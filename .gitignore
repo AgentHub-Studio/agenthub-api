@@ -1,0 +1,22 @@
+# Binaries
+bin/
+*.exe
+*.out
+
+# Test artifacts
+coverage.out
+coverage.html
+
+# Environment files
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
