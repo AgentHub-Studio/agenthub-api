@@ -1,0 +1,24 @@
+# Build artifacts
+bin/
+coverage.out
+*.test
+
+# Test files
+**/*_test.go
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# CI/CD
+.github/

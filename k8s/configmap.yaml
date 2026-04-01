@@ -1,0 +1,18 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agenthub-api-config
+  namespace: agenthub
+data:
+  PORT: "8081"
+  LOG_LEVEL: "info"
+  KEYCLOAK_BASE_URL: "http://keycloak.agenthub.svc.cluster.local:8080"
+  KEYCLOAK_ADMIN_USERNAME: "admin"
+  KEYCLOAK_ADMIN_CLIENT_ID: "admin-cli"
+  KEYCLOAK_ADMIN_REALM: "master"
+  KEYCLOAK_FRONTEND_CLIENT: "agenthub-frontend"
+  MINIO_ENDPOINT: "minio.agenthub.svc.cluster.local:9000"
+  MINIO_REGION: "us-east-1"
+  MINIO_USE_SSL: "false"
+  CORS_ORIGINS: "*"
