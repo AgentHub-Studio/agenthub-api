@@ -28,6 +28,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/agents/{agentId}/memory/{key}", h.getByKey)
 	r.Delete("/api/agents/{agentId}/memory/{key}", h.deleteByKey)
 	r.Delete("/api/agents/{agentId}/memory", h.clear)
+	r.Post("/api/agents/{agentId}/memory/recall", h.recall)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -124,4 +125,25 @@ func (h *Handler) clear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.NoContent(w)
+}
+
+// recall handles POST /api/agents/{agentId}/memory/recall.
+// It returns the top-N semantically similar memories with decay-adjusted relevance scores.
+func (h *Handler) recall(w http.ResponseWriter, r *http.Request) {
+	agentID, err := uuid.Parse(chi.URLParam(r, "agentId"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	var req RecallRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	results, err := h.svc.Recall(r.Context(), agentID, req)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, results)
 }
