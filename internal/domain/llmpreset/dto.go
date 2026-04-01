@@ -29,24 +29,7 @@ type LLMPresetResponse struct {
 
 // ResponseFrom converts an LLMPreset entity to LLMPresetResponse.
 func ResponseFrom(p LLMPreset) LLMPresetResponse {
-	return LLMPresetResponse{
-		ID:          p.ID,
-		TenantID:    p.TenantID,
-		Name:        p.Name,
-		Description: p.Description,
-		Provider:    p.Provider,
-		Model:       p.Model,
-		BaseURL:     p.BaseURL,
-		APIKeyEnv:   p.APIKeyEnv,
-		MaxTokens:   p.MaxTokens,
-		Temperature: p.Temperature,
-		ConfigJSON:  p.ConfigJSON,
-		IsDefault:   p.IsDefault,
-		IsPublic:    p.IsPublic,
-		Visibility:  p.Visibility,
-		CreatedAt:   p.CreatedAt,
-		UpdatedAt:   p.UpdatedAt,
-	}
+	return LLMPresetResponse(p)
 }
 
 // CreateLLMPresetRequest is the JSON body for preset creation.
