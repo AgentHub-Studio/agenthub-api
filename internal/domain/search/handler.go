@@ -13,7 +13,7 @@ import (
 
 // searchService is the interface required by Handler.
 type searchService interface {
-	Search(ctx context.Context, tenantID string, query string, limit int) (GlobalSearchResponse, error)
+	Search(ctx context.Context, tenantID, query, entityType string, limit int) (GlobalSearchResponse, error)
 }
 
 // Handler handles HTTP requests for global search.
@@ -48,7 +48,9 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	res, err := h.svc.Search(r.Context(), tenantID, q, limit)
+	entityType := r.URL.Query().Get("type") // optional: "agent", "skill", "tool", "knowledge_base"
+
+	res, err := h.svc.Search(r.Context(), tenantID, q, entityType, limit)
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return

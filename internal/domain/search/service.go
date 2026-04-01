@@ -19,6 +19,14 @@ type Repository interface {
 	SearchKnowledgeBases(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error)
 }
 
+// EntityType constants for the entityType filter accepted by Search.
+const (
+	EntityAgent         = "agent"
+	EntitySkill         = "skill"
+	EntityTool          = "tool"
+	EntityKnowledgeBase = "knowledge_base"
+)
+
 // Service implements global cross-domain search.
 type Service struct {
 	repo Repository
@@ -34,48 +42,78 @@ func NewServiceWithPool(pool *pgxpool.Pool) *Service {
 	return NewService(&pgRepository{pool: pool})
 }
 
-// Search runs parallel queries across agents, skills, tools, and knowledge_bases.
-func (s *Service) Search(ctx context.Context, tenantID string, query string, limit int) (GlobalSearchResponse, error) {
+// Search runs parallel full-text queries across agents, skills, tools, and knowledge_bases.
+// entityType filters results to a single entity type when non-empty (e.g. "agent").
+func (s *Service) Search(ctx context.Context, tenantID, query, entityType string, limit int) (GlobalSearchResponse, error) {
 	if limit <= 0 {
 		limit = 5
 	}
+
+	empty := []SearchResult{}
 
 	type result struct {
 		items []SearchResult
 		err   error
 	}
 
-	agentCh := make(chan result, 1)
-	skillCh := make(chan result, 1)
-	toolCh := make(chan result, 1)
-	kbCh := make(chan result, 1)
+	run := func(fn func() ([]SearchResult, error)) chan result {
+		ch := make(chan result, 1)
+		go func() {
+			items, err := fn()
+			if items == nil {
+				items = empty
+			}
+			ch <- result{items, err}
+		}()
+		return ch
+	}
 
+	skip := func() chan result {
+		ch := make(chan result, 1)
+		ch <- result{items: empty}
+		return ch
+	}
+
+	include := func(t string) bool {
+		return entityType == "" || entityType == t
+	}
+
+	var (
+		agentCh = skip()
+		skillCh = skip()
+		toolCh  = skip()
+		kbCh    = skip()
+	)
 	var wg sync.WaitGroup
-	wg.Add(4)
 
-	go func() {
-		defer wg.Done()
-		items, err := s.repo.SearchAgents(ctx, tenantID, query, limit)
-		agentCh <- result{items, err}
-	}()
-
-	go func() {
-		defer wg.Done()
-		items, err := s.repo.SearchSkills(ctx, tenantID, query, limit)
-		skillCh <- result{items, err}
-	}()
-
-	go func() {
-		defer wg.Done()
-		items, err := s.repo.SearchTools(ctx, tenantID, query, limit)
-		toolCh <- result{items, err}
-	}()
-
-	go func() {
-		defer wg.Done()
-		items, err := s.repo.SearchKnowledgeBases(ctx, tenantID, query, limit)
-		kbCh <- result{items, err}
-	}()
+	if include(EntityAgent) {
+		wg.Add(1)
+		agentCh = run(func() ([]SearchResult, error) {
+			defer wg.Done()
+			return s.repo.SearchAgents(ctx, tenantID, query, limit)
+		})
+	}
+	if include(EntitySkill) {
+		wg.Add(1)
+		skillCh = run(func() ([]SearchResult, error) {
+			defer wg.Done()
+			return s.repo.SearchSkills(ctx, tenantID, query, limit)
+		})
+	}
+	if include(EntityTool) {
+		wg.Add(1)
+		toolCh = run(func() ([]SearchResult, error) {
+			defer wg.Done()
+			return s.repo.SearchTools(ctx, tenantID, query, limit)
+		})
+	}
+	if include(EntityKnowledgeBase) {
+		wg.Add(1)
+		kbCh = run(func() ([]SearchResult, error) {
+			defer wg.Done()
+			return s.repo.SearchKnowledgeBases(ctx, tenantID, query, limit)
+		})
+	}
 
 	wg.Wait()
 
@@ -120,7 +158,9 @@ func (r *pgRepository) SearchKnowledgeBases(ctx context.Context, tenantID, query
 	return r.searchTable(ctx, tenantID, "knowledge_base", "knowledge_base", query, limit)
 }
 
-// searchTable performs an ILIKE search on name and description columns for the given table.
+// searchTable queries a single table using full-text search (ts_rank) for queries >= 3 chars,
+// falling back to case-insensitive ILIKE for shorter queries.
+// Results are ranked by relevance descending.
 func (r *pgRepository) searchTable(ctx context.Context, tenantID, table, resourceType, query string, limit int) ([]SearchResult, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
@@ -128,17 +168,42 @@ func (r *pgRepository) searchTable(ctx context.Context, tenantID, table, resourc
 	}
 	defer release()
 
-	pattern := "%" + query + "%"
-	rows, err := conn.Query(ctx,
-		fmt.Sprintf(
+	var (
+		sqlStr string
+		args   []any
+	)
+
+	if len([]rune(query)) >= 3 {
+		// Full-text search with relevance ranking.
+		// plainto_tsquery handles arbitrary input safely (no operator injection).
+		sqlStr = fmt.Sprintf(
+			`SELECT id::text, name, COALESCE(description,''), COALESCE(status::text,''), COALESCE(slug,'')
+			 FROM %s
+			 WHERE to_tsvector('portuguese', name || ' ' || COALESCE(description,''))
+			       @@ plainto_tsquery('portuguese', $1)
+			 ORDER BY ts_rank(
+			     to_tsvector('portuguese', name || ' ' || COALESCE(description,'')),
+			     plainto_tsquery('portuguese', $1)
+			 ) DESC
+			 LIMIT $2`,
+			table,
+		)
+		args = []any{query, limit}
+	} else {
+		// Short query fallback: ILIKE ordered alphabetically.
+		pattern := "%" + query + "%"
+		sqlStr = fmt.Sprintf(
 			`SELECT id::text, name, COALESCE(description,''), COALESCE(status::text,''), COALESCE(slug,'')
 			 FROM %s
 			 WHERE name ILIKE $1 OR description ILIKE $1
+			 ORDER BY name ASC
 			 LIMIT $2`,
 			table,
-		),
-		pattern, limit,
-	)
+		)
+		args = []any{pattern, limit}
+	}
+
+	rows, err := conn.Query(ctx, sqlStr, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search: query %s: %w", table, err)
 	}
