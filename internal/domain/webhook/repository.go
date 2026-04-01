@@ -24,6 +24,7 @@ type WebhookRepository interface {
 	Create(ctx context.Context, w WebhookConfig) (WebhookConfig, error)
 	GetByID(ctx context.Context, id uuid.UUID) (WebhookConfig, error)
 	GetBySecret(ctx context.Context, secret string) (WebhookConfig, error)
+	GetByToken(ctx context.Context, token string) (WebhookConfig, error)
 	Update(ctx context.Context, w WebhookConfig) (WebhookConfig, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	ListDeliveries(ctx context.Context, webhookID uuid.UUID, filter DeliveryFilter, req pagination.PageRequest) ([]WebhookDeliveryLog, int64, error)
@@ -104,6 +105,21 @@ func (r *Repository) GetBySecret(ctx context.Context, secret string) (WebhookCon
 	row := conn.QueryRow(ctx, `
 		SELECT id, name, url, events, secret, enabled, retry_count, created_at, updated_at
 		  FROM webhook_config WHERE secret = $1 AND enabled = TRUE`, secret)
+	return scanConfigRow(row)
+}
+
+// GetByToken returns a webhook configuration by its authentication token.
+func (r *Repository) GetByToken(ctx context.Context, token string) (WebhookConfig, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return WebhookConfig{}, err
+	}
+	defer release()
+
+	row := conn.QueryRow(ctx, `
+		SELECT id, name, url, events, secret, token, enabled, retry_count, created_at, updated_at
+		  FROM webhook_config WHERE token = $1 AND enabled = TRUE`, token)
 	return scanConfigRow(row)
 }
 

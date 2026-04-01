@@ -14,11 +14,21 @@ type WebhookConfig struct {
 	URL        string    `json:"url"`
 	Events     []string  `json:"events"`
 	Secret     *string   `json:"secret,omitempty"`
+	Token      string    `json:"token"`  // auto-generated authentication token for ingestion
 	Enabled    bool      `json:"enabled"`
 	RetryCount int       `json:"retryCount"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
+
+// Delivery status constants.
+const (
+	DeliveryPending    = "PENDING"
+	DeliveryProcessing = "PROCESSING"
+	DeliverySuccess    = "SUCCESS"
+	DeliveryFailed     = "FAILED"
+	DeliveryDeadLetter = "DEAD_LETTER"
+)
 
 // DeliveryFilter holds optional filters for listing delivery logs.
 type DeliveryFilter struct {

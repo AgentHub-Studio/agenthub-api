@@ -88,6 +88,15 @@ func (m *mockWebhookRepo) GetBySecret(_ context.Context, secret string) (webhook
 	return webhook.WebhookConfig{}, webhook.ErrNotFound
 }
 
+func (m *mockWebhookRepo) GetByToken(_ context.Context, token string) (webhook.WebhookConfig, error) {
+	for _, c := range m.configs {
+		if c.Token == token && c.Enabled {
+			return c, nil
+		}
+	}
+	return webhook.WebhookConfig{}, webhook.ErrNotFound
+}
+
 func (m *mockWebhookRepo) CreateDelivery(_ context.Context, d webhook.WebhookDeliveryLog) (webhook.WebhookDeliveryLog, error) {
 	d.ID = uuid.New()
 	m.deliveries = append(m.deliveries, d)
@@ -153,6 +162,22 @@ func newIngestWebhook(t *testing.T, svc *webhook.Service, targetURL string, even
 	})
 	require.NoError(t, err)
 	return secret
+}
+
+// createWebhook creates a webhook config for use in Ingest tests and returns the full config
+// including the auto-generated Token.
+func createWebhook(t *testing.T, svc *webhook.Service, events []string) webhook.WebhookConfig {
+	t.Helper()
+	if events == nil {
+		events = []string{"*"}
+	}
+	w, err := svc.Create(context.Background(), webhook.CreateWebhookRequest{
+		Name:   "test-webhook",
+		URL:    "http://localhost:9999/sink",
+		Events: events,
+	})
+	require.NoError(t, err)
+	return w
 }
 
 func TestIngestWebhook_GitHubSignatureValid(t *testing.T) {
