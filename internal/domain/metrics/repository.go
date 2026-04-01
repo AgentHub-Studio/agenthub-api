@@ -109,6 +109,47 @@ func (r *Repository) GetAgentSummary(ctx context.Context, tenantID string, agent
 	return s, err
 }
 
+// ListAll returns a paginated list of all metrics for the tenant.
+func (r *Repository) ListAll(ctx context.Context, tenantID string, pr pagination.PageRequest) ([]AgentMetrics, int, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
+
+	var total int
+	if err := conn.QueryRow(ctx, `SELECT COUNT(*) FROM agent_metrics`).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("metrics: count all: %w", err)
+	}
+
+	rows, err := conn.Query(ctx,
+		`SELECT id, agent_id, agent_execution_id, session_id, model_name, provider,
+		        prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd, latency_ms, created_at
+		 FROM agent_metrics
+		 ORDER BY created_at DESC
+		 LIMIT $1 OFFSET $2`,
+		pr.Size, pr.Offset(),
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("metrics: list all: %w", err)
+	}
+	defer rows.Close()
+
+	var items []AgentMetrics
+	for rows.Next() {
+		var m AgentMetrics
+		if err := rows.Scan(
+			&m.ID, &m.AgentID, &m.AgentExecutionID, &m.SessionID, &m.ModelName, &m.Provider,
+			&m.PromptTokens, &m.CompletionTokens, &m.TotalTokens, &m.EstimatedCostUSD,
+			&m.LatencyMs, &m.CreatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("metrics: scan all: %w", err)
+		}
+		items = append(items, m)
+	}
+	return items, total, rows.Err()
+}
+
 // GetTenantSummary returns aggregated metrics for the entire tenant.
 func (r *Repository) GetTenantSummary(ctx context.Context, tenantID string) (MetricsSummary, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)

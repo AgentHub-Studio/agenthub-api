@@ -72,4 +72,7 @@ type ListFilter struct {
 	EntityType string
 	EntityID   string
 	Action     string
+	ActorID    string
+	DateFrom   *time.Time
+	DateTo     *time.Time
 }

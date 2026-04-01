@@ -2,12 +2,17 @@ package audit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -17,6 +22,7 @@ import (
 type auditService interface {
 	ListAll(ctx context.Context, tenantID string, f ListFilter, pr pagination.PageRequest) ([]AuditLog, int, error)
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (AuditLog, error)
+	Record(ctx context.Context, tenantID string, req RecordRequest) (AuditLog, error)
 }
 
 // Handler handles HTTP requests for audit logs.
@@ -30,11 +36,28 @@ func NewHandler(svc auditService) *Handler {
 }
 
 // Routes mounts the handler routes.
+// GET endpoints (list, getByID) require the "admin" role.
+// POST (record) is accessible to any authenticated caller so other services can log events.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Get("/", h.list)
-	r.Get("/{id}", h.getByID)
+	r.Post("/", h.record)
+	r.With(middleware.RequireRole("admin")).Get("/", h.list)
+	r.With(middleware.RequireRole("admin")).Get("/{id}", h.getByID)
 	return r
+}
+
+// ExtractIP returns the client IP from X-Forwarded-For or RemoteAddr.
+func ExtractIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// Take the first (leftmost) address, which is the original client.
+		parts := strings.SplitN(xff, ",", 2)
+		return strings.TrimSpace(parts[0])
+	}
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +68,18 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		EntityType: r.URL.Query().Get("entityType"),
 		EntityID:   r.URL.Query().Get("entityId"),
 		Action:     r.URL.Query().Get("action"),
+		ActorID:    r.URL.Query().Get("actorId"),
+	}
+
+	if v := r.URL.Query().Get("dateFrom"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			f.DateFrom = &t
+		}
+	}
+	if v := r.URL.Query().Get("dateTo"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			f.DateTo = &t
+		}
 	}
 
 	items, total, err := h.svc.ListAll(r.Context(), tenantID, f, pr)
@@ -58,6 +93,28 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		dtos[i] = ResponseFrom(l)
 	}
 	respond.JSON(w, http.StatusOK, pagination.NewPage(dtos, int64(total), pr))
+}
+
+func (h *Handler) record(w http.ResponseWriter, r *http.Request) {
+	tenantID := tenant.FromContext(r.Context())
+
+	var req RecordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Automatically extract IP if not provided by the caller.
+	if req.IPAddress == "" {
+		req.IPAddress = ExtractIP(r)
+	}
+
+	l, err := h.svc.Record(r.Context(), tenantID, req)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusCreated, ResponseFrom(l))
 }
 
 func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {

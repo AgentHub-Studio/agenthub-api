@@ -50,6 +50,21 @@ func (r *Repository) ListAll(ctx context.Context, tenantID string, f ListFilter,
 		args = append(args, f.Action)
 		idx++
 	}
+	if f.ActorID != "" {
+		where += fmt.Sprintf(" AND actor_id = $%d", idx)
+		args = append(args, f.ActorID)
+		idx++
+	}
+	if f.DateFrom != nil {
+		where += fmt.Sprintf(" AND created_at >= $%d", idx)
+		args = append(args, *f.DateFrom)
+		idx++
+	}
+	if f.DateTo != nil {
+		where += fmt.Sprintf(" AND created_at <= $%d", idx)
+		args = append(args, *f.DateTo)
+		idx++
+	}
 
 	countArgs := make([]any, len(args))
 	copy(countArgs, args)
