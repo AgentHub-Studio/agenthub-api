@@ -135,6 +135,10 @@ func (h *Handler) bindToSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.BindToSkill(r.Context(), skillID, req)
 	if err != nil {
+		if errors.Is(err, ErrAlreadyBound) {
+			respond.Error(w, http.StatusConflict, "tool already bound to this skill")
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
