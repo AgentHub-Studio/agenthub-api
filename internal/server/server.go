@@ -10,15 +10,22 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/experiment"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/search"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/settings"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/user"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/vpnresource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
 	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 )
@@ -57,6 +64,13 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
+	oauthHandler := oauth.NewHandler(oauth.NewService(oauth.NewRepository(pool)))
+	auditHandler := audit.NewHandler(audit.NewService(audit.NewRepository(pool)))
+	metricsHandler := metrics.NewHandler(metrics.NewService(metrics.NewRepository(pool)))
+	experimentHandler := experiment.NewHandler(experiment.NewService(experiment.NewRepository(pool)))
+	vpnHandler := vpnresource.NewHandler(vpnresource.NewService(vpnresource.NewRepository(pool)))
+	datasourceHandler := datasource.NewHandler(datasource.NewService(datasource.NewRepository(pool)))
+	searchHandler := search.NewHandler(search.NewService(pool))
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
@@ -88,6 +102,17 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		memoryHandler.RegisterRoutes(r)
 		executionHandler.RegisterRoutes(r)
 		webhookHandler.RegisterRoutes(r)
+		r.Mount("/api/oauth-credentials", oauthHandler.Routes())
+		r.Mount("/api/audit-logs", auditHandler.Routes())
+		r.Mount("/api/metrics", metricsHandler.Routes())
+		r.Route("/api/agents/{agentId}/metrics", func(r chi.Router) {
+			r.Mount("/", metricsHandler.AgentRoutes())
+		})
+		r.Mount("/api/experiments", experimentHandler.Routes())
+		r.Mount("/api/vpn-resources", vpnHandler.Routes())
+		r.Mount("/api/datasources", datasourceHandler.Routes())
+		r.Get("/api/proxy/datasources/{id}", datasourceHandler.ProxyRoutes().ServeHTTP)
+		r.Mount("/api/search", searchHandler.Routes())
 	})
 
 	s.router = r
