@@ -12,13 +12,21 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/apierror"
 )
 
+// dependencyService defines the methods used by Handler.
+type dependencyService interface {
+	List(ctx context.Context, packageID uuid.UUID) ([]DependencyResponse, error)
+	Add(ctx context.Context, packageID uuid.UUID, req AddDependencyRequest, tenantID string) (DependencyResponse, error)
+	Remove(ctx context.Context, packageID, depID uuid.UUID, tenantID string) error
+	Resolve(ctx context.Context, packageID uuid.UUID) (ResolvedDependency, error)
+}
+
 // Handler exposes the HTTP interface for package dependencies.
 type Handler struct {
-	svc *Service
+	svc dependencyService
 }
 
 // NewHandler creates a new dependency Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc dependencyService) *Handler {
 	return &Handler{svc: svc}
 }
 

@@ -91,6 +91,17 @@ func (m *mockUserSvc) RemoveRole(_ context.Context, userID string, _ string) err
 	return nil
 }
 
+func (m *mockUserSvc) ResetPassword(_ context.Context, userID string) error {
+	if _, ok := m.users[userID]; !ok {
+		return user.ErrNotFound
+	}
+	return nil
+}
+
+func (m *mockUserSvc) ListRoles(_ context.Context) ([]string, error) {
+	return []string{"admin", "user"}, nil
+}
+
 func setupUser() (*chi.Mux, *mockUserSvc) {
 	svc := newMockUserSvc()
 	h := user.NewHandler(svc)

@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,13 +13,24 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
+// chatService defines the methods used by Handler.
+type chatService interface {
+	ListSessions(ctx context.Context, req pagination.PageRequest) (pagination.Page[ChatSessionResponse], error)
+	CreateSession(ctx context.Context, req CreateSessionRequest) (ChatSessionResponse, error)
+	GetSession(ctx context.Context, id uuid.UUID) (ChatSessionResponse, error)
+	DeleteSession(ctx context.Context, id uuid.UUID) error
+	ArchiveSession(ctx context.Context, id uuid.UUID) (ChatSessionResponse, error)
+	ListMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) (pagination.Page[ChatMessageResponse], error)
+	AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
+}
+
 // Handler handles HTTP requests for chat sessions and messages.
 type Handler struct {
-	svc *Service
+	svc chatService
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc chatService) *Handler {
 	return &Handler{svc: svc}
 }
 

@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,13 +13,24 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
+// packageService defines the methods used by Handler.
+type packageService interface {
+	ListPublic(ctx context.Context, req pagination.PageRequest) (pagination.Page[PackageResponse], error)
+	GetByID(ctx context.Context, id uuid.UUID) (PackageResponse, error)
+	GetBySlug(ctx context.Context, slug string) (PackageResponse, error)
+	ListByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) (pagination.Page[PackageResponse], error)
+	Create(ctx context.Context, req CreatePackageRequest, tenantID string) (PackageResponse, error)
+	Update(ctx context.Context, id uuid.UUID, req UpdatePackageRequest, tenantID string) (PackageResponse, error)
+	Delete(ctx context.Context, id uuid.UUID, tenantID string) error
+}
+
 // Handler exposes the HTTP interface for the package registry.
 type Handler struct {
-	svc *Service
+	svc packageService
 }
 
 // NewHandler creates a new package Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc packageService) *Handler {
 	return &Handler{svc: svc}
 }
 

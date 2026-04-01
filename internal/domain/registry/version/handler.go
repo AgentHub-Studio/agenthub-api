@@ -12,13 +12,21 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/apierror"
 )
 
+// versionService defines the methods used by Handler.
+type versionService interface {
+	ListByPackage(ctx context.Context, packageID uuid.UUID) ([]VersionResponse, error)
+	GetByVersion(ctx context.Context, packageID uuid.UUID, versionStr string) (VersionResponse, error)
+	Publish(ctx context.Context, packageID uuid.UUID, req PublishVersionRequest, tenantID string) (VersionResponse, error)
+	Delete(ctx context.Context, packageID uuid.UUID, versionStr string, tenantID string) error
+}
+
 // Handler exposes the HTTP interface for package versions.
 type Handler struct {
-	svc *Service
+	svc versionService
 }
 
 // NewHandler creates a new version Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc versionService) *Handler {
 	return &Handler{svc: svc}
 }
 

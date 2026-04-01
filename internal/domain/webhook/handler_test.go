@@ -88,6 +88,15 @@ func (m *mockWebhookSvc) ListDeliveries(_ context.Context, webhookID uuid.UUID, 
 	return pagination.NewPage(logs, int64(len(logs)), req), nil
 }
 
+func (m *mockWebhookSvc) IngestWebhook(_ context.Context, token, sourceType string, payload []byte, signature, eventType string) (webhook.WebhookDeliveryLog, error) {
+	d := webhook.WebhookDeliveryLog{
+		ID:        uuid.New(),
+		EventType: eventType,
+		Status:    "PENDING",
+	}
+	return d, nil
+}
+
 func (m *mockWebhookSvc) SendTest(_ context.Context, id uuid.UUID) (webhook.WebhookDeliveryLog, error) {
 	if _, ok := m.webhooks[id]; !ok {
 		return webhook.WebhookDeliveryLog{}, webhook.ErrNotFound

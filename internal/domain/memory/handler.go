@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,13 +12,22 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
+// memoryService defines the methods used by Handler.
+type memoryService interface {
+	List(ctx context.Context, agentID uuid.UUID, userID *string) ([]AgentMemory, error)
+	Upsert(ctx context.Context, agentID uuid.UUID, key string, req UpsertMemoryRequest) (AgentMemory, error)
+	GetByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) (AgentMemory, error)
+	DeleteByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) error
+	ClearByAgent(ctx context.Context, agentID uuid.UUID) error
+}
+
 // Handler exposes the HTTP interface for agent memory.
 type Handler struct {
-	svc *Service
+	svc memoryService
 }
 
 // NewHandler creates a new memory Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc memoryService) *Handler {
 	return &Handler{svc: svc}
 }
 

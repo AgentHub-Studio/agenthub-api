@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,13 +13,23 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
+// executionService defines the methods used by Handler.
+type executionService interface {
+	List(ctx context.Context, agentID *uuid.UUID, status *string, req pagination.PageRequest) (pagination.Page[AgentExecution], error)
+	Start(ctx context.Context, req StartExecutionRequest) (AgentExecution, error)
+	GetByID(ctx context.Context, id uuid.UUID) (AgentExecution, error)
+	Cancel(ctx context.Context, id uuid.UUID) error
+	ListNodes(ctx context.Context, executionID uuid.UUID) ([]AgentExecutionNode, error)
+	ListToolExecutions(ctx context.Context, nodeExecutionID uuid.UUID) ([]ToolExecution, error)
+}
+
 // Handler exposes the HTTP interface for agent executions.
 type Handler struct {
-	svc *Service
+	svc executionService
 }
 
 // NewHandler creates a new execution Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc executionService) *Handler {
 	return &Handler{svc: svc}
 }
 

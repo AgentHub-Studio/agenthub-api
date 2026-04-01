@@ -1,6 +1,7 @@
 package document
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,13 +13,21 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
+// documentService defines the methods used by Handler.
+type documentService interface {
+	ListByKnowledgeBase(ctx context.Context, kbID uuid.UUID, req pagination.PageRequest) (pagination.Page[DocumentResponse], error)
+	Upload(ctx context.Context, req UploadRequest) (DocumentResponse, error)
+	GetByID(ctx context.Context, id uuid.UUID) (DocumentResponse, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler handles HTTP requests for documents.
 type Handler struct {
-	svc *Service
+	svc documentService
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc documentService) *Handler {
 	return &Handler{svc: svc}
 }
 

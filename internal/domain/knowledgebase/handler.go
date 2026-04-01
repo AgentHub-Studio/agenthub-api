@@ -1,6 +1,7 @@
 package knowledgebase
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,13 +13,24 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
+// knowledgeBaseService defines the methods used by Handler.
+type knowledgeBaseService interface {
+	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[KnowledgeBaseResponse], error)
+	Create(ctx context.Context, req CreateRequest) (KnowledgeBaseResponse, error)
+	GetByID(ctx context.Context, id uuid.UUID) (KnowledgeBaseResponse, error)
+	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (KnowledgeBaseResponse, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+	Activate(ctx context.Context, id uuid.UUID) (KnowledgeBaseResponse, error)
+	Pause(ctx context.Context, id uuid.UUID) (KnowledgeBaseResponse, error)
+}
+
 // Handler handles HTTP requests for knowledge bases.
 type Handler struct {
-	svc *Service
+	svc knowledgeBaseService
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc knowledgeBaseService) *Handler {
 	return &Handler{svc: svc}
 }
 

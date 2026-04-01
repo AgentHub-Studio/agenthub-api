@@ -34,6 +34,16 @@ func (m *mockLLMPresetSvc) List(_ context.Context, req pagination.PageRequest) (
 	return pagination.NewPage(items, int64(len(items)), req), nil
 }
 
+func (m *mockLLMPresetSvc) ListByProvider(_ context.Context, provider string, req pagination.PageRequest) (pagination.Page[llmpreset.LLMPresetResponse], error) {
+	items := make([]llmpreset.LLMPresetResponse, 0)
+	for _, p := range m.presets {
+		if p.Provider == provider {
+			items = append(items, p)
+		}
+	}
+	return pagination.NewPage(items, int64(len(items)), req), nil
+}
+
 func (m *mockLLMPresetSvc) Get(_ context.Context, id uuid.UUID) (llmpreset.LLMPresetResponse, error) {
 	p, ok := m.presets[id]
 	if !ok {
