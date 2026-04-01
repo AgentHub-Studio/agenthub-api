@@ -26,13 +26,7 @@ type DependencyResponse struct {
 
 // ResponseFrom converts a PackageDependency entity to a DependencyResponse DTO.
 func ResponseFrom(d PackageDependency) DependencyResponse {
-	return DependencyResponse{
-		ID:                d.ID,
-		PackageID:         d.PackageID,
-		DependencyID:      d.DependencyID,
-		VersionConstraint: d.VersionConstraint,
-		CreatedAt:         d.CreatedAt,
-	}
+	return DependencyResponse(d)
 }
 
 // AddDependencyRequest is the payload for adding a dependency.

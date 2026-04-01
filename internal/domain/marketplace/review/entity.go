@@ -36,14 +36,7 @@ type ReviewResponse struct {
 
 // ResponseFrom converts a Review to ReviewResponse.
 func ResponseFrom(r Review) ReviewResponse {
-	return ReviewResponse{
-		ID:        r.ID,
-		ListingID: r.ListingID,
-		TenantID:  r.TenantID,
-		Rating:    r.Rating,
-		Comment:   r.Comment,
-		CreatedAt: r.CreatedAt,
-	}
+	return ReviewResponse(r)
 }
 
 // CreateRequest is the DTO for creating a review.

@@ -40,15 +40,5 @@ type AssetDownloadResponse struct {
 
 // ResponseFrom converts a PackageAsset entity to AssetResponse.
 func ResponseFrom(a PackageAsset) AssetResponse {
-	return AssetResponse{
-		ID:          a.ID,
-		PackageID:   a.PackageID,
-		VersionID:   a.VersionID,
-		Filename:    a.Filename,
-		ContentType: a.ContentType,
-		StoragePath: a.StoragePath,
-		SizeBytes:   a.SizeBytes,
-		Checksum:    a.Checksum,
-		CreatedAt:   a.CreatedAt,
-	}
+	return AssetResponse(a)
 }

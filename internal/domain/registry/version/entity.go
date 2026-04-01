@@ -35,17 +35,7 @@ type VersionResponse struct {
 
 // ResponseFrom converts a PackageVersion entity to VersionResponse.
 func ResponseFrom(v PackageVersion) VersionResponse {
-	return VersionResponse{
-		ID:            v.ID,
-		PackageID:     v.PackageID,
-		Version:       v.Version,
-		Changelog:     v.Changelog,
-		StoragePath:   v.StoragePath,
-		Checksum:      v.Checksum,
-		DownloadCount: v.DownloadCount,
-		PublishedAt:   v.PublishedAt,
-		PublishedBy:   v.PublishedBy,
-	}
+	return VersionResponse(v)
 }
 
 // PublishVersionRequest is the DTO for publishing a new version.

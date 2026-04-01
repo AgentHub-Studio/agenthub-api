@@ -41,14 +41,7 @@ type InstallResponse struct {
 
 // ResponseFrom converts an Installation to InstallResponse.
 func ResponseFrom(i Installation) InstallResponse {
-	return InstallResponse{
-		ID:             i.ID,
-		TenantID:       i.TenantID,
-		PackageID:      i.PackageID,
-		PackageVersion: i.PackageVersion,
-		Status:         i.Status,
-		InstalledAt:    i.InstalledAt,
-	}
+	return InstallResponse(i)
 }
 
 // InstallRequest is the DTO for installing a package.
