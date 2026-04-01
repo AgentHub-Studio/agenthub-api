@@ -2,6 +2,7 @@ package datasource
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -37,8 +38,47 @@ func (s *Service) GetByID(ctx context.Context, tenantID string, id uuid.UUID) (D
 	return s.repo.GetByID(ctx, tenantID, id)
 }
 
+// defaultPort returns the conventional port number for the given DataSourceType.
+func defaultPort(t DataSourceType) int {
+	switch t {
+	case DataSourceTypeMySQL:
+		return 3306
+	case DataSourceTypeSQLServer:
+		return 1433
+	default: // POSTGRESQL
+		return 5432
+	}
+}
+
+// applyDefaults fills Port with the type default when zero.
+func applyDefaults(req *CreateRequest) {
+	if req.Port == 0 {
+		req.Port = defaultPort(req.Type)
+	}
+}
+
+// validateRequest checks required fields and type constraints.
+func validateRequest(req CreateRequest) error {
+	if req.Name == "" {
+		return fmt.Errorf("datasource: name is required")
+	}
+	switch req.Type {
+	case DataSourceTypePostgreSQL, DataSourceTypeMySQL, DataSourceTypeSQLServer:
+	default:
+		return fmt.Errorf("datasource: unsupported type: %s", req.Type)
+	}
+	if req.Host == "" {
+		return fmt.Errorf("datasource: host is required")
+	}
+	return nil
+}
+
 // Create creates a new datasource.
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (DataSource, error) {
+	applyDefaults(&req)
+	if err := validateRequest(req); err != nil {
+		return DataSource{}, err
+	}
 	d := DataSource{
 		Name:          req.Name,
 		Type:          req.Type,
@@ -54,6 +94,10 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 
 // Update updates an existing datasource.
 func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (DataSource, error) {
+	applyDefaults(&req)
+	if err := validateRequest(req); err != nil {
+		return DataSource{}, err
+	}
 	d := DataSource{
 		Name:          req.Name,
 		Type:          req.Type,

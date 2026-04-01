@@ -136,6 +136,20 @@ func TestSearchService_EntityTypeFilter_OnlySearchesSkill(t *testing.T) {
 	assert.Equal(t, 1, repo.skillCalls)
 }
 
+func TestSearchService_TotalResults(t *testing.T) {
+	repo := &mockSearchRepo{
+		agents: []search.SearchResult{{ID: "a1", Name: "Agent 1"}, {ID: "a2", Name: "Agent 2"}},
+		skills: []search.SearchResult{{ID: "s1", Name: "Skill 1"}},
+		tools:  []search.SearchResult{},
+		kbs:    []search.SearchResult{},
+	}
+	svc := search.NewService(repo)
+	res, err := svc.Search(context.Background(), "t1", "query", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.TotalResults, "TotalResults should sum all result counts")
+}
+
+
 func TestSearchService_EntityTypeFilter_Empty_SearchesAll(t *testing.T) {
 	repo := &mockSearchRepo{
 		agents: []search.SearchResult{{ID: "a1", Name: "Agent"}},

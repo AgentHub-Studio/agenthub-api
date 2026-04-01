@@ -194,7 +194,10 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		r.Mount("/api/experiments", experimentHandler.Routes())
 		r.Mount("/api/vpn-resources", vpnHandler.Routes())
 		r.Mount("/api/datasources", datasourceHandler.Routes())
-		r.Get("/api/proxy/datasources/{id}", datasourceHandler.ProxyRoutes().ServeHTTP)
+		// Proxy credentials endpoint — requires PROXY_SERVICE role.
+		// ProxyServiceRequired is a pass-through while auth middleware is placeholder (dev mode).
+		// Once agenthub-go-commons/auth is wired (PR #12), it enforces the role.
+		r.With(middleware.ProxyServiceRequired).Mount("/api/proxy/datasources", datasourceHandler.ProxyRoutes())
 		r.Mount("/api/search", searchHandler.Routes())
 		chatHandler.RegisterRoutes(r)
 		documentHandler.RegisterRoutes(r)

@@ -10,17 +10,19 @@ import (
 // CreateRequest is the payload for creating a tool.
 type CreateRequest struct {
 	Name        string          `json:"name"`
-	Type        string          `json:"type"`
+	Type        ToolType        `json:"type"`
 	Config      json.RawMessage `json:"config"`
 	Description string          `json:"description"`
+	Labels      []string        `json:"labels"`
 }
 
 // UpdateRequest is the payload for updating a tool.
 type UpdateRequest struct {
 	Name        string          `json:"name"`
-	Type        string          `json:"type"`
+	Type        ToolType        `json:"type"`
 	Config      json.RawMessage `json:"config"`
 	Description string          `json:"description"`
+	Labels      []string        `json:"labels"`
 }
 
 // BindRequest is the payload for binding a tool to a skill.
@@ -34,9 +36,10 @@ type BindRequest struct {
 type Response struct {
 	ID          uuid.UUID `json:"id"`
 	Name        string    `json:"name"`
-	Type        string    `json:"type"`
+	Type        ToolType  `json:"type"`
 	Config      any       `json:"config"`
 	Description string    `json:"description"`
+	Labels      []string  `json:"labels"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -55,12 +58,17 @@ type SkillToolResponse struct {
 func ResponseFrom(t Tool) Response {
 	var config any
 	_ = json.Unmarshal(t.Config, &config)
+	labels := t.Labels
+	if labels == nil {
+		labels = []string{}
+	}
 	return Response{
 		ID:          t.ID,
 		Name:        t.Name,
 		Type:        t.Type,
 		Config:      config,
 		Description: t.Description,
+		Labels:      labels,
 		CreatedAt:   t.CreatedAt,
 		UpdatedAt:   t.UpdatedAt,
 	}

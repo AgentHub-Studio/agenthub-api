@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -22,6 +23,8 @@ type vpnService interface {
 	Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (VpnResource, error)
 	Delete(ctx context.Context, tenantID string, id uuid.UUID) error
 	TestConnection(ctx context.Context, tenantID string, id uuid.UUID) (TestConnectionResponse, error)
+	UploadOvpnConfig(ctx context.Context, tenantID string, id uuid.UUID, r io.Reader, size int64) (VpnResource, error)
+	UploadAuthFile(ctx context.Context, tenantID string, id uuid.UUID, r io.Reader, size int64) (VpnResource, error)
 }
 
 // Handler handles HTTP requests for VPN resources.
@@ -43,6 +46,8 @@ func (h *Handler) Routes() http.Handler {
 	r.Put("/{id}", h.update)
 	r.Delete("/{id}", h.delete)
 	r.Post("/{id}/test", h.testConnection)
+	r.Post("/{id}/upload-config", h.uploadConfig)
+	r.Post("/{id}/upload-auth", h.uploadAuth)
 	return r
 }
 
@@ -163,4 +168,72 @@ func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, res)
+}
+
+// uploadConfig accepts a multipart upload of a .ovpn configuration file.
+func (h *Handler) uploadConfig(w http.ResponseWriter, r *http.Request) {
+	tenantID := tenant.FromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	const maxSize = 1 << 20 // 1 MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	if err := r.ParseMultipartForm(maxSize); err != nil {
+		respond.Error(w, http.StatusBadRequest, "request too large or not multipart")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "field 'file' is required")
+		return
+	}
+	defer file.Close()
+
+	updated, err := h.svc.UploadOvpnConfig(r.Context(), tenantID, id, file, header.Size)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, err.Error())
+			return
+		}
+		respond.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, ResponseFrom(updated))
+}
+
+// uploadAuth accepts a multipart upload of a VPN auth file (username/password).
+func (h *Handler) uploadAuth(w http.ResponseWriter, r *http.Request) {
+	tenantID := tenant.FromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	const maxSize = 4096
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	if err := r.ParseMultipartForm(maxSize); err != nil {
+		respond.Error(w, http.StatusBadRequest, "request too large or not multipart")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "field 'file' is required")
+		return
+	}
+	defer file.Close()
+
+	updated, err := h.svc.UploadAuthFile(r.Context(), tenantID, id, io.Reader(file), header.Size)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, err.Error())
+			return
+		}
+		respond.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, ResponseFrom(updated))
 }

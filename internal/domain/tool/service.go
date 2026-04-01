@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -33,11 +34,18 @@ func (s *Service) List(ctx context.Context, req pagination.PageRequest, toolType
 
 // Create creates a new tool.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, error) {
+	if req.Name == "" {
+		return Response{}, fmt.Errorf("tool: name is required")
+	}
+	if !IsValidToolType(req.Type) {
+		return Response{}, fmt.Errorf("tool: unsupported type: %s", req.Type)
+	}
 	t := Tool{
 		Name:        req.Name,
 		Type:        req.Type,
 		Config:      req.Config,
 		Description: req.Description,
+		Labels:      req.Labels,
 	}
 	created, err := s.repo.Create(ctx, t)
 	if err != nil {

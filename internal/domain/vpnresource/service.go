@@ -2,11 +2,22 @@ package vpnresource
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+// StorageClient abstracts object-storage uploads for VPN config files.
+type StorageClient interface {
+	Upload(ctx context.Context, key string, r io.Reader, size int64, contentType string) (string, error)
+}
 
 // VpnRepository defines the persistence interface for VpnResource.
 type VpnRepository interface {
@@ -19,12 +30,25 @@ type VpnRepository interface {
 
 // Service implements business logic for VPN resources.
 type Service struct {
-	repo VpnRepository
+	repo    VpnRepository
+	storage StorageClient
 }
 
-// NewService creates a new Service.
+// NewService creates a new Service with a noop storage client.
 func NewService(repo VpnRepository) *Service {
-	return &Service{repo: repo}
+	return &Service{repo: repo, storage: &noopStorageClient{}}
+}
+
+// NewServiceWithStorage creates a new Service with a custom storage client.
+func NewServiceWithStorage(repo VpnRepository, storage StorageClient) *Service {
+	return &Service{repo: repo, storage: storage}
+}
+
+// noopStorageClient accepts uploads silently — used when MinIO is not configured.
+type noopStorageClient struct{}
+
+func (n *noopStorageClient) Upload(_ context.Context, key string, _ io.Reader, _ int64, _ string) (string, error) {
+	return key, nil
 }
 
 // ListAll returns a paginated list of VPN resources.
@@ -68,11 +92,150 @@ func (s *Service) Delete(ctx context.Context, tenantID string, id uuid.UUID) err
 	return s.repo.Delete(ctx, tenantID, id)
 }
 
-// TestConnection performs a noop connectivity test for the VPN resource.
+// TestConnection tests VPN resource connectivity by starting a Docker container.
+// The test verifies:
+//  1. The VPN resource exists and has a config file uploaded.
+//  2. Docker is available on the host.
+//  3. A Docker container can be launched (using alpine:latest) to confirm the runtime works.
+//
+// Full VPN tunnel validation (OpenVPN handshake) requires the vpn-proxy service.
+// This method acts as a pre-flight check that the infrastructure is ready.
 func (s *Service) TestConnection(ctx context.Context, tenantID string, id uuid.UUID) (TestConnectionResponse, error) {
-	// Verify resource exists before reporting connected.
-	if _, err := s.repo.GetByID(ctx, tenantID, id); err != nil {
+	v, err := s.repo.GetByID(ctx, tenantID, id)
+	if err != nil {
 		return TestConnectionResponse{}, err
 	}
-	return TestConnectionResponse{Connected: true, Message: "noop"}, nil
+
+	// Check that a VPN config file has been uploaded.
+	if v.OvpnConfigPath == "" {
+		return TestConnectionResponse{
+			Connected: false,
+			Message:   "VPN config not uploaded — use POST /api/vpn-resources/{id}/ovpn to upload the .ovpn file",
+		}, nil
+	}
+
+	// Verify Docker availability and run a minimal connectivity probe.
+	if err := checkDockerAvailable(ctx); err != nil {
+		slog.Warn("vpn: docker not available for connectivity test", "err", err)
+		return TestConnectionResponse{
+			Connected: false,
+			Message:   fmt.Sprintf("Docker unavailable: %v", err),
+		}, nil
+	}
+
+	// Run a lightweight container as a Docker runtime smoke-test.
+	// Full VPN tunnel testing is delegated to the vpn-proxy service.
+	testCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(testCtx,
+		"docker", "run", "--rm", "--network=none",
+		"alpine:latest", "echo", "vpn-preflight-ok",
+	).CombinedOutput()
+	if err != nil {
+		slog.Warn("vpn: connectivity probe container failed", "err", err, "output", string(out))
+		return TestConnectionResponse{
+			Connected: false,
+			Message:   fmt.Sprintf("Docker probe failed: %v — %s", err, strings.TrimSpace(string(out))),
+		}, nil
+	}
+
+	return TestConnectionResponse{
+		Connected: true,
+		Message:   "Docker runtime verified; VPN config present — ready for vpn-proxy",
+	}, nil
+}
+
+// checkDockerAvailable runs `docker version` to verify the Docker daemon is accessible.
+func checkDockerAvailable(ctx context.Context) error {
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(checkCtx, "docker", "version", "--format", "{{.Server.Version}}").Run()
+}
+
+// UploadOvpnConfig validates and uploads a .ovpn config file to object storage,
+// then updates the VpnResource.OvpnConfigPath.
+func (s *Service) UploadOvpnConfig(ctx context.Context, tenantID string, id uuid.UUID, r io.Reader, size int64) (VpnResource, error) {
+	v, err := s.repo.GetByID(ctx, tenantID, id)
+	if err != nil {
+		return VpnResource{}, err
+	}
+
+	// Buffer entire content for validation (max 1 MB).
+	const maxOvpnSize = 1 << 20
+	if size > maxOvpnSize {
+		return VpnResource{}, fmt.Errorf("vpn: ovpn config exceeds maximum size of 1 MB")
+	}
+
+	buf, err := io.ReadAll(io.LimitReader(r, maxOvpnSize+1))
+	if err != nil {
+		return VpnResource{}, fmt.Errorf("vpn: read ovpn config: %w", err)
+	}
+	if err := validateOvpnContent(string(buf)); err != nil {
+		return VpnResource{}, err
+	}
+
+	key := fmt.Sprintf("vpn/%s/%s/config.ovpn", tenantID, id)
+	storedKey, err := s.storage.Upload(ctx, key, strings.NewReader(string(buf)), int64(len(buf)), "application/octet-stream")
+	if err != nil {
+		return VpnResource{}, fmt.Errorf("vpn: upload ovpn config: %w", err)
+	}
+
+	v.OvpnConfigPath = storedKey
+	return s.repo.Update(ctx, tenantID, id, VpnResource{
+		Name:           v.Name,
+		Description:    v.Description,
+		Enabled:        v.Enabled,
+		OvpnConfigPath: storedKey,
+		AuthFilePath:   v.AuthFilePath,
+		SecretName:     v.SecretName,
+	})
+}
+
+// UploadAuthFile uploads a VPN auth file (username/password) to object storage,
+// then updates the VpnResource.AuthFilePath.
+func (s *Service) UploadAuthFile(ctx context.Context, tenantID string, id uuid.UUID, r io.Reader, size int64) (VpnResource, error) {
+	v, err := s.repo.GetByID(ctx, tenantID, id)
+	if err != nil {
+		return VpnResource{}, err
+	}
+
+	const maxAuthSize = 4096
+	if size > maxAuthSize {
+		return VpnResource{}, fmt.Errorf("vpn: auth file exceeds maximum size of 4 KB")
+	}
+
+	buf, err := io.ReadAll(io.LimitReader(r, maxAuthSize+1))
+	if err != nil {
+		return VpnResource{}, fmt.Errorf("vpn: read auth file: %w", err)
+	}
+
+	key := fmt.Sprintf("vpn/%s/%s/auth.txt", tenantID, id)
+	storedKey, err := s.storage.Upload(ctx, key, strings.NewReader(string(buf)), int64(len(buf)), "text/plain")
+	if err != nil {
+		return VpnResource{}, fmt.Errorf("vpn: upload auth file: %w", err)
+	}
+
+	v.AuthFilePath = storedKey
+	return s.repo.Update(ctx, tenantID, id, VpnResource{
+		Name:           v.Name,
+		Description:    v.Description,
+		Enabled:        v.Enabled,
+		OvpnConfigPath: v.OvpnConfigPath,
+		AuthFilePath:   storedKey,
+		SecretName:     v.SecretName,
+	})
+}
+
+// validateOvpnContent performs basic structural validation of an OpenVPN config file.
+// A valid file must contain "remote" and "dev" directives.
+func validateOvpnContent(content string) error {
+	lower := strings.ToLower(content)
+	if !strings.Contains(lower, "remote ") {
+		return fmt.Errorf("vpn: invalid .ovpn file: missing 'remote' directive")
+	}
+	if !strings.Contains(lower, "dev ") {
+		return fmt.Errorf("vpn: invalid .ovpn file: missing 'dev' directive")
+	}
+	return nil
 }

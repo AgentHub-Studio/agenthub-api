@@ -6,13 +6,41 @@ import (
 	"github.com/google/uuid"
 )
 
+// ToolType represents the implementation type of a tool.
+type ToolType = string
+
+const (
+	ToolTypeHTTP           ToolType = "HTTP"
+	ToolTypeSQL            ToolType = "SQL"
+	ToolTypeDocumentSearch ToolType = "DOCUMENT_SEARCH"
+	ToolTypeCustom         ToolType = "CUSTOM"
+	ToolTypeBlockly        ToolType = "BLOCKLY"
+	ToolTypeComposite      ToolType = "COMPOSITE"
+)
+
+// validToolTypes is used for type validation.
+var validToolTypes = map[ToolType]bool{
+	ToolTypeHTTP:           true,
+	ToolTypeSQL:            true,
+	ToolTypeDocumentSearch: true,
+	ToolTypeCustom:         true,
+	ToolTypeBlockly:        true,
+	ToolTypeComposite:      true,
+}
+
+// IsValidToolType returns true when the given type string is a known ToolType.
+func IsValidToolType(t string) bool {
+	return validToolTypes[t]
+}
+
 // Tool is a concrete implementation of a skill capability.
 type Tool struct {
 	ID          uuid.UUID `db:"id"`
 	Name        string    `db:"name"`
-	Type        string    `db:"type"`
+	Type        ToolType  `db:"type"`
 	Config      []byte    `db:"config"`
 	Description string    `db:"description"`
+	Labels      []string  `db:"labels"`
 	CreatedAt   time.Time `db:"created_at"`
 	UpdatedAt   time.Time `db:"updated_at"`
 }
