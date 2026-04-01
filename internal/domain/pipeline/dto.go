@@ -109,12 +109,5 @@ func NodeResponseFrom(n Node) NodeResponse {
 
 // EdgeResponseFrom converts an Edge to an EdgeResponse.
 func EdgeResponseFrom(e Edge) EdgeResponse {
-	return EdgeResponse{
-		ID:           e.ID,
-		PipelineID:   e.PipelineID,
-		SourceNodeID: e.SourceNodeID,
-		TargetNodeID: e.TargetNodeID,
-		Label:        e.Label,
-		CreatedAt:    e.CreatedAt,
-	}
+	return EdgeResponse(e)
 }

@@ -15,12 +15,7 @@ type SettingResponse struct {
 
 // ResponseFrom converts a Setting entity to SettingResponse.
 func ResponseFrom(s Setting) SettingResponse {
-	return SettingResponse{
-		Key:         s.Key,
-		Value:       s.Value,
-		Description: s.Description,
-		UpdatedAt:   s.UpdatedAt,
-	}
+	return SettingResponse(s)
 }
 
 // UpdateSettingRequest is the JSON body for creating or updating a setting.
