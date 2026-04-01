@@ -74,8 +74,6 @@ func (m *mockLLMRepo) SetDefault(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
-const tenantID = "test-tenant"
-
 func TestLLMPresetService_Create_Success(t *testing.T) {
 	svc := llmpreset.NewService(newMockRepo())
 	p, err := svc.Create(context.Background(), llmpreset.CreateLLMPresetRequest{

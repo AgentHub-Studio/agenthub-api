@@ -133,13 +133,12 @@ func TestExperimentService_Delete_NotFound(t *testing.T) {
 
 func TestExperimentService_RecordResult(t *testing.T) {
 	svc := experiment.NewService(newMockRepo())
-	expID := uuid.New()
 	// seed a fake experiment so RecordResult has a valid reference
 	created, err := svc.Create(context.Background(), tenantID, experiment.CreateRequest{
 		AgentID: uuid.New(), Name: "exp", StartDate: time.Now(), EndDate: time.Now().Add(time.Hour),
 	})
 	require.NoError(t, err)
-	expID = created.ID
+	expID := created.ID
 
 	res, err := svc.RecordResult(context.Background(), tenantID, expID, experiment.RecordResultRequest{
 		VariantKey:   "A",
