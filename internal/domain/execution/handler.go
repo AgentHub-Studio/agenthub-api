@@ -99,7 +99,11 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.svc.Cancel(r.Context(), id); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			respond.Error(w, http.StatusNotFound, "execution not found or not running")
+			respond.Error(w, http.StatusNotFound, "execution not found")
+			return
+		}
+		if errors.Is(err, ErrInvalidTransition) {
+			respond.Error(w, http.StatusConflict, err.Error())
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, "failed to cancel execution")

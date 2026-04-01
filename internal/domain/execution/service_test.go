@@ -147,6 +147,17 @@ func TestExecutionService_Cancel_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, execution.ErrNotFound)
 }
 
+func TestExecutionService_Cancel_InvalidTransition_Completed(t *testing.T) {
+	svc := execution.NewService(newMockRepo())
+	e := startExecution(t, svc, uuid.New())
+
+	require.NoError(t, svc.Complete(context.Background(), e.ID, nil))
+
+	// Try to cancel a COMPLETED execution — invalid transition
+	err := svc.Cancel(context.Background(), e.ID)
+	require.ErrorIs(t, err, execution.ErrInvalidTransition)
+}
+
 func TestExecutionService_List_FilterByAgent(t *testing.T) {
 	svc := execution.NewService(newMockRepo())
 	agentID := uuid.New()

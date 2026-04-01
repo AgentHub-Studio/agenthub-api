@@ -65,7 +65,16 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (AgentExecution, er
 }
 
 // Cancel cancels a running execution.
+// Returns ErrNotFound if the execution does not exist.
+// Returns ErrInvalidTransition if the execution is not in a cancellable state.
 func (s *Service) Cancel(ctx context.Context, id uuid.UUID) error {
+	e, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !CanTransition(e.Status, StatusCancelled) {
+		return fmt.Errorf("%w: %s → %s", ErrInvalidTransition, e.Status, StatusCancelled)
+	}
 	return s.repo.Cancel(ctx, id)
 }
 
