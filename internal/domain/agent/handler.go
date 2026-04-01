@@ -175,3 +175,155 @@ func (h *Handler) clone(w http.ResponseWriter, r *http.Request) {
 	}
 	respond.JSON(w, http.StatusCreated, resp)
 }
+
+// VersionHandler exposes agent version HTTP endpoints.
+type VersionHandler struct {
+	svc VersionService
+}
+
+// NewVersionHandler creates a new VersionHandler.
+func NewVersionHandler(svc VersionService) *VersionHandler {
+	return &VersionHandler{svc: svc}
+}
+
+// RegisterVersionRoutes mounts version routes under /api/agents/{agentId}/versions.
+func (h *VersionHandler) RegisterVersionRoutes(r chi.Router) {
+	r.Get("/api/agents/{agentId}/versions", h.listVersions)
+	r.Post("/api/agents/{agentId}/versions", h.createDraft)
+	r.Get("/api/agents/{agentId}/versions/draft", h.getDraft)
+	r.Get("/api/agents/{agentId}/versions/latest-published", h.getLatestPublished)
+	r.Put("/api/agents/{agentId}/versions/by-id/{versionId}", h.updateDraft)
+	r.Post("/api/agents/{agentId}/versions/{versionId}/publish", h.publishVersion)
+}
+
+func parseAgentID(r *http.Request) (uuid.UUID, error) {
+	return uuid.Parse(chi.URLParam(r, "agentId"))
+}
+
+func parseVersionID(r *http.Request) (uuid.UUID, error) {
+	return uuid.Parse(chi.URLParam(r, "versionId"))
+}
+
+func (h *VersionHandler) listVersions(w http.ResponseWriter, r *http.Request) {
+	agentID, err := parseAgentID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agentId")
+		return
+	}
+	req := pagination.ParsePageRequest(r)
+	page, err := h.svc.ListVersions(r.Context(), agentID, req)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, page)
+}
+
+func (h *VersionHandler) createDraft(w http.ResponseWriter, r *http.Request) {
+	agentID, err := parseAgentID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agentId")
+		return
+	}
+	var req CreateAgentVersionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	resp, err := h.svc.CreateDraft(r.Context(), agentID, req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			respond.Error(w, http.StatusNotFound, "agent not found")
+		case errors.Is(err, ErrDraftAlreadyExists):
+			respond.Error(w, http.StatusConflict, err.Error())
+		default:
+			respond.Error(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respond.JSON(w, http.StatusCreated, resp)
+}
+
+func (h *VersionHandler) getDraft(w http.ResponseWriter, r *http.Request) {
+	agentID, err := parseAgentID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agentId")
+		return
+	}
+	resp, err := h.svc.GetDraft(r.Context(), agentID)
+	if err != nil {
+		if errors.Is(err, ErrVersionNotFound) {
+			respond.Error(w, http.StatusNotFound, "no draft version found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *VersionHandler) getLatestPublished(w http.ResponseWriter, r *http.Request) {
+	agentID, err := parseAgentID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agentId")
+		return
+	}
+	resp, err := h.svc.GetLatestPublished(r.Context(), agentID)
+	if err != nil {
+		if errors.Is(err, ErrVersionNotFound) {
+			respond.Error(w, http.StatusNotFound, "no published version found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *VersionHandler) updateDraft(w http.ResponseWriter, r *http.Request) {
+	versionID, err := parseVersionID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid versionId")
+		return
+	}
+	var req UpdateAgentVersionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	resp, err := h.svc.UpdateDraft(r.Context(), versionID, req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrVersionNotFound):
+			respond.Error(w, http.StatusNotFound, "version not found")
+		case errors.Is(err, ErrVersionImmutable):
+			respond.Error(w, http.StatusConflict, err.Error())
+		default:
+			respond.Error(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *VersionHandler) publishVersion(w http.ResponseWriter, r *http.Request) {
+	versionID, err := parseVersionID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid versionId")
+		return
+	}
+	resp, err := h.svc.Publish(r.Context(), versionID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrVersionNotFound):
+			respond.Error(w, http.StatusNotFound, "version not found")
+		case errors.Is(err, ErrVersionImmutable):
+			respond.Error(w, http.StatusConflict, err.Error())
+		default:
+			respond.Error(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
