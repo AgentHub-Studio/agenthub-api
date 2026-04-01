@@ -20,13 +20,20 @@ func New(keycloakBaseURL string, corsOrigins []string) *Chain {
 	}
 }
 
-// Public returns middleware for unauthenticated routes: Recovery → RequestID → Logger → CORS.
+// CORSHandler returns the CORS middleware for use at the root router level.
+// Must be applied before any route groups so that OPTIONS preflight requests
+// are handled before chi returns 405 Method Not Allowed.
+func (c *Chain) CORSHandler() func(http.Handler) http.Handler {
+	return CORS(c.corsOrigins)
+}
+
+// Public returns middleware for unauthenticated routes: Recovery → RequestID → Logger.
+// CORS is applied at root router level via CORSHandler(), not here.
 func (c *Chain) Public() []func(http.Handler) http.Handler {
 	return []func(http.Handler) http.Handler{
 		Recovery,
 		RequestID,
 		Logger,
-		CORS(c.corsOrigins),
 	}
 }
 
