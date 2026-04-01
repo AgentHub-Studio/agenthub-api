@@ -267,7 +267,7 @@ func vectorTextToFloat32Slice(s string) []float32 {
 	for i := 0; i <= len(s); i++ {
 		if i == len(s) || s[i] == ',' {
 			var f float32
-			fmt.Sscanf(s[start:i], "%g", &f)
+			_, _ = fmt.Sscanf(s[start:i], "%g", &f)
 			result = append(result, f)
 			start = i + 1
 		}
