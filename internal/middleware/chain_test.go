@@ -53,7 +53,8 @@ func TestChain_Protected_RejectsInvalidToken(t *testing.T) {
 func TestChain_Public_HasCORSHeader(t *testing.T) {
 	chain := middleware.New("http://keycloak:8080", []string{"https://app.example.com"})
 
-	handler := applyMiddlewares(chain.Public(), okHandler())
+	// CORS is applied at root router level via CORSHandler(), not inside Public().
+	handler := chain.CORSHandler()(applyMiddlewares(chain.Public(), okHandler()))
 	req := httptest.NewRequest(http.MethodOptions, "/health", nil)
 	req.Header.Set("Origin", "https://app.example.com")
 	rec := httptest.NewRecorder()
