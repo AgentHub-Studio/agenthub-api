@@ -11,13 +11,13 @@ import (
 
 // Service defines business logic operations for LLMPreset.
 type Service interface {
-	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error)
-	ListByProvider(ctx context.Context, provider string, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error)
-	Get(ctx context.Context, id uuid.UUID) (LLMPresetResponse, error)
-	Create(ctx context.Context, req CreateLLMPresetRequest) (LLMPresetResponse, error)
-	Update(ctx context.Context, id uuid.UUID, req UpdateLLMPresetRequest) (LLMPresetResponse, error)
-	Delete(ctx context.Context, id uuid.UUID) error
-	SetDefault(ctx context.Context, id uuid.UUID) error
+	List(ctx context.Context, tenantID string, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error)
+	ListByProvider(ctx context.Context, tenantID, provider string, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error)
+	Get(ctx context.Context, tenantID string, id uuid.UUID) (LLMPresetResponse, error)
+	Create(ctx context.Context, tenantID string, req CreateLLMPresetRequest) (LLMPresetResponse, error)
+	Update(ctx context.Context, tenantID string, id uuid.UUID, req UpdateLLMPresetRequest) (LLMPresetResponse, error)
+	Delete(ctx context.Context, tenantID string, id uuid.UUID) error
+	SetDefault(ctx context.Context, tenantID string, id uuid.UUID) error
 }
 
 type service struct {
@@ -29,8 +29,8 @@ func NewService(repo Repository) Service {
 	return &service{repo: repo}
 }
 
-func (s *service) List(ctx context.Context, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error) {
-	presets, total, err := s.repo.FindAll(ctx, req)
+func (s *service) List(ctx context.Context, tenantID string, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error) {
+	presets, total, err := s.repo.FindAll(ctx, tenantID, req)
 	if err != nil {
 		return pagination.Page[LLMPresetResponse]{}, err
 	}
@@ -41,11 +41,11 @@ func (s *service) List(ctx context.Context, req pagination.PageRequest) (paginat
 	return pagination.NewPage(responses, total, req), nil
 }
 
-func (s *service) ListByProvider(ctx context.Context, provider string, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error) {
+func (s *service) ListByProvider(ctx context.Context, tenantID, provider string, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error) {
 	if provider == "" {
 		return pagination.Page[LLMPresetResponse]{}, fmt.Errorf("llmpreset: provider is required")
 	}
-	presets, total, err := s.repo.FindByProvider(ctx, provider, req)
+	presets, total, err := s.repo.FindByProvider(ctx, tenantID, provider, req)
 	if err != nil {
 		return pagination.Page[LLMPresetResponse]{}, err
 	}
@@ -56,15 +56,15 @@ func (s *service) ListByProvider(ctx context.Context, provider string, req pagin
 	return pagination.NewPage(responses, total, req), nil
 }
 
-func (s *service) Get(ctx context.Context, id uuid.UUID) (LLMPresetResponse, error) {
-	p, err := s.repo.FindByID(ctx, id)
+func (s *service) Get(ctx context.Context, tenantID string, id uuid.UUID) (LLMPresetResponse, error) {
+	p, err := s.repo.FindByID(ctx, tenantID, id)
 	if err != nil {
 		return LLMPresetResponse{}, err
 	}
 	return ResponseFrom(p), nil
 }
 
-func (s *service) Create(ctx context.Context, req CreateLLMPresetRequest) (LLMPresetResponse, error) {
+func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPresetRequest) (LLMPresetResponse, error) {
 	if req.Name == "" {
 		return LLMPresetResponse{}, fmt.Errorf("name is required")
 	}
@@ -74,6 +74,13 @@ func (s *service) Create(ctx context.Context, req CreateLLMPresetRequest) (LLMPr
 	if req.Model == "" {
 		return LLMPresetResponse{}, fmt.Errorf("model is required")
 	}
+	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
+	if err != nil {
+		return LLMPresetResponse{}, err
+	}
+	if exists {
+		return LLMPresetResponse{}, ErrDuplicateName
+	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 4096
@@ -82,17 +89,26 @@ func (s *service) Create(ctx context.Context, req CreateLLMPresetRequest) (LLMPr
 	if temperature == 0 {
 		temperature = 0.7
 	}
+	visibility := req.Visibility
+	if visibility == "" {
+		visibility = VisibilityPrivate
+	}
 
 	p := LLMPreset{
 		ID:          uuid.New(),
+		TenantID:    tenantID,
 		Name:        req.Name,
+		Description: req.Description,
 		Provider:    req.Provider,
 		Model:       req.Model,
 		BaseURL:     req.BaseURL,
 		APIKeyEnv:   req.APIKeyEnv,
 		MaxTokens:   maxTokens,
 		Temperature: temperature,
+		ConfigJSON:  req.ConfigJSON,
 		IsDefault:   req.IsDefault,
+		IsPublic:    req.IsPublic,
+		Visibility:  visibility,
 	}
 	created, err := s.repo.Create(ctx, p)
 	if err != nil {
@@ -101,13 +117,16 @@ func (s *service) Create(ctx context.Context, req CreateLLMPresetRequest) (LLMPr
 	return ResponseFrom(created), nil
 }
 
-func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateLLMPresetRequest) (LLMPresetResponse, error) {
-	p, err := s.repo.FindByID(ctx, id)
+func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req UpdateLLMPresetRequest) (LLMPresetResponse, error) {
+	p, err := s.repo.FindByID(ctx, tenantID, id)
 	if err != nil {
 		return LLMPresetResponse{}, err
 	}
 	if req.Name != nil {
 		p.Name = *req.Name
+	}
+	if req.Description != nil {
+		p.Description = *req.Description
 	}
 	if req.Provider != nil {
 		p.Provider = *req.Provider
@@ -127,6 +146,15 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateLLMPresetR
 	if req.Temperature != nil {
 		p.Temperature = *req.Temperature
 	}
+	if req.ConfigJSON != nil {
+		p.ConfigJSON = req.ConfigJSON
+	}
+	if req.IsPublic != nil {
+		p.IsPublic = *req.IsPublic
+	}
+	if req.Visibility != nil {
+		p.Visibility = *req.Visibility
+	}
 	updated, err := s.repo.Update(ctx, p)
 	if err != nil {
 		return LLMPresetResponse{}, err
@@ -134,10 +162,10 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateLLMPresetR
 	return ResponseFrom(updated), nil
 }
 
-func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
-	return s.repo.Delete(ctx, id)
+func (s *service) Delete(ctx context.Context, tenantID string, id uuid.UUID) error {
+	return s.repo.Delete(ctx, tenantID, id)
 }
 
-func (s *service) SetDefault(ctx context.Context, id uuid.UUID) error {
-	return s.repo.SetDefault(ctx, id)
+func (s *service) SetDefault(ctx context.Context, tenantID string, id uuid.UUID) error {
+	return s.repo.SetDefault(ctx, tenantID, id)
 }
