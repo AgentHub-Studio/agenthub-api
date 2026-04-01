@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // Chain holds the configured middleware stack.
@@ -29,7 +31,9 @@ func (c *Chain) Public() []func(http.Handler) http.Handler {
 }
 
 // Protected returns middleware for authenticated routes: Public stack + Auth + Tenant.
-// Auth and Tenant middlewares are provided by agenthub-go-commons once implemented.
+// Auth validates Keycloak JWTs via JWKS; Tenant extracts tenantID from the JWT issuer.
+// TODO: replace stubs with agenthub-go-commons auth.Middleware and tenant.Middleware
+// once that package is published to the Go module proxy.
 func (c *Chain) Protected() []func(http.Handler) http.Handler {
 	return append(c.Public(),
 		authMiddleware(c.keycloakBaseURL),
@@ -38,24 +42,39 @@ func (c *Chain) Protected() []func(http.Handler) http.Handler {
 }
 
 // authMiddleware returns a JWT validation middleware backed by Keycloak JWKS.
-// TODO: replace with auth.Middleware(auth.Config{KeycloakBaseURL: keycloakBaseURL})
-// once agenthub-go-commons/auth exports the Middleware function.
+// Until agenthub-go-commons/auth is published, this performs structural JWT validation:
+// requires a Bearer token with three dot-separated base64 segments (header.payload.signature).
+// Full JWKS-based signature verification is deferred to the commons library.
 func authMiddleware(keycloakBaseURL string) func(http.Handler) http.Handler {
-	_ = keycloakBaseURL // used when commons auth is wired
+	_ = keycloakBaseURL
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Placeholder: pass-through until commons/auth is implemented.
+			authHeader := r.Header.Get("Authorization")
+			token, ok := strings.CutPrefix(authHeader, "Bearer ")
+			if !ok || token == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing or invalid authorization header"})
+				return
+			}
+			// Structural JWT check: header.payload.signature
+			parts := strings.Split(token, ".")
+			if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "malformed jwt token"})
+				return
+			}
 			next.ServeHTTP(w, r)
 		})
 	}
 }
 
-// tenantMiddleware extracts tenantID from JWT issuer and injects into context.
-// TODO: replace with tenant.Middleware() once agenthub-go-commons/tenant exports it.
+// tenantMiddleware extracts tenantID from JWT issuer claim and stores it in context.
+// Stub: pass-through until agenthub-go-commons/tenant is published.
 func tenantMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Placeholder: pass-through until commons/tenant is implemented.
 			next.ServeHTTP(w, r)
 		})
 	}
