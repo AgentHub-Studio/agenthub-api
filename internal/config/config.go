@@ -30,13 +30,14 @@ func (m MinIOConfig) IsConfigured() bool { return m.Endpoint != "" }
 
 // Config holds all configuration for agenthub-api.
 type Config struct {
-	Port            string
-	DatabaseURL     string
-	KeycloakBaseURL string
-	KeycloakAdmin   KeycloakAdminConfig
-	MinIO           MinIOConfig
-	CORSOrigins     []string
-	LogLevel        string
+	Port                string
+	DatabaseURL         string
+	KeycloakBaseURL     string
+	KeycloakAdmin       KeycloakAdminConfig
+	MinIO               MinIOConfig
+	CORSOrigins         []string
+	LogLevel            string
+	OAuthEncryptionKey  string // 32-byte AES-256 key; empty disables encryption (dev mode)
 }
 
 // Load reads configuration from environment variables.
@@ -64,6 +65,8 @@ func Load() (*Config, error) {
 
 	corsOrigins := getEnv("CORS_ORIGINS", "*")
 	cfg.CORSOrigins = strings.Split(corsOrigins, ",")
+
+	cfg.OAuthEncryptionKey = os.Getenv("OAUTH_ENCRYPTION_KEY")
 
 	cfg.MinIO = MinIOConfig{
 		Endpoint:        os.Getenv("MINIO_ENDPOINT"),

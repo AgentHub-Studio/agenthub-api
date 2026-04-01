@@ -59,13 +59,22 @@ type OAuthCredentialResponse struct {
 }
 
 // ResponseFrom converts an OAuthCredential to its public DTO, masking all secret fields.
+// Secret fields are replaced with "***" when they are non-empty.
 func ResponseFrom(c OAuthCredential) OAuthCredentialResponse {
 	r := OAuthCredentialResponse(c)
-	r.ClientSecret = ""
-	r.APIKeyValue = ""
-	r.BearerToken = ""
-	r.Password = ""
+	r.ClientSecret = maskSecret(c.ClientSecret)
+	r.APIKeyValue = maskSecret(c.APIKeyValue)
+	r.BearerToken = maskSecret(c.BearerToken)
+	r.Password = maskSecret(c.Password)
 	return r
+}
+
+// maskSecret returns "***" when s is non-empty, preserving empty as-is.
+func maskSecret(s string) string {
+	if s != "" {
+		return "***"
+	}
+	return ""
 }
 
 // CreateRequest is the payload for creating an OAuthCredential.

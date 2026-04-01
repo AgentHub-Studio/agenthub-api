@@ -87,7 +87,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
-	oauthHandler := oauth.NewHandler(oauth.NewService(oauth.NewRepository(pool)))
+	oauthHandler := oauth.NewHandler(oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey))
 	auditHandler := audit.NewHandler(audit.NewService(audit.NewRepository(pool)))
 	metricsHandler := metrics.NewHandler(metrics.NewService(metrics.NewRepository(pool)))
 	experimentHandler := experiment.NewHandler(experiment.NewService(experiment.NewRepository(pool)))
