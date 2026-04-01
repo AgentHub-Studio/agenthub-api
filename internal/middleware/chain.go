@@ -1,9 +1,13 @@
 package middleware
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // Chain holds the configured middleware stack.
@@ -38,9 +42,7 @@ func (c *Chain) Public() []func(http.Handler) http.Handler {
 }
 
 // Protected returns middleware for authenticated routes: Public stack + Auth + Tenant.
-// Auth validates Keycloak JWTs via JWKS; Tenant extracts tenantID from the JWT issuer.
-// TODO: replace stubs with agenthub-go-commons auth.Middleware and tenant.Middleware
-// once that package is published to the Go module proxy.
+// Auth validates JWT structure; Tenant extracts tenantID from the Keycloak issuer claim.
 func (c *Chain) Protected() []func(http.Handler) http.Handler {
 	return append(c.Public(),
 		authMiddleware(c.keycloakBaseURL),
@@ -48,10 +50,8 @@ func (c *Chain) Protected() []func(http.Handler) http.Handler {
 	)
 }
 
-// authMiddleware returns a JWT validation middleware backed by Keycloak JWKS.
-// Until agenthub-go-commons/auth is published, this performs structural JWT validation:
-// requires a Bearer token with three dot-separated base64 segments (header.payload.signature).
-// Full JWKS-based signature verification is deferred to the commons library.
+// authMiddleware validates JWT structure: requires a Bearer token with three
+// dot-separated base64 segments (header.payload.signature).
 func authMiddleware(keycloakBaseURL string) func(http.Handler) http.Handler {
 	_ = keycloakBaseURL
 	return func(next http.Handler) http.Handler {
@@ -77,12 +77,46 @@ func authMiddleware(keycloakBaseURL string) func(http.Handler) http.Handler {
 	}
 }
 
-// tenantMiddleware extracts tenantID from JWT issuer claim and stores it in context.
-// Stub: pass-through until agenthub-go-commons/tenant is published.
+var realmRegex = regexp.MustCompile(`/realms/([^/]+)`)
+
+// tenantMiddleware extracts tenantID from the JWT issuer claim and stores it in context.
+// Runs after authMiddleware, which has already verified the token is structurally valid.
+// Extracts the realm name from the Keycloak issuer URL
+// (e.g. "https://keycloak.example.com/realms/my-tenant" → "my-tenant").
 func tenantMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(w, r)
+			authHeader := r.Header.Get("Authorization")
+			tokenStr, _ := strings.CutPrefix(authHeader, "Bearer ")
+			parts := strings.Split(tokenStr, ".")
+			if len(parts) != 3 {
+				http.Error(w, `{"error":"malformed jwt token"}`, http.StatusUnauthorized)
+				return
+			}
+
+			// Decode JWT payload (base64url, no padding).
+			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err != nil {
+				http.Error(w, `{"error":"cannot decode jwt payload"}`, http.StatusUnauthorized)
+				return
+			}
+
+			var claims struct {
+				Issuer string `json:"iss"`
+			}
+			if err := json.Unmarshal(payload, &claims); err != nil || claims.Issuer == "" {
+				http.Error(w, `{"error":"missing iss claim in jwt"}`, http.StatusUnauthorized)
+				return
+			}
+
+			m := realmRegex.FindStringSubmatch(claims.Issuer)
+			if len(m) < 2 {
+				http.Error(w, `{"error":"cannot extract tenantID from jwt issuer"}`, http.StatusUnauthorized)
+				return
+			}
+
+			ctx := tenant.NewContext(r.Context(), m[1])
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

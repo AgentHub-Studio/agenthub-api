@@ -12,6 +12,8 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/database"
 	"github.com/AgentHub-Studio/agenthub-api/internal/server"
+	commonsmigratemulti "github.com/AgentHub-Studio/agenthub-go-commons/database/multitenant"
+	commonsmigrate "github.com/AgentHub-Studio/agenthub-go-commons/database/migrate"
 )
 
 func main() {
@@ -31,6 +33,20 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	// Apply public schema migrations.
+	slog.Info("running public schema migrations")
+	if err := commonsmigrate.Up(ctx, pool, "public", "/migrations/public"); err != nil {
+		slog.Error("failed to run public migrations", "err", err)
+		os.Exit(1)
+	}
+
+	// Apply per-tenant schema migrations to all ACTIVE tenants.
+	slog.Info("running tenant schema migrations")
+	if err := commonsmigratemulti.MigrateAllTenants(ctx, pool, "/migrations/schemas"); err != nil {
+		slog.Error("failed to run tenant migrations", "err", err)
+		os.Exit(1)
+	}
 
 	srv := server.New(cfg, pool)
 

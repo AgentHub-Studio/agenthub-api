@@ -21,9 +21,19 @@ BEGIN
     END IF;
 END $$;
 
--- Per-tenant unique name.
-ALTER TABLE public.llm_config_preset
-    ADD CONSTRAINT llm_config_preset_tenant_name_key UNIQUE (tenant_id, name);
+-- Per-tenant unique name (idempotent — constraint may already exist).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE table_schema = 'public'
+          AND table_name   = 'llm_config_preset'
+          AND constraint_name = 'llm_config_preset_tenant_name_key'
+    ) THEN
+        ALTER TABLE public.llm_config_preset
+            ADD CONSTRAINT llm_config_preset_tenant_name_key UNIQUE (tenant_id, name);
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_llm_config_preset_tenant ON public.llm_config_preset (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_llm_config_preset_visibility ON public.llm_config_preset (visibility);
