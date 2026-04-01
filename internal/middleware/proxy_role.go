@@ -5,10 +5,6 @@ import (
 	"net/http"
 )
 
-// proxyClaimsKey is the context key used by agenthub-go-commons/auth to store JWT claims.
-// Kept unexported to avoid coupling — we only need HasRole behaviour here.
-type proxyClaimsKey = struct{ pkg string }
-
 // proxyRoleChecker is a minimal interface satisfied by go-commons Claims.
 type proxyRoleChecker interface {
 	HasRole(string) bool
