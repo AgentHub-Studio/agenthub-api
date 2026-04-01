@@ -109,7 +109,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (AgentExecution,
 	return scanExecutionRow(row)
 }
 
-// Cancel sets execution status to CANCELLED.
+// Cancel sets execution status to CANCELLED and cascades to all active node executions.
 func (r *Repository) Cancel(ctx context.Context, id uuid.UUID) error {
 	tenantID := tenant.FromContext(ctx)
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
@@ -119,13 +119,22 @@ func (r *Repository) Cancel(ctx context.Context, id uuid.UUID) error {
 	defer release()
 
 	ct, err := conn.Exec(ctx,
-		`UPDATE agent_execution SET status = 'CANCELLED', finished_at = NOW() WHERE id = $1 AND status = 'RUNNING'`,
+		`UPDATE agent_execution SET status = 'CANCELLED', finished_at = NOW() WHERE id = $1 AND status IN ('PENDING','RUNNING')`,
 		id)
 	if err != nil {
 		return fmt.Errorf("execution: cancel: %w", err)
 	}
 	if ct.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+
+	// Cascade: cancel all active node executions for this execution.
+	_, err = conn.Exec(ctx,
+		`UPDATE agent_execution_node SET status = 'CANCELLED', finished_at = NOW()
+		  WHERE execution_id = $1 AND status IN ('PENDING','RUNNING')`,
+		id)
+	if err != nil {
+		return fmt.Errorf("execution: cancel nodes: %w", err)
 	}
 	return nil
 }

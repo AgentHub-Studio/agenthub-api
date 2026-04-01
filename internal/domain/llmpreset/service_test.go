@@ -37,6 +37,16 @@ func (m *mockLLMRepo) FindByID(_ context.Context, id uuid.UUID) (llmpreset.LLMPr
 	return p, nil
 }
 
+func (m *mockLLMRepo) FindByProvider(_ context.Context, provider string, _ pagination.PageRequest) ([]llmpreset.LLMPreset, int64, error) {
+	var out []llmpreset.LLMPreset
+	for _, p := range m.data {
+		if p.Provider == provider {
+			out = append(out, p)
+		}
+	}
+	return out, int64(len(out)), nil
+}
+
 func (m *mockLLMRepo) Create(_ context.Context, p llmpreset.LLMPreset) (llmpreset.LLMPreset, error) {
 	p.ID = uuid.New()
 	if p.IsDefault {
@@ -120,4 +130,26 @@ func TestLLMPresetService_List(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), page.TotalElements)
 	assert.Len(t, page.Content, 3)
+}
+
+func TestLLMPresetService_ListByProvider(t *testing.T) {
+	svc := llmpreset.NewService(newMockRepo())
+	_, _ = svc.Create(context.Background(), llmpreset.CreateLLMPresetRequest{
+		Name: "GPT-4o", Provider: "openai", Model: "gpt-4o",
+	})
+	_, _ = svc.Create(context.Background(), llmpreset.CreateLLMPresetRequest{
+		Name: "Claude", Provider: "anthropic", Model: "claude-sonnet-4-6",
+	})
+
+	page, err := svc.ListByProvider(context.Background(), "openai", pagination.PageRequest{Page: 0, Size: 20})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), page.TotalElements)
+	assert.Len(t, page.Content, 1)
+	assert.Equal(t, "openai", page.Content[0].Provider)
+}
+
+func TestLLMPresetService_ListByProvider_EmptyProvider_ReturnsError(t *testing.T) {
+	svc := llmpreset.NewService(newMockRepo())
+	_, err := svc.ListByProvider(context.Background(), "", pagination.PageRequest{Page: 0, Size: 20})
+	require.Error(t, err)
 }

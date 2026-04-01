@@ -19,6 +19,7 @@ var ErrNotFound = errors.New("llmpreset: not found")
 type Repository interface {
 	FindAll(ctx context.Context, req pagination.PageRequest) ([]LLMPreset, int64, error)
 	FindByID(ctx context.Context, id uuid.UUID) (LLMPreset, error)
+	FindByProvider(ctx context.Context, provider string, req pagination.PageRequest) ([]LLMPreset, int64, error)
 	Create(ctx context.Context, p LLMPreset) (LLMPreset, error)
 	Update(ctx context.Context, p LLMPreset) (LLMPreset, error)
 	Delete(ctx context.Context, id uuid.UUID) error
@@ -59,6 +60,33 @@ func (r *pgRepository) FindAll(ctx context.Context, req pagination.PageRequest) 
 	rows, err := r.pool.Query(ctx, query, req.Size, req.Offset())
 	if err != nil {
 		return nil, 0, fmt.Errorf("llmpreset.FindAll: %w", err)
+	}
+	defer rows.Close()
+
+	var presets []LLMPreset
+	for rows.Next() {
+		p, err := scanPreset(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		presets = append(presets, p)
+	}
+	if presets == nil {
+		presets = []LLMPreset{}
+	}
+	return presets, total, rows.Err()
+}
+
+func (r *pgRepository) FindByProvider(ctx context.Context, provider string, req pagination.PageRequest) ([]LLMPreset, int64, error) {
+	var total int64
+	if err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.llm_config_preset WHERE provider = $1`, provider).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("llmpreset.FindByProvider count: %w", err)
+	}
+
+	query := fmt.Sprintf(`SELECT %s FROM public.llm_config_preset WHERE provider = $1 ORDER BY name LIMIT $2 OFFSET $3`, presetColumns)
+	rows, err := r.pool.Query(ctx, query, provider, req.Size, req.Offset())
+	if err != nil {
+		return nil, 0, fmt.Errorf("llmpreset.FindByProvider: %w", err)
 	}
 	defer rows.Close()
 
