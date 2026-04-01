@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -89,13 +92,65 @@ func (s *Service) Delete(ctx context.Context, tenantID string, id uuid.UUID) err
 	return s.repo.Delete(ctx, tenantID, id)
 }
 
-// TestConnection performs a noop connectivity test for the VPN resource.
+// TestConnection tests VPN resource connectivity by starting a Docker container.
+// The test verifies:
+//  1. The VPN resource exists and has a config file uploaded.
+//  2. Docker is available on the host.
+//  3. A Docker container can be launched (using alpine:latest) to confirm the runtime works.
+//
+// Full VPN tunnel validation (OpenVPN handshake) requires the vpn-proxy service.
+// This method acts as a pre-flight check that the infrastructure is ready.
 func (s *Service) TestConnection(ctx context.Context, tenantID string, id uuid.UUID) (TestConnectionResponse, error) {
-	// Verify resource exists before reporting connected.
-	if _, err := s.repo.GetByID(ctx, tenantID, id); err != nil {
+	v, err := s.repo.GetByID(ctx, tenantID, id)
+	if err != nil {
 		return TestConnectionResponse{}, err
 	}
-	return TestConnectionResponse{Connected: true, Message: "noop"}, nil
+
+	// Check that a VPN config file has been uploaded.
+	if v.OvpnConfigPath == "" {
+		return TestConnectionResponse{
+			Connected: false,
+			Message:   "VPN config not uploaded — use POST /api/vpn-resources/{id}/ovpn to upload the .ovpn file",
+		}, nil
+	}
+
+	// Verify Docker availability and run a minimal connectivity probe.
+	if err := checkDockerAvailable(ctx); err != nil {
+		slog.Warn("vpn: docker not available for connectivity test", "err", err)
+		return TestConnectionResponse{
+			Connected: false,
+			Message:   fmt.Sprintf("Docker unavailable: %v", err),
+		}, nil
+	}
+
+	// Run a lightweight container as a Docker runtime smoke-test.
+	// Full VPN tunnel testing is delegated to the vpn-proxy service.
+	testCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(testCtx,
+		"docker", "run", "--rm", "--network=none",
+		"alpine:latest", "echo", "vpn-preflight-ok",
+	).CombinedOutput()
+	if err != nil {
+		slog.Warn("vpn: connectivity probe container failed", "err", err, "output", string(out))
+		return TestConnectionResponse{
+			Connected: false,
+			Message:   fmt.Sprintf("Docker probe failed: %v — %s", err, strings.TrimSpace(string(out))),
+		}, nil
+	}
+
+	return TestConnectionResponse{
+		Connected: true,
+		Message:   "Docker runtime verified; VPN config present — ready for vpn-proxy",
+	}, nil
+}
+
+// checkDockerAvailable runs `docker version` to verify the Docker daemon is accessible.
+func checkDockerAvailable(ctx context.Context) error {
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(checkCtx, "docker", "version", "--format", "{{.Server.Version}}").Run()
 }
 
 // UploadOvpnConfig validates and uploads a .ovpn config file to object storage,
