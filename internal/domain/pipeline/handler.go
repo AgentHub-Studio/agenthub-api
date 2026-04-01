@@ -132,11 +132,14 @@ func (h *Handler) replaceNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.ReplaceNodes(r.Context(), id, nodes)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			respond.Error(w, http.StatusNotFound, "pipeline not found")
-			return
+		case errors.Is(err, ErrDuplicateNodeName):
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		default:
+			respond.Error(w, http.StatusInternalServerError, err.Error())
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -155,11 +158,14 @@ func (h *Handler) replaceEdges(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.ReplaceEdges(r.Context(), id, edges)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			respond.Error(w, http.StatusNotFound, "pipeline not found")
-			return
+		case errors.Is(err, ErrCyclicGraph):
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		default:
+			respond.Error(w, http.StatusInternalServerError, err.Error())
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)

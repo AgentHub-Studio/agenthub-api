@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,3 +40,9 @@ type Edge struct {
 	Label        string    `db:"label"`
 	CreatedAt    time.Time `db:"created_at"`
 }
+
+// ErrCyclicGraph is returned when the pipeline graph contains a cycle.
+var ErrCyclicGraph = errors.New("pipeline graph contains a cycle")
+
+// ErrDuplicateNodeName is returned when two nodes share the same name in a pipeline.
+var ErrDuplicateNodeName = errors.New("pipeline has duplicate node names")

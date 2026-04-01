@@ -2,7 +2,7 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -85,7 +85,11 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 }
 
 // ReplaceNodes replaces all nodes for a pipeline.
+// Validates that node names are unique within the pipeline.
 func (s *Service) ReplaceNodes(ctx context.Context, pipelineID uuid.UUID, nodes []NodeRequest) ([]NodeResponse, error) {
+	if err := validateUniqueNodeNames(nodes); err != nil {
+		return nil, err
+	}
 	result, err := s.repo.ReplaceNodes(ctx, pipelineID, nodes)
 	if err != nil {
 		return nil, err
@@ -98,7 +102,11 @@ func (s *Service) ReplaceNodes(ctx context.Context, pipelineID uuid.UUID, nodes 
 }
 
 // ReplaceEdges replaces all edges for a pipeline.
+// Validates that the resulting graph has no cycles.
 func (s *Service) ReplaceEdges(ctx context.Context, pipelineID uuid.UUID, edges []EdgeRequest) ([]EdgeResponse, error) {
+	if hasCycle(edges) {
+		return nil, fmt.Errorf("%w: edges form a cycle", ErrCyclicGraph)
+	}
 	result, err := s.repo.ReplaceEdges(ctx, pipelineID, edges)
 	if err != nil {
 		return nil, err
@@ -110,5 +118,56 @@ func (s *Service) ReplaceEdges(ctx context.Context, pipelineID uuid.UUID, edges 
 	return resp, nil
 }
 
-// ensure json import is used
-var _ = json.Marshal
+// validateUniqueNodeNames returns ErrDuplicateNodeName if any two nodes share the same name.
+func validateUniqueNodeNames(nodes []NodeRequest) error {
+	seen := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		if _, exists := seen[n.Name]; exists {
+			return fmt.Errorf("%w: %q", ErrDuplicateNodeName, n.Name)
+		}
+		seen[n.Name] = struct{}{}
+	}
+	return nil
+}
+
+// hasCycle detects cycles in a directed graph represented by EdgeRequests.
+// Uses DFS with three-color marking: white (unvisited), gray (in stack), black (done).
+func hasCycle(edges []EdgeRequest) bool {
+	// Build adjacency list.
+	adj := make(map[uuid.UUID][]uuid.UUID)
+	nodes := make(map[uuid.UUID]struct{})
+	for _, e := range edges {
+		adj[e.SourceNodeID] = append(adj[e.SourceNodeID], e.TargetNodeID)
+		nodes[e.SourceNodeID] = struct{}{}
+		nodes[e.TargetNodeID] = struct{}{}
+	}
+
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := make(map[uuid.UUID]int, len(nodes))
+
+	var dfs func(n uuid.UUID) bool
+	dfs = func(n uuid.UUID) bool {
+		color[n] = gray
+		for _, next := range adj[n] {
+			if color[next] == gray {
+				return true // back edge → cycle
+			}
+			if color[next] == white && dfs(next) {
+				return true
+			}
+		}
+		color[n] = black
+		return false
+	}
+
+	for n := range nodes {
+		if color[n] == white && dfs(n) {
+			return true
+		}
+	}
+	return false
+}
