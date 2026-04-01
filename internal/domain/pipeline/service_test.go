@@ -131,6 +131,46 @@ func TestPipelineService_ReplaceNodes(t *testing.T) {
 	assert.Len(t, nodes, 3)
 }
 
+func TestPipelineService_ReplaceNodes_DuplicateName(t *testing.T) {
+	svc := pipeline.NewService(newMockRepo())
+	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: uuid.New()})
+	require.NoError(t, err)
+
+	_, err = svc.ReplaceNodes(context.Background(), p.ID, []pipeline.NodeRequest{
+		{NodeType: "INPUT", Name: "Start"},
+		{NodeType: "LLM", Name: "Start"}, // duplicate
+	})
+	require.ErrorIs(t, err, pipeline.ErrDuplicateNodeName)
+}
+
+func TestPipelineService_ReplaceEdges_Cycle(t *testing.T) {
+	svc := pipeline.NewService(newMockRepo())
+	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: uuid.New()})
+	require.NoError(t, err)
+
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	_, err = svc.ReplaceEdges(context.Background(), p.ID, []pipeline.EdgeRequest{
+		{SourceNodeID: a, TargetNodeID: b},
+		{SourceNodeID: b, TargetNodeID: c},
+		{SourceNodeID: c, TargetNodeID: a}, // creates cycle a→b→c→a
+	})
+	require.ErrorIs(t, err, pipeline.ErrCyclicDependency)
+}
+
+func TestPipelineService_ReplaceEdges_NoCycle(t *testing.T) {
+	svc := pipeline.NewService(newMockRepo())
+	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: uuid.New()})
+	require.NoError(t, err)
+
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	edges, err := svc.ReplaceEdges(context.Background(), p.ID, []pipeline.EdgeRequest{
+		{SourceNodeID: a, TargetNodeID: b},
+		{SourceNodeID: b, TargetNodeID: c},
+	})
+	require.NoError(t, err)
+	assert.Len(t, edges, 2)
+}
+
 func TestPipelineService_List(t *testing.T) {
 	svc := pipeline.NewService(newMockRepo())
 	for i := 0; i < 3; i++ {
