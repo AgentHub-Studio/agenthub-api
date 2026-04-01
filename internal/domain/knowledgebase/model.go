@@ -39,16 +39,7 @@ type KnowledgeBaseResponse struct {
 }
 
 // ResponseFrom maps a KnowledgeBase entity to a KnowledgeBaseResponse DTO.
-func ResponseFrom(k KnowledgeBase) KnowledgeBaseResponse {
-	return KnowledgeBaseResponse{
-		ID:          k.ID,
-		Name:        k.Name,
-		Description: k.Description,
-		Status:      k.Status,
-		CreatedAt:   k.CreatedAt,
-		UpdatedAt:   k.UpdatedAt,
-	}
-}
+func ResponseFrom(k KnowledgeBase) KnowledgeBaseResponse { return KnowledgeBaseResponse(k) }
 
 // CreateRequest is the payload for creating a KnowledgeBase.
 type CreateRequest struct {

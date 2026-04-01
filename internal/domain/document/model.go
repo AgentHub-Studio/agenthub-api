@@ -49,19 +49,7 @@ type DocumentResponse struct {
 }
 
 // ResponseFrom maps a Document entity to a DocumentResponse DTO.
-func ResponseFrom(d Document) DocumentResponse {
-	return DocumentResponse{
-		ID:              d.ID,
-		KnowledgeBaseID: d.KnowledgeBaseID,
-		FileName:        d.FileName,
-		ContentType:     d.ContentType,
-		Status:          d.Status,
-		StoragePath:     d.StoragePath,
-		FileSize:        d.FileSize,
-		CreatedAt:       d.CreatedAt,
-		UpdatedAt:       d.UpdatedAt,
-	}
-}
+func ResponseFrom(d Document) DocumentResponse { return DocumentResponse(d) }
 
 // UploadRequest is the payload for uploading a document.
 type UploadRequest struct {
