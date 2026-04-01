@@ -43,7 +43,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		for _, m := range chain.Protected() {
 			r.Use(m)
 		}
-		mountProtectedRoutes(r)
+		mountProtectedRoutes(r, pool)
 	})
 
 	s.router = r
