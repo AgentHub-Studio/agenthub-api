@@ -141,3 +141,89 @@ func TestPipelineService_List(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), page.TotalElements)
 }
+
+// --- Cycle detection tests ---
+
+func makeEdge(src, tgt uuid.UUID) pipeline.EdgeRequest {
+	return pipeline.EdgeRequest{SourceNodeID: src, TargetNodeID: tgt}
+}
+
+func TestReplaceEdges_NoCycle(t *testing.T) {
+	repo := newMockRepo()
+	svc := pipeline.NewService(repo)
+	pid := uuid.New()
+	repo.data[pid] = pipeline.Pipeline{ID: pid}
+
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	edges := []pipeline.EdgeRequest{makeEdge(a, b), makeEdge(b, c)}
+	_, err := svc.ReplaceEdges(context.Background(), pid, edges)
+	require.NoError(t, err)
+}
+
+func TestReplaceEdges_DirectCycle(t *testing.T) {
+	repo := newMockRepo()
+	svc := pipeline.NewService(repo)
+	pid := uuid.New()
+	repo.data[pid] = pipeline.Pipeline{ID: pid}
+
+	a, b := uuid.New(), uuid.New()
+	edges := []pipeline.EdgeRequest{makeEdge(a, b), makeEdge(b, a)}
+	_, err := svc.ReplaceEdges(context.Background(), pid, edges)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, pipeline.ErrCyclicGraph)
+}
+
+func TestReplaceEdges_IndirectCycle(t *testing.T) {
+	repo := newMockRepo()
+	svc := pipeline.NewService(repo)
+	pid := uuid.New()
+	repo.data[pid] = pipeline.Pipeline{ID: pid}
+
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	// A→B→C→A
+	edges := []pipeline.EdgeRequest{makeEdge(a, b), makeEdge(b, c), makeEdge(c, a)}
+	_, err := svc.ReplaceEdges(context.Background(), pid, edges)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, pipeline.ErrCyclicGraph)
+}
+
+func TestReplaceEdges_EmptyEdges(t *testing.T) {
+	repo := newMockRepo()
+	svc := pipeline.NewService(repo)
+	pid := uuid.New()
+	repo.data[pid] = pipeline.Pipeline{ID: pid}
+
+	_, err := svc.ReplaceEdges(context.Background(), pid, nil)
+	require.NoError(t, err)
+}
+
+// --- Duplicate node name tests ---
+
+func TestReplaceNodes_UniqueNames(t *testing.T) {
+	repo := newMockRepo()
+	svc := pipeline.NewService(repo)
+	pid := uuid.New()
+	repo.data[pid] = pipeline.Pipeline{ID: pid}
+
+	nodes := []pipeline.NodeRequest{
+		{Name: "input", NodeType: "INPUT"},
+		{Name: "llm", NodeType: "LLM"},
+	}
+	_, err := svc.ReplaceNodes(context.Background(), pid, nodes)
+	require.NoError(t, err)
+}
+
+func TestReplaceNodes_DuplicateNames(t *testing.T) {
+	repo := newMockRepo()
+	svc := pipeline.NewService(repo)
+	pid := uuid.New()
+	repo.data[pid] = pipeline.Pipeline{ID: pid}
+
+	nodes := []pipeline.NodeRequest{
+		{Name: "node", NodeType: "INPUT"},
+		{Name: "node", NodeType: "OUTPUT"}, // duplicate
+	}
+	_, err := svc.ReplaceNodes(context.Background(), pid, nodes)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, pipeline.ErrDuplicateNodeName)
+}
