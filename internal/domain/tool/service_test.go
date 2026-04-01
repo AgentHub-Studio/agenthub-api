@@ -53,6 +53,7 @@ func (m *mockToolRepo) Update(_ context.Context, id uuid.UUID, req tool.UpdateRe
 	t.Name = req.Name
 	t.Type = req.Type
 	t.Description = req.Description
+	t.Labels = req.Labels
 	m.data[id] = t
 	return t, nil
 }
@@ -146,6 +147,52 @@ func TestToolService_BindToSkill_AlreadyBound(t *testing.T) {
 	require.NoError(t, err)
 	_, err = svc.BindToSkill(context.Background(), skillID, tool.BindRequest{ToolID: created.ID, Priority: 1})
 	require.ErrorIs(t, err, tool.ErrAlreadyBound)
+}
+
+func TestToolService_Create_InvalidType(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name: "Bad Tool",
+		Type: "INVALID_TYPE",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported type")
+}
+
+func TestToolService_Create_MissingName(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{Type: tool.ToolTypeHTTP})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "name")
+}
+
+func TestToolService_Create_WithLabels(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "Tagged Tool",
+		Type:   tool.ToolTypeHTTP,
+		Labels: []string{"prod", "external"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"prod", "external"}, created.Labels)
+}
+
+func TestToolService_Create_ValidTypes(t *testing.T) {
+	validTypes := []string{
+		tool.ToolTypeHTTP,
+		tool.ToolTypeSQL,
+		tool.ToolTypeDocumentSearch,
+		tool.ToolTypeCustom,
+		tool.ToolTypeBlockly,
+		tool.ToolTypeComposite,
+	}
+	for _, tt := range validTypes {
+		t.Run(tt, func(t *testing.T) {
+			svc := tool.NewService(newMockRepo())
+			_, err := svc.Create(context.Background(), tool.CreateRequest{Name: "T", Type: tt})
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestToolService_List_FilterByType(t *testing.T) {

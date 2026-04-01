@@ -168,6 +168,45 @@ func TestLLMPresetService_ListByProvider(t *testing.T) {
 	assert.Equal(t, "openai", page.Content[0].Provider)
 }
 
+func TestLLMPresetService_Create_DuplicateName_ReturnsError(t *testing.T) {
+	svc := llmpreset.NewService(newMockRepo())
+	req := llmpreset.CreateLLMPresetRequest{Name: "GPT-4o", Provider: "openai", Model: "gpt-4o"}
+	_, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+	_, err = svc.Create(context.Background(), req)
+	require.ErrorIs(t, err, llmpreset.ErrDuplicateName)
+}
+
+func TestLLMPresetService_Create_ValidationErrors(t *testing.T) {
+	svc := llmpreset.NewService(newMockRepo())
+
+	_, err := svc.Create(context.Background(), llmpreset.CreateLLMPresetRequest{Provider: "openai", Model: "gpt-4o"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "name")
+
+	_, err = svc.Create(context.Background(), llmpreset.CreateLLMPresetRequest{Name: "X", Model: "gpt-4o"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "provider")
+
+	_, err = svc.Create(context.Background(), llmpreset.CreateLLMPresetRequest{Name: "Y", Provider: "openai"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "model")
+}
+
+func TestLLMPresetService_Update_PartialFields(t *testing.T) {
+	svc := llmpreset.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), llmpreset.CreateLLMPresetRequest{
+		Name: "Original", Provider: "openai", Model: "gpt-4o",
+	})
+	require.NoError(t, err)
+
+	newName := "Updated"
+	updated, err := svc.Update(context.Background(), created.ID, llmpreset.UpdateLLMPresetRequest{Name: &newName})
+	require.NoError(t, err)
+	assert.Equal(t, "Updated", updated.Name)
+	assert.Equal(t, "openai", updated.Provider, "provider should remain unchanged")
+}
+
 func TestLLMPresetService_ListByProvider_EmptyProvider_ReturnsError(t *testing.T) {
 	svc := llmpreset.NewService(newMockRepo())
 	_, err := svc.ListByProvider(context.Background(), tenantA, "", pagination.PageRequest{Page: 0, Size: 20})
