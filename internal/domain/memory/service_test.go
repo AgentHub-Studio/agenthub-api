@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -12,89 +13,100 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
 )
 
-type key struct {
-	agentID uuid.UUID
-	userID  string
-	key     string
+// --- mock repository ---
+
+type mockRepo struct {
+	entries map[string]memory.AgentMemory
 }
 
-type mockMemoryRepo struct {
-	data map[key]memory.AgentMemory
+func newMockRepo() *mockRepo {
+	return &mockRepo{entries: make(map[string]memory.AgentMemory)}
 }
 
-func newMockRepo() *mockMemoryRepo {
-	return &mockMemoryRepo{data: make(map[key]memory.AgentMemory)}
+func entryKey(agentID uuid.UUID, key string) string {
+	return agentID.String() + ":" + key
 }
 
-func makeKey(agentID uuid.UUID, userID *string, k string) key {
-	uid := ""
-	if userID != nil {
-		uid = *userID
-	}
-	return key{agentID: agentID, userID: uid, key: k}
-}
-
-func (m *mockMemoryRepo) ListByAgent(_ context.Context, agentID uuid.UUID, userID *string) ([]memory.AgentMemory, error) {
+func (m *mockRepo) ListByAgent(_ context.Context, agentID uuid.UUID, _ *string) ([]memory.AgentMemory, error) {
 	var out []memory.AgentMemory
-	for k, v := range m.data {
-		if k.agentID != agentID {
-			continue
+	for _, e := range m.entries {
+		if e.AgentID == agentID {
+			out = append(out, e)
 		}
-		if userID != nil && k.userID != *userID {
-			continue
-		}
-		out = append(out, v)
 	}
 	return out, nil
 }
 
-func (m *mockMemoryRepo) Upsert(_ context.Context, mem memory.AgentMemory) (memory.AgentMemory, error) {
-	if mem.ID == uuid.Nil {
-		mem.ID = uuid.New()
+func (m *mockRepo) Upsert(_ context.Context, e memory.AgentMemory) (memory.AgentMemory, error) {
+	if e.ID == uuid.Nil {
+		e.ID = uuid.New()
 	}
-	uid := ""
-	if mem.UserID != nil {
-		uid = *mem.UserID
+	if e.LastAccessedAt.IsZero() {
+		e.LastAccessedAt = time.Now()
 	}
-	m.data[key{agentID: mem.AgentID, userID: uid, key: mem.Key}] = mem
-	return mem, nil
+	m.entries[entryKey(e.AgentID, e.Key)] = e
+	return e, nil
 }
 
-func (m *mockMemoryRepo) GetByKey(_ context.Context, agentID uuid.UUID, userID *string, k string) (memory.AgentMemory, error) {
-	mk := makeKey(agentID, userID, k)
-	mem, ok := m.data[mk]
+func (m *mockRepo) GetByKey(_ context.Context, agentID uuid.UUID, _ *string, key string) (memory.AgentMemory, error) {
+	e, ok := m.entries[entryKey(agentID, key)]
 	if !ok {
 		return memory.AgentMemory{}, memory.ErrNotFound
 	}
-	return mem, nil
+	return e, nil
 }
 
-func (m *mockMemoryRepo) DeleteByKey(_ context.Context, agentID uuid.UUID, userID *string, k string) error {
-	mk := makeKey(agentID, userID, k)
-	if _, ok := m.data[mk]; !ok {
+func (m *mockRepo) DeleteByKey(_ context.Context, agentID uuid.UUID, _ *string, key string) error {
+	k := entryKey(agentID, key)
+	if _, ok := m.entries[k]; !ok {
 		return memory.ErrNotFound
 	}
-	delete(m.data, mk)
+	delete(m.entries, k)
 	return nil
 }
 
-func (m *mockMemoryRepo) ClearByAgent(_ context.Context, agentID uuid.UUID) error {
-	for k := range m.data {
-		if k.agentID == agentID {
-			delete(m.data, k)
+func (m *mockRepo) ClearByAgent(_ context.Context, agentID uuid.UUID) error {
+	for k, e := range m.entries {
+		if e.AgentID == agentID {
+			delete(m.entries, k)
 		}
 	}
 	return nil
 }
 
-func TestMemoryService_Upsert_Success(t *testing.T) {
+func (m *mockRepo) Recall(_ context.Context, agentID uuid.UUID, _ *string, _ []float32, limit int) ([]memory.AgentMemory, error) {
+	var out []memory.AgentMemory
+	for _, e := range m.entries {
+		if e.AgentID == agentID && len(e.Embedding) > 0 {
+			e.LastAccessedAt = time.Now()
+			out = append(out, e)
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// --- tests ---
+
+func TestMemoryService_UpsertAndGet(t *testing.T) {
 	svc := memory.NewService(newMockRepo())
 	agentID := uuid.New()
-	val, _ := json.Marshal("Paris")
-	mem, err := svc.Upsert(context.Background(), agentID, "last_city", memory.UpsertMemoryRequest{Value: val})
+
+	val := json.RawMessage(`{"key":"hello"}`)
+	m, err := svc.Upsert(context.Background(), agentID, "greeting", memory.UpsertMemoryRequest{Value: val})
 	require.NoError(t, err)
-	assert.Equal(t, "last_city", mem.Key)
-	assert.NotEqual(t, uuid.Nil, mem.ID)
+	assert.Equal(t, "greeting", m.Key)
+	assert.Equal(t, val, json.RawMessage(m.Value))
+}
+
+func TestMemoryService_Upsert_InvalidJSON_ReturnsError(t *testing.T) {
+	svc := memory.NewService(newMockRepo())
+	_, err := svc.Upsert(context.Background(), uuid.New(), "k", memory.UpsertMemoryRequest{
+		Value: json.RawMessage(`not-json`),
+	})
+	require.Error(t, err)
 }
 
 func TestMemoryService_GetByKey_NotFound(t *testing.T) {
@@ -103,27 +115,58 @@ func TestMemoryService_GetByKey_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, memory.ErrNotFound)
 }
 
-func TestMemoryService_DeleteByKey_Success(t *testing.T) {
+func TestMemoryService_DeleteByKey(t *testing.T) {
 	svc := memory.NewService(newMockRepo())
 	agentID := uuid.New()
-	val, _ := json.Marshal(42)
-	_, err := svc.Upsert(context.Background(), agentID, "counter", memory.UpsertMemoryRequest{Value: val})
-	require.NoError(t, err)
-	err = svc.DeleteByKey(context.Background(), agentID, nil, "counter")
-	require.NoError(t, err)
+	_, _ = svc.Upsert(context.Background(), agentID, "x", memory.UpsertMemoryRequest{Value: json.RawMessage(`1`)})
+
+	require.NoError(t, svc.DeleteByKey(context.Background(), agentID, nil, "x"))
+	_, err := svc.GetByKey(context.Background(), agentID, nil, "x")
+	require.ErrorIs(t, err, memory.ErrNotFound)
 }
 
 func TestMemoryService_ClearByAgent(t *testing.T) {
 	svc := memory.NewService(newMockRepo())
 	agentID := uuid.New()
 	for _, k := range []string{"a", "b", "c"} {
-		v, _ := json.Marshal(k)
-		_, err := svc.Upsert(context.Background(), agentID, k, memory.UpsertMemoryRequest{Value: v})
-		require.NoError(t, err)
+		_, _ = svc.Upsert(context.Background(), agentID, k, memory.UpsertMemoryRequest{Value: json.RawMessage(`1`)})
 	}
-	err := svc.ClearByAgent(context.Background(), agentID)
-	require.NoError(t, err)
+	require.NoError(t, svc.ClearByAgent(context.Background(), agentID))
+
 	items, err := svc.List(context.Background(), agentID, nil)
 	require.NoError(t, err)
 	assert.Empty(t, items)
+}
+
+func TestMemoryService_Recall_ReturnsResults(t *testing.T) {
+	svc := memory.NewService(newMockRepo())
+	agentID := uuid.New()
+
+	embedding := []float32{0.1, 0.2, 0.3, 0.4}
+	_, _ = svc.Upsert(context.Background(), agentID, "fact1", memory.UpsertMemoryRequest{
+		Value:     json.RawMessage(`"Paris is the capital of France"`),
+		Embedding: embedding,
+	})
+
+	results, err := svc.Recall(context.Background(), agentID, memory.RecallRequest{
+		Embedding: embedding,
+		Limit:     5,
+	})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.InDelta(t, 1.0, results[0].Relevance, 0.1, "recently accessed memory should have relevance near 1")
+}
+
+func TestMemoryService_Recall_EmptyEmbedding_ReturnsError(t *testing.T) {
+	svc := memory.NewService(newMockRepo())
+	_, err := svc.Recall(context.Background(), uuid.New(), memory.RecallRequest{Embedding: nil})
+	require.Error(t, err)
+}
+
+func TestAgentMemory_RelevanceScore_Decays(t *testing.T) {
+	recent := memory.AgentMemory{LastAccessedAt: time.Now()}
+	old := memory.AgentMemory{LastAccessedAt: time.Now().Add(-72 * time.Hour)}
+
+	assert.Greater(t, recent.RelevanceScore(), old.RelevanceScore())
+	assert.InDelta(t, 1.0, recent.RelevanceScore(), 0.01)
 }
