@@ -78,6 +78,10 @@ func (m *mockMemorySvc) ClearByAgent(_ context.Context, agentID uuid.UUID) error
 	return nil
 }
 
+func (m *mockMemorySvc) Recall(_ context.Context, agentID uuid.UUID, req memory.RecallRequest) ([]memory.MemoryRecallResult, error) {
+	return []memory.MemoryRecallResult{}, nil
+}
+
 func setupMemory() (*chi.Mux, *mockMemorySvc) {
 	svc := newMockMemorySvc()
 	h := memory.NewHandler(svc)
