@@ -11,6 +11,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/apierror"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // packageService defines the methods used by Handler.
@@ -199,12 +200,5 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 
 // tenantFromContext extracts the tenant ID from the request context.
 func tenantFromContext(r *http.Request) string {
-	v := r.Context().Value(tenantContextKey{})
-	if v == nil {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
+	return tenant.FromContext(r.Context())
 }
-
-type tenantContextKey struct{}

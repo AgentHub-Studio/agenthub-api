@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/apierror"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // versionService defines the methods used by Handler.
@@ -138,13 +139,6 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-type tenantContextKey struct{}
-
 func tenantFromContext(ctx context.Context) string {
-	v := ctx.Value(tenantContextKey{})
-	if v == nil {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
+	return tenant.FromContext(ctx)
 }
