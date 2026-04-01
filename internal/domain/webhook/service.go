@@ -1,14 +1,33 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+)
+
+// ErrSignatureInvalid is returned when a webhook signature does not match.
+var ErrSignatureInvalid = fmt.Errorf("webhook: invalid signature")
+
+// ErrEventFiltered is returned when the event type is not in the webhook's allowed list.
+var ErrEventFiltered = fmt.Errorf("webhook: event filtered")
+
+const (
+	ingestBaseDelay = time.Second
+	ingestMaxRetries = 5
 )
 
 // Service handles business logic for webhooks.
@@ -115,6 +134,134 @@ func (s *Service) ListDeliveries(ctx context.Context, webhookID uuid.UUID, req p
 		return pagination.Page[WebhookDeliveryLog]{}, err
 	}
 	return pagination.NewPage(items, total, req), nil
+}
+
+// IngestWebhook receives an event from an external system (e.g. GitHub, GitLab),
+// validates the signature, filters by event type, creates a delivery log, and
+// asynchronously dispatches the payload to the webhook URL with exponential-backoff retry.
+//
+// sourceType must be "github" or "gitlab".
+// signature is the raw value of X-Hub-Signature-256 (GitHub) or X-Gitlab-Token (GitLab).
+func (s *Service) IngestWebhook(ctx context.Context, token, sourceType string, payload []byte, signature, eventType string) (WebhookDeliveryLog, error) {
+	w, err := s.repo.GetBySecret(ctx, token)
+	if err != nil {
+		return WebhookDeliveryLog{}, err
+	}
+
+	// Validate signature.
+	if w.Secret != nil && *w.Secret != "" {
+		if err := validateSignature(sourceType, *w.Secret, payload, signature); err != nil {
+			return WebhookDeliveryLog{}, err
+		}
+	}
+
+	// Filter event type.
+	if len(w.Events) > 0 && !containsEvent(w.Events, eventType) {
+		return WebhookDeliveryLog{}, ErrEventFiltered
+	}
+
+	// Create delivery log.
+	d := WebhookDeliveryLog{
+		WebhookID: w.ID,
+		EventType: eventType,
+		Payload:   payload,
+		Status:    "PENDING",
+		Attempts:  0,
+	}
+	log, err := s.repo.CreateDelivery(ctx, d)
+	if err != nil {
+		return WebhookDeliveryLog{}, err
+	}
+
+	// Dispatch asynchronously with retry.
+	go s.dispatchWithRetry(w, log)
+
+	return log, nil
+}
+
+// dispatchWithRetry forwards the payload to the webhook's target URL with exponential backoff.
+// Delays: 1s, 2s, 4s, 8s, 16s (2^attempt * baseDelay, capped at ingestMaxRetries attempts).
+func (s *Service) dispatchWithRetry(w WebhookConfig, d WebhookDeliveryLog) {
+	maxAttempts := w.RetryCount
+	if maxAttempts <= 0 || maxAttempts > ingestMaxRetries {
+		maxAttempts = ingestMaxRetries
+	}
+
+	ctx := context.Background()
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(math.Pow(2, float64(attempt-1))) * ingestBaseDelay
+			time.Sleep(delay)
+		}
+
+		d.Attempts = attempt + 1
+		status, body, err := doHTTPPost(client, w.URL, d.Payload)
+		if err == nil && status >= 200 && status < 300 {
+			now := time.Now().UTC()
+			d.Status = "DELIVERED"
+			d.ResponseStatus = &status
+			d.ResponseBody = &body
+			d.DeliveredAt = &now
+			_, _ = s.repo.UpdateDelivery(ctx, d)
+			return
+		}
+		if err == nil {
+			d.ResponseStatus = &status
+			d.ResponseBody = &body
+		}
+	}
+
+	d.Status = "FAILED"
+	_, _ = s.repo.UpdateDelivery(ctx, d)
+}
+
+// doHTTPPost sends a POST request with the given payload and returns status code, body, error.
+func doHTTPPost(client *http.Client, url string, payload []byte) (int, string, error) {
+	resp, err := client.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode, string(b), nil
+}
+
+// validateSignature checks the HMAC-SHA256 signature for GitHub or token equality for GitLab.
+func validateSignature(sourceType, secret string, payload []byte, signature string) error {
+	switch strings.ToLower(sourceType) {
+	case "github":
+		// GitHub sends: sha256=<hex>
+		expected := "sha256=" + ComputeHMACSHA256(secret, payload)
+		if !hmac.Equal([]byte(signature), []byte(expected)) {
+			return ErrSignatureInvalid
+		}
+	case "gitlab":
+		// GitLab sends the secret token directly.
+		if signature != secret {
+			return ErrSignatureInvalid
+		}
+	}
+	return nil
+}
+
+// ComputeHMACSHA256 returns the hex-encoded HMAC-SHA256 of payload using key.
+// Exported for use in tests.
+func ComputeHMACSHA256(key string, payload []byte) string {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write(payload)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// containsEvent returns true if event is in the allowed list.
+func containsEvent(allowed []string, event string) bool {
+	for _, e := range allowed {
+		if e == event {
+			return true
+		}
+	}
+	return false
 }
 
 // SendTest creates a test delivery log entry with a sample payload.

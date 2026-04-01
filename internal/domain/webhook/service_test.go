@@ -2,6 +2,9 @@ package webhook_test
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
@@ -69,10 +72,29 @@ func (m *mockWebhookRepo) ListDeliveries(_ context.Context, webhookID uuid.UUID,
 	return out, int64(len(out)), nil
 }
 
+func (m *mockWebhookRepo) GetBySecret(_ context.Context, secret string) (webhook.WebhookConfig, error) {
+	for _, c := range m.configs {
+		if c.Secret != nil && *c.Secret == secret && c.Enabled {
+			return c, nil
+		}
+	}
+	return webhook.WebhookConfig{}, webhook.ErrNotFound
+}
+
 func (m *mockWebhookRepo) CreateDelivery(_ context.Context, d webhook.WebhookDeliveryLog) (webhook.WebhookDeliveryLog, error) {
 	d.ID = uuid.New()
 	m.deliveries = append(m.deliveries, d)
 	return d, nil
+}
+
+func (m *mockWebhookRepo) UpdateDelivery(_ context.Context, d webhook.WebhookDeliveryLog) (webhook.WebhookDeliveryLog, error) {
+	for i, existing := range m.deliveries {
+		if existing.ID == d.ID {
+			m.deliveries[i] = d
+			return d, nil
+		}
+	}
+	return webhook.WebhookDeliveryLog{}, webhook.ErrNotFound
 }
 
 func TestWebhookService_Create_Success(t *testing.T) {
@@ -108,4 +130,80 @@ func TestWebhookService_List(t *testing.T) {
 	items, err := svc.List(context.Background())
 	require.NoError(t, err)
 	assert.Len(t, items, 2)
+}
+
+// --- IngestWebhook tests ---
+
+// newIngestWebhook creates a webhook with a secret and returns its token.
+func newIngestWebhook(t *testing.T, svc *webhook.Service, targetURL string, events []string) string {
+	t.Helper()
+	secret := "test-secret-token"
+	_, err := svc.Create(context.Background(), webhook.CreateWebhookRequest{
+		Name:   "ingest-hook",
+		URL:    targetURL,
+		Events: events,
+		Secret: &secret,
+	})
+	require.NoError(t, err)
+	return secret
+}
+
+func TestIngestWebhook_GitHubSignatureValid(t *testing.T) {
+	received := make(chan []byte, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		received <- b
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	svc := webhook.NewService(newMockRepo())
+	secret := newIngestWebhook(t, svc, ts.URL, []string{"push"})
+
+	payload := []byte(`{"ref":"refs/heads/main"}`)
+	sig := "sha256=" + webhook.ComputeHMACSHA256(secret, payload)
+
+	log, err := svc.IngestWebhook(context.Background(), secret, "github", payload, sig, "push")
+	require.NoError(t, err)
+	assert.Equal(t, "PENDING", log.Status)
+	assert.Equal(t, "push", log.EventType)
+}
+
+func TestIngestWebhook_InvalidSignature_ReturnsError(t *testing.T) {
+	svc := webhook.NewService(newMockRepo())
+	secret := newIngestWebhook(t, svc, "http://localhost", []string{"push"})
+
+	_, err := svc.IngestWebhook(context.Background(), secret, "github", []byte(`{}`), "sha256=badsig", "push")
+	require.ErrorIs(t, err, webhook.ErrSignatureInvalid)
+}
+
+func TestIngestWebhook_EventFiltered(t *testing.T) {
+	svc := webhook.NewService(newMockRepo())
+	secret := newIngestWebhook(t, svc, "http://localhost", []string{"push"})
+	sig := "sha256=" + webhook.ComputeHMACSHA256(secret, []byte(`{}`))
+
+	_, err := svc.IngestWebhook(context.Background(), secret, "github", []byte(`{}`), sig, "pull_request")
+	require.ErrorIs(t, err, webhook.ErrEventFiltered)
+}
+
+func TestIngestWebhook_TokenNotFound_ReturnsError(t *testing.T) {
+	svc := webhook.NewService(newMockRepo())
+	_, err := svc.IngestWebhook(context.Background(), "nonexistent-token", "github", []byte(`{}`), "", "push")
+	require.ErrorIs(t, err, webhook.ErrNotFound)
+}
+
+func TestIngestWebhook_GitLabTokenValid(t *testing.T) {
+	received := make(chan struct{}, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	svc := webhook.NewService(newMockRepo())
+	secret := newIngestWebhook(t, svc, ts.URL, []string{"Push Hook"})
+
+	log, err := svc.IngestWebhook(context.Background(), secret, "gitlab", []byte(`{}`), secret, "Push Hook")
+	require.NoError(t, err)
+	assert.Equal(t, "PENDING", log.Status)
 }

@@ -23,10 +23,12 @@ type WebhookRepository interface {
 	List(ctx context.Context) ([]WebhookConfig, error)
 	Create(ctx context.Context, w WebhookConfig) (WebhookConfig, error)
 	GetByID(ctx context.Context, id uuid.UUID) (WebhookConfig, error)
+	GetBySecret(ctx context.Context, secret string) (WebhookConfig, error)
 	Update(ctx context.Context, w WebhookConfig) (WebhookConfig, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	ListDeliveries(ctx context.Context, webhookID uuid.UUID, req pagination.PageRequest) ([]WebhookDeliveryLog, int64, error)
 	CreateDelivery(ctx context.Context, d WebhookDeliveryLog) (WebhookDeliveryLog, error)
+	UpdateDelivery(ctx context.Context, d WebhookDeliveryLog) (WebhookDeliveryLog, error)
 }
 
 // Repository provides data access for webhook tables.
@@ -87,6 +89,21 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (WebhookConfig, 
 	row := conn.QueryRow(ctx, `
 		SELECT id, name, url, events, secret, enabled, retry_count, created_at, updated_at
 		  FROM webhook_config WHERE id = $1`, id)
+	return scanConfigRow(row)
+}
+
+// GetBySecret returns a webhook configuration by its secret token.
+func (r *Repository) GetBySecret(ctx context.Context, secret string) (WebhookConfig, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return WebhookConfig{}, err
+	}
+	defer release()
+
+	row := conn.QueryRow(ctx, `
+		SELECT id, name, url, events, secret, enabled, retry_count, created_at, updated_at
+		  FROM webhook_config WHERE secret = $1 AND enabled = TRUE`, secret)
 	return scanConfigRow(row)
 }
 
@@ -172,6 +189,24 @@ func (r *Repository) CreateDelivery(ctx context.Context, d WebhookDeliveryLog) (
 		RETURNING id, webhook_id, event_type, payload, status, response_status, response_body, attempts, delivered_at, created_at`
 	row := conn.QueryRow(ctx, query,
 		d.WebhookID, d.EventType, d.Payload, d.Status, d.ResponseStatus, d.ResponseBody, d.Attempts, d.DeliveredAt)
+	return scanDeliveryRow(row)
+}
+
+// UpdateDelivery updates a delivery log entry.
+func (r *Repository) UpdateDelivery(ctx context.Context, d WebhookDeliveryLog) (WebhookDeliveryLog, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return WebhookDeliveryLog{}, err
+	}
+	defer release()
+
+	const query = `
+		UPDATE webhook_delivery_log
+		   SET status = $2, response_status = $3, response_body = $4, attempts = $5, delivered_at = $6
+		 WHERE id = $1
+		RETURNING id, webhook_id, event_type, payload, status, response_status, response_body, attempts, delivered_at, created_at`
+	row := conn.QueryRow(ctx, query, d.ID, d.Status, d.ResponseStatus, d.ResponseBody, d.Attempts, d.DeliveredAt)
 	return scanDeliveryRow(row)
 }
 
