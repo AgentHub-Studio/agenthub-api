@@ -1,6 +1,14 @@
 // Package search provides cross-domain full-text search for tenant resources.
 package search
 
+// Entity type filter constants for targeted search.
+const (
+	EntityAgent         = "agent"
+	EntitySkill         = "skill"
+	EntityTool          = "tool"
+	EntityKnowledgeBase = "knowledge_base"
+)
+
 // SearchResult is a generic resource match returned by global search.
 type SearchResult struct {
 	ID          string `json:"id"`
