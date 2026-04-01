@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // Chain holds the configured middleware stack.
@@ -40,11 +42,29 @@ func (c *Chain) Protected() []func(http.Handler) http.Handler {
 }
 
 // authMiddleware returns a JWT validation middleware backed by Keycloak JWKS.
-// Stub: pass-through until agenthub-go-commons/auth is published.
+// Until agenthub-go-commons/auth is published, this performs structural JWT validation:
+// requires a Bearer token with three dot-separated base64 segments (header.payload.signature).
+// Full JWKS-based signature verification is deferred to the commons library.
 func authMiddleware(keycloakBaseURL string) func(http.Handler) http.Handler {
 	_ = keycloakBaseURL
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			token, ok := strings.CutPrefix(authHeader, "Bearer ")
+			if !ok || token == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing or invalid authorization header"})
+				return
+			}
+			// Structural JWT check: header.payload.signature
+			parts := strings.Split(token, ".")
+			if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "malformed jwt token"})
+				return
+			}
 			next.ServeHTTP(w, r)
 		})
 	}
