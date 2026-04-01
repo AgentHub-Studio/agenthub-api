@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -77,6 +78,22 @@ func (m *mockVPNSvc) TestConnection(_ context.Context, _ string, id uuid.UUID) (
 		return vpnresource.TestConnectionResponse{}, vpnresource.ErrNotFound
 	}
 	return vpnresource.TestConnectionResponse{Connected: true, Message: "OK"}, nil
+}
+
+func (m *mockVPNSvc) UploadOvpnConfig(_ context.Context, _ string, id uuid.UUID, _ io.Reader, _ int64) (vpnresource.VpnResource, error) {
+	v, ok := m.resources[id]
+	if !ok {
+		return vpnresource.VpnResource{}, vpnresource.ErrNotFound
+	}
+	return v, nil
+}
+
+func (m *mockVPNSvc) UploadAuthFile(_ context.Context, _ string, id uuid.UUID, _ io.Reader, _ int64) (vpnresource.VpnResource, error) {
+	v, ok := m.resources[id]
+	if !ok {
+		return vpnresource.VpnResource{}, vpnresource.ErrNotFound
+	}
+	return v, nil
 }
 
 func setupVPN() (*chi.Mux, *mockVPNSvc) {
