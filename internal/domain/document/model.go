@@ -2,6 +2,7 @@ package document
 
 import (
 	"errors"
+	"io"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,11 +52,13 @@ type DocumentResponse struct {
 // ResponseFrom maps a Document entity to a DocumentResponse DTO.
 func ResponseFrom(d Document) DocumentResponse { return DocumentResponse(d) }
 
-// UploadRequest is the payload for uploading a document.
+// UploadRequest carries the metadata and file content for a document upload.
+// Content and FileSize are populated by the handler from the multipart form;
+// StoragePath is derived by the service after uploading to object storage.
 type UploadRequest struct {
-	KnowledgeBaseID uuid.UUID `json:"knowledgeBaseId"`
-	FileName        string    `json:"fileName"`
-	ContentType     string    `json:"contentType"`
-	FileSize        int64     `json:"fileSize"`
-	StoragePath     string    `json:"storagePath"`
+	KnowledgeBaseID uuid.UUID
+	FileName        string
+	ContentType     string
+	FileSize        int64
+	Content         io.Reader // file data from multipart form
 }

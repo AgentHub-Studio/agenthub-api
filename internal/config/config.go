@@ -22,7 +22,8 @@ type MinIOConfig struct {
 	SecretAccessKey string
 	UseSSL          bool
 	Region          string
-	Bucket          string
+	Bucket          string // MINIO_BUCKET — used by the package registry
+	DocumentsBucket string // MINIO_DOCUMENTS_BUCKET — used by document uploads
 }
 
 // IsConfigured returns true when the MinIO endpoint is set.
@@ -75,6 +76,7 @@ func Load() (*Config, error) {
 		UseSSL:          os.Getenv("MINIO_USE_SSL") == "true",
 		Region:          getEnv("MINIO_REGION", "us-east-1"),
 		Bucket:          getEnv("MINIO_BUCKET", "agenthub-packages"),
+		DocumentsBucket: getEnv("MINIO_DOCUMENTS_BUCKET", "agenthub-documents"),
 	}
 
 	return cfg, nil

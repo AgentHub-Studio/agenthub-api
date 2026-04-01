@@ -2,7 +2,6 @@ package document
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -63,12 +62,32 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req UploadRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid request body")
+	// Accept multipart/form-data with a "file" field.
+	const maxUploadSize = 100 << 20 // 100 MB
+	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+		respond.Error(w, http.StatusBadRequest, "multipart form required")
 		return
 	}
-	req.KnowledgeBaseID = kbID
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "file field is required")
+		return
+	}
+	defer file.Close() //nolint:errcheck
+
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	req := UploadRequest{
+		KnowledgeBaseID: kbID,
+		FileName:        header.Filename,
+		ContentType:     contentType,
+		FileSize:        header.Size,
+		Content:         file,
+	}
 
 	resp, err := h.svc.Upload(r.Context(), req)
 	if err != nil {

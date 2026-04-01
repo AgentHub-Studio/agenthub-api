@@ -2,6 +2,8 @@ package document_test
 
 import (
 	"context"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -12,6 +14,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
+// mockDocRepo is an in-memory Repository for unit tests.
 type mockDocRepo struct {
 	data map[uuid.UUID]document.Document
 }
@@ -39,7 +42,9 @@ func (m *mockDocRepo) FindByID(_ context.Context, id uuid.UUID) (document.Docume
 }
 
 func (m *mockDocRepo) Create(_ context.Context, d document.Document) (document.Document, error) {
-	d.ID = uuid.New()
+	if d.ID == uuid.Nil {
+		d.ID = uuid.New()
+	}
 	d.Status = document.StatusPending
 	m.data[d.ID] = d
 	return d, nil
@@ -63,33 +68,67 @@ func (m *mockDocRepo) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// mockStorage is a StorageClient that records uploads for assertions.
+type mockStorage struct {
+	uploaded []string
+}
+
+func (m *mockStorage) Upload(_ context.Context, key string, _ io.Reader, _ int64, _ string) (string, error) {
+	m.uploaded = append(m.uploaded, key)
+	return key, nil
+}
+
+func newSvc() (*document.Service, *mockStorage) {
+	storage := &mockStorage{}
+	svc := document.NewService(newMockRepo(), storage)
+	return svc, storage
+}
+
 func TestDocumentService_Upload_Success(t *testing.T) {
-	svc := document.NewService(newMockRepo())
+	svc, storage := newSvc()
 	kbID := uuid.New()
 	d, err := svc.Upload(context.Background(), document.UploadRequest{
 		KnowledgeBaseID: kbID,
 		FileName:        "report.pdf",
 		ContentType:     "application/pdf",
 		FileSize:        204800,
-		StoragePath:     "kb/" + kbID.String() + "/report.pdf",
+		Content:         strings.NewReader("fake pdf content"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "report.pdf", d.FileName)
 	assert.NotEqual(t, uuid.Nil, d.ID)
 	assert.Equal(t, document.StatusPending, d.Status)
+	assert.NotEmpty(t, d.StoragePath)
+	// Storage path should contain the kbID and document ID.
+	assert.Contains(t, d.StoragePath, kbID.String())
+	assert.Contains(t, d.StoragePath, d.ID.String())
+	require.Len(t, storage.uploaded, 1)
+	assert.Equal(t, d.StoragePath, storage.uploaded[0])
+}
+
+func TestDocumentService_Upload_MissingFileName(t *testing.T) {
+	svc, _ := newSvc()
+	_, err := svc.Upload(context.Background(), document.UploadRequest{
+		KnowledgeBaseID: uuid.New(),
+		Content:         strings.NewReader("data"),
+	})
+	require.Error(t, err)
 }
 
 func TestDocumentService_GetByID_NotFound(t *testing.T) {
-	svc := document.NewService(newMockRepo())
+	svc, _ := newSvc()
 	_, err := svc.GetByID(context.Background(), uuid.New())
 	require.ErrorIs(t, err, document.ErrNotFound)
 }
 
 func TestDocumentService_UpdateStatus(t *testing.T) {
-	svc := document.NewService(newMockRepo())
+	svc, _ := newSvc()
 	kbID := uuid.New()
 	created, err := svc.Upload(context.Background(), document.UploadRequest{
-		KnowledgeBaseID: kbID, FileName: "doc.txt", ContentType: "text/plain", StoragePath: "x",
+		KnowledgeBaseID: kbID,
+		FileName:        "doc.txt",
+		ContentType:     "text/plain",
+		Content:         strings.NewReader("content"),
 	})
 	require.NoError(t, err)
 	updated, err := svc.UpdateStatus(context.Background(), created.ID, document.StatusIndexed)
@@ -98,17 +137,23 @@ func TestDocumentService_UpdateStatus(t *testing.T) {
 }
 
 func TestDocumentService_ListByKnowledgeBase(t *testing.T) {
-	svc := document.NewService(newMockRepo())
+	svc, _ := newSvc()
 	kbID := uuid.New()
 	for i := 0; i < 3; i++ {
 		_, err := svc.Upload(context.Background(), document.UploadRequest{
-			KnowledgeBaseID: kbID, FileName: "file.pdf", ContentType: "application/pdf", StoragePath: "x",
+			KnowledgeBaseID: kbID,
+			FileName:        "file.pdf",
+			ContentType:     "application/pdf",
+			Content:         strings.NewReader("data"),
 		})
 		require.NoError(t, err)
 	}
-	// document from a different KB — should not appear
+	// Document from a different KB — should not appear in results.
 	_, err := svc.Upload(context.Background(), document.UploadRequest{
-		KnowledgeBaseID: uuid.New(), FileName: "other.pdf", ContentType: "application/pdf", StoragePath: "y",
+		KnowledgeBaseID: uuid.New(),
+		FileName:        "other.pdf",
+		ContentType:     "application/pdf",
+		Content:         strings.NewReader("data"),
 	})
 	require.NoError(t, err)
 
@@ -119,7 +164,7 @@ func TestDocumentService_ListByKnowledgeBase(t *testing.T) {
 }
 
 func TestDocumentService_Delete_NotFound(t *testing.T) {
-	svc := document.NewService(newMockRepo())
+	svc, _ := newSvc()
 	err := svc.Delete(context.Background(), uuid.New())
 	require.ErrorIs(t, err, document.ErrNotFound)
 }

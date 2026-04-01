@@ -11,12 +11,13 @@ import (
 
 // Service provides business logic for Document operations.
 type Service struct {
-	repo Repository
+	repo    Repository
+	storage StorageClient
 }
 
-// NewService creates a new Service backed by the given Repository.
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+// NewService creates a new Service backed by the given Repository and StorageClient.
+func NewService(repo Repository, storage StorageClient) *Service {
+	return &Service{repo: repo, storage: storage}
 }
 
 // ListByKnowledgeBase returns a paginated list of documents for a knowledge base.
@@ -43,18 +44,27 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (DocumentResponse, 
 	return ResponseFrom(d), nil
 }
 
-// Upload creates a new document record with PENDING status.
+// Upload stores the file in object storage and creates a document record with PENDING status.
 func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentResponse, error) {
 	if req.FileName == "" {
 		return DocumentResponse{}, fmt.Errorf("document service: file name is required")
 	}
 
+	// Derive a stable storage key before uploading so the DB record and the object share the same path.
+	docID := uuid.New()
+	storagePath := fmt.Sprintf("documents/%s/%s/%s", req.KnowledgeBaseID, docID, req.FileName)
+
+	if _, err := s.storage.Upload(ctx, storagePath, req.Content, req.FileSize, req.ContentType); err != nil {
+		return DocumentResponse{}, fmt.Errorf("document service: upload file: %w", err)
+	}
+
 	d := Document{
+		ID:              docID,
 		KnowledgeBaseID: req.KnowledgeBaseID,
 		FileName:        req.FileName,
 		ContentType:     req.ContentType,
 		FileSize:        req.FileSize,
-		StoragePath:     req.StoragePath,
+		StoragePath:     storagePath,
 		Status:          StatusPending,
 	}
 

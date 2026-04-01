@@ -104,7 +104,9 @@ func (r *postgresRepository) Create(ctx context.Context, d Document) (Document, 
 	defer release()
 
 	now := time.Now().UTC()
-	d.ID = uuid.New()
+	if d.ID == uuid.Nil {
+		d.ID = uuid.New()
+	}
 	d.CreatedAt = now
 	d.UpdatedAt = now
 
