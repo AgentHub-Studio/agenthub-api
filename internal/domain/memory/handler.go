@@ -19,6 +19,7 @@ type memoryService interface {
 	GetByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) (AgentMemory, error)
 	DeleteByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) error
 	ClearByAgent(ctx context.Context, agentID uuid.UUID) error
+	Recall(ctx context.Context, agentID uuid.UUID, req RecallRequest) ([]MemoryRecallResult, error)
 }
 
 // Handler exposes the HTTP interface for agent memory.

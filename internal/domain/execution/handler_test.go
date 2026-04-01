@@ -61,6 +61,14 @@ func (m *mockExecutionSvc) Cancel(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (m *mockExecutionSvc) GetDetails(_ context.Context, id uuid.UUID) (execution.ExecutionDetails, error) {
+	e, ok := m.executions[id]
+	if !ok {
+		return execution.ExecutionDetails{}, execution.ErrNotFound
+	}
+	return execution.ExecutionDetails{AgentExecution: e, Nodes: []execution.NodeDetails{}}, nil
+}
+
 func (m *mockExecutionSvc) ListNodes(_ context.Context, _ uuid.UUID) ([]execution.AgentExecutionNode, error) {
 	return []execution.AgentExecutionNode{}, nil
 }

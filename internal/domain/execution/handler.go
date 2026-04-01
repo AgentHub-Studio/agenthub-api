@@ -19,6 +19,7 @@ type executionService interface {
 	Start(ctx context.Context, req StartExecutionRequest) (AgentExecution, error)
 	GetByID(ctx context.Context, id uuid.UUID) (AgentExecution, error)
 	Cancel(ctx context.Context, id uuid.UUID) error
+	GetDetails(ctx context.Context, id uuid.UUID) (ExecutionDetails, error)
 	ListNodes(ctx context.Context, executionID uuid.UUID) ([]AgentExecutionNode, error)
 	ListToolExecutions(ctx context.Context, nodeExecutionID uuid.UUID) ([]ToolExecution, error)
 }

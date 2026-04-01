@@ -42,6 +42,17 @@ func (m *mockAuditSvc) GetByID(_ context.Context, _ string, id uuid.UUID) (audit
 	return l, nil
 }
 
+func (m *mockAuditSvc) Record(_ context.Context, _ string, req audit.RecordRequest) (audit.AuditLog, error) {
+	id := uuid.New()
+	l := audit.AuditLog{
+		ID:         id,
+		EntityType: req.EntityType,
+		Action:     req.Action,
+	}
+	m.logs[id] = l
+	return l, nil
+}
+
 func setupAudit() (*chi.Mux, *mockAuditSvc) {
 	svc := newMockAuditSvc()
 	h := audit.NewHandler(svc)

@@ -83,7 +83,7 @@ func (m *mockWebhookSvc) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (m *mockWebhookSvc) ListDeliveries(_ context.Context, webhookID uuid.UUID, req pagination.PageRequest) (pagination.Page[webhook.WebhookDeliveryLog], error) {
+func (m *mockWebhookSvc) ListDeliveries(_ context.Context, webhookID uuid.UUID, _ webhook.DeliveryFilter, req pagination.PageRequest) (pagination.Page[webhook.WebhookDeliveryLog], error) {
 	logs := m.deliveries[webhookID]
 	return pagination.NewPage(logs, int64(len(logs)), req), nil
 }

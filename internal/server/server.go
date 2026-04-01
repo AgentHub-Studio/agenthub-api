@@ -95,7 +95,28 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	datasourceHandler := datasource.NewHandler(datasource.NewService(datasource.NewRepository(pool)))
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
 	chatHandler := chat.NewHandler(chat.NewService(chat.NewRepository(pool)))
-	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool)))
+	var docStorage document.StorageClient
+	if cfg.MinIO.IsConfigured() {
+		ds, err := document.NewMinIOStorageClient(
+			cfg.MinIO.Endpoint,
+			cfg.MinIO.AccessKeyID,
+			cfg.MinIO.SecretAccessKey,
+			cfg.MinIO.UseSSL,
+			cfg.MinIO.Region,
+			cfg.MinIO.DocumentsBucket,
+		)
+		if err != nil {
+			slog.Warn("minio: failed to create document storage client, using noop", "err", err)
+			docStorage = &document.NoopStorageClient{}
+		} else {
+			docStorage = ds
+			slog.Info("minio: document storage configured", "bucket", cfg.MinIO.DocumentsBucket)
+		}
+	} else {
+		slog.Warn("minio: MINIO_ENDPOINT not set, document uploads will not be stored")
+		docStorage = &document.NoopStorageClient{}
+	}
+	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage))
 	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(knowledgebase.NewRepository(pool)))
 	mcpHandler := mcp.NewHandler(mcp.NewService(mcp.NewRepository(pool)))
 

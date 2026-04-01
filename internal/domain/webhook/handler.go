@@ -21,7 +21,7 @@ type webhookService interface {
 	GetByID(ctx context.Context, id uuid.UUID) (WebhookConfig, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateWebhookRequest) (WebhookConfig, error)
 	Delete(ctx context.Context, id uuid.UUID) error
-	ListDeliveries(ctx context.Context, webhookID uuid.UUID, req pagination.PageRequest) (pagination.Page[WebhookDeliveryLog], error)
+	ListDeliveries(ctx context.Context, webhookID uuid.UUID, filter DeliveryFilter, req pagination.PageRequest) (pagination.Page[WebhookDeliveryLog], error)
 	IngestWebhook(ctx context.Context, token, sourceType string, payload []byte, signature, eventType string) (WebhookDeliveryLog, error)
 	SendTest(ctx context.Context, webhookID uuid.UUID) (WebhookDeliveryLog, error)
 }
