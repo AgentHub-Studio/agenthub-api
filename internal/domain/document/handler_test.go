@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -91,9 +92,17 @@ func TestDocumentHandler_List_Success(t *testing.T) {
 func TestDocumentHandler_Upload_Success(t *testing.T) {
 	r, _ := setupDocument()
 	kbID := uuid.New()
-	body, _ := json.Marshal(document.UploadRequest{FileName: "report.pdf", ContentType: "application/pdf"})
-	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "report.pdf")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("fake pdf content"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -106,7 +115,8 @@ func TestDocumentHandler_Upload_Success(t *testing.T) {
 func TestDocumentHandler_Upload_InvalidBody(t *testing.T) {
 	r, _ := setupDocument()
 	kbID := uuid.New()
-	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", bytes.NewReader([]byte("not-json")))
+	// Sending JSON instead of multipart/form-data should return 400.
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", bytes.NewReader([]byte("not-multipart")))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
