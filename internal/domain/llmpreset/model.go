@@ -2,21 +2,36 @@
 package llmpreset
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-// LLMPreset is the domain entity for a global LLM configuration preset.
+// Visibility constants for LLM presets.
+const (
+	VisibilityPrivate      = "PRIVATE"
+	VisibilityOrganization = "ORGANIZATION"
+	VisibilityPublic       = "PUBLIC"
+)
+
+// LLMPreset is the domain entity for a per-tenant LLM configuration preset
+// stored in the public schema with an explicit tenant_id for isolation.
 type LLMPreset struct {
 	ID          uuid.UUID
+	TenantID    string          // Keycloak realm slug, e.g. "my-company"
 	Name        string
-	Provider    string  // openai, anthropic, ollama, openrouter
+	Description string
+	Provider    string          // OPENAI, ANTHROPIC, OLLAMA, OPENROUTER
 	Model       string
 	BaseURL     string
-	APIKeyEnv   string  // name of the environment variable holding the API key
+	APIKeyEnv   string          // env-var name holding the API key
 	MaxTokens   int
 	Temperature float64
+	ConfigJSON  json.RawMessage // free-form JSONB: top_p, frequency_penalty, etc.
 	IsDefault   bool
+	IsPublic    bool
+	Visibility  string          // PRIVATE, ORGANIZATION, PUBLIC
 	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
