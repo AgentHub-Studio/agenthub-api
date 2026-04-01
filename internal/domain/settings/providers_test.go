@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,19 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/settings"
 )
+
+// redirectTransport redirects all requests to the given base URL (used to intercept hardcoded URLs in tests).
+type redirectTransport struct {
+	baseURL string
+}
+
+func (t *redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	u, _ := url.Parse(t.baseURL + req.URL.Path)
+	u.RawQuery = req.URL.RawQuery
+	req2 := req.Clone(req.Context())
+	req2.URL = u
+	return http.DefaultTransport.RoundTrip(req2)
+}
 
 func TestListProviders_Returns4Providers(t *testing.T) {
 	providers := settings.ListProviders()
@@ -97,7 +111,7 @@ func TestListOpenRouterModels_CallsAPI(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	settings.SetProviderHTTPClient(ts.Client())
+	settings.SetProviderHTTPClient(&http.Client{Transport: &redirectTransport{baseURL: ts.URL}})
 	defer settings.SetProviderHTTPClient(nil)
 
 	models, err := settings.ListOpenRouterModels(context.Background(), "test-key")
