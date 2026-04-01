@@ -11,10 +11,6 @@ type roleChecker interface {
 	HasRole(string) bool
 }
 
-// claimsKey mirrors the context key used by agenthub-go-commons/auth.
-// Once go-commons is a dependency, replace this with auth.ClaimsFromContext.
-type claimsContextKey = struct{ pkg string }
-
 // claimsFromContext extracts a roleChecker from ctx, if present.
 // Returns nil when the auth middleware is in placeholder mode (dev).
 func claimsFromContext(ctx context.Context) roleChecker {
