@@ -89,6 +89,6 @@ func mountProtectedRoutes(r chi.Router, pool *pgxpool.Pool) {
 	r.Mount("/api/proxy/datasources", dsHandler.ProxyRoutes())
 
 	// Global search
-	searchSvc := search.NewService(pool)
+	searchSvc := search.NewServiceWithPool(pool)
 	r.Mount("/api/search", search.NewHandler(searchSvc).Routes())
 }
