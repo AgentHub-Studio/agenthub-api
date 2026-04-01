@@ -1,0 +1,165 @@
+package listing
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"unicode"
+
+	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+)
+
+// Service implements business logic for marketplace listings.
+type Service struct {
+	repo *Repository
+}
+
+// NewService creates a new Service.
+func NewService(repo *Repository) *Service {
+	return &Service{repo: repo}
+}
+
+// ListAll returns all active listings paginated.
+func (s *Service) ListAll(ctx context.Context, req pagination.PageRequest) (pagination.Page[ListingResponse], error) {
+	listings, total, err := s.repo.FindAll(ctx, req)
+	if err != nil {
+		return pagination.Page[ListingResponse]{}, fmt.Errorf("listing: list all: %w", err)
+	}
+	return toPage(listings, total, req), nil
+}
+
+// ListByType returns listings filtered by type.
+func (s *Service) ListByType(ctx context.Context, t PackageType, req pagination.PageRequest) (pagination.Page[ListingResponse], error) {
+	listings, total, err := s.repo.FindByType(ctx, t, req)
+	if err != nil {
+		return pagination.Page[ListingResponse]{}, fmt.Errorf("listing: list by type: %w", err)
+	}
+	return toPage(listings, total, req), nil
+}
+
+// ListByCategory returns listings filtered by category.
+func (s *Service) ListByCategory(ctx context.Context, cat string, req pagination.PageRequest) (pagination.Page[ListingResponse], error) {
+	listings, total, err := s.repo.FindByCategory(ctx, cat, req)
+	if err != nil {
+		return pagination.Page[ListingResponse]{}, fmt.Errorf("listing: list by category: %w", err)
+	}
+	return toPage(listings, total, req), nil
+}
+
+// ListByTenant returns listings published by the given tenant.
+func (s *Service) ListByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) (pagination.Page[ListingResponse], error) {
+	listings, total, err := s.repo.FindByTenant(ctx, tenantID, req)
+	if err != nil {
+		return pagination.Page[ListingResponse]{}, fmt.Errorf("listing: list by tenant: %w", err)
+	}
+	return toPage(listings, total, req), nil
+}
+
+// GetByID returns a listing by UUID.
+func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (ListingResponse, error) {
+	l, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return ListingResponse{}, err
+	}
+	return ResponseFrom(l), nil
+}
+
+// GetBySlug returns a listing by slug.
+func (s *Service) GetBySlug(ctx context.Context, slug string) (ListingResponse, error) {
+	l, err := s.repo.FindBySlug(ctx, slug)
+	if err != nil {
+		return ListingResponse{}, err
+	}
+	return ResponseFrom(l), nil
+}
+
+// Create publishes a new marketplace listing.
+func (s *Service) Create(ctx context.Context, tenantID string, req CreateListingRequest) (ListingResponse, error) {
+	if req.Name == "" {
+		return ListingResponse{}, fmt.Errorf("listing: name is required")
+	}
+	slug := req.Slug
+	if slug == "" {
+		slug = toSlug(req.Name)
+	}
+	l := Listing{
+		ID:          uuid.New(),
+		TenantID:    tenantID,
+		PackageID:   req.PackageID,
+		Name:        req.Name,
+		Slug:        slug,
+		Description: req.Description,
+		Type:        PackageType(req.Type),
+		Category:    req.Category,
+		Status:      StatusActive,
+	}
+	created, err := s.repo.Create(ctx, l)
+	if err != nil {
+		return ListingResponse{}, fmt.Errorf("listing: create: %w", err)
+	}
+	return ResponseFrom(created), nil
+}
+
+// Update updates mutable fields of a listing.
+func (s *Service) Update(ctx context.Context, id uuid.UUID, tenantID string, req UpdateListingRequest) (ListingResponse, error) {
+	l, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return ListingResponse{}, err
+	}
+	if l.TenantID != tenantID {
+		return ListingResponse{}, fmt.Errorf("listing: forbidden")
+	}
+	if req.Name != nil {
+		l.Name = *req.Name
+	}
+	if req.Description != nil {
+		l.Description = *req.Description
+	}
+	if req.Category != nil {
+		l.Category = *req.Category
+	}
+	updated, err := s.repo.Update(ctx, l)
+	if err != nil {
+		return ListingResponse{}, fmt.Errorf("listing: update: %w", err)
+	}
+	return ResponseFrom(updated), nil
+}
+
+// Delete soft-deletes a listing.
+func (s *Service) Delete(ctx context.Context, id uuid.UUID, tenantID string) error {
+	l, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if l.TenantID != tenantID {
+		return fmt.Errorf("listing: forbidden")
+	}
+	return s.repo.SoftDelete(ctx, id)
+}
+
+func toPage(listings []Listing, total int64, req pagination.PageRequest) pagination.Page[ListingResponse] {
+	responses := make([]ListingResponse, len(listings))
+	for i, l := range listings {
+		responses[i] = ResponseFrom(l)
+	}
+	return pagination.NewPage(responses, total, req)
+}
+
+func toSlug(name string) string {
+	name = strings.ToLower(name)
+	var b strings.Builder
+	for _, r := range name {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	result := b.String()
+	for strings.Contains(result, "--") {
+		result = strings.ReplaceAll(result, "--", "-")
+	}
+	return strings.Trim(result, "-")
+}
