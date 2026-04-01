@@ -1,0 +1,80 @@
+package execution
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+)
+
+// Service handles business logic for agent executions.
+type Service struct {
+	repo ExecutionRepository
+}
+
+// NewService creates a new execution Service.
+func NewService(repo ExecutionRepository) *Service {
+	return &Service{repo: repo}
+}
+
+// List returns a page of executions.
+func (s *Service) List(ctx context.Context, agentID *uuid.UUID, status *string, req pagination.PageRequest) (pagination.Page[AgentExecution], error) {
+	items, total, err := s.repo.List(ctx, agentID, status, req)
+	if err != nil {
+		return pagination.Page[AgentExecution]{}, err
+	}
+	return pagination.NewPage(items, total, req), nil
+}
+
+// Start creates a new execution record in RUNNING status.
+func (s *Service) Start(ctx context.Context, req StartExecutionRequest) (AgentExecution, error) {
+	agentID, err := uuid.Parse(req.AgentID)
+	if err != nil {
+		return AgentExecution{}, fmt.Errorf("execution: invalid agent id: %w", err)
+	}
+
+	input := req.Input
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
+	}
+
+	var pipelineID *uuid.UUID
+	if req.PipelineID != nil {
+		pid, err := uuid.Parse(*req.PipelineID)
+		if err != nil {
+			return AgentExecution{}, fmt.Errorf("execution: invalid pipeline id: %w", err)
+		}
+		pipelineID = &pid
+	}
+
+	e := AgentExecution{
+		AgentID:    agentID,
+		PipelineID: pipelineID,
+		Status:     "RUNNING",
+		Input:      input,
+	}
+	return s.repo.Create(ctx, e)
+}
+
+// GetByID returns a single execution.
+func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (AgentExecution, error) {
+	return s.repo.GetByID(ctx, id)
+}
+
+// Cancel cancels a running execution.
+func (s *Service) Cancel(ctx context.Context, id uuid.UUID) error {
+	return s.repo.Cancel(ctx, id)
+}
+
+// ListNodes returns node executions for a given execution.
+func (s *Service) ListNodes(ctx context.Context, executionID uuid.UUID) ([]AgentExecutionNode, error) {
+	return s.repo.ListNodes(ctx, executionID)
+}
+
+// ListToolExecutions returns tool executions for a given node.
+func (s *Service) ListToolExecutions(ctx context.Context, nodeExecutionID uuid.UUID) ([]ToolExecution, error) {
+	return s.repo.ListToolExecutions(ctx, nodeExecutionID)
+}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -9,6 +10,36 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
+	apikc "github.com/AgentHub-Studio/agenthub-api/internal/keycloak"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/experiment"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
+	mkplInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
+	mkplListing "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
+	mkplReview "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/review"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
+	regDependency "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/dependency"
+	regInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/installation"
+	regPackage "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
+	regVersion "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/version"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/search"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/settings"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/user"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/vpnresource"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
 	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 )
 
@@ -23,27 +54,140 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	s := &Server{pool: pool}
 	chain := middleware.New(cfg.KeycloakBaseURL, cfg.CORSOrigins)
 
+	// Build Keycloak user client for user management.
+	keycloakCfg := user.KeycloakClientConfig{
+		BaseURL:        cfg.KeycloakBaseURL,
+		AdminUsername:  cfg.KeycloakAdmin.AdminUsername,
+		AdminPassword:  cfg.KeycloakAdmin.AdminPassword,
+		AdminClientID:  cfg.KeycloakAdmin.AdminClientID,
+		AdminRealm:     cfg.KeycloakAdmin.AdminRealm,
+		FrontendClient: cfg.KeycloakAdmin.FrontendClient,
+	}
+	keycloakClient := user.NewKeycloakUserClient(keycloakCfg)
+
+	// Build Keycloak realm provisioner for tenant creation.
+	provisioner := apikc.NewProvisioner(apikc.Config{
+		BaseURL:        cfg.KeycloakBaseURL,
+		AdminUsername:  cfg.KeycloakAdmin.AdminUsername,
+		AdminPassword:  cfg.KeycloakAdmin.AdminPassword,
+		AdminClientID:  cfg.KeycloakAdmin.AdminClientID,
+		AdminRealm:     cfg.KeycloakAdmin.AdminRealm,
+		FrontendClient: cfg.KeycloakAdmin.FrontendClient,
+	})
+
+	// Instantiate domain handlers.
+	tenantHandler := tenant.NewHandler(tenant.NewService(tenant.NewRepository(pool), provisioner))
+	userHandler := user.NewHandler(user.NewService(keycloakClient))
+	settingsHandler := settings.NewHandler(settings.NewService(settings.NewRepository(pool)))
+	llmpresetHandler := llmpreset.NewHandler(llmpreset.NewService(llmpreset.NewRepository(pool)))
+	agentHandler := agent.NewHandler(agent.NewService(agent.NewRepository(pool)))
+	pipelineHandler := pipeline.NewHandler(pipeline.NewService(pipeline.NewRepository(pool)))
+	skillHandler := skill.NewHandler(skill.NewService(skill.NewRepository(pool)))
+	toolHandler := tool.NewHandler(tool.NewService(tool.NewRepository(pool)))
+	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool)))
+	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
+	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
+	oauthHandler := oauth.NewHandler(oauth.NewService(oauth.NewRepository(pool)))
+	auditHandler := audit.NewHandler(audit.NewService(audit.NewRepository(pool)))
+	metricsHandler := metrics.NewHandler(metrics.NewService(metrics.NewRepository(pool)))
+	experimentHandler := experiment.NewHandler(experiment.NewService(experiment.NewRepository(pool)))
+	vpnHandler := vpnresource.NewHandler(vpnresource.NewService(vpnresource.NewRepository(pool)))
+	datasourceHandler := datasource.NewHandler(datasource.NewService(datasource.NewRepository(pool)))
+	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
+	chatHandler := chat.NewHandler(chat.NewService(chat.NewRepository(pool)))
+	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool)))
+	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(knowledgebase.NewRepository(pool)))
+	mcpHandler := mcp.NewHandler(mcp.NewService(mcp.NewRepository(pool)))
+
+	// Marketplace handlers.
+	mkplListingHandler := mkplListing.NewHandler(mkplListing.NewService(mkplListing.NewRepository(pool)))
+	mkplReviewHandler := mkplReview.NewHandler(mkplReview.NewService(mkplReview.NewRepository(pool), mkplListing.NewRepository(pool)))
+	mkplInstallationHandler := mkplInstallation.NewHandler(mkplInstallation.NewService(mkplInstallation.NewRepository(pool)))
+
+	// Registry handlers — storage backend selected based on MinIO config.
+	var regStorage regInstallation.StorageBackend
+	if cfg.MinIO.IsConfigured() {
+		storage, err := regInstallation.NewMinIOStorageFromConfig(regInstallation.MinIOConfig{
+			Endpoint:        cfg.MinIO.Endpoint,
+			AccessKeyID:     cfg.MinIO.AccessKeyID,
+			SecretAccessKey: cfg.MinIO.SecretAccessKey,
+			UseSSL:          cfg.MinIO.UseSSL,
+			Region:          cfg.MinIO.Region,
+			Bucket:          cfg.MinIO.Bucket,
+		})
+		if err != nil {
+			slog.Warn("minio: failed to create storage client, using noop backend", "err", err)
+			regStorage = &regInstallation.NoopStorage{}
+		} else {
+			regStorage = storage
+			slog.Info("minio: storage client configured", "bucket", cfg.MinIO.Bucket)
+		}
+	} else {
+		slog.Warn("minio: MINIO_ENDPOINT not set, package uploads will fail")
+		regStorage = &regInstallation.NoopStorage{}
+	}
+	pkgRepo := regPackage.NewRepository(pool)
+	regPackageHandler := regPackage.NewHandler(regPackage.NewService(pkgRepo))
+	regVersionHandler := regVersion.NewHandler(regVersion.NewService(regVersion.NewRepository(pool), pkgRepo))
+	regDependencyHandler := regDependency.NewHandler(regDependency.NewService(regDependency.NewRepository(pool), pkgRepo))
+	regInstallationHandler := regInstallation.NewHandler(regInstallation.NewService(regInstallation.NewRepository(pool), regStorage))
+
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
 
-	// Health endpoints — no auth
+	// Health endpoints — no auth.
 	r.Get("/health", s.handleHealth)
 	r.Get("/ready", s.handleReady)
 
-	// Public API routes
+	// Public routes — no JWT required.
 	r.Group(func(r chi.Router) {
 		for _, m := range chain.Public() {
 			r.Use(m)
 		}
-		mountPublicRoutes(r)
+		tenantHandler.RegisterPublicRoutes(r)
+		regPackageHandler.RegisterPublicRoutes(r)
+		regInstallationHandler.RegisterPublicRoutes(r)
 	})
 
-	// Protected API routes
+	// Protected routes — JWT required.
 	r.Group(func(r chi.Router) {
 		for _, m := range chain.Protected() {
 			r.Use(m)
 		}
-		mountProtectedRoutes(r)
+		userHandler.RegisterProtectedRoutes(r)
+		settingsHandler.RegisterProtectedRoutes(r)
+		llmpresetHandler.RegisterProtectedRoutes(r)
+		agentHandler.RegisterRoutes(r)
+		pipelineHandler.RegisterRoutes(r)
+		skillHandler.RegisterRoutes(r)
+		toolHandler.RegisterRoutes(r)
+		memoryHandler.RegisterRoutes(r)
+		executionHandler.RegisterRoutes(r)
+		webhookHandler.RegisterRoutes(r)
+		r.Mount("/api/oauth-credentials", oauthHandler.Routes())
+		r.Mount("/api/audit-logs", auditHandler.Routes())
+		r.Mount("/api/metrics", metricsHandler.Routes())
+		r.Route("/api/agents/{agentId}/metrics", func(r chi.Router) {
+			r.Mount("/", metricsHandler.AgentRoutes())
+		})
+		r.Mount("/api/experiments", experimentHandler.Routes())
+		r.Mount("/api/vpn-resources", vpnHandler.Routes())
+		r.Mount("/api/datasources", datasourceHandler.Routes())
+		r.Get("/api/proxy/datasources/{id}", datasourceHandler.ProxyRoutes().ServeHTTP)
+		r.Mount("/api/search", searchHandler.Routes())
+		chatHandler.RegisterRoutes(r)
+		documentHandler.RegisterRoutes(r)
+		knowledgebaseHandler.RegisterRoutes(r)
+		mcpHandler.RegisterRoutes(r)
+		// Marketplace
+		mkplListingHandler.RegisterRoutes(r)
+		mkplReviewHandler.RegisterRoutes(r)
+		mkplInstallationHandler.RegisterRoutes(r)
+		// Registry
+		regPackageHandler.RegisterProtectedRoutes(r)
+		regVersionHandler.RegisterRoutes(r)
+		regDependencyHandler.RegisterRoutes(r)
+		regInstallationHandler.RegisterProtectedRoutes(r)
 	})
 
 	s.router = r

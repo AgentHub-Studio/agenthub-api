@@ -10,6 +10,20 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
+// ListingRepository defines the persistence interface for Listing.
+type ListingRepository interface {
+	FindAll(ctx context.Context, req pagination.PageRequest) ([]Listing, int64, error)
+	FindByType(ctx context.Context, t PackageType, req pagination.PageRequest) ([]Listing, int64, error)
+	FindByCategory(ctx context.Context, cat string, req pagination.PageRequest) ([]Listing, int64, error)
+	FindByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) ([]Listing, int64, error)
+	FindByID(ctx context.Context, id uuid.UUID) (Listing, error)
+	FindBySlug(ctx context.Context, slug string) (Listing, error)
+	Create(ctx context.Context, l Listing) (Listing, error)
+	Update(ctx context.Context, l Listing) (Listing, error)
+	SoftDelete(ctx context.Context, id uuid.UUID) error
+	UpdateRatingStats(ctx context.Context, id uuid.UUID, avg float64, count int) error
+}
+
 // Repository handles persistence for marketplace listings.
 type Repository struct {
 	db *pgxpool.Pool
