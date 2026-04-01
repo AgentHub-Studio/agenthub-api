@@ -23,6 +23,8 @@ type ExecutionRepository interface {
 	List(ctx context.Context, agentID *uuid.UUID, status *string, req pagination.PageRequest) ([]AgentExecution, int64, error)
 	Create(ctx context.Context, e AgentExecution) (AgentExecution, error)
 	GetByID(ctx context.Context, id uuid.UUID) (AgentExecution, error)
+	GetDetails(ctx context.Context, id uuid.UUID) (ExecutionDetails, error)
+	Transition(ctx context.Context, id uuid.UUID, from, to string, output []byte, errMsg *string) error
 	Cancel(ctx context.Context, id uuid.UUID) error
 	ListNodes(ctx context.Context, executionID uuid.UUID) ([]AgentExecutionNode, error)
 	ListToolExecutions(ctx context.Context, nodeExecutionID uuid.UUID) ([]ToolExecution, error)
@@ -160,6 +162,58 @@ func (r *Repository) ListNodes(ctx context.Context, executionID uuid.UUID) ([]Ag
 	}
 	defer rows.Close()
 	return scanNodeRows(rows)
+}
+
+// GetDetails returns a full execution with its nested node and tool executions.
+func (r *Repository) GetDetails(ctx context.Context, id uuid.UUID) (ExecutionDetails, error) {
+	exec, err := r.GetByID(ctx, id)
+	if err != nil {
+		return ExecutionDetails{}, err
+	}
+
+	nodes, err := r.ListNodes(ctx, id)
+	if err != nil {
+		return ExecutionDetails{}, err
+	}
+
+	details := ExecutionDetails{AgentExecution: exec, Nodes: make([]NodeDetails, len(nodes))}
+	for i, n := range nodes {
+		tools, err := r.ListToolExecutions(ctx, n.ID)
+		if err != nil {
+			return ExecutionDetails{}, err
+		}
+		details.Nodes[i] = NodeDetails{AgentExecutionNode: n, Tools: tools}
+	}
+	return details, nil
+}
+
+// Transition performs a conditional status update: only updates if current status == from.
+// Returns ErrNotFound when no row matches, ErrInvalidTransition is checked by the caller.
+func (r *Repository) Transition(ctx context.Context, id uuid.UUID, from, to string, output []byte, errMsg *string) error {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	ct, err := conn.Exec(ctx,
+		`UPDATE agent_execution
+		    SET status = $3, output = COALESCE($4, output),
+		        error_message = COALESCE($5, error_message),
+		        finished_at = CASE WHEN $3 IN ('COMPLETED','FAILED','CANCELLED') THEN NOW() ELSE finished_at END,
+		        duration_ms  = CASE WHEN $3 IN ('COMPLETED','FAILED','CANCELLED')
+		                            THEN EXTRACT(EPOCH FROM (NOW()-started_at))*1000
+		                            ELSE duration_ms END
+		  WHERE id = $1 AND status = $2`,
+		id, from, to, output, errMsg)
+	if err != nil {
+		return fmt.Errorf("execution: transition: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListToolExecutions returns tool executions for a given node execution.
