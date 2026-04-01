@@ -118,6 +118,20 @@ func (m *mockExperimentSvc) GetResults(_ context.Context, _ string, experimentID
 	return []experiment.ExperimentResult{}, 0, nil
 }
 
+func (m *mockExperimentSvc) GetSummary(_ context.Context, _ string, id uuid.UUID) (experiment.ExperimentSummary, error) {
+	if _, ok := m.experiments[id]; !ok {
+		return experiment.ExperimentSummary{}, experiment.ErrNotFound
+	}
+	return experiment.ExperimentSummary{ExperimentID: id}, nil
+}
+
+func (m *mockExperimentSvc) SelectVariant(_ context.Context, _ string, id uuid.UUID, _ string) (string, error) {
+	if _, ok := m.experiments[id]; !ok {
+		return "", experiment.ErrNotFound
+	}
+	return "A", nil
+}
+
 func setupExperiment() (*chi.Mux, *mockExperimentSvc) {
 	svc := newMockExperimentSvc()
 	h := experiment.NewHandler(svc)

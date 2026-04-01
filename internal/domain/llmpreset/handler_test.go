@@ -15,6 +15,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // mockLLMPresetSvc implements llmpreset.Service for handler tests.
@@ -26,7 +27,7 @@ func newMockLLMPresetSvc() *mockLLMPresetSvc {
 	return &mockLLMPresetSvc{presets: make(map[uuid.UUID]llmpreset.LLMPresetResponse)}
 }
 
-func (m *mockLLMPresetSvc) List(_ context.Context, req pagination.PageRequest) (pagination.Page[llmpreset.LLMPresetResponse], error) {
+func (m *mockLLMPresetSvc) List(_ context.Context, _ string, req pagination.PageRequest) (pagination.Page[llmpreset.LLMPresetResponse], error) {
 	items := make([]llmpreset.LLMPresetResponse, 0, len(m.presets))
 	for _, p := range m.presets {
 		items = append(items, p)
@@ -34,7 +35,7 @@ func (m *mockLLMPresetSvc) List(_ context.Context, req pagination.PageRequest) (
 	return pagination.NewPage(items, int64(len(items)), req), nil
 }
 
-func (m *mockLLMPresetSvc) ListByProvider(_ context.Context, provider string, req pagination.PageRequest) (pagination.Page[llmpreset.LLMPresetResponse], error) {
+func (m *mockLLMPresetSvc) ListByProvider(_ context.Context, _ string, provider string, req pagination.PageRequest) (pagination.Page[llmpreset.LLMPresetResponse], error) {
 	items := make([]llmpreset.LLMPresetResponse, 0)
 	for _, p := range m.presets {
 		if p.Provider == provider {
@@ -44,7 +45,7 @@ func (m *mockLLMPresetSvc) ListByProvider(_ context.Context, provider string, re
 	return pagination.NewPage(items, int64(len(items)), req), nil
 }
 
-func (m *mockLLMPresetSvc) Get(_ context.Context, id uuid.UUID) (llmpreset.LLMPresetResponse, error) {
+func (m *mockLLMPresetSvc) Get(_ context.Context, _ string, id uuid.UUID) (llmpreset.LLMPresetResponse, error) {
 	p, ok := m.presets[id]
 	if !ok {
 		return llmpreset.LLMPresetResponse{}, llmpreset.ErrNotFound
@@ -52,7 +53,7 @@ func (m *mockLLMPresetSvc) Get(_ context.Context, id uuid.UUID) (llmpreset.LLMPr
 	return p, nil
 }
 
-func (m *mockLLMPresetSvc) Create(_ context.Context, req llmpreset.CreateLLMPresetRequest) (llmpreset.LLMPresetResponse, error) {
+func (m *mockLLMPresetSvc) Create(_ context.Context, _ string, req llmpreset.CreateLLMPresetRequest) (llmpreset.LLMPresetResponse, error) {
 	id := uuid.New()
 	resp := llmpreset.LLMPresetResponse{
 		ID:       id,
@@ -64,7 +65,7 @@ func (m *mockLLMPresetSvc) Create(_ context.Context, req llmpreset.CreateLLMPres
 	return resp, nil
 }
 
-func (m *mockLLMPresetSvc) Update(_ context.Context, id uuid.UUID, req llmpreset.UpdateLLMPresetRequest) (llmpreset.LLMPresetResponse, error) {
+func (m *mockLLMPresetSvc) Update(_ context.Context, _ string, id uuid.UUID, req llmpreset.UpdateLLMPresetRequest) (llmpreset.LLMPresetResponse, error) {
 	p, ok := m.presets[id]
 	if !ok {
 		return llmpreset.LLMPresetResponse{}, llmpreset.ErrNotFound
@@ -76,7 +77,7 @@ func (m *mockLLMPresetSvc) Update(_ context.Context, id uuid.UUID, req llmpreset
 	return p, nil
 }
 
-func (m *mockLLMPresetSvc) Delete(_ context.Context, id uuid.UUID) error {
+func (m *mockLLMPresetSvc) Delete(_ context.Context, _ string, id uuid.UUID) error {
 	if _, ok := m.presets[id]; !ok {
 		return llmpreset.ErrNotFound
 	}
@@ -84,7 +85,7 @@ func (m *mockLLMPresetSvc) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (m *mockLLMPresetSvc) SetDefault(_ context.Context, id uuid.UUID) error {
+func (m *mockLLMPresetSvc) SetDefault(_ context.Context, _ string, id uuid.UUID) error {
 	if _, ok := m.presets[id]; !ok {
 		return llmpreset.ErrNotFound
 	}
@@ -95,6 +96,12 @@ func setupLLMPreset() (*chi.Mux, *mockLLMPresetSvc) {
 	svc := newMockLLMPresetSvc()
 	h := llmpreset.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := tenant.NewContext(r.Context(), "test-tenant")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterProtectedRoutes(r)
 	return r, svc
 }
@@ -104,7 +111,7 @@ func TestLLMPresetHandler_List_Success(t *testing.T) {
 	id := uuid.New()
 	svc.presets[id] = llmpreset.LLMPresetResponse{ID: id, Name: "GPT-4"}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/llm-presets", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/llm-config-presets", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -121,7 +128,7 @@ func TestLLMPresetHandler_Create_Success(t *testing.T) {
 		Provider: "openai",
 		Model:    "gpt-4",
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/llm-presets", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/llm-config-presets", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -134,7 +141,7 @@ func TestLLMPresetHandler_Create_Success(t *testing.T) {
 
 func TestLLMPresetHandler_Create_InvalidBody(t *testing.T) {
 	r, _ := setupLLMPreset()
-	req := httptest.NewRequest(http.MethodPost, "/api/llm-presets", bytes.NewReader([]byte("not-json")))
+	req := httptest.NewRequest(http.MethodPost, "/api/llm-config-presets", bytes.NewReader([]byte("not-json")))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -144,7 +151,7 @@ func TestLLMPresetHandler_Create_InvalidBody(t *testing.T) {
 
 func TestLLMPresetHandler_Get_NotFound(t *testing.T) {
 	r, _ := setupLLMPreset()
-	req := httptest.NewRequest(http.MethodGet, "/api/llm-presets/"+uuid.New().String(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/llm-config-presets/"+uuid.New().String(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -153,7 +160,7 @@ func TestLLMPresetHandler_Get_NotFound(t *testing.T) {
 
 func TestLLMPresetHandler_Get_InvalidID(t *testing.T) {
 	r, _ := setupLLMPreset()
-	req := httptest.NewRequest(http.MethodGet, "/api/llm-presets/not-a-uuid", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/llm-config-presets/not-a-uuid", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -165,7 +172,7 @@ func TestLLMPresetHandler_Delete_Success(t *testing.T) {
 	id := uuid.New()
 	svc.presets[id] = llmpreset.LLMPresetResponse{ID: id, Name: "To Delete"}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/llm-presets/"+id.String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/llm-config-presets/"+id.String(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -174,7 +181,7 @@ func TestLLMPresetHandler_Delete_Success(t *testing.T) {
 
 func TestLLMPresetHandler_Delete_NotFound(t *testing.T) {
 	r, _ := setupLLMPreset()
-	req := httptest.NewRequest(http.MethodDelete, "/api/llm-presets/"+uuid.New().String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/llm-config-presets/"+uuid.New().String(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -186,7 +193,7 @@ func TestLLMPresetHandler_SetDefault_Success(t *testing.T) {
 	id := uuid.New()
 	svc.presets[id] = llmpreset.LLMPresetResponse{ID: id, Name: "Default"}
 
-	req := httptest.NewRequest(http.MethodPut, "/api/llm-presets/"+id.String()+"/default", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/llm-config-presets/"+id.String()+"/default", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -195,7 +202,7 @@ func TestLLMPresetHandler_SetDefault_Success(t *testing.T) {
 
 func TestLLMPresetHandler_SetDefault_NotFound(t *testing.T) {
 	r, _ := setupLLMPreset()
-	req := httptest.NewRequest(http.MethodPut, "/api/llm-presets/"+uuid.New().String()+"/default", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/llm-config-presets/"+uuid.New().String()+"/default", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
