@@ -11,6 +11,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
+	apikc "github.com/AgentHub-Studio/agenthub-api/internal/keycloak"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
@@ -56,8 +57,18 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	}
 	keycloakClient := user.NewKeycloakUserClient(keycloakCfg)
 
+	// Build Keycloak realm provisioner for tenant creation.
+	provisioner := apikc.NewProvisioner(apikc.Config{
+		BaseURL:        cfg.KeycloakBaseURL,
+		AdminUsername:  cfg.KeycloakAdmin.AdminUsername,
+		AdminPassword:  cfg.KeycloakAdmin.AdminPassword,
+		AdminClientID:  cfg.KeycloakAdmin.AdminClientID,
+		AdminRealm:     cfg.KeycloakAdmin.AdminRealm,
+		FrontendClient: cfg.KeycloakAdmin.FrontendClient,
+	})
+
 	// Instantiate domain handlers.
-	tenantHandler := tenant.NewHandler(tenant.NewService(tenant.NewRepository(pool), nil))
+	tenantHandler := tenant.NewHandler(tenant.NewService(tenant.NewRepository(pool), provisioner))
 	userHandler := user.NewHandler(user.NewService(keycloakClient))
 	settingsHandler := settings.NewHandler(settings.NewService(settings.NewRepository(pool)))
 	llmpresetHandler := llmpreset.NewHandler(llmpreset.NewService(llmpreset.NewRepository(pool)))
