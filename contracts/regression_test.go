@@ -116,7 +116,108 @@ func TestRegression_Registry(t *testing.T) {
 	c := goAPIClient()
 
 	cases := []endpointCase{
-		{name: "list packages", path: "/api/registry/packages?page=0&size=5"},
+		{name: "list packages", path: "/api/packages?page=0&size=5"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_LLMPresets(t *testing.T) {
+	skipIfNoContracts(t)
+	c := goAPIClient()
+
+	cases := []endpointCase{
+		{name: "list llm presets", path: "/api/llm-config-presets?page=0&size=5"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_MCP(t *testing.T) {
+	skipIfNoContracts(t)
+	c := goAPIClient()
+
+	cases := []endpointCase{
+		{name: "list mcp servers", path: "/api/mcp/servers?page=0&size=5"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_Chat(t *testing.T) {
+	skipIfNoContracts(t)
+	c := goAPIClient()
+
+	cases := []endpointCase{
+		{name: "list chat sessions", path: "/api/chat/sessions?page=0&size=5"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_Execution(t *testing.T) {
+	skipIfNoContracts(t)
+	c := goAPIClient()
+
+	cases := []endpointCase{
+		{name: "list executions", path: "/api/executions?page=0&size=5"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_Audit(t *testing.T) {
+	skipIfNoContracts(t)
+	c := goAPIClient()
+
+	cases := []endpointCase{
+		{name: "list audit logs", path: "/api/audit-logs?page=0&size=5"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_Metrics(t *testing.T) {
+	skipIfNoContracts(t)
+	c := goAPIClient()
+
+	cases := []endpointCase{
+		{name: "tenant metrics", path: "/api/metrics/tenant"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_Experiments(t *testing.T) {
+	skipIfNoContracts(t)
+	c := goAPIClient()
+
+	cases := []endpointCase{
+		{name: "list experiments", path: "/api/experiments?page=0&size=5"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_VPN(t *testing.T) {
+	skipIfNoContracts(t)
+	c := goAPIClient()
+
+	cases := []endpointCase{
+		{name: "list vpn resources", path: "/api/vpn-resources?page=0&size=5"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_DataSources(t *testing.T) {
+	skipIfNoContracts(t)
+	c := goAPIClient()
+
+	cases := []endpointCase{
+		{name: "list datasources", path: "/api/datasources?page=0&size=5"},
+	}
+	runSnapshotCases(t, c, cases)
+}
+
+func TestRegression_Tenants(t *testing.T) {
+	skipIfNoContracts(t)
+	// Public endpoint — no auth required.
+	c := client.New(getEnv("GO_URL", "http://localhost:9080"), "")
+
+	cases := []endpointCase{
+		{name: "list tenants", path: "/public/tenants?page=0&size=5"},
 	}
 	runSnapshotCases(t, c, cases)
 }
@@ -128,6 +229,9 @@ func TestRegression_NotFound(t *testing.T) {
 	nilUUID := "00000000-0000-0000-0000-000000000000"
 	cases := []endpointCase{
 		{name: "agent not found", path: fmt.Sprintf("/api/agents/%s", nilUUID), wantStatus: http.StatusNotFound},
+		{name: "pipeline not found", path: fmt.Sprintf("/api/pipelines/%s", nilUUID), wantStatus: http.StatusNotFound},
+		{name: "skill not found", path: fmt.Sprintf("/api/skills/%s", nilUUID), wantStatus: http.StatusNotFound},
+		{name: "knowledge base not found", path: fmt.Sprintf("/api/knowledge-bases/%s", nilUUID), wantStatus: http.StatusNotFound},
 	}
 	runSnapshotCases(t, c, cases)
 }

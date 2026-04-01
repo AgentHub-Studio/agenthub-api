@@ -103,8 +103,8 @@ func TestRegistryPackage_Contract(t *testing.T) {
 	cases := []contractCase{
 		{
 			name:     "list packages",
-			javaPath: "/api/registry/packages?page=0&size=10",
-			goPath:   "/api/registry/packages?page=0&size=10",
+			javaPath: "/api/packages?page=0&size=10",
+			goPath:   "/api/packages?page=0&size=10",
 		},
 	}
 

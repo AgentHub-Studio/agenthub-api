@@ -14,16 +14,8 @@ import (
 	"github.com/AgentHub-Studio/agenthub-e2e/testutil"
 )
 
-// apiBaseURL returns the agenthub-api base URL (from env or default).
-func apiBaseURL() string {
-	if u := os.Getenv("API_URL"); u != "" {
-		return u
-	}
-	return "http://localhost:8081"
-}
-
 func TestE2E_HealthCheck(t *testing.T) {
-	client := testutil.NewAPIClient(t, apiBaseURL(), "")
+	client := testutil.NewAPIClient(t, e2eConfig().backendURL, "")
 	var result map[string]any
 	status := client.Get("/health", &result)
 	assert.Equal(t, http.StatusOK, status, "health check should return 200")
@@ -37,7 +29,7 @@ func TestE2E_AgentCRUD(t *testing.T) {
 	_ = ctx
 
 	token := os.Getenv("AUTH_TOKEN")
-	client := testutil.NewAPIClient(t, apiBaseURL(), token)
+	client := testutil.NewAPIClient(t, e2eConfig().backendURL, token)
 
 	// Create agent
 	createReq := map[string]any{
@@ -86,7 +78,7 @@ func TestE2E_PipelineCRUD(t *testing.T) {
 	}
 
 	token := os.Getenv("AUTH_TOKEN")
-	client := testutil.NewAPIClient(t, apiBaseURL(), token)
+	client := testutil.NewAPIClient(t, e2eConfig().backendURL, token)
 
 	// First create an agent
 	agentReq := map[string]any{"name": "Pipeline Test Agent", "description": "For pipeline testing"}
@@ -123,7 +115,7 @@ func TestE2E_KnowledgeBaseCRUD(t *testing.T) {
 	}
 
 	token := os.Getenv("AUTH_TOKEN")
-	client := testutil.NewAPIClient(t, apiBaseURL(), token)
+	client := testutil.NewAPIClient(t, e2eConfig().backendURL, token)
 
 	// Create KB
 	kbReq := map[string]any{"name": "Test KB", "description": "E2E test knowledge base"}
