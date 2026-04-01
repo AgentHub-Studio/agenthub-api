@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -19,6 +20,8 @@ type metricsService interface {
 	Record(ctx context.Context, tenantID string, req RecordRequest) (AgentMetrics, error)
 	GetAgentSummary(ctx context.Context, tenantID string, agentID uuid.UUID) (MetricsSummary, error)
 	GetTenantSummary(ctx context.Context, tenantID string) (MetricsSummary, error)
+	TopAgents(ctx context.Context, tenantID string, limit int) ([]AgentUsage, error)
+	CostBreakdown(ctx context.Context, tenantID string) ([]CostBreakdownEntry, error)
 }
 
 // Handler handles HTTP requests for agent metrics.
@@ -43,6 +46,8 @@ func (h *Handler) AgentRoutes() http.Handler {
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/tenant", h.tenantSummary)
+	r.Get("/top-agents", h.topAgents)
+	r.Get("/cost-breakdown", h.costBreakdown)
 	r.Post("/", h.record)
 	return r
 }
@@ -94,6 +99,34 @@ func (h *Handler) tenantSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, s)
+}
+
+func (h *Handler) topAgents(w http.ResponseWriter, r *http.Request) {
+	tenantID := tenant.FromContext(r.Context())
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	result, err := h.svc.TopAgents(r.Context(), tenantID, limit)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) costBreakdown(w http.ResponseWriter, r *http.Request) {
+	tenantID := tenant.FromContext(r.Context())
+
+	result, err := h.svc.CostBreakdown(r.Context(), tenantID)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) record(w http.ResponseWriter, r *http.Request) {
