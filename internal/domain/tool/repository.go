@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/database"
@@ -206,6 +207,10 @@ func (r *Repository) BindToSkill(ctx context.Context, skillID uuid.UUID, req Bin
 		skillID, req.ToolID, req.Priority, isActive,
 	)
 	if err := row.Scan(&st.ID, &st.SkillID, &st.ToolID, &st.Priority, &st.IsActive, &st.CreatedAt); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return SkillTool{}, ErrAlreadyBound
+		}
 		return SkillTool{}, fmt.Errorf("tool: bind to skill: %w", err)
 	}
 	return st, nil
