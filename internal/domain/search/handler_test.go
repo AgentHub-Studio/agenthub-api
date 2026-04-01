@@ -18,7 +18,7 @@ import (
 // mockSearchSvc satisfies the private searchService interface in search.Handler.
 type mockSearchSvc struct{}
 
-func (m *mockSearchSvc) Search(_ context.Context, _ string, query string, _ int) (search.GlobalSearchResponse, error) {
+func (m *mockSearchSvc) Search(_ context.Context, _ string, query, _ string, _ int) (search.GlobalSearchResponse, error) {
 	return search.GlobalSearchResponse{
 		Query:          query,
 		Agents:         []search.SearchResult{{ID: "a1", Name: "Agent One", Type: "agent"}},

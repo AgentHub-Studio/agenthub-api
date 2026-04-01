@@ -55,6 +55,14 @@ func (m *mockMetricsSvc) GetTenantSummary(_ context.Context, _ string) (metrics.
 	return metrics.MetricsSummary{TotalExecutions: 10}, nil
 }
 
+func (m *mockMetricsSvc) TopAgents(_ context.Context, _ string, _ int) ([]metrics.AgentUsage, error) {
+	return []metrics.AgentUsage{}, nil
+}
+
+func (m *mockMetricsSvc) CostBreakdown(_ context.Context, _ string) ([]metrics.CostBreakdownEntry, error) {
+	return []metrics.CostBreakdownEntry{}, nil
+}
+
 func setupMetrics() (*chi.Mux, *mockMetricsSvc) {
 	svc := newMockMetricsSvc()
 	h := metrics.NewHandler(svc)
