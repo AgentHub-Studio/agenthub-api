@@ -128,12 +128,14 @@ func (s *Service) Search(ctx context.Context, tenantID, query, entityType string
 		}
 	}
 
+	total := len(agentRes.items) + len(skillRes.items) + len(toolRes.items) + len(kbRes.items)
 	return GlobalSearchResponse{
 		Query:          query,
 		Agents:         agentRes.items,
 		Skills:         skillRes.items,
 		Tools:          toolRes.items,
 		KnowledgeBases: kbRes.items,
+		TotalResults:   total,
 	}, nil
 }
 

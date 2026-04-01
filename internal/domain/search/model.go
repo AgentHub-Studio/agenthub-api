@@ -18,4 +18,5 @@ type GlobalSearchResponse struct {
 	Skills         []SearchResult `json:"skills"`
 	Tools          []SearchResult `json:"tools"`
 	KnowledgeBases []SearchResult `json:"knowledgeBases"`
+	TotalResults   int            `json:"totalResults"`
 }

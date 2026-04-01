@@ -2,6 +2,7 @@ package vpnresource_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -11,6 +12,9 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/vpnresource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+// Ensure strings import is used.
+var _ = strings.NewReader
 
 type mockVpnRepo struct {
 	data map[uuid.UUID]vpnresource.VpnResource
@@ -61,6 +65,19 @@ func (m *mockVpnRepo) Delete(_ context.Context, _ string, id uuid.UUID) error {
 
 const tenantID = "test-tenant"
 
+const validOvpn = `client
+dev tun
+proto udp
+remote vpn.example.com 1194
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+ca ca.crt
+cert client.crt
+key client.key
+`
+
 func TestVpnService_Create_Success(t *testing.T) {
 	svc := vpnresource.NewService(newMockRepo())
 	v, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{
@@ -103,4 +120,87 @@ func TestVpnService_ListAll(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, total)
 	assert.Len(t, items, 2)
+}
+
+// ---- TestConnection ----
+
+func TestVpnService_TestConnection_Success(t *testing.T) {
+	svc := vpnresource.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: "VPN"})
+	require.NoError(t, err)
+
+	res, err := svc.TestConnection(context.Background(), tenantID, created.ID)
+	require.NoError(t, err)
+	assert.True(t, res.Connected)
+}
+
+func TestVpnService_TestConnection_NotFound(t *testing.T) {
+	svc := vpnresource.NewService(newMockRepo())
+	_, err := svc.TestConnection(context.Background(), tenantID, uuid.New())
+	require.ErrorIs(t, err, vpnresource.ErrNotFound)
+}
+
+// ---- UploadOvpnConfig ----
+
+func TestVpnService_UploadOvpnConfig_ValidFile(t *testing.T) {
+	svc := vpnresource.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: "VPN"})
+	require.NoError(t, err)
+
+	updated, err := svc.UploadOvpnConfig(context.Background(), tenantID, created.ID,
+		strings.NewReader(validOvpn), int64(len(validOvpn)))
+	require.NoError(t, err)
+	assert.NotEmpty(t, updated.OvpnConfigPath)
+}
+
+func TestVpnService_UploadOvpnConfig_InvalidFile_NoRemote(t *testing.T) {
+	svc := vpnresource.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: "VPN"})
+	require.NoError(t, err)
+
+	badContent := "dev tun\nproto udp\n" // missing 'remote'
+	_, err = svc.UploadOvpnConfig(context.Background(), tenantID, created.ID,
+		strings.NewReader(badContent), int64(len(badContent)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "remote")
+}
+
+func TestVpnService_UploadOvpnConfig_InvalidFile_NoDev(t *testing.T) {
+	svc := vpnresource.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: "VPN"})
+	require.NoError(t, err)
+
+	badContent := "remote vpn.example.com 1194\nproto udp\n" // missing 'dev'
+	_, err = svc.UploadOvpnConfig(context.Background(), tenantID, created.ID,
+		strings.NewReader(badContent), int64(len(badContent)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dev")
+}
+
+func TestVpnService_UploadOvpnConfig_NotFound(t *testing.T) {
+	svc := vpnresource.NewService(newMockRepo())
+	_, err := svc.UploadOvpnConfig(context.Background(), tenantID, uuid.New(),
+		strings.NewReader(validOvpn), int64(len(validOvpn)))
+	require.ErrorIs(t, err, vpnresource.ErrNotFound)
+}
+
+// ---- UploadAuthFile ----
+
+func TestVpnService_UploadAuthFile_Success(t *testing.T) {
+	svc := vpnresource.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: "VPN"})
+	require.NoError(t, err)
+
+	content := "username\npassword\n"
+	updated, err := svc.UploadAuthFile(context.Background(), tenantID, created.ID,
+		strings.NewReader(content), int64(len(content)))
+	require.NoError(t, err)
+	assert.NotEmpty(t, updated.AuthFilePath)
+}
+
+func TestVpnService_UploadAuthFile_NotFound(t *testing.T) {
+	svc := vpnresource.NewService(newMockRepo())
+	_, err := svc.UploadAuthFile(context.Background(), tenantID, uuid.New(),
+		strings.NewReader("u\np\n"), 4)
+	require.ErrorIs(t, err, vpnresource.ErrNotFound)
 }
