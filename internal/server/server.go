@@ -11,6 +11,10 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/experiment"
@@ -71,6 +75,10 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	vpnHandler := vpnresource.NewHandler(vpnresource.NewService(vpnresource.NewRepository(pool)))
 	datasourceHandler := datasource.NewHandler(datasource.NewService(datasource.NewRepository(pool)))
 	searchHandler := search.NewHandler(search.NewService(pool))
+	chatHandler := chat.NewHandler(chat.NewService(chat.NewRepository(pool)))
+	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool)))
+	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(knowledgebase.NewRepository(pool)))
+	mcpHandler := mcp.NewHandler(mcp.NewService(mcp.NewRepository(pool)))
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
@@ -113,6 +121,10 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		r.Mount("/api/datasources", datasourceHandler.Routes())
 		r.Get("/api/proxy/datasources/{id}", datasourceHandler.ProxyRoutes().ServeHTTP)
 		r.Mount("/api/search", searchHandler.Routes())
+		chatHandler.RegisterRoutes(r)
+		documentHandler.RegisterRoutes(r)
+		knowledgebaseHandler.RegisterRoutes(r)
+		mcpHandler.RegisterRoutes(r)
 	})
 
 	s.router = r
