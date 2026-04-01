@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -35,11 +36,13 @@ func NewHandler(svc auditService) *Handler {
 }
 
 // Routes mounts the handler routes.
+// GET endpoints (list, getByID) require the "admin" role.
+// POST (record) is accessible to any authenticated caller so other services can log events.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Post("/", h.record)
-	r.Get("/", h.list)
-	r.Get("/{id}", h.getByID)
+	r.With(middleware.RequireRole("admin")).Get("/", h.list)
+	r.With(middleware.RequireRole("admin")).Get("/{id}", h.getByID)
 	return r
 }
 
