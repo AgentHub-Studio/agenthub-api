@@ -88,3 +88,4 @@ type ResolveResponse struct {
 	Header string `json:"header"`
 	Value  string `json:"value"`
 }
+
