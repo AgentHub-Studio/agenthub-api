@@ -124,14 +124,16 @@ func TestVpnService_ListAll(t *testing.T) {
 
 // ---- TestConnection ----
 
-func TestVpnService_TestConnection_Success(t *testing.T) {
+func TestVpnService_TestConnection_NoConfig_ReturnsFalse(t *testing.T) {
 	svc := vpnresource.NewService(newMockRepo())
 	created, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: "VPN"})
 	require.NoError(t, err)
 
+	// VPN without an uploaded .ovpn config cannot connect.
 	res, err := svc.TestConnection(context.Background(), tenantID, created.ID)
 	require.NoError(t, err)
-	assert.True(t, res.Connected)
+	assert.False(t, res.Connected)
+	assert.NotEmpty(t, res.Message)
 }
 
 func TestVpnService_TestConnection_NotFound(t *testing.T) {
