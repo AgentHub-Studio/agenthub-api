@@ -26,6 +26,8 @@ type experimentService interface {
 	Complete(ctx context.Context, tenantID string, id uuid.UUID) (PromptExperiment, error)
 	RecordResult(ctx context.Context, tenantID string, experimentID uuid.UUID, req RecordResultRequest) (ExperimentResult, error)
 	GetResults(ctx context.Context, tenantID string, experimentID uuid.UUID, pr pagination.PageRequest) ([]ExperimentResult, int, error)
+	SelectVariant(ctx context.Context, tenantID string, id uuid.UUID, sessionID string) (string, error)
+	GetSummary(ctx context.Context, tenantID string, id uuid.UUID) (ExperimentSummary, error)
 }
 
 // Handler handles HTTP requests for prompt experiments.
@@ -51,6 +53,8 @@ func (h *Handler) Routes() http.Handler {
 	r.Post("/{id}/complete", h.complete)
 	r.Post("/{id}/results", h.recordResult)
 	r.Get("/{id}/results", h.getResults)
+	r.Get("/{id}/summary", h.getSummary)
+	r.Get("/{id}/select-variant", h.selectVariant)
 	return r
 }
 
@@ -175,11 +179,14 @@ func (h *Handler) transitionStatus(w http.ResponseWriter, r *http.Request, fn fu
 
 	e, err := fn(r.Context(), tenantID, id)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			respond.Error(w, http.StatusNotFound, err.Error())
-			return
+		case errors.Is(err, ErrInvalidTransition):
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		default:
+			respond.Error(w, http.StatusInternalServerError, err.Error())
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	respond.JSON(w, http.StatusOK, ResponseFrom(e))
@@ -231,4 +238,49 @@ func (h *Handler) getResults(w http.ResponseWriter, r *http.Request) {
 		dtos[i] = ResultResponseFrom(res)
 	}
 	respond.JSON(w, http.StatusOK, pagination.NewPage(dtos, int64(total), pr))
+}
+
+// getSummary returns aggregated variant metrics for an experiment.
+func (h *Handler) getSummary(w http.ResponseWriter, r *http.Request) {
+	tenantID := tenant.FromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	summary, err := h.svc.GetSummary(r.Context(), tenantID, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, err.Error())
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, summary)
+}
+
+// selectVariant deterministically picks a variant for the given session_id query param.
+func (h *Handler) selectVariant(w http.ResponseWriter, r *http.Request) {
+	tenantID := tenant.FromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	sessionID := r.URL.Query().Get("sessionId")
+	if sessionID == "" {
+		respond.Error(w, http.StatusBadRequest, "sessionId query parameter is required")
+		return
+	}
+	variant, err := h.svc.SelectVariant(r.Context(), tenantID, id, sessionID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, err.Error())
+			return
+		}
+		respond.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, map[string]string{"variantKey": variant})
 }

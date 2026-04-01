@@ -11,6 +11,12 @@ import (
 // ErrNotFound is returned when a PromptExperiment is not found.
 var ErrNotFound = errors.New("experiment not found")
 
+// ErrInvalidTransition is returned when a status transition is not allowed.
+var ErrInvalidTransition = errors.New("experiment: invalid status transition")
+
+// ErrInvalidTrafficSplit is returned when the traffic split percentages do not sum to 100.
+var ErrInvalidTrafficSplit = errors.New("experiment: traffic split must sum to 100")
+
 // ExperimentStatus represents the lifecycle state of an experiment.
 type ExperimentStatus string
 
@@ -20,6 +26,38 @@ const (
 	ExperimentStatusPaused    ExperimentStatus = "PAUSED"
 	ExperimentStatusCompleted ExperimentStatus = "COMPLETED"
 )
+
+// validTransitions defines which status changes are permitted.
+var validTransitions = map[ExperimentStatus]map[ExperimentStatus]bool{
+	ExperimentStatusDraft:     {ExperimentStatusActive: true},
+	ExperimentStatusActive:    {ExperimentStatusPaused: true, ExperimentStatusCompleted: true},
+	ExperimentStatusPaused:    {ExperimentStatusActive: true, ExperimentStatusCompleted: true},
+	ExperimentStatusCompleted: {},
+}
+
+// CanTransition returns true when moving from → to is a valid state-machine step.
+func CanTransition(from, to ExperimentStatus) bool {
+	allowed, ok := validTransitions[from]
+	if !ok {
+		return false
+	}
+	return allowed[to]
+}
+
+// VariantSummary aggregates experiment results for a single variant.
+type VariantSummary struct {
+	VariantKey      string  `json:"variantKey"`
+	Count           int     `json:"count"`
+	AvgFeedback     float64 `json:"avgFeedback"`
+	AvgLatencyMs    float64 `json:"avgLatencyMs"`
+	TotalTokenCount int64   `json:"totalTokenCount"`
+}
+
+// ExperimentSummary groups all variant summaries for an experiment.
+type ExperimentSummary struct {
+	ExperimentID uuid.UUID        `json:"experimentId"`
+	Variants     []VariantSummary `json:"variants"`
+}
 
 // PromptExperiment defines an A/B test for agent prompt variants.
 type PromptExperiment struct {
