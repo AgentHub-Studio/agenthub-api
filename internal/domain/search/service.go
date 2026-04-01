@@ -19,14 +19,6 @@ type Repository interface {
 	SearchKnowledgeBases(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error)
 }
 
-// EntityType constants for the entityType filter accepted by Search.
-const (
-	EntityAgent         = "agent"
-	EntitySkill         = "skill"
-	EntityTool          = "tool"
-	EntityKnowledgeBase = "knowledge_base"
-)
-
 // Service implements global cross-domain search.
 type Service struct {
 	repo Repository
