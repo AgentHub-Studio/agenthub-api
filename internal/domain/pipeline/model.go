@@ -44,5 +44,8 @@ type Edge struct {
 // ErrCyclicGraph is returned when the pipeline graph contains a cycle.
 var ErrCyclicGraph = errors.New("pipeline graph contains a cycle")
 
+// ErrCyclicDependency is an alias for ErrCyclicGraph.
+var ErrCyclicDependency = ErrCyclicGraph
+
 // ErrDuplicateNodeName is returned when two nodes share the same name in a pipeline.
 var ErrDuplicateNodeName = errors.New("pipeline has duplicate node names")
