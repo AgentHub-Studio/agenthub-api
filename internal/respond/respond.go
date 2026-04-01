@@ -5,11 +5,11 @@ import (
 	"net/http"
 )
 
-// JSON writes v as JSON with the given status code.
-func JSON(w http.ResponseWriter, status int, v any) {
+// JSON writes a JSON response with the given status code and body.
+func JSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // Error writes a JSON error response.
@@ -17,7 +17,7 @@ func Error(w http.ResponseWriter, status int, msg string) {
 	JSON(w, status, map[string]string{"error": msg})
 }
 
-// NoContent writes 204 No Content.
+// NoContent writes a 204 No Content response.
 func NoContent(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNoContent)
 }
