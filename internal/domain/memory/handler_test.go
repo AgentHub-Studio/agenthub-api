@@ -25,10 +25,6 @@ func newMockMemorySvc() *mockMemorySvc {
 	return &mockMemorySvc{entries: make(map[string]memory.AgentMemory)}
 }
 
-func entryKey(agentID uuid.UUID, key string) string {
-	return agentID.String() + ":" + key
-}
-
 func (m *mockMemorySvc) List(_ context.Context, agentID uuid.UUID, _ *string) ([]memory.AgentMemory, error) {
 	var items []memory.AgentMemory
 	prefix := agentID.String() + ":"
