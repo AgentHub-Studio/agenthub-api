@@ -13,11 +13,11 @@ import (
 
 // Service handles business logic for webhooks.
 type Service struct {
-	repo *Repository
+	repo WebhookRepository
 }
 
 // NewService creates a new webhook Service.
-func NewService(repo *Repository) *Service {
+func NewService(repo WebhookRepository) *Service {
 	return &Service{repo: repo}
 }
 

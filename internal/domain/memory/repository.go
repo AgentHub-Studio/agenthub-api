@@ -17,6 +17,15 @@ import (
 // ErrNotFound is returned when a memory entry is not found.
 var ErrNotFound = errors.New("memory: not found")
 
+// MemoryRepository defines the persistence interface for AgentMemory.
+type MemoryRepository interface {
+	ListByAgent(ctx context.Context, agentID uuid.UUID, userID *string) ([]AgentMemory, error)
+	Upsert(ctx context.Context, m AgentMemory) (AgentMemory, error)
+	GetByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) (AgentMemory, error)
+	DeleteByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) error
+	ClearByAgent(ctx context.Context, agentID uuid.UUID) error
+}
+
 // Repository provides data access for agent_memory.
 type Repository struct {
 	pool *pgxpool.Pool

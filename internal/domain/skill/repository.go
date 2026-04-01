@@ -17,6 +17,16 @@ import (
 // ErrNotFound is returned when a skill is not found.
 var ErrNotFound = errors.New("skill: not found")
 
+// SkillRepository defines the persistence interface for Skill.
+type SkillRepository interface {
+	List(ctx context.Context, req pagination.PageRequest) ([]Skill, int64, error)
+	Create(ctx context.Context, s Skill) (Skill, error)
+	GetByID(ctx context.Context, id uuid.UUID) (Skill, error)
+	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Skill, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+	SlugExists(ctx context.Context, slug string) (bool, error)
+}
+
 // Repository handles persistence for skills.
 type Repository struct {
 	pool *pgxpool.Pool

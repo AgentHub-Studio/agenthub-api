@@ -12,11 +12,11 @@ import (
 
 // Service handles business logic for agent executions.
 type Service struct {
-	repo *Repository
+	repo ExecutionRepository
 }
 
 // NewService creates a new execution Service.
-func NewService(repo *Repository) *Service {
+func NewService(repo ExecutionRepository) *Service {
 	return &Service{repo: repo}
 }
 

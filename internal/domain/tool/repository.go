@@ -20,6 +20,18 @@ var ErrNotFound = errors.New("tool: not found")
 // ErrAlreadyBound is returned when a tool is already bound to a skill.
 var ErrAlreadyBound = errors.New("tool: already bound to skill")
 
+// ToolRepository defines the persistence interface for Tool.
+type ToolRepository interface {
+	List(ctx context.Context, req pagination.PageRequest, toolType string) ([]Tool, int64, error)
+	Create(ctx context.Context, t Tool) (Tool, error)
+	GetByID(ctx context.Context, id uuid.UUID) (Tool, error)
+	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Tool, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+	BindToSkill(ctx context.Context, skillID uuid.UUID, req BindRequest) (SkillTool, error)
+	UnbindFromSkill(ctx context.Context, skillID, toolID uuid.UUID) error
+	ListBySkill(ctx context.Context, skillID uuid.UUID) ([]SkillTool, []Tool, error)
+}
+
 // Repository handles persistence for tools and skill-tool bindings.
 type Repository struct {
 	pool *pgxpool.Pool

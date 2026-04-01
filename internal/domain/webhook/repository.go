@@ -18,6 +18,17 @@ import (
 // ErrNotFound is returned when a webhook is not found.
 var ErrNotFound = errors.New("webhook: not found")
 
+// WebhookRepository defines the persistence interface for WebhookConfig.
+type WebhookRepository interface {
+	List(ctx context.Context) ([]WebhookConfig, error)
+	Create(ctx context.Context, w WebhookConfig) (WebhookConfig, error)
+	GetByID(ctx context.Context, id uuid.UUID) (WebhookConfig, error)
+	Update(ctx context.Context, w WebhookConfig) (WebhookConfig, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+	ListDeliveries(ctx context.Context, webhookID uuid.UUID, req pagination.PageRequest) ([]WebhookDeliveryLog, int64, error)
+	CreateDelivery(ctx context.Context, d WebhookDeliveryLog) (WebhookDeliveryLog, error)
+}
+
 // Repository provides data access for webhook tables.
 type Repository struct {
 	pool *pgxpool.Pool

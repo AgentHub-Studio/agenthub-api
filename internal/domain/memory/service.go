@@ -11,11 +11,11 @@ import (
 
 // Service handles business logic for agent memory.
 type Service struct {
-	repo *Repository
+	repo MemoryRepository
 }
 
 // NewService creates a new memory Service.
-func NewService(repo *Repository) *Service {
+func NewService(repo MemoryRepository) *Service {
 	return &Service{repo: repo}
 }
 

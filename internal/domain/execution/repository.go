@@ -18,6 +18,16 @@ import (
 // ErrNotFound is returned when an execution is not found.
 var ErrNotFound = errors.New("execution: not found")
 
+// ExecutionRepository defines the persistence interface for AgentExecution.
+type ExecutionRepository interface {
+	List(ctx context.Context, agentID *uuid.UUID, status *string, req pagination.PageRequest) ([]AgentExecution, int64, error)
+	Create(ctx context.Context, e AgentExecution) (AgentExecution, error)
+	GetByID(ctx context.Context, id uuid.UUID) (AgentExecution, error)
+	Cancel(ctx context.Context, id uuid.UUID) error
+	ListNodes(ctx context.Context, executionID uuid.UUID) ([]AgentExecutionNode, error)
+	ListToolExecutions(ctx context.Context, nodeExecutionID uuid.UUID) ([]ToolExecution, error)
+}
+
 // Repository provides data access for execution tables.
 type Repository struct {
 	pool *pgxpool.Pool

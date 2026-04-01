@@ -11,11 +11,11 @@ import (
 
 // Service holds business logic for pipelines.
 type Service struct {
-	repo *Repository
+	repo PipelineRepository
 }
 
 // NewService creates a new Service.
-func NewService(repo *Repository) *Service {
+func NewService(repo PipelineRepository) *Service {
 	return &Service{repo: repo}
 }
 

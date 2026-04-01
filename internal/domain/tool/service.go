@@ -10,11 +10,11 @@ import (
 
 // Service holds business logic for tools.
 type Service struct {
-	repo *Repository
+	repo ToolRepository
 }
 
 // NewService creates a new Service.
-func NewService(repo *Repository) *Service {
+func NewService(repo ToolRepository) *Service {
 	return &Service{repo: repo}
 }
 

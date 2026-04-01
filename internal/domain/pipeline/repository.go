@@ -18,6 +18,17 @@ import (
 // ErrNotFound is returned when a pipeline is not found.
 var ErrNotFound = errors.New("pipeline: not found")
 
+// PipelineRepository defines the persistence interface for Pipeline.
+type PipelineRepository interface {
+	List(ctx context.Context, req pagination.PageRequest) ([]Pipeline, int64, error)
+	Create(ctx context.Context, p Pipeline) (Pipeline, error)
+	GetByID(ctx context.Context, id uuid.UUID) (Pipeline, []Node, []Edge, error)
+	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Pipeline, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+	ReplaceNodes(ctx context.Context, pipelineID uuid.UUID, nodes []NodeRequest) ([]Node, error)
+	ReplaceEdges(ctx context.Context, pipelineID uuid.UUID, edges []EdgeRequest) ([]Edge, error)
+}
+
 // Repository handles persistence for pipelines, nodes and edges.
 type Repository struct {
 	pool *pgxpool.Pool
