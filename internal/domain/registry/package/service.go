@@ -13,13 +13,24 @@ import (
 
 var slugRegex = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
+// packageRepo defines the data access methods required by Service.
+type packageRepo interface {
+	ListPublic(ctx context.Context, req pagination.PageRequest) ([]Package, int64, error)
+	GetByID(ctx context.Context, id uuid.UUID) (Package, error)
+	GetBySlug(ctx context.Context, slug string) (Package, error)
+	ListByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) ([]Package, int64, error)
+	Create(ctx context.Context, p Package) (Package, error)
+	Update(ctx context.Context, id uuid.UUID, name, description, visibility string) (Package, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+}
+
 // Service implements business logic for the package registry.
 type Service struct {
-	repo *Repository
+	repo packageRepo
 }
 
 // NewService creates a new package Service.
-func NewService(repo *Repository) *Service {
+func NewService(repo packageRepo) *Service {
 	return &Service{repo: repo}
 }
 
