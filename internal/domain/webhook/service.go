@@ -74,6 +74,7 @@ func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (Webhook
 		URL:        req.URL,
 		Events:     events,
 		Secret:     req.Secret,
+		Token:      uuid.New().String(),
 		Enabled:    enabled,
 		RetryCount: retryCount,
 	}
@@ -127,9 +128,9 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repo.Delete(ctx, id)
 }
 
-// ListDeliveries returns paginated delivery logs.
-func (s *Service) ListDeliveries(ctx context.Context, webhookID uuid.UUID, req pagination.PageRequest) (pagination.Page[WebhookDeliveryLog], error) {
-	items, total, err := s.repo.ListDeliveries(ctx, webhookID, req)
+// ListDeliveries returns paginated delivery logs with optional status/event_type filters.
+func (s *Service) ListDeliveries(ctx context.Context, webhookID uuid.UUID, filter DeliveryFilter, req pagination.PageRequest) (pagination.Page[WebhookDeliveryLog], error) {
+	items, total, err := s.repo.ListDeliveries(ctx, webhookID, filter, req)
 	if err != nil {
 		return pagination.Page[WebhookDeliveryLog]{}, err
 	}
@@ -254,14 +255,55 @@ func ComputeHMACSHA256(key string, payload []byte) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// containsEvent returns true if event is in the allowed list.
+// containsEvent returns true if event is in the allowed list or the list contains "*".
 func containsEvent(allowed []string, event string) bool {
 	for _, e := range allowed {
-		if e == event {
+		if e == "*" || e == event {
 			return true
 		}
 	}
 	return false
+}
+
+// Ingest receives a generic webhook event, authenticates by token, creates a delivery
+// log and asynchronously dispatches to the configured URL. This is a simplified
+// alternative to IngestWebhook for non-signed payloads (internal or testing use).
+func (s *Service) Ingest(ctx context.Context, token, eventType, signature string, payload []byte) (WebhookDeliveryLog, error) {
+	w, err := s.repo.GetByToken(ctx, token)
+	if err != nil {
+		return WebhookDeliveryLog{}, err
+	}
+
+	if len(w.Events) > 0 && !containsEvent(w.Events, eventType) {
+		return WebhookDeliveryLog{}, ErrEventFiltered
+	}
+
+	d := WebhookDeliveryLog{
+		WebhookID: w.ID,
+		EventType: eventType,
+		Payload:   payload,
+		Status:    DeliveryPending,
+		Attempts:  0,
+	}
+	log, err := s.repo.CreateDelivery(ctx, d)
+	if err != nil {
+		return WebhookDeliveryLog{}, err
+	}
+
+	go s.dispatchWithRetry(w, log)
+	return log, nil
+}
+
+// RecordDeliveryResult updates a delivery log with the HTTP response from the target.
+func (s *Service) RecordDeliveryResult(ctx context.Context, d WebhookDeliveryLog, statusCode int, responseBody string, success bool) (WebhookDeliveryLog, error) {
+	d.ResponseStatus = &statusCode
+	d.ResponseBody = &responseBody
+	if success {
+		d.Status = DeliverySuccess
+	} else {
+		d.Status = DeliveryFailed
+	}
+	return s.repo.UpdateDelivery(ctx, d)
 }
 
 // SendTest creates a test delivery log entry with a sample payload.

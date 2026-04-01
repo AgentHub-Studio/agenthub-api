@@ -62,12 +62,19 @@ func (m *mockWebhookRepo) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (m *mockWebhookRepo) ListDeliveries(_ context.Context, webhookID uuid.UUID, _ pagination.PageRequest) ([]webhook.WebhookDeliveryLog, int64, error) {
+func (m *mockWebhookRepo) ListDeliveries(_ context.Context, webhookID uuid.UUID, filter webhook.DeliveryFilter, _ pagination.PageRequest) ([]webhook.WebhookDeliveryLog, int64, error) {
 	var out []webhook.WebhookDeliveryLog
 	for _, d := range m.deliveries {
-		if d.WebhookID == webhookID {
-			out = append(out, d)
+		if d.WebhookID != webhookID {
+			continue
 		}
+		if filter.Status != "" && d.Status != filter.Status {
+			continue
+		}
+		if filter.EventType != "" && d.EventType != filter.EventType {
+			continue
+		}
+		out = append(out, d)
 	}
 	return out, int64(len(out)), nil
 }
@@ -75,6 +82,15 @@ func (m *mockWebhookRepo) ListDeliveries(_ context.Context, webhookID uuid.UUID,
 func (m *mockWebhookRepo) GetBySecret(_ context.Context, secret string) (webhook.WebhookConfig, error) {
 	for _, c := range m.configs {
 		if c.Secret != nil && *c.Secret == secret && c.Enabled {
+			return c, nil
+		}
+	}
+	return webhook.WebhookConfig{}, webhook.ErrNotFound
+}
+
+func (m *mockWebhookRepo) GetByToken(_ context.Context, token string) (webhook.WebhookConfig, error) {
+	for _, c := range m.configs {
+		if c.Token == token && c.Enabled {
 			return c, nil
 		}
 	}
@@ -148,6 +164,22 @@ func newIngestWebhook(t *testing.T, svc *webhook.Service, targetURL string, even
 	return secret
 }
 
+// createWebhook creates a webhook config for use in Ingest tests and returns the full config
+// including the auto-generated Token.
+func createWebhook(t *testing.T, svc *webhook.Service, events []string) webhook.WebhookConfig {
+	t.Helper()
+	if events == nil {
+		events = []string{"*"}
+	}
+	w, err := svc.Create(context.Background(), webhook.CreateWebhookRequest{
+		Name:   "test-webhook",
+		URL:    "http://localhost:9999/sink",
+		Events: events,
+	})
+	require.NoError(t, err)
+	return w
+}
+
 func TestIngestWebhook_GitHubSignatureValid(t *testing.T) {
 	received := make(chan []byte, 1)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -206,4 +238,53 @@ func TestIngestWebhook_GitLabTokenValid(t *testing.T) {
 	log, err := svc.IngestWebhook(context.Background(), secret, "gitlab", []byte(`{}`), secret, "Push Hook")
 	require.NoError(t, err)
 	assert.Equal(t, "PENDING", log.Status)
+}
+
+func TestWebhookService_ListDeliveries_FilterByStatus(t *testing.T) {
+	repo := newMockRepo()
+	svc := webhook.NewService(repo)
+	w := createWebhook(t, svc, nil)
+
+	// Ingest two events with different results.
+	d1, err := svc.Ingest(context.Background(), w.Token, "push", "", []byte("{}"))
+	require.NoError(t, err)
+	_, err = svc.RecordDeliveryResult(context.Background(), d1, 200, "OK", true)
+	require.NoError(t, err)
+
+	_, err = svc.Ingest(context.Background(), w.Token, "push", "", []byte("{}"))
+	require.NoError(t, err)
+	// Second delivery remains PENDING.
+
+	pr := pagination.PageRequest{Page: 0, Size: 20}
+
+	pageAll, err := svc.ListDeliveries(context.Background(), w.ID, webhook.DeliveryFilter{}, pr)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), pageAll.TotalElements)
+
+	pageSuccess, err := svc.ListDeliveries(context.Background(), w.ID, webhook.DeliveryFilter{Status: webhook.DeliverySuccess}, pr)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), pageSuccess.TotalElements)
+	assert.Equal(t, webhook.DeliverySuccess, pageSuccess.Content[0].Status)
+
+	pagePending, err := svc.ListDeliveries(context.Background(), w.ID, webhook.DeliveryFilter{Status: webhook.DeliveryPending}, pr)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), pagePending.TotalElements)
+}
+
+func TestWebhookService_ListDeliveries_FilterByEventType(t *testing.T) {
+	repo := newMockRepo()
+	svc := webhook.NewService(repo)
+	w := createWebhook(t, svc, nil)
+
+	_, err := svc.Ingest(context.Background(), w.Token, "push", "", []byte("{}"))
+	require.NoError(t, err)
+	_, err = svc.Ingest(context.Background(), w.Token, "pull_request", "", []byte("{}"))
+	require.NoError(t, err)
+
+	pr := pagination.PageRequest{Page: 0, Size: 20}
+
+	pagePush, err := svc.ListDeliveries(context.Background(), w.ID, webhook.DeliveryFilter{EventType: "push"}, pr)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), pagePush.TotalElements)
+	assert.Equal(t, "push", pagePush.Content[0].EventType)
 }
