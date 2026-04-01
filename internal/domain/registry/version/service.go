@@ -14,14 +14,28 @@ import (
 // semverRegex matches a simple semver string: major.minor.patch
 var semverRegex = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
+// versionRepository defines data access methods required by Service.
+type versionRepository interface {
+	ListByPackage(ctx context.Context, packageID uuid.UUID) ([]PackageVersion, error)
+	GetByVersion(ctx context.Context, packageID uuid.UUID, versionStr string) (PackageVersion, error)
+	Create(ctx context.Context, v PackageVersion) (PackageVersion, error)
+	Delete(ctx context.Context, packageID uuid.UUID, versionStr string) error
+}
+
+// packageRepository defines the package data access methods required by Service.
+type packageRepository interface {
+	GetByID(ctx context.Context, id uuid.UUID) (pkg.Package, error)
+	UpdateLatestVersion(ctx context.Context, id uuid.UUID, version string) error
+}
+
 // Service implements business logic for package versions.
 type Service struct {
-	repo    *Repository
-	pkgRepo *pkg.Repository
+	repo    versionRepository
+	pkgRepo packageRepository
 }
 
 // NewService creates a new version Service.
-func NewService(repo *Repository, pkgRepo *pkg.Repository) *Service {
+func NewService(repo versionRepository, pkgRepo packageRepository) *Service {
 	return &Service{repo: repo, pkgRepo: pkgRepo}
 }
 

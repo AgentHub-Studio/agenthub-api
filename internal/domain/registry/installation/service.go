@@ -20,14 +20,21 @@ type StorageBackend interface {
 	PresignedURL(ctx context.Context, storagePath string, expires time.Duration) (string, error)
 }
 
+// assetRepository defines data access methods required by Service.
+type assetRepository interface {
+	ListByPackage(ctx context.Context, packageID uuid.UUID, versionID *uuid.UUID) ([]PackageAsset, error)
+	GetByID(ctx context.Context, assetID uuid.UUID) (PackageAsset, error)
+	Create(ctx context.Context, a PackageAsset) (PackageAsset, error)
+}
+
 // Service implements business logic for package assets.
 type Service struct {
-	repo    *Repository
+	repo    assetRepository
 	storage StorageBackend
 }
 
 // NewService creates a new installation Service.
-func NewService(repo *Repository, storage StorageBackend) *Service {
+func NewService(repo assetRepository, storage StorageBackend) *Service {
 	return &Service{repo: repo, storage: storage}
 }
 

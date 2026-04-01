@@ -1,7 +1,9 @@
 package installation
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -12,13 +14,20 @@ import (
 
 const maxUploadSize = 100 << 20 // 100 MB
 
+// installationService defines the methods used by Handler.
+type installationService interface {
+	ListAssets(ctx context.Context, packageID uuid.UUID, versionID *uuid.UUID) ([]AssetResponse, error)
+	UploadAsset(ctx context.Context, packageID uuid.UUID, versionID *uuid.UUID, filename string, contentType string, reader io.Reader, size int64) (AssetResponse, error)
+	DownloadURL(ctx context.Context, assetID uuid.UUID) (AssetDownloadResponse, error)
+}
+
 // Handler exposes the HTTP interface for package assets.
 type Handler struct {
-	svc *Service
+	svc installationService
 }
 
 // NewHandler creates a new installation Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc installationService) *Handler {
 	return &Handler{svc: svc}
 }
 

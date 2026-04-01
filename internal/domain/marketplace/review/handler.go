@@ -1,6 +1,7 @@
 package review
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,13 +14,20 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
+// reviewService defines the methods used by Handler.
+type reviewService interface {
+	ListByListing(ctx context.Context, listingID uuid.UUID, req pagination.PageRequest) (pagination.Page[ReviewResponse], error)
+	Create(ctx context.Context, listingID uuid.UUID, tenantID string, req CreateRequest) (ReviewResponse, error)
+	Delete(ctx context.Context, listingID uuid.UUID, reviewID uuid.UUID, tenantID string) error
+}
+
 // Handler exposes review HTTP endpoints.
 type Handler struct {
-	svc *Service
+	svc reviewService
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc reviewService) *Handler {
 	return &Handler{svc: svc}
 }
 

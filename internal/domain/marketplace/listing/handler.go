@@ -1,6 +1,7 @@
 package listing
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,13 +14,24 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
+// listingService defines the methods used by Handler.
+type listingService interface {
+	ListAll(ctx context.Context, req pagination.PageRequest) (pagination.Page[ListingResponse], error)
+	ListByType(ctx context.Context, t PackageType, req pagination.PageRequest) (pagination.Page[ListingResponse], error)
+	ListByCategory(ctx context.Context, cat string, req pagination.PageRequest) (pagination.Page[ListingResponse], error)
+	Create(ctx context.Context, tenantID string, req CreateListingRequest) (ListingResponse, error)
+	GetByID(ctx context.Context, id uuid.UUID) (ListingResponse, error)
+	Update(ctx context.Context, id uuid.UUID, tenantID string, req UpdateListingRequest) (ListingResponse, error)
+	Delete(ctx context.Context, id uuid.UUID, tenantID string) error
+}
+
 // Handler exposes marketplace listing HTTP endpoints.
 type Handler struct {
-	svc *Service
+	svc listingService
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc listingService) *Handler {
 	return &Handler{svc: svc}
 }
 

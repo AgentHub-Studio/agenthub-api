@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,13 +12,22 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
+// mcpService defines the methods used by Handler.
+type mcpService interface {
+	List(ctx context.Context) ([]McpServerConfigResponse, error)
+	Create(ctx context.Context, req CreateRequest) (McpServerConfigResponse, error)
+	GetByID(ctx context.Context, id uuid.UUID) (McpServerConfigResponse, error)
+	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (McpServerConfigResponse, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler handles HTTP requests for MCP server configs.
 type Handler struct {
-	svc *Service
+	svc mcpService
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc mcpService) *Handler {
 	return &Handler{svc: svc}
 }
 

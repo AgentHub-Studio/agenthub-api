@@ -10,15 +10,24 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/apierror"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
+
+// dependencyService defines the methods used by Handler.
+type dependencyService interface {
+	List(ctx context.Context, packageID uuid.UUID) ([]DependencyResponse, error)
+	Add(ctx context.Context, packageID uuid.UUID, req AddDependencyRequest, tenantID string) (DependencyResponse, error)
+	Remove(ctx context.Context, packageID, depID uuid.UUID, tenantID string) error
+	Resolve(ctx context.Context, packageID uuid.UUID) (ResolvedDependency, error)
+}
 
 // Handler exposes the HTTP interface for package dependencies.
 type Handler struct {
-	svc *Service
+	svc dependencyService
 }
 
 // NewHandler creates a new dependency Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc dependencyService) *Handler {
 	return &Handler{svc: svc}
 }
 
@@ -132,13 +141,6 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 	apierror.WriteJSON(w, http.StatusOK, tree)
 }
 
-type tenantContextKey struct{}
-
 func tenantFromContext(ctx context.Context) string {
-	v := ctx.Value(tenantContextKey{})
-	if v == nil {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
+	return tenant.FromContext(ctx)
 }

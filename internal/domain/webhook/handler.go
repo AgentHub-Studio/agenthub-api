@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,13 +14,25 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
+// webhookService defines the methods used by Handler.
+type webhookService interface {
+	List(ctx context.Context) ([]WebhookConfig, error)
+	Create(ctx context.Context, req CreateWebhookRequest) (WebhookConfig, error)
+	GetByID(ctx context.Context, id uuid.UUID) (WebhookConfig, error)
+	Update(ctx context.Context, id uuid.UUID, req UpdateWebhookRequest) (WebhookConfig, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+	ListDeliveries(ctx context.Context, webhookID uuid.UUID, req pagination.PageRequest) (pagination.Page[WebhookDeliveryLog], error)
+	IngestWebhook(ctx context.Context, token, sourceType string, payload []byte, signature, eventType string) (WebhookDeliveryLog, error)
+	SendTest(ctx context.Context, webhookID uuid.UUID) (WebhookDeliveryLog, error)
+}
+
 // Handler exposes webhook HTTP endpoints.
 type Handler struct {
-	svc *Service
+	svc webhookService
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc webhookService) *Handler {
 	return &Handler{svc: svc}
 }
 

@@ -10,14 +10,27 @@ import (
 	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
 )
 
+// dependencyRepository defines data access methods required by Service.
+type dependencyRepository interface {
+	ListByPackage(ctx context.Context, packageID uuid.UUID) ([]PackageDependency, error)
+	Create(ctx context.Context, d PackageDependency) (PackageDependency, error)
+	Delete(ctx context.Context, packageID, depID uuid.UUID) error
+	GetPackageName(ctx context.Context, packageID uuid.UUID) (name, slug string, err error)
+}
+
+// packageRepository defines the package data access methods required by Service.
+type packageRepository interface {
+	GetByID(ctx context.Context, id uuid.UUID) (pkg.Package, error)
+}
+
 // Service implements business logic for package dependencies.
 type Service struct {
-	repo    *Repository
-	pkgRepo *pkg.Repository
+	repo    dependencyRepository
+	pkgRepo packageRepository
 }
 
 // NewService creates a new dependency Service.
-func NewService(repo *Repository, pkgRepo *pkg.Repository) *Service {
+func NewService(repo dependencyRepository, pkgRepo packageRepository) *Service {
 	return &Service{repo: repo, pkgRepo: pkgRepo}
 }
 

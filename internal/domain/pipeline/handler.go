@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,13 +13,24 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
+// pipelineService defines the methods used by Handler.
+type pipelineService interface {
+	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[Response], error)
+	Create(ctx context.Context, req CreateRequest) (Response, error)
+	GetByID(ctx context.Context, id uuid.UUID) (Response, error)
+	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Response, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+	ReplaceNodes(ctx context.Context, pipelineID uuid.UUID, nodes []NodeRequest) ([]NodeResponse, error)
+	ReplaceEdges(ctx context.Context, pipelineID uuid.UUID, edges []EdgeRequest) ([]EdgeResponse, error)
+}
+
 // Handler exposes pipeline HTTP endpoints.
 type Handler struct {
-	svc *Service
+	svc pipelineService
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc pipelineService) *Handler {
 	return &Handler{svc: svc}
 }
 

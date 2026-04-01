@@ -1,6 +1,7 @@
 package installation
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,13 +14,20 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
+// installationService defines the methods used by Handler.
+type installationService interface {
+	ListByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) (pagination.Page[InstallResponse], error)
+	Install(ctx context.Context, tenantID string, req InstallRequest) (InstallResponse, error)
+	Uninstall(ctx context.Context, id uuid.UUID, tenantID string) error
+}
+
 // Handler exposes installation HTTP endpoints.
 type Handler struct {
-	svc *Service
+	svc installationService
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc *Service) *Handler {
+func NewHandler(svc installationService) *Handler {
 	return &Handler{svc: svc}
 }
 
