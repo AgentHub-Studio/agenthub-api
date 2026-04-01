@@ -2,6 +2,9 @@ package middleware
 
 import (
 	"net/http"
+
+	"github.com/AgentHub-Studio/agenthub-go-commons/auth"
+	"github.com/AgentHub-Studio/agenthub-go-commons/tenant"
 )
 
 // Chain holds the configured middleware stack.
@@ -29,34 +32,10 @@ func (c *Chain) Public() []func(http.Handler) http.Handler {
 }
 
 // Protected returns middleware for authenticated routes: Public stack + Auth + Tenant.
-// Auth and Tenant middlewares are provided by agenthub-go-commons once implemented.
+// Auth validates Keycloak JWTs via JWKS; Tenant extracts tenantID from the JWT issuer.
 func (c *Chain) Protected() []func(http.Handler) http.Handler {
 	return append(c.Public(),
-		authMiddleware(c.keycloakBaseURL),
-		tenantMiddleware(),
+		auth.Middleware(auth.Config{KeycloakBaseURL: c.keycloakBaseURL}),
+		tenant.Middleware(),
 	)
-}
-
-// authMiddleware returns a JWT validation middleware backed by Keycloak JWKS.
-// TODO: replace with auth.Middleware(auth.Config{KeycloakBaseURL: keycloakBaseURL})
-// once agenthub-go-commons/auth exports the Middleware function.
-func authMiddleware(keycloakBaseURL string) func(http.Handler) http.Handler {
-	_ = keycloakBaseURL // used when commons auth is wired
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Placeholder: pass-through until commons/auth is implemented.
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// tenantMiddleware extracts tenantID from JWT issuer and injects into context.
-// TODO: replace with tenant.Middleware() once agenthub-go-commons/tenant exports it.
-func tenantMiddleware() func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Placeholder: pass-through until commons/tenant is implemented.
-			next.ServeHTTP(w, r)
-		})
-	}
 }
