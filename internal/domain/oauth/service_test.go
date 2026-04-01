@@ -226,6 +226,81 @@ func TestOAuthService_ResolveAuthHeader_OAuth2_TokenEndpointError(t *testing.T) 
 	assert.Contains(t, err.Error(), "401")
 }
 
+// ---- ResponseFrom masking tests ----
+
+func TestResponseFrom_MasksSecrets(t *testing.T) {
+	c := oauth.OAuthCredential{
+		Name:         "my-cred",
+		ClientSecret: "super-secret",
+		APIKeyValue:  "api-key-val",
+		BearerToken:  "bearer-tok",
+		Password:     "p4ssw0rd",
+	}
+	r := oauth.ResponseFrom(c)
+	assert.Equal(t, "***", r.ClientSecret)
+	assert.Equal(t, "***", r.APIKeyValue)
+	assert.Equal(t, "***", r.BearerToken)
+	assert.Equal(t, "***", r.Password)
+}
+
+func TestResponseFrom_EmptySecretsRemainEmpty(t *testing.T) {
+	c := oauth.OAuthCredential{Name: "my-cred"}
+	r := oauth.ResponseFrom(c)
+	assert.Equal(t, "", r.ClientSecret)
+	assert.Equal(t, "", r.APIKeyValue)
+	assert.Equal(t, "", r.BearerToken)
+	assert.Equal(t, "", r.Password)
+}
+
+// ---- AES-256-GCM encryption tests ----
+
+const aesKey = "12345678901234567890123456789012" // 32 bytes
+
+func TestOAuthService_EncryptionRoundtrip_APIKey(t *testing.T) {
+	svc := oauth.NewServiceWithEncryption(newMockRepo(), aesKey)
+
+	c := createCred(t, svc, oauth.CreateRequest{
+		Name: "k", AuthType: oauth.AuthTypeAPIKey, APIKeyHeader: "X-Key", APIKeyValue: "my-secret-key",
+	})
+
+	// Stored value must be encrypted (not plaintext).
+	assert.NotEqual(t, "my-secret-key", c.APIKeyValue, "stored value should be encrypted")
+
+	// Resolving must return the correct plaintext value.
+	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "my-secret-key", res.Value)
+}
+
+func TestOAuthService_EncryptionRoundtrip_BearerToken(t *testing.T) {
+	svc := oauth.NewServiceWithEncryption(newMockRepo(), aesKey)
+
+	c := createCred(t, svc, oauth.CreateRequest{
+		Name: "b", AuthType: oauth.AuthTypeBearerToken, BearerToken: "my-bearer",
+	})
+
+	assert.NotEqual(t, "my-bearer", c.BearerToken)
+
+	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer my-bearer", res.Value)
+}
+
+func TestOAuthService_EncryptionRoundtrip_BasicAuth(t *testing.T) {
+	svc := oauth.NewServiceWithEncryption(newMockRepo(), aesKey)
+
+	c := createCred(t, svc, oauth.CreateRequest{
+		Name: "ba", AuthType: oauth.AuthTypeBasicAuth, Username: "user", Password: "secret",
+	})
+
+	assert.NotEqual(t, "secret", c.Password)
+
+	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
+	require.NoError(t, err)
+	expected := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:secret"))
+	assert.Equal(t, expected, res.Value)
+}
+
 func TestOAuthService_Update_ClearsTokenCache(t *testing.T) {
 	calls := 0
 	httpClient := &mockHTTPClient{}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/crypto"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -43,19 +44,31 @@ type HTTPClient interface {
 
 // Service implements business logic for OAuth credentials.
 type Service struct {
-	repo       CredentialRepository
-	httpClient HTTPClient
+	repo          CredentialRepository
+	httpClient    HTTPClient
+	encryptionKey string // AES-256-GCM key; empty means no encryption (dev mode)
 
 	mu         sync.Mutex
 	tokenCache map[uuid.UUID]*cachedToken
 }
 
-// NewService creates a new Service.
+// NewService creates a new Service without encryption.
 func NewService(repo CredentialRepository) *Service {
 	return &Service{
 		repo:       repo,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		tokenCache: make(map[uuid.UUID]*cachedToken),
+	}
+}
+
+// NewServiceWithEncryption creates a Service with AES-256-GCM secret encryption.
+// key must be exactly 32 bytes; pass "" to disable encryption (development mode).
+func NewServiceWithEncryption(repo CredentialRepository, key string) *Service {
+	return &Service{
+		repo:          repo,
+		httpClient:    &http.Client{Timeout: 10 * time.Second},
+		encryptionKey: key,
+		tokenCache:    make(map[uuid.UUID]*cachedToken),
 	}
 }
 
@@ -68,6 +81,22 @@ func NewServiceWithClient(repo CredentialRepository, client HTTPClient) *Service
 	}
 }
 
+// encryptSecret encrypts s if an encryption key is configured.
+func (s *Service) encryptSecret(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	return crypto.Encrypt(s.encryptionKey, plaintext)
+}
+
+// decryptSecret decrypts s if an encryption key is configured.
+func (s *Service) decryptSecret(ciphertext string) (string, error) {
+	if ciphertext == "" {
+		return "", nil
+	}
+	return crypto.Decrypt(s.encryptionKey, ciphertext)
+}
+
 // ListAll returns a paginated list of OAuth credentials for the tenant.
 func (s *Service) ListAll(ctx context.Context, tenantID string, pr pagination.PageRequest) ([]OAuthCredential, int, error) {
 	return s.repo.ListAll(ctx, tenantID, pr)
@@ -78,38 +107,72 @@ func (s *Service) GetByID(ctx context.Context, tenantID string, id uuid.UUID) (O
 	return s.repo.GetByID(ctx, tenantID, id)
 }
 
-// Create creates a new OAuth credential.
+// Create creates a new OAuth credential, encrypting all secret fields.
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (OAuthCredential, error) {
+	clientSecret, err := s.encryptSecret(req.ClientSecret)
+	if err != nil {
+		return OAuthCredential{}, fmt.Errorf("oauth: encrypt client_secret: %w", err)
+	}
+	apiKeyValue, err := s.encryptSecret(req.APIKeyValue)
+	if err != nil {
+		return OAuthCredential{}, fmt.Errorf("oauth: encrypt api_key_value: %w", err)
+	}
+	bearerToken, err := s.encryptSecret(req.BearerToken)
+	if err != nil {
+		return OAuthCredential{}, fmt.Errorf("oauth: encrypt bearer_token: %w", err)
+	}
+	password, err := s.encryptSecret(req.Password)
+	if err != nil {
+		return OAuthCredential{}, fmt.Errorf("oauth: encrypt password: %w", err)
+	}
+
 	c := OAuthCredential{
 		Name:         req.Name,
 		AuthType:     req.AuthType,
 		TokenURL:     req.TokenURL,
 		ClientID:     req.ClientID,
-		ClientSecret: req.ClientSecret,
+		ClientSecret: clientSecret,
 		Scopes:       req.Scopes,
 		APIKeyHeader: req.APIKeyHeader,
-		APIKeyValue:  req.APIKeyValue,
-		BearerToken:  req.BearerToken,
+		APIKeyValue:  apiKeyValue,
+		BearerToken:  bearerToken,
 		Username:     req.Username,
-		Password:     req.Password,
+		Password:     password,
 	}
 	return s.repo.Create(ctx, tenantID, c)
 }
 
-// Update updates an existing OAuth credential and clears its token cache entry.
+// Update updates an existing OAuth credential, re-encrypting all secret fields, and clears its token cache entry.
 func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (OAuthCredential, error) {
+	clientSecret, err := s.encryptSecret(req.ClientSecret)
+	if err != nil {
+		return OAuthCredential{}, fmt.Errorf("oauth: encrypt client_secret: %w", err)
+	}
+	apiKeyValue, err := s.encryptSecret(req.APIKeyValue)
+	if err != nil {
+		return OAuthCredential{}, fmt.Errorf("oauth: encrypt api_key_value: %w", err)
+	}
+	bearerToken, err := s.encryptSecret(req.BearerToken)
+	if err != nil {
+		return OAuthCredential{}, fmt.Errorf("oauth: encrypt bearer_token: %w", err)
+	}
+	password, err := s.encryptSecret(req.Password)
+	if err != nil {
+		return OAuthCredential{}, fmt.Errorf("oauth: encrypt password: %w", err)
+	}
+
 	c := OAuthCredential{
 		Name:         req.Name,
 		AuthType:     req.AuthType,
 		TokenURL:     req.TokenURL,
 		ClientID:     req.ClientID,
-		ClientSecret: req.ClientSecret,
+		ClientSecret: clientSecret,
 		Scopes:       req.Scopes,
 		APIKeyHeader: req.APIKeyHeader,
-		APIKeyValue:  req.APIKeyValue,
-		BearerToken:  req.BearerToken,
+		APIKeyValue:  apiKeyValue,
+		BearerToken:  bearerToken,
 		Username:     req.Username,
-		Password:     req.Password,
+		Password:     password,
 	}
 	result, err := s.repo.Update(ctx, tenantID, id, c)
 	if err == nil {
@@ -141,6 +204,12 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 
 	switch c.AuthType {
 	case AuthTypeOAuth2ClientCredentials:
+		// Decrypt client_secret before performing token exchange.
+		clientSecret, err := s.decryptSecret(c.ClientSecret)
+		if err != nil {
+			return ResolveResponse{}, fmt.Errorf("oauth: decrypt client_secret: %w", err)
+		}
+		c.ClientSecret = clientSecret
 		token, err := s.fetchOrCachedToken(ctx, id, c)
 		if err != nil {
 			return ResolveResponse{}, err
@@ -148,17 +217,29 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 		return ResolveResponse{Header: "Authorization", Value: "Bearer " + token}, nil
 
 	case AuthTypeBearerToken:
-		return ResolveResponse{Header: "Authorization", Value: "Bearer " + c.BearerToken}, nil
+		bearerToken, err := s.decryptSecret(c.BearerToken)
+		if err != nil {
+			return ResolveResponse{}, fmt.Errorf("oauth: decrypt bearer_token: %w", err)
+		}
+		return ResolveResponse{Header: "Authorization", Value: "Bearer " + bearerToken}, nil
 
 	case AuthTypeAPIKey:
+		apiKeyValue, err := s.decryptSecret(c.APIKeyValue)
+		if err != nil {
+			return ResolveResponse{}, fmt.Errorf("oauth: decrypt api_key_value: %w", err)
+		}
 		header := c.APIKeyHeader
 		if header == "" {
 			header = "X-API-Key"
 		}
-		return ResolveResponse{Header: header, Value: c.APIKeyValue}, nil
+		return ResolveResponse{Header: header, Value: apiKeyValue}, nil
 
 	case AuthTypeBasicAuth:
-		encoded := base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + c.Password))
+		password, err := s.decryptSecret(c.Password)
+		if err != nil {
+			return ResolveResponse{}, fmt.Errorf("oauth: decrypt password: %w", err)
+		}
+		encoded := base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + password))
 		return ResolveResponse{Header: "Authorization", Value: "Basic " + encoded}, nil
 
 	default:
