@@ -78,7 +78,8 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid execution id")
 		return
 	}
-	e, err := h.svc.GetByID(r.Context(), id)
+	// Return full hierarchy: execution + nodes + tool executions.
+	e, err := h.svc.GetDetails(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "execution not found")
