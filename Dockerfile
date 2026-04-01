@@ -9,9 +9,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o /build/bin/api \
     ./cmd/api
 
-FROM scratch
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/api /api
 COPY --from=builder /build/migrations /migrations
 EXPOSE 8081
