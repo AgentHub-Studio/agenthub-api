@@ -9,7 +9,6 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	commonsStorage "github.com/AgentHub-Studio/agenthub-go-commons/storage"
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
@@ -108,18 +107,19 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// Registry handlers — storage backend selected based on MinIO config.
 	var regStorage regInstallation.StorageBackend
 	if cfg.MinIO.IsConfigured() {
-		storageClient, err := commonsStorage.NewClient(commonsStorage.Config{
+		storage, err := regInstallation.NewMinIOStorageFromConfig(regInstallation.MinIOConfig{
 			Endpoint:        cfg.MinIO.Endpoint,
 			AccessKeyID:     cfg.MinIO.AccessKeyID,
 			SecretAccessKey: cfg.MinIO.SecretAccessKey,
 			UseSSL:          cfg.MinIO.UseSSL,
 			Region:          cfg.MinIO.Region,
+			Bucket:          cfg.MinIO.Bucket,
 		})
 		if err != nil {
 			slog.Warn("minio: failed to create storage client, using noop backend", "err", err)
 			regStorage = &regInstallation.NoopStorage{}
 		} else {
-			regStorage = regInstallation.NewMinIOStorage(storageClient, cfg.MinIO.Bucket)
+			regStorage = storage
 			slog.Info("minio: storage client configured", "bucket", cfg.MinIO.Bucket)
 		}
 	} else {

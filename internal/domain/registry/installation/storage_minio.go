@@ -2,30 +2,60 @@ package installation
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
-	"github.com/AgentHub-Studio/agenthub-go-commons/storage"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// minioStorage adapts storage.Client to the StorageBackend interface.
-// It fixes the bucket at construction time so callers do not need to specify it.
+// MinIOConfig holds the configuration needed to create a MinIO-backed StorageBackend.
+type MinIOConfig struct {
+	Endpoint        string
+	AccessKeyID     string
+	SecretAccessKey string
+	UseSSL          bool
+	Region          string
+	Bucket          string
+}
+
+// minioStorage implements StorageBackend using MinIO (minio-go/v7).
+// The bucket is fixed at construction time so callers do not need to specify it.
 type minioStorage struct {
-	client *storage.Client
+	mc     *minio.Client
 	bucket string
 }
 
-// NewMinIOStorage creates a StorageBackend backed by MinIO.
-func NewMinIOStorage(client *storage.Client, bucket string) StorageBackend {
-	return &minioStorage{client: client, bucket: bucket}
+// NewMinIOStorageFromConfig creates a StorageBackend backed by MinIO using the provided config.
+func NewMinIOStorageFromConfig(cfg MinIOConfig) (StorageBackend, error) {
+	mc, err := minio.New(cfg.Endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+		Secure: cfg.UseSSL,
+		Region: cfg.Region,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("minio: create client: %w", err)
+	}
+	return &minioStorage{mc: mc, bucket: cfg.Bucket}, nil
 }
 
 // Upload stores reader at key within the configured bucket and returns the storage path.
 func (m *minioStorage) Upload(ctx context.Context, key string, r io.Reader, size int64, contentType string) (string, error) {
-	return m.client.Upload(ctx, m.bucket, key, r, size, contentType)
+	_, err := m.mc.PutObject(ctx, m.bucket, key, r, size, minio.PutObjectOptions{
+		ContentType: contentType,
+	})
+	if err != nil {
+		return "", fmt.Errorf("minio: upload %s/%s: %w", m.bucket, key, err)
+	}
+	return key, nil
 }
 
 // PresignedURL returns a time-limited download URL for the given storage path.
 func (m *minioStorage) PresignedURL(ctx context.Context, storagePath string, expires time.Duration) (string, error) {
-	return m.client.PresignedURL(ctx, m.bucket, storagePath, expires)
+	u, err := m.mc.PresignedGetObject(ctx, m.bucket, storagePath, expires, nil)
+	if err != nil {
+		return "", fmt.Errorf("minio: presigned url %s/%s: %w", m.bucket, storagePath, err)
+	}
+	return u.String(), nil
 }
