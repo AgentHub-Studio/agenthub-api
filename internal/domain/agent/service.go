@@ -175,3 +175,119 @@ func toSlug(name string) string {
 	}
 	return result
 }
+
+// VersionService defines business logic for AgentVersion.
+type VersionService interface {
+	CreateDraft(ctx context.Context, agentID uuid.UUID, req CreateAgentVersionRequest) (AgentVersionResponse, error)
+	UpdateDraft(ctx context.Context, versionID uuid.UUID, req UpdateAgentVersionRequest) (AgentVersionResponse, error)
+	Publish(ctx context.Context, versionID uuid.UUID) (AgentVersionResponse, error)
+	GetDraft(ctx context.Context, agentID uuid.UUID) (AgentVersionResponse, error)
+	GetLatestPublished(ctx context.Context, agentID uuid.UUID) (AgentVersionResponse, error)
+	ListVersions(ctx context.Context, agentID uuid.UUID, req pagination.PageRequest) (pagination.Page[AgentVersionResponse], error)
+}
+
+type versionService struct {
+	repo    Repository
+	verRepo VersionRepository
+}
+
+// NewVersionService creates a new VersionService.
+func NewVersionService(repo Repository, verRepo VersionRepository) VersionService {
+	return &versionService{repo: repo, verRepo: verRepo}
+}
+
+func (s *versionService) CreateDraft(ctx context.Context, agentID uuid.UUID, req CreateAgentVersionRequest) (AgentVersionResponse, error) {
+	// Ensure the agent exists.
+	if _, err := s.repo.FindByID(ctx, agentID); err != nil {
+		return AgentVersionResponse{}, err
+	}
+	// Ensure no existing draft.
+	if _, err := s.verRepo.FindDraft(ctx, agentID); err == nil {
+		return AgentVersionResponse{}, ErrDraftAlreadyExists
+	}
+	num, err := s.verRepo.NextVersionNumber(ctx, agentID)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	v := AgentVersion{
+		ID:             uuid.New(),
+		AgentID:        agentID,
+		VersionNumber:  num,
+		Status:         VersionStatusDraft,
+		Description:    req.Description,
+		DefinitionJSON: req.DefinitionJSON,
+		ConfigJSON:     req.ConfigJSON,
+	}
+	created, err := s.verRepo.Create(ctx, v)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	return VersionResponseFrom(created), nil
+}
+
+func (s *versionService) UpdateDraft(ctx context.Context, versionID uuid.UUID, req UpdateAgentVersionRequest) (AgentVersionResponse, error) {
+	v, err := s.verRepo.FindByID(ctx, versionID)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	if v.Status != VersionStatusDraft {
+		return AgentVersionResponse{}, ErrVersionImmutable
+	}
+	if req.Description != nil {
+		v.Description = *req.Description
+	}
+	if len(req.DefinitionJSON) > 0 {
+		v.DefinitionJSON = req.DefinitionJSON
+	}
+	if len(req.ConfigJSON) > 0 {
+		v.ConfigJSON = req.ConfigJSON
+	}
+	updated, err := s.verRepo.Update(ctx, v)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	return VersionResponseFrom(updated), nil
+}
+
+func (s *versionService) Publish(ctx context.Context, versionID uuid.UUID) (AgentVersionResponse, error) {
+	v, err := s.verRepo.FindByID(ctx, versionID)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	if v.Status != VersionStatusDraft {
+		return AgentVersionResponse{}, ErrVersionImmutable
+	}
+	published, err := s.verRepo.Publish(ctx, versionID)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	return VersionResponseFrom(published), nil
+}
+
+func (s *versionService) GetDraft(ctx context.Context, agentID uuid.UUID) (AgentVersionResponse, error) {
+	v, err := s.verRepo.FindDraft(ctx, agentID)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	return VersionResponseFrom(v), nil
+}
+
+func (s *versionService) GetLatestPublished(ctx context.Context, agentID uuid.UUID) (AgentVersionResponse, error) {
+	v, err := s.verRepo.FindLatestPublished(ctx, agentID)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	return VersionResponseFrom(v), nil
+}
+
+func (s *versionService) ListVersions(ctx context.Context, agentID uuid.UUID, req pagination.PageRequest) (pagination.Page[AgentVersionResponse], error) {
+	versions, total, err := s.verRepo.FindByAgentID(ctx, agentID, req)
+	if err != nil {
+		return pagination.Page[AgentVersionResponse]{}, err
+	}
+	responses := make([]AgentVersionResponse, len(versions))
+	for i, v := range versions {
+		responses[i] = VersionResponseFrom(v)
+	}
+	return pagination.NewPage(responses, total, req), nil
+}

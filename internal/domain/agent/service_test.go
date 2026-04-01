@@ -168,3 +168,191 @@ func TestAgentService_List(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), page.TotalElements)
 }
+
+// --- VersionService tests ---
+
+type mockVersionRepo struct {
+	data map[uuid.UUID]agent.AgentVersion
+}
+
+func newMockVersionRepo() *mockVersionRepo {
+	return &mockVersionRepo{data: make(map[uuid.UUID]agent.AgentVersion)}
+}
+
+func (m *mockVersionRepo) FindByID(_ context.Context, id uuid.UUID) (agent.AgentVersion, error) {
+	v, ok := m.data[id]
+	if !ok {
+		return agent.AgentVersion{}, agent.ErrVersionNotFound
+	}
+	return v, nil
+}
+
+func (m *mockVersionRepo) FindByAgentID(_ context.Context, agentID uuid.UUID, req pagination.PageRequest) ([]agent.AgentVersion, int64, error) {
+	var out []agent.AgentVersion
+	for _, v := range m.data {
+		if v.AgentID == agentID {
+			out = append(out, v)
+		}
+	}
+	return out, int64(len(out)), nil
+}
+
+func (m *mockVersionRepo) FindDraft(_ context.Context, agentID uuid.UUID) (agent.AgentVersion, error) {
+	for _, v := range m.data {
+		if v.AgentID == agentID && v.Status == agent.VersionStatusDraft {
+			return v, nil
+		}
+	}
+	return agent.AgentVersion{}, agent.ErrVersionNotFound
+}
+
+func (m *mockVersionRepo) FindLatestPublished(_ context.Context, agentID uuid.UUID) (agent.AgentVersion, error) {
+	var latest agent.AgentVersion
+	found := false
+	for _, v := range m.data {
+		if v.AgentID == agentID && v.Status == agent.VersionStatusPublished {
+			if !found || v.VersionNumber > latest.VersionNumber {
+				latest = v
+				found = true
+			}
+		}
+	}
+	if !found {
+		return agent.AgentVersion{}, agent.ErrVersionNotFound
+	}
+	return latest, nil
+}
+
+func (m *mockVersionRepo) Create(_ context.Context, v agent.AgentVersion) (agent.AgentVersion, error) {
+	m.data[v.ID] = v
+	return v, nil
+}
+
+func (m *mockVersionRepo) Update(_ context.Context, v agent.AgentVersion) (agent.AgentVersion, error) {
+	if _, ok := m.data[v.ID]; !ok {
+		return agent.AgentVersion{}, agent.ErrVersionNotFound
+	}
+	m.data[v.ID] = v
+	return v, nil
+}
+
+func (m *mockVersionRepo) Publish(_ context.Context, id uuid.UUID) (agent.AgentVersion, error) {
+	v, ok := m.data[id]
+	if !ok {
+		return agent.AgentVersion{}, agent.ErrVersionNotFound
+	}
+	v.Status = agent.VersionStatusPublished
+	m.data[id] = v
+	return v, nil
+}
+
+func (m *mockVersionRepo) NextVersionNumber(_ context.Context, agentID uuid.UUID) (int, error) {
+	max := 0
+	for _, v := range m.data {
+		if v.AgentID == agentID && v.VersionNumber > max {
+			max = v.VersionNumber
+		}
+	}
+	return max + 1, nil
+}
+
+func newVersionSvc() (agent.VersionService, *mockAgentRepo, *mockVersionRepo) {
+	ar := newMockRepo()
+	vr := newMockVersionRepo()
+	return agent.NewVersionService(ar, vr), ar, vr
+}
+
+func seedAgent(ar *mockAgentRepo) agent.Agent {
+	a := agent.Agent{ID: uuid.New(), Name: "test", Slug: "test", Status: agent.StatusDraft, CurrentVersion: 1}
+	ar.data[a.ID] = a
+	return a
+}
+
+func TestVersionService_CreateDraft(t *testing.T) {
+	svc, ar, _ := newVersionSvc()
+	a := seedAgent(ar)
+
+	resp, err := svc.CreateDraft(context.Background(), a.ID, agent.CreateAgentVersionRequest{Description: "v1"})
+	require.NoError(t, err)
+	assert.Equal(t, "DRAFT", resp.Status)
+	assert.Equal(t, 1, resp.VersionNumber)
+}
+
+func TestVersionService_CreateDraft_AgentNotFound(t *testing.T) {
+	svc, _, _ := newVersionSvc()
+	_, err := svc.CreateDraft(context.Background(), uuid.New(), agent.CreateAgentVersionRequest{})
+	require.Error(t, err)
+}
+
+func TestVersionService_CreateDraft_DuplicateDraft(t *testing.T) {
+	svc, ar, _ := newVersionSvc()
+	a := seedAgent(ar)
+
+	_, err := svc.CreateDraft(context.Background(), a.ID, agent.CreateAgentVersionRequest{Description: "v1"})
+	require.NoError(t, err)
+
+	// Second draft should fail.
+	_, err = svc.CreateDraft(context.Background(), a.ID, agent.CreateAgentVersionRequest{Description: "v2"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrDraftAlreadyExists)
+}
+
+func TestVersionService_UpdateDraft(t *testing.T) {
+	svc, ar, _ := newVersionSvc()
+	a := seedAgent(ar)
+
+	draft, err := svc.CreateDraft(context.Background(), a.ID, agent.CreateAgentVersionRequest{Description: "initial"})
+	require.NoError(t, err)
+
+	desc := "updated"
+	updated, err := svc.UpdateDraft(context.Background(), draft.ID, agent.UpdateAgentVersionRequest{Description: &desc})
+	require.NoError(t, err)
+	assert.Equal(t, "updated", updated.Description)
+}
+
+func TestVersionService_UpdateDraft_Immutable(t *testing.T) {
+	svc, ar, vr := newVersionSvc()
+	a := seedAgent(ar)
+
+	draft, _ := svc.CreateDraft(context.Background(), a.ID, agent.CreateAgentVersionRequest{})
+	// Manually publish it.
+	published, _ := vr.Publish(context.Background(), draft.ID)
+	_ = published
+
+	desc := "should fail"
+	_, err := svc.UpdateDraft(context.Background(), draft.ID, agent.UpdateAgentVersionRequest{Description: &desc})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrVersionImmutable)
+}
+
+func TestVersionService_Publish(t *testing.T) {
+	svc, ar, _ := newVersionSvc()
+	a := seedAgent(ar)
+
+	draft, _ := svc.CreateDraft(context.Background(), a.ID, agent.CreateAgentVersionRequest{})
+	published, err := svc.Publish(context.Background(), draft.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "PUBLISHED", published.Status)
+}
+
+func TestVersionService_GetDraft(t *testing.T) {
+	svc, ar, _ := newVersionSvc()
+	a := seedAgent(ar)
+
+	_, _ = svc.CreateDraft(context.Background(), a.ID, agent.CreateAgentVersionRequest{Description: "draft"})
+	resp, err := svc.GetDraft(context.Background(), a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "DRAFT", resp.Status)
+}
+
+func TestVersionService_GetLatestPublished(t *testing.T) {
+	svc, ar, _ := newVersionSvc()
+	a := seedAgent(ar)
+
+	draft, _ := svc.CreateDraft(context.Background(), a.ID, agent.CreateAgentVersionRequest{})
+	_, _ = svc.Publish(context.Background(), draft.ID)
+
+	resp, err := svc.GetLatestPublished(context.Background(), a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "PUBLISHED", resp.Status)
+}

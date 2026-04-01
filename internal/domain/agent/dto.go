@@ -63,3 +63,55 @@ type UpdateAgentRequest struct {
 type CloneAgentRequest struct {
 	Name string `json:"name"`
 }
+
+// AgentVersionResponse is the JSON response for an AgentVersion.
+type AgentVersionResponse struct {
+	ID             uuid.UUID       `json:"id"`
+	AgentID        uuid.UUID       `json:"agentId"`
+	VersionNumber  int             `json:"versionNumber"`
+	Status         string          `json:"status"`
+	Description    string          `json:"description"`
+	DefinitionJSON json.RawMessage `json:"definitionJson,omitempty"`
+	ConfigJSON     json.RawMessage `json:"configJson,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
+	PublishedAt    *time.Time      `json:"publishedAt,omitempty"`
+}
+
+// VersionResponseFrom converts an AgentVersion entity to AgentVersionResponse.
+func VersionResponseFrom(v AgentVersion) AgentVersionResponse {
+	def := v.DefinitionJSON
+	if len(def) == 0 {
+		def = json.RawMessage(`{}`)
+	}
+	cfg := v.ConfigJSON
+	if len(cfg) == 0 {
+		cfg = json.RawMessage(`{}`)
+	}
+	return AgentVersionResponse{
+		ID:             v.ID,
+		AgentID:        v.AgentID,
+		VersionNumber:  v.VersionNumber,
+		Status:         string(v.Status),
+		Description:    v.Description,
+		DefinitionJSON: def,
+		ConfigJSON:     cfg,
+		CreatedAt:      v.CreatedAt,
+		UpdatedAt:      v.UpdatedAt,
+		PublishedAt:    v.PublishedAt,
+	}
+}
+
+// CreateAgentVersionRequest is the JSON body for creating a draft version.
+type CreateAgentVersionRequest struct {
+	Description    string          `json:"description"`
+	DefinitionJSON json.RawMessage `json:"definitionJson,omitempty"`
+	ConfigJSON     json.RawMessage `json:"configJson,omitempty"`
+}
+
+// UpdateAgentVersionRequest is the JSON body for updating a draft version.
+type UpdateAgentVersionRequest struct {
+	Description    *string         `json:"description,omitempty"`
+	DefinitionJSON json.RawMessage `json:"definitionJson,omitempty"`
+	ConfigJSON     json.RawMessage `json:"configJson,omitempty"`
+}
