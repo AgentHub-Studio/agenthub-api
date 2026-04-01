@@ -26,6 +26,7 @@ func NewHandler(svc Service) *Handler {
 func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
 	r.Get("/api/llm-presets", h.list)
 	r.Post("/api/llm-presets", h.create)
+	r.Get("/api/llm-presets/by-provider/{provider}", h.listByProvider)
 	r.Get("/api/llm-presets/{id}", h.get)
 	r.Put("/api/llm-presets/{id}", h.update)
 	r.Delete("/api/llm-presets/{id}", h.delete)
@@ -37,6 +38,17 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	page, err := h.svc.List(r.Context(), req)
 	if err != nil {
 		httputil.InternalServerError(w, err.Error())
+		return
+	}
+	httputil.JSON(w, http.StatusOK, page)
+}
+
+func (h *Handler) listByProvider(w http.ResponseWriter, r *http.Request) {
+	provider := chi.URLParam(r, "provider")
+	req := pagination.ParsePageRequest(r)
+	page, err := h.svc.ListByProvider(r.Context(), provider, req)
+	if err != nil {
+		httputil.BadRequest(w, err.Error())
 		return
 	}
 	httputil.JSON(w, http.StatusOK, page)

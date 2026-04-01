@@ -12,6 +12,7 @@ import (
 // Service defines business logic operations for LLMPreset.
 type Service interface {
 	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error)
+	ListByProvider(ctx context.Context, provider string, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error)
 	Get(ctx context.Context, id uuid.UUID) (LLMPresetResponse, error)
 	Create(ctx context.Context, req CreateLLMPresetRequest) (LLMPresetResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateLLMPresetRequest) (LLMPresetResponse, error)
@@ -30,6 +31,21 @@ func NewService(repo Repository) Service {
 
 func (s *service) List(ctx context.Context, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error) {
 	presets, total, err := s.repo.FindAll(ctx, req)
+	if err != nil {
+		return pagination.Page[LLMPresetResponse]{}, err
+	}
+	responses := make([]LLMPresetResponse, len(presets))
+	for i, p := range presets {
+		responses[i] = ResponseFrom(p)
+	}
+	return pagination.NewPage(responses, total, req), nil
+}
+
+func (s *service) ListByProvider(ctx context.Context, provider string, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error) {
+	if provider == "" {
+		return pagination.Page[LLMPresetResponse]{}, fmt.Errorf("llmpreset: provider is required")
+	}
+	presets, total, err := s.repo.FindByProvider(ctx, provider, req)
 	if err != nil {
 		return pagination.Page[LLMPresetResponse]{}, err
 	}
