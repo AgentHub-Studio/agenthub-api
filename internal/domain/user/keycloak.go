@@ -26,6 +26,8 @@ type KeycloakUserClient interface {
 	DeleteUser(ctx context.Context, tenantID string, userID string) error
 	AssignRole(ctx context.Context, tenantID string, userID string, role string) error
 	RemoveRole(ctx context.Context, tenantID string, userID string, role string) error
+	ResetPassword(ctx context.Context, tenantID string, userID string) error
+	ListRoles(ctx context.Context, tenantID string) ([]string, error)
 }
 
 // keycloakClient is the HTTP implementation of KeycloakUserClient.
@@ -412,6 +414,53 @@ func (c *keycloakClient) manageRole(ctx context.Context, tenantID, userID, role,
 		return fmt.Errorf("keycloak: manage role %s %d: %s", method, resp.StatusCode, string(b))
 	}
 	return nil
+}
+
+// ResetPassword triggers a Keycloak "UPDATE_PASSWORD" required action, sending a reset email.
+func (c *keycloakClient) ResetPassword(ctx context.Context, tenantID string, userID string) error {
+	path := fmt.Sprintf("/admin/realms/%s/users/%s/execute-actions-email", tenantID, userID)
+	resp, err := c.adminRequest(ctx, http.MethodPut, path, []string{"UPDATE_PASSWORD"})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak: reset password %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// ListRoles returns all client roles defined in the agenthub-frontend client for a realm.
+func (c *keycloakClient) ListRoles(ctx context.Context, tenantID string) ([]string, error) {
+	clientUUID, err := c.getClientUUID(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/admin/realms/%s/clients/%s/roles", tenantID, clientUUID)
+	resp, err := c.adminRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak: list roles %d: %s", resp.StatusCode, string(body))
+	}
+	var roles []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &roles); err != nil {
+		return nil, fmt.Errorf("keycloak: parse roles: %w", err)
+	}
+	names := make([]string, len(roles))
+	for i, r := range roles {
+		names[i] = r.Name
+	}
+	return names, nil
 }
 
 func splitPath(p string) []string {

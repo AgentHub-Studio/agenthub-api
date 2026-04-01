@@ -16,6 +16,8 @@ type Service interface {
 	Delete(ctx context.Context, userID string) error
 	AssignRole(ctx context.Context, userID string, role string) error
 	RemoveRole(ctx context.Context, userID string, role string) error
+	ResetPassword(ctx context.Context, userID string) error
+	ListRoles(ctx context.Context) ([]string, error)
 }
 
 type service struct {
@@ -112,4 +114,20 @@ func (s *service) RemoveRole(ctx context.Context, userID string, role string) er
 		return err
 	}
 	return s.client.RemoveRole(ctx, tenantID, userID, role)
+}
+
+func (s *service) ResetPassword(ctx context.Context, userID string) error {
+	tenantID, err := s.tenantID(ctx)
+	if err != nil {
+		return err
+	}
+	return s.client.ResetPassword(ctx, tenantID, userID)
+}
+
+func (s *service) ListRoles(ctx context.Context) ([]string, error) {
+	tenantID, err := s.tenantID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.client.ListRoles(ctx, tenantID)
 }

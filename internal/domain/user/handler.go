@@ -24,11 +24,13 @@ func NewHandler(svc Service) *Handler {
 func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
 	r.Get("/api/users", h.list)
 	r.Post("/api/users", h.create)
+	r.Get("/api/users/roles", h.listRoles)
 	r.Get("/api/users/{id}", h.get)
 	r.Patch("/api/users/{id}", h.update)
 	r.Delete("/api/users/{id}", h.delete)
 	r.Post("/api/users/{id}/roles/{role}", h.assignRole)
 	r.Delete("/api/users/{id}/roles/{role}", h.removeRole)
+	r.Post("/api/users/{id}/reset-password", h.resetPassword)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -131,4 +133,26 @@ func (h *Handler) removeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.svc.ResetPassword(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httputil.NotFound(w, "user not found")
+			return
+		}
+		httputil.InternalServerError(w, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) listRoles(w http.ResponseWriter, r *http.Request) {
+	roles, err := h.svc.ListRoles(r.Context())
+	if err != nil {
+		httputil.InternalServerError(w, err.Error())
+		return
+	}
+	httputil.JSON(w, http.StatusOK, roles)
 }

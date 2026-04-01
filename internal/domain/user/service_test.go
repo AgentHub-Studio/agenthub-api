@@ -96,6 +96,17 @@ func (m *mockKeycloakClient) RemoveRole(_ context.Context, _ string, userID stri
 	return user.ErrNotFound
 }
 
+func (m *mockKeycloakClient) ResetPassword(_ context.Context, _ string, userID string) error {
+	if _, ok := m.users[userID]; !ok {
+		return user.ErrNotFound
+	}
+	return nil
+}
+
+func (m *mockKeycloakClient) ListRoles(_ context.Context, _ string) ([]string, error) {
+	return []string{"admin", "user", "mcp-client-runtime"}, nil
+}
+
 // ctxWithTenant returns a context with the given tenant ID set.
 func ctxWithTenant(tenantID string) context.Context {
 	return tenant.NewContext(context.Background(), tenantID)
@@ -166,4 +177,28 @@ func TestUserService_NoTenantContext(t *testing.T) {
 	_, err := svc.List(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tenantID not found")
+}
+
+func TestUserService_ResetPassword_Success(t *testing.T) {
+	svc := user.NewService(newMockClient())
+	ctx := ctxWithTenant("t1")
+	u, err := svc.Create(ctx, user.CreateUserRequest{Username: "dave"})
+	require.NoError(t, err)
+
+	err = svc.ResetPassword(ctx, u.ID)
+	require.NoError(t, err)
+}
+
+func TestUserService_ResetPassword_NotFound(t *testing.T) {
+	svc := user.NewService(newMockClient())
+	err := svc.ResetPassword(ctxWithTenant("t1"), "ghost-id")
+	require.ErrorIs(t, err, user.ErrNotFound)
+}
+
+func TestUserService_ListRoles_Success(t *testing.T) {
+	svc := user.NewService(newMockClient())
+	roles, err := svc.ListRoles(ctxWithTenant("t1"))
+	require.NoError(t, err)
+	assert.Contains(t, roles, "admin")
+	assert.Contains(t, roles, "user")
 }
