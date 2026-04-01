@@ -127,7 +127,11 @@ func (h *Handler) listDeliveries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := pagination.ParsePageRequest(r)
-	page, err := h.svc.ListDeliveries(r.Context(), id, req)
+	filter := DeliveryFilter{
+		Status:    r.URL.Query().Get("status"),
+		EventType: r.URL.Query().Get("eventType"),
+	}
+	page, err := h.svc.ListDeliveries(r.Context(), id, filter, req)
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return

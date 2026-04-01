@@ -20,6 +20,12 @@ type WebhookConfig struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
+// DeliveryFilter holds optional filters for listing delivery logs.
+type DeliveryFilter struct {
+	Status    string // optional: PENDING, PROCESSING, SUCCESS, FAILED, DEAD_LETTER
+	EventType string // optional: event type string
+}
+
 // WebhookDeliveryLog records a delivery attempt.
 type WebhookDeliveryLog struct {
 	ID             uuid.UUID  `json:"id"`

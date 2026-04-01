@@ -127,9 +127,9 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repo.Delete(ctx, id)
 }
 
-// ListDeliveries returns paginated delivery logs.
-func (s *Service) ListDeliveries(ctx context.Context, webhookID uuid.UUID, req pagination.PageRequest) (pagination.Page[WebhookDeliveryLog], error) {
-	items, total, err := s.repo.ListDeliveries(ctx, webhookID, req)
+// ListDeliveries returns paginated delivery logs with optional status/event_type filters.
+func (s *Service) ListDeliveries(ctx context.Context, webhookID uuid.UUID, filter DeliveryFilter, req pagination.PageRequest) (pagination.Page[WebhookDeliveryLog], error) {
+	items, total, err := s.repo.ListDeliveries(ctx, webhookID, filter, req)
 	if err != nil {
 		return pagination.Page[WebhookDeliveryLog]{}, err
 	}

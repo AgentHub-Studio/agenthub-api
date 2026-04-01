@@ -26,7 +26,7 @@ type WebhookRepository interface {
 	GetBySecret(ctx context.Context, secret string) (WebhookConfig, error)
 	Update(ctx context.Context, w WebhookConfig) (WebhookConfig, error)
 	Delete(ctx context.Context, id uuid.UUID) error
-	ListDeliveries(ctx context.Context, webhookID uuid.UUID, req pagination.PageRequest) ([]WebhookDeliveryLog, int64, error)
+	ListDeliveries(ctx context.Context, webhookID uuid.UUID, filter DeliveryFilter, req pagination.PageRequest) ([]WebhookDeliveryLog, int64, error)
 	CreateDelivery(ctx context.Context, d WebhookDeliveryLog) (WebhookDeliveryLog, error)
 	UpdateDelivery(ctx context.Context, d WebhookDeliveryLog) (WebhookDeliveryLog, error)
 }
@@ -144,8 +144,9 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// ListDeliveries returns paginated delivery logs for a webhook.
-func (r *Repository) ListDeliveries(ctx context.Context, webhookID uuid.UUID, req pagination.PageRequest) ([]WebhookDeliveryLog, int64, error) {
+// ListDeliveries returns paginated delivery logs for a webhook, optionally filtered
+// by status and/or event_type.
+func (r *Repository) ListDeliveries(ctx context.Context, webhookID uuid.UUID, filter DeliveryFilter, req pagination.PageRequest) ([]WebhookDeliveryLog, int64, error) {
 	tenantID := tenant.FromContext(ctx)
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
@@ -153,18 +154,38 @@ func (r *Repository) ListDeliveries(ctx context.Context, webhookID uuid.UUID, re
 	}
 	defer release()
 
+	// Build dynamic args: $1 = webhookID; optional $2/$3 for status/event_type.
+	args := []any{webhookID}
+	where := "WHERE webhook_id = $1"
+	if filter.Status != "" {
+		args = append(args, filter.Status)
+		where += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+	if filter.EventType != "" {
+		args = append(args, filter.EventType)
+		where += fmt.Sprintf(" AND event_type = $%d", len(args))
+	}
+
 	var total int64
-	if err := conn.QueryRow(ctx, `SELECT COUNT(*) FROM webhook_delivery_log WHERE webhook_id = $1`, webhookID).Scan(&total); err != nil {
+	countQuery := "SELECT COUNT(*) FROM webhook_delivery_log " + where
+	if err := conn.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("webhook: count deliveries: %w", err)
 	}
 
-	rows, err := conn.Query(ctx, `
+	// Append pagination args after the filter args.
+	limitArg := len(args) + 1
+	offsetArg := len(args) + 2
+	args = append(args, req.Size, req.Offset())
+
+	listQuery := fmt.Sprintf(`
 		SELECT id, webhook_id, event_type, payload, status, response_status, response_body,
 		       attempts, delivered_at, created_at
 		  FROM webhook_delivery_log
-		 WHERE webhook_id = $1
+		 %s
 		 ORDER BY created_at DESC
-		 LIMIT $2 OFFSET $3`, webhookID, req.Size, req.Offset())
+		 LIMIT $%d OFFSET $%d`, where, limitArg, offsetArg)
+
+	rows, err := conn.Query(ctx, listQuery, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("webhook: list deliveries: %w", err)
 	}
