@@ -15,12 +15,26 @@ type KeycloakAdminConfig struct {
 	FrontendClient string
 }
 
+// MinIOConfig holds MinIO/S3 storage connection configuration.
+type MinIOConfig struct {
+	Endpoint        string
+	AccessKeyID     string
+	SecretAccessKey string
+	UseSSL          bool
+	Region          string
+	Bucket          string
+}
+
+// IsConfigured returns true when the MinIO endpoint is set.
+func (m MinIOConfig) IsConfigured() bool { return m.Endpoint != "" }
+
 // Config holds all configuration for agenthub-api.
 type Config struct {
 	Port            string
 	DatabaseURL     string
 	KeycloakBaseURL string
 	KeycloakAdmin   KeycloakAdminConfig
+	MinIO           MinIOConfig
 	CORSOrigins     []string
 	LogLevel        string
 }
@@ -50,6 +64,15 @@ func Load() (*Config, error) {
 
 	corsOrigins := getEnv("CORS_ORIGINS", "*")
 	cfg.CORSOrigins = strings.Split(corsOrigins, ",")
+
+	cfg.MinIO = MinIOConfig{
+		Endpoint:        os.Getenv("MINIO_ENDPOINT"),
+		AccessKeyID:     os.Getenv("MINIO_ACCESS_KEY"),
+		SecretAccessKey: os.Getenv("MINIO_SECRET_KEY"),
+		UseSSL:          os.Getenv("MINIO_USE_SSL") == "true",
+		Region:          getEnv("MINIO_REGION", "us-east-1"),
+		Bucket:          getEnv("MINIO_BUCKET", "agenthub-packages"),
+	}
 
 	return cfg, nil
 }

@@ -2,12 +2,14 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	commonsStorage "github.com/AgentHub-Studio/agenthub-go-commons/storage"
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
@@ -20,10 +22,17 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/experiment"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
+	mkplInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
+	mkplListing "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
+	mkplReview "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/review"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
+	regDependency "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/dependency"
+	regInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/installation"
+	regPackage "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
+	regVersion "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/version"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/search"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/settings"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
@@ -91,6 +100,38 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(knowledgebase.NewRepository(pool)))
 	mcpHandler := mcp.NewHandler(mcp.NewService(mcp.NewRepository(pool)))
 
+	// Marketplace handlers.
+	mkplListingHandler := mkplListing.NewHandler(mkplListing.NewService(mkplListing.NewRepository(pool)))
+	mkplReviewHandler := mkplReview.NewHandler(mkplReview.NewService(mkplReview.NewRepository(pool), mkplListing.NewRepository(pool)))
+	mkplInstallationHandler := mkplInstallation.NewHandler(mkplInstallation.NewService(mkplInstallation.NewRepository(pool)))
+
+	// Registry handlers — storage backend selected based on MinIO config.
+	var regStorage regInstallation.StorageBackend
+	if cfg.MinIO.IsConfigured() {
+		storageClient, err := commonsStorage.NewClient(commonsStorage.Config{
+			Endpoint:        cfg.MinIO.Endpoint,
+			AccessKeyID:     cfg.MinIO.AccessKeyID,
+			SecretAccessKey: cfg.MinIO.SecretAccessKey,
+			UseSSL:          cfg.MinIO.UseSSL,
+			Region:          cfg.MinIO.Region,
+		})
+		if err != nil {
+			slog.Warn("minio: failed to create storage client, using noop backend", "err", err)
+			regStorage = &regInstallation.NoopStorage{}
+		} else {
+			regStorage = regInstallation.NewMinIOStorage(storageClient, cfg.MinIO.Bucket)
+			slog.Info("minio: storage client configured", "bucket", cfg.MinIO.Bucket)
+		}
+	} else {
+		slog.Warn("minio: MINIO_ENDPOINT not set, package uploads will fail")
+		regStorage = &regInstallation.NoopStorage{}
+	}
+	pkgRepo := regPackage.NewRepository(pool)
+	regPackageHandler := regPackage.NewHandler(regPackage.NewService(pkgRepo))
+	regVersionHandler := regVersion.NewHandler(regVersion.NewService(regVersion.NewRepository(pool), pkgRepo))
+	regDependencyHandler := regDependency.NewHandler(regDependency.NewService(regDependency.NewRepository(pool), pkgRepo))
+	regInstallationHandler := regInstallation.NewHandler(regInstallation.NewService(regInstallation.NewRepository(pool), regStorage))
+
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
 
@@ -104,6 +145,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			r.Use(m)
 		}
 		tenantHandler.RegisterPublicRoutes(r)
+		regPackageHandler.RegisterPublicRoutes(r)
+		regInstallationHandler.RegisterPublicRoutes(r)
 	})
 
 	// Protected routes — JWT required.
@@ -136,6 +179,15 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		documentHandler.RegisterRoutes(r)
 		knowledgebaseHandler.RegisterRoutes(r)
 		mcpHandler.RegisterRoutes(r)
+		// Marketplace
+		mkplListingHandler.RegisterRoutes(r)
+		mkplReviewHandler.RegisterRoutes(r)
+		mkplInstallationHandler.RegisterRoutes(r)
+		// Registry
+		regPackageHandler.RegisterProtectedRoutes(r)
+		regVersionHandler.RegisterRoutes(r)
+		regDependencyHandler.RegisterRoutes(r)
+		regInstallationHandler.RegisterProtectedRoutes(r)
 	})
 
 	s.router = r
