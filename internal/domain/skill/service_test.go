@@ -2,6 +2,7 @@ package skill_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -80,8 +81,57 @@ func TestSkillService_Create_AutoSlug(t *testing.T) {
 		Category: "communication",
 	})
 	require.NoError(t, err)
-	assert.NotEmpty(t, s.Slug)
+	assert.Equal(t, "send-email", s.Slug)
 	assert.NotEqual(t, uuid.Nil, s.ID)
+}
+
+func TestSkillService_Create_SlugKebabCase(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	s, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:     "Document Search",
+		Category: "rag",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "document-search", s.Slug)
+}
+
+func TestSkillService_Create_InputSchemaArrayConversion(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	s, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:        "Search Tool",
+		Category:    "rag",
+		InputSchema: json.RawMessage(`["query","topK"]`),
+	})
+	require.NoError(t, err)
+
+	// Verify schema was converted to JSON Schema object
+	resp := s.InputSchema
+	schemaBytes, err := json.Marshal(resp)
+	require.NoError(t, err)
+	var schema map[string]any
+	require.NoError(t, json.Unmarshal(schemaBytes, &schema))
+	assert.Equal(t, "object", schema["type"])
+	props, ok := schema["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, props, "query")
+	assert.Contains(t, props, "topK")
+}
+
+func TestSkillService_Create_InputSchemaObjectPassthrough(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	objectSchema := json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)
+	s, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:        "Search V2",
+		Category:    "rag",
+		InputSchema: objectSchema,
+	})
+	require.NoError(t, err)
+	schemaBytes, err := json.Marshal(s.InputSchema)
+	require.NoError(t, err)
+	var schema map[string]any
+	require.NoError(t, json.Unmarshal(schemaBytes, &schema))
+	assert.Equal(t, "object", schema["type"])
+	assert.Contains(t, schema["properties"], "q")
 }
 
 func TestSkillService_Create_CustomSlug(t *testing.T) {

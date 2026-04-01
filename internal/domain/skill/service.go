@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode"
@@ -54,12 +55,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		slug = fmt.Sprintf("%s_%d", base, i)
 	}
 
+	inputSchema := normaliseInputSchema(req.InputSchema)
+
 	sk := Skill{
 		Name:         req.Name,
 		Slug:         slug,
 		Description:  req.Description,
 		Category:     req.Category,
-		InputSchema:  req.InputSchema,
+		InputSchema:  inputSchema,
 		OutputSchema: req.OutputSchema,
 	}
 	created, err := s.repo.Create(ctx, sk)
@@ -92,7 +95,44 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repo.Delete(ctx, id)
 }
 
-// toSlug converts a name to a snake_case slug.
+// normaliseInputSchema converts array shorthand (["field1","field2"]) to a
+// full JSON Schema object, and passes through existing object schemas unchanged.
+// nil / empty input returns nil.
+func normaliseInputSchema(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var parsed any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return raw // not valid JSON — return as-is
+	}
+	arr, ok := parsed.([]any)
+	if !ok {
+		return raw // already an object (or string) — pass through
+	}
+	// Convert ["field1","field2"] → JSON Schema object with string properties
+	properties := make(map[string]any, len(arr))
+	required := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if name, ok := item.(string); ok {
+			properties[name] = map[string]any{"type": "string"}
+			required = append(required, name)
+		}
+	}
+	schema := map[string]any{
+		"type":       "object",
+		"properties": properties,
+		"required":   required,
+	}
+	out, err := json.Marshal(schema)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+// toSlug converts a name to a kebab-case slug.
+// "Document Search" → "document-search", "My  Tool!" → "my-tool"
 func toSlug(name string) string {
 	name = strings.ToLower(name)
 	var b strings.Builder
@@ -100,13 +140,13 @@ func toSlug(name string) string {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			b.WriteRune(r)
 		} else {
-			b.WriteRune('_')
+			b.WriteRune('-')
 		}
 	}
-	// collapse consecutive underscores
+	// collapse consecutive hyphens
 	result := b.String()
-	for strings.Contains(result, "__") {
-		result = strings.ReplaceAll(result, "__", "_")
+	for strings.Contains(result, "--") {
+		result = strings.ReplaceAll(result, "--", "-")
 	}
-	return strings.Trim(result, "_")
+	return strings.Trim(result, "-")
 }
