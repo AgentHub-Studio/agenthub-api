@@ -49,7 +49,7 @@ func TestAuditService_Record_Success(t *testing.T) {
 	log, err := svc.Record(context.Background(), tenantID, audit.RecordRequest{
 		EntityType: "agent",
 		EntityID:   uuid.New().String(),
-		Action:     audit.ActionCreate,
+		Action:     audit.AuditActionCreate,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "agent", log.EntityType)
@@ -68,7 +68,7 @@ func TestAuditService_ListAll(t *testing.T) {
 		_, err := svc.Record(context.Background(), tenantID, audit.RecordRequest{
 			EntityType: "skill",
 			EntityID:   uuid.New().String(),
-			Action:     audit.ActionUpdate,
+			Action:     audit.AuditActionUpdate,
 		})
 		require.NoError(t, err)
 	}

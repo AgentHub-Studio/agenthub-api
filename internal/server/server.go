@@ -74,7 +74,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	experimentHandler := experiment.NewHandler(experiment.NewService(experiment.NewRepository(pool)))
 	vpnHandler := vpnresource.NewHandler(vpnresource.NewService(vpnresource.NewRepository(pool)))
 	datasourceHandler := datasource.NewHandler(datasource.NewService(datasource.NewRepository(pool)))
-	searchHandler := search.NewHandler(search.NewService(pool))
+	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
 	chatHandler := chat.NewHandler(chat.NewService(chat.NewRepository(pool)))
 	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool)))
 	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(knowledgebase.NewRepository(pool)))

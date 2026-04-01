@@ -51,9 +51,10 @@ func (m *mockSettingsRepo) Delete(_ context.Context, key string) error {
 func TestSettingsService_Upsert_Success(t *testing.T) {
 	svc := settings.NewService(newMockRepo())
 	val, _ := json.Marshal("dark")
+	desc := "UI theme"
 	s, err := svc.Upsert(context.Background(), "theme", settings.UpdateSettingRequest{
 		Value:       val,
-		Description: "UI theme",
+		Description: &desc,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "theme", s.Key)

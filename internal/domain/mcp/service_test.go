@@ -102,7 +102,7 @@ func TestMCPService_Delete_NotFound(t *testing.T) {
 func TestMCPService_ListAutoStart(t *testing.T) {
 	svc := mcp.NewService(newMockRepo())
 	autoStart := true
-	_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: "auto", TransportType: "stdio", AutoStart: &autoStart})
+	_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: "auto", TransportType: "stdio", AutoStart: autoStart})
 	require.NoError(t, err)
 	_, err = svc.Create(context.Background(), mcp.CreateRequest{Name: "manual", TransportType: "stdio"})
 	require.NoError(t, err)

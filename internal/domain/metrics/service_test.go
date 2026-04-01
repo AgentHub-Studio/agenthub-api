@@ -41,7 +41,7 @@ func (m *mockMetricsRepo) GetAgentSummary(_ context.Context, _ string, agentID u
 			total += r.TotalTokens
 		}
 	}
-	return metrics.MetricsSummary{TotalTokens: total}, nil
+	return metrics.MetricsSummary{TotalTokens: int64(total)}, nil
 }
 
 func (m *mockMetricsRepo) GetTenantSummary(_ context.Context, _ string) (metrics.MetricsSummary, error) {
@@ -49,7 +49,7 @@ func (m *mockMetricsRepo) GetTenantSummary(_ context.Context, _ string) (metrics
 	for _, r := range m.data {
 		total += r.TotalTokens
 	}
-	return metrics.MetricsSummary{TotalTokens: total}, nil
+	return metrics.MetricsSummary{TotalTokens: int64(total)}, nil
 }
 
 const tenantID = "test-tenant"
@@ -63,6 +63,7 @@ func TestMetricsService_Record_Success(t *testing.T) {
 		Provider:         "openai",
 		PromptTokens:     100,
 		CompletionTokens: 50,
+		TotalTokens:      150,
 		LatencyMs:        250,
 	})
 	require.NoError(t, err)
@@ -90,10 +91,10 @@ func TestMetricsService_GetAgentSummary(t *testing.T) {
 	agentID := uuid.New()
 	_, err := svc.Record(context.Background(), tenantID, metrics.RecordRequest{
 		AgentID: agentID, ModelName: "gpt-4o", Provider: "openai",
-		PromptTokens: 100, CompletionTokens: 50,
+		PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150,
 	})
 	require.NoError(t, err)
 	summary, err := svc.GetAgentSummary(context.Background(), tenantID, agentID)
 	require.NoError(t, err)
-	assert.Equal(t, 150, summary.TotalTokens)
+	assert.Equal(t, int64(150), summary.TotalTokens)
 }

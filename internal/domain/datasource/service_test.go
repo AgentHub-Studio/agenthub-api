@@ -65,11 +65,11 @@ func TestDataSourceService_Create_Success(t *testing.T) {
 	svc := datasource.NewService(newMockRepo())
 	ds, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
 		Name:     "Prod DB",
-		Type:     datasource.TypePostgreSQL,
+		Type:     datasource.DataSourceTypePostgreSQL,
 		Host:     "pg.internal",
 		Port:     5432,
 		Database: "appdb",
-		DbUser:   "appuser",
+		DBUser:   "appuser",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "Prod DB", ds.Name)
@@ -85,7 +85,7 @@ func TestDataSourceService_GetByID_NotFound(t *testing.T) {
 func TestDataSourceService_Delete_Success(t *testing.T) {
 	svc := datasource.NewService(newMockRepo())
 	created, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
-		Name: "DB", Type: datasource.TypeMySQL, Host: "mysql", Port: 3306, Database: "db", DbUser: "root",
+		Name: "DB", Type: datasource.DataSourceTypeMySQL, Host: "mysql", Port: 3306, Database: "db", DBUser: "root",
 	})
 	require.NoError(t, err)
 	err = svc.Delete(context.Background(), tenantID, created.ID)
@@ -96,7 +96,7 @@ func TestDataSourceService_ListAll(t *testing.T) {
 	svc := datasource.NewService(newMockRepo())
 	for i := 0; i < 2; i++ {
 		_, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
-			Name: "DB", Type: datasource.TypePostgreSQL, Host: "pg", Port: 5432, Database: "db", DbUser: "u",
+			Name: "DB", Type: datasource.DataSourceTypePostgreSQL, Host: "pg", Port: 5432, Database: "db", DBUser: "u",
 		})
 		require.NoError(t, err)
 	}

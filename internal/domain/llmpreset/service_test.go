@@ -120,6 +120,6 @@ func TestLLMPresetService_List(t *testing.T) {
 	}
 	page, err := svc.List(context.Background(), pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)
-	assert.Equal(t, 3, page.TotalElements)
+	assert.Equal(t, int64(3), page.TotalElements)
 	assert.Len(t, page.Content, 3)
 }

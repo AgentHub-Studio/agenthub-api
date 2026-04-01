@@ -10,17 +10,31 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/database"
 )
 
+// Repository abstracts the underlying data source for search queries.
+// Each method searches a single entity type and returns matching results.
+type Repository interface {
+	SearchAgents(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error)
+	SearchSkills(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error)
+	SearchTools(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error)
+	SearchKnowledgeBases(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error)
+}
+
 // Service implements global cross-domain search.
 type Service struct {
-	pool *pgxpool.Pool
+	repo Repository
 }
 
 // NewService creates a new Service.
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool}
+func NewService(repo Repository) *Service {
+	return &Service{repo: repo}
 }
 
-// Search runs parallel ILIKE queries across agents, skills, tools, and knowledge_bases.
+// NewServiceWithPool creates a Service backed by a pgxpool.Pool.
+func NewServiceWithPool(pool *pgxpool.Pool) *Service {
+	return NewService(&pgRepository{pool: pool})
+}
+
+// Search runs parallel queries across agents, skills, tools, and knowledge_bases.
 func (s *Service) Search(ctx context.Context, tenantID string, query string, limit int) (GlobalSearchResponse, error) {
 	if limit <= 0 {
 		limit = 5
@@ -41,25 +55,25 @@ func (s *Service) Search(ctx context.Context, tenantID string, query string, lim
 
 	go func() {
 		defer wg.Done()
-		items, err := s.searchTable(ctx, tenantID, "agent", "agent", query, limit)
+		items, err := s.repo.SearchAgents(ctx, tenantID, query, limit)
 		agentCh <- result{items, err}
 	}()
 
 	go func() {
 		defer wg.Done()
-		items, err := s.searchTable(ctx, tenantID, "skill", "skill", query, limit)
+		items, err := s.repo.SearchSkills(ctx, tenantID, query, limit)
 		skillCh <- result{items, err}
 	}()
 
 	go func() {
 		defer wg.Done()
-		items, err := s.searchTable(ctx, tenantID, "tool", "tool", query, limit)
+		items, err := s.repo.SearchTools(ctx, tenantID, query, limit)
 		toolCh <- result{items, err}
 	}()
 
 	go func() {
 		defer wg.Done()
-		items, err := s.searchTable(ctx, tenantID, "knowledge_base", "knowledge_base", query, limit)
+		items, err := s.repo.SearchKnowledgeBases(ctx, tenantID, query, limit)
 		kbCh <- result{items, err}
 	}()
 
@@ -85,9 +99,30 @@ func (s *Service) Search(ctx context.Context, tenantID string, query string, lim
 	}, nil
 }
 
+// pgRepository is the PostgreSQL implementation of Repository.
+type pgRepository struct {
+	pool *pgxpool.Pool
+}
+
+func (r *pgRepository) SearchAgents(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error) {
+	return r.searchTable(ctx, tenantID, "agent", "agent", query, limit)
+}
+
+func (r *pgRepository) SearchSkills(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error) {
+	return r.searchTable(ctx, tenantID, "skill", "skill", query, limit)
+}
+
+func (r *pgRepository) SearchTools(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error) {
+	return r.searchTable(ctx, tenantID, "tool", "tool", query, limit)
+}
+
+func (r *pgRepository) SearchKnowledgeBases(ctx context.Context, tenantID, query string, limit int) ([]SearchResult, error) {
+	return r.searchTable(ctx, tenantID, "knowledge_base", "knowledge_base", query, limit)
+}
+
 // searchTable performs an ILIKE search on name and description columns for the given table.
-func (s *Service) searchTable(ctx context.Context, tenantID, table, resourceType, query string, limit int) ([]SearchResult, error) {
-	conn, release, err := database.AcquireWithTenant(ctx, s.pool, tenantID)
+func (r *pgRepository) searchTable(ctx context.Context, tenantID, table, resourceType, query string, limit int) ([]SearchResult, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -111,12 +146,12 @@ func (s *Service) searchTable(ctx context.Context, tenantID, table, resourceType
 
 	var items []SearchResult
 	for rows.Next() {
-		var r SearchResult
-		r.Type = resourceType
-		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &r.Status, &r.Slug); err != nil {
+		var res SearchResult
+		res.Type = resourceType
+		if err := rows.Scan(&res.ID, &res.Name, &res.Description, &res.Status, &res.Slug); err != nil {
 			return nil, fmt.Errorf("search: scan %s: %w", table, err)
 		}
-		items = append(items, r)
+		items = append(items, res)
 	}
 	if items == nil {
 		items = []SearchResult{}

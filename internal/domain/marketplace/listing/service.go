@@ -13,11 +13,11 @@ import (
 
 // Service implements business logic for marketplace listings.
 type Service struct {
-	repo *Repository
+	repo ListingRepository
 }
 
 // NewService creates a new Service.
-func NewService(repo *Repository) *Service {
+func NewService(repo ListingRepository) *Service {
 	return &Service{repo: repo}
 }
 
