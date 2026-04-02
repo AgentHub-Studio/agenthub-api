@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -22,6 +24,9 @@ type chatService interface {
 	ArchiveSession(ctx context.Context, id uuid.UUID) (ChatSessionResponse, error)
 	ListMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) (pagination.Page[ChatMessageResponse], error)
 	AddMessage(ctx context.Context, r *http.Request, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
+	// GetLatestAssistantMessage returns the most recent assistant message for the session
+	// created after the given time. Returns (msg, true, nil) when found.
+	GetLatestAssistantMessage(ctx context.Context, sessionID uuid.UUID, after time.Time) (ChatMessageResponse, bool, error)
 }
 
 // Handler handles HTTP requests for chat sessions and messages.
@@ -43,6 +48,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/chat/sessions/{id}/archive", h.archiveSession)
 	r.Get("/api/chat/sessions/{id}/messages", h.listMessages)
 	r.Post("/api/chat/sessions/{id}/messages", h.addMessage)
+	r.Get("/api/chat/sessions/{id}/stream", h.streamMessages)
 }
 
 func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -167,4 +173,73 @@ func (h *Handler) addMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.JSON(w, http.StatusCreated, resp)
+}
+
+// streamMessages handles GET /api/chat/sessions/{id}/stream.
+// It long-polls for a new assistant message and delivers it as Server-Sent Events (SSE).
+// The frontend opens this endpoint after posting a user message and waits for the reply.
+func (h *Handler) streamMessages(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respond.Error(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	// Record the time just before the poll loop — any assistant message created
+	// after this point is the reply to the most recent user message.
+	after := time.Now().UTC().Add(-5 * time.Second)
+
+	ctx := r.Context()
+	deadline := time.Now().Add(120 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+
+			msg, found, pollErr := h.svc.GetLatestAssistantMessage(ctx, sessionID, after)
+			if pollErr != nil {
+				continue
+			}
+			if !found {
+				continue
+			}
+
+			payload, marshalErr := json.Marshal(map[string]any{
+				"content": msg.Content,
+				"text":    msg.Content,
+			})
+			if marshalErr != nil {
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+
+			fmt.Fprintf(w, "data: %s\n\n", payload)
+			flusher.Flush()
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+	}
 }

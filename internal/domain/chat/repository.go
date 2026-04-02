@@ -24,6 +24,9 @@ type Repository interface {
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	FindMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) ([]ChatMessage, int64, error)
 	CreateMessage(ctx context.Context, m ChatMessage) (ChatMessage, error)
+	// GetLatestAssistantMessage returns the most recent assistant message created after
+	// the given time, or (ChatMessage{}, false, nil) if none has arrived yet.
+	GetLatestAssistantMessage(ctx context.Context, sessionID uuid.UUID, after time.Time) (ChatMessage, bool, error)
 }
 
 type postgresRepository struct {
@@ -225,4 +228,30 @@ func (r *postgresRepository) CreateMessage(ctx context.Context, m ChatMessage) (
 	}
 
 	return m, nil
+}
+
+func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sessionID uuid.UUID, after time.Time) (ChatMessage, bool, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return ChatMessage{}, false, err
+	}
+	defer release()
+
+	var m ChatMessage
+	err = conn.QueryRow(ctx,
+		`SELECT id, session_id, role, content, created_at
+		 FROM chat_message
+		 WHERE session_id = $1 AND role = 'assistant' AND created_at > $2
+		 ORDER BY created_at DESC
+		 LIMIT 1`,
+		sessionID, after,
+	).Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ChatMessage{}, false, nil
+		}
+		return ChatMessage{}, false, fmt.Errorf("chat: get latest assistant message: %w", err)
+	}
+
+	return m, true, nil
 }
