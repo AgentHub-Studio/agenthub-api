@@ -82,5 +82,45 @@ func (c *OrchestratorClient) RunAgentExecution(ctx context.Context, bearerToken 
 		return "", fmt.Errorf("chat orchestrator: decode response: %w", err)
 	}
 
-	return execResp.Output, nil
+	// If the execution already completed synchronously, return immediately.
+	if execResp.Status == "COMPLETED" {
+		return execResp.Output, nil
+	}
+	if execResp.Status == "FAILED" {
+		return "", fmt.Errorf("chat orchestrator: execution failed")
+	}
+
+	// Poll for completion — the orchestrator runs pipelines asynchronously.
+	execID := execResp.ID
+	maxAttempts := 60
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+
+		getReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			c.baseURL+"/api/executions/"+execID, nil)
+		if err != nil {
+			continue
+		}
+		getReq.Header.Set("Authorization", bearerToken)
+
+		getResp, err := c.httpClient.Do(getReq)
+		if err != nil {
+			continue
+		}
+		var polledResp executionResponse
+		json.NewDecoder(getResp.Body).Decode(&polledResp) //nolint:errcheck
+		getResp.Body.Close()                              //nolint:errcheck
+
+		if polledResp.Status == "COMPLETED" {
+			return polledResp.Output, nil
+		}
+		if polledResp.Status == "FAILED" {
+			return "", fmt.Errorf("chat orchestrator: execution failed")
+		}
+	}
+	return "", fmt.Errorf("chat orchestrator: execution timed out after %d attempts", maxAttempts)
 }
