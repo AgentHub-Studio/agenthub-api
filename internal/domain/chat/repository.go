@@ -27,6 +27,9 @@ type Repository interface {
 	// GetLatestAssistantMessage returns the most recent assistant message created after
 	// the given time, or (ChatMessage{}, false, nil) if none has arrived yet.
 	GetLatestAssistantMessage(ctx context.Context, sessionID uuid.UUID, after time.Time) (ChatMessage, bool, error)
+	// FindAllMessages returns all messages for a session ordered by created_at ASC.
+	// Used by the agentic Runner to load conversation history.
+	FindAllMessages(ctx context.Context, sessionID uuid.UUID) ([]ChatMessage, error)
 	// GetLatestCompactSummary returns the most recent compact_summary message for the session,
 	// or (ChatMessage{}, false, nil) if none exists.
 	GetLatestCompactSummary(ctx context.Context, sessionID uuid.UUID) (ChatMessage, bool, error)
@@ -283,6 +286,48 @@ func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sess
 	}
 
 	return m, true, nil
+}
+
+func (r *postgresRepository) FindAllMessages(ctx context.Context, sessionID uuid.UUID) ([]ChatMessage, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT id, session_id, role, content,
+		        message_type, tool_calls, tool_call_id,
+		        metadata, token_usage, finish_reason, turn_index,
+		        created_at
+		 FROM chat_message
+		 WHERE session_id = $1
+		 ORDER BY created_at ASC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("chat: find all messages: %w", err)
+	}
+	defer rows.Close()
+
+	var items []ChatMessage
+	for rows.Next() {
+		var m ChatMessage
+		if err := rows.Scan(
+			&m.ID, &m.SessionID, &m.Role, &m.Content,
+			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
+			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex,
+			&m.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("chat: scan message: %w", err)
+		}
+		items = append(items, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("chat: rows: %w", err)
+	}
+
+	return items, nil
 }
 
 func (r *postgresRepository) GetLatestCompactSummary(ctx context.Context, sessionID uuid.UUID) (ChatMessage, bool, error) {

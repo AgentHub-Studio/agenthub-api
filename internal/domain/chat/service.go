@@ -2,9 +2,8 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,21 +11,52 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
-// agentRunner delegates user messages to the orchestrator for agent-based sessions.
-type agentRunner interface {
-	RunAgentExecution(ctx context.Context, bearerToken string, agentID string, userMessage string) (string, error)
+// AgentLoader returns agent configuration needed by the Runner.
+type AgentLoader interface {
+	GetAgentForRun(ctx context.Context, id uuid.UUID) (*AgentRunConfig, error)
+}
+
+// AgentRunConfig carries agent fields consumed by the agentic Runner.
+type AgentRunConfig struct {
+	ID           uuid.UUID
+	SystemPrompt string
+	ModelConfig  json.RawMessage // raw JSON — passed to RunConfigFromModelConfig
+}
+
+// RunEvent is the envelope emitted by the agentic loop.
+// Defined here (in the chat package) to avoid an import cycle:
+// chat → chat/agentic → chat.
+type RunEvent struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+// RunInput carries everything needed to start an agentic run.
+type RunInput struct {
+	SessionID    uuid.UUID
+	AgentID      uuid.UUID
+	UserMessage  string
+	SystemPrompt string
+	TenantID     string
+}
+
+// SessionRunner starts an agentic loop and returns a channel of RunEvents.
+// The chat.Service calls this; the concrete implementation lives in
+// chat/agentic and is injected via the server wiring.
+type SessionRunner interface {
+	RunSession(ctx context.Context, in RunInput) (<-chan RunEvent, error)
 }
 
 // Service provides business logic for chat operations.
 type Service struct {
-	repo         Repository
-	orchestrator agentRunner
+	repo   Repository
+	runner SessionRunner
 }
 
 // NewService creates a new Service backed by the given Repository.
-// Pass a non-nil orchestrator to enable AI responses for agent-based sessions.
-func NewService(repo Repository, orchestrator agentRunner) *Service {
-	return &Service{repo: repo, orchestrator: orchestrator}
+// runner may be nil (disables agentic features).
+func NewService(repo Repository, runner SessionRunner) *Service {
+	return &Service{repo: repo, runner: runner}
 }
 
 // ListSessions returns a paginated list of chat sessions.
@@ -119,10 +149,9 @@ func (s *Service) GetLatestAssistantMessage(ctx context.Context, sessionID uuid.
 }
 
 // AddMessage adds a message to a chat session.
-// For user messages on agent-bound sessions, it delegates to the orchestrator and
-// stores the assistant reply. The user message response is returned; the assistant
-// reply (if any) is stored asynchronously and the frontend can poll for it.
-func (s *Service) AddMessage(ctx context.Context, r *http.Request, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error) {
+// Returns the persisted user message DTO. For agent-bound sessions the agentic
+// loop is NOT started here — use RunSession instead.
+func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error) {
 	if req.Role == "" {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: role is required")
 	}
@@ -141,32 +170,29 @@ func (s *Service) AddMessage(ctx context.Context, r *http.Request, sessionID uui
 		return ChatMessageResponse{}, fmt.Errorf("chat service: add message: %w", err)
 	}
 
-	// For user messages on agent sessions, trigger orchestrator and store assistant reply.
-	if req.Role == "user" && s.orchestrator != nil {
-		session, sesErr := s.repo.GetSessionByID(ctx, sessionID)
-		if sesErr == nil && session.AgentID != nil {
-			bearerToken := r.Header.Get("Authorization")
-			go func() {
-				bgCtx := context.Background()
-				output, runErr := s.orchestrator.RunAgentExecution(bgCtx, bearerToken, session.AgentID.String(), req.Content)
-				if runErr != nil {
-					slog.Warn("chat service: orchestrator execution failed", "sessionId", sessionID, "err", runErr)
-					return
-				}
-				if output == "" {
-					return
-				}
-				assistantMsg := ChatMessage{
-					SessionID: sessionID,
-					Role:      "assistant",
-					Content:   output,
-				}
-				if _, storeErr := s.repo.CreateMessage(bgCtx, assistantMsg); storeErr != nil {
-					slog.Warn("chat service: failed to store assistant message", "sessionId", sessionID, "err", storeErr)
-				}
-			}()
-		}
+	return MessageResponseFrom(created), nil
+}
+
+// RunSession starts an agentic run for the given session.
+// It loads the session, validates it has an agent, then delegates to the SessionRunner.
+// The caller (SSE handler) consumes the returned channel for streaming.
+func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error) {
+	if s.runner == nil {
+		return nil, fmt.Errorf("chat service: agentic features not configured")
 	}
 
-	return MessageResponseFrom(created), nil
+	session, err := s.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("chat service: get session: %w", err)
+	}
+	if session.AgentID == nil {
+		return nil, fmt.Errorf("chat service: session has no agent")
+	}
+
+	return s.runner.RunSession(ctx, RunInput{
+		SessionID:   sessionID,
+		AgentID:     *session.AgentID,
+		UserMessage: userMessage,
+		TenantID:    tenantID,
+	})
 }

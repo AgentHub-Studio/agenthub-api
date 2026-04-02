@@ -86,7 +86,7 @@ func (m *mockChatSvc) ListMessages(_ context.Context, sessionID uuid.UUID, req p
 	return pagination.NewPage(items, int64(len(items)), req), nil
 }
 
-func (m *mockChatSvc) AddMessage(_ context.Context, _ *http.Request, sessionID uuid.UUID, req chat.CreateMessageRequest) (chat.ChatMessageResponse, error) {
+func (m *mockChatSvc) AddMessage(_ context.Context, sessionID uuid.UUID, req chat.CreateMessageRequest) (chat.ChatMessageResponse, error) {
 	msg := chat.ChatMessage{
 		ID:        uuid.New(),
 		SessionID: sessionID,
@@ -254,5 +254,38 @@ func TestChatHandler_StreamMessages_InvalidID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/not-a-uuid/stream", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestChatHandler_ArchiveSession_Success(t *testing.T) {
+	r, svc := setupChat()
+	id := uuid.New()
+	svc.sessions[id] = chat.ChatSession{ID: id, Title: "Active Chat", Status: chat.StatusActive}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+id.String()+"/archive", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp chat.ChatSessionResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, chat.StatusArchived, resp.Status)
+}
+
+func TestChatHandler_ArchiveSession_NotFound(t *testing.T) {
+	r, _ := setupChat()
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+uuid.New().String()+"/archive", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestChatHandler_ArchiveSession_InvalidID(t *testing.T) {
+	r, _ := setupChat()
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/not-a-uuid/archive", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
