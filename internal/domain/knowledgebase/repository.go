@@ -23,6 +23,8 @@ type Repository interface {
 	Update(ctx context.Context, k KnowledgeBase) (KnowledgeBase, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	UpdateStatus(ctx context.Context, id uuid.UUID, status KnowledgeBaseStatus) (KnowledgeBase, error)
+	// ListByAgentID returns all knowledge bases linked to an agent via the agent_knowledge_base table.
+	ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]KnowledgeBase, error)
 }
 
 type postgresRepository struct {
@@ -189,6 +191,46 @@ func (r *postgresRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	}
 
 	return nil
+}
+
+// ListByAgentID returns all knowledge bases linked to the given agent via the agent_knowledge_base join table.
+func (r *postgresRepository) ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]KnowledgeBase, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT kb.`+selectColumns+`,
+		        (SELECT COUNT(*) FROM document d WHERE d.knowledge_base_id = kb.id) AS document_count
+		 FROM knowledge_base kb
+		 INNER JOIN agent_knowledge_base akb ON akb.knowledge_base_id = kb.id
+		 WHERE akb.agent_id = $1
+		 ORDER BY kb.name`,
+		agentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("knowledgebase: list by agent: %w", err)
+	}
+	defer rows.Close()
+
+	var items []KnowledgeBase
+	for rows.Next() {
+		var kb KnowledgeBase
+		if err := rows.Scan(
+			&kb.ID, &kb.Name, &kb.Description, &kb.Status,
+			&kb.EmbeddingModel, &kb.SearchMode, &kb.ContextWindow,
+			&kb.CreatedAt, &kb.UpdatedAt, &kb.DocumentCount,
+		); err != nil {
+			return nil, fmt.Errorf("knowledgebase: scan: %w", err)
+		}
+		items = append(items, kb)
+	}
+	if items == nil {
+		items = []KnowledgeBase{}
+	}
+	return items, rows.Err()
 }
 
 func (r *postgresRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status KnowledgeBaseStatus) (KnowledgeBase, error) {

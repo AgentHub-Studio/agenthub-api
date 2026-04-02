@@ -25,6 +25,8 @@ type SkillRepository interface {
 	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Skill, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	SlugExists(ctx context.Context, slug string) (bool, error)
+	// ListByAgentID returns all skills linked to an agent via the agent_skill table.
+	ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]Skill, error)
 }
 
 // Repository handles persistence for skills.
@@ -222,4 +224,40 @@ func scanSkillFromRows(rows pgx.Rows) (Skill, error) {
 	s.InputSchema = in
 	s.OutputSchema = out
 	return s, nil
+}
+
+// ListByAgentID returns all skills linked to the given agent via the agent_skill join table.
+func (r *Repository) ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]Skill, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT s.id, s.name, s.slug, s.description, s.category, s.input_schema, s.output_schema, s.created_at, s.updated_at
+		 FROM skill s
+		 INNER JOIN agent_skill ags ON ags.skill_id = s.id
+		 WHERE ags.agent_id = $1
+		 ORDER BY s.name`,
+		agentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("skill: list by agent: %w", err)
+	}
+	defer rows.Close()
+
+	var skills []Skill
+	for rows.Next() {
+		s, err := scanSkillFromRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		skills = append(skills, s)
+	}
+	if skills == nil {
+		skills = []Skill{}
+	}
+	return skills, rows.Err()
 }
