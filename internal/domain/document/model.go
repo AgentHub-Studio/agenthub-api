@@ -1,6 +1,7 @@
 package document
 
 import (
+	"context"
 	"errors"
 	"io"
 	"time"
@@ -61,4 +62,29 @@ type UploadRequest struct {
 	ContentType     string
 	FileSize        int64
 	Content         io.Reader // file data from multipart form
+}
+
+// DocumentUploadedEvent is published to RabbitMQ after a successful upload so the
+// extractor service can start the chunking pipeline for the new document.
+type DocumentUploadedEvent struct {
+	DocumentID      uuid.UUID `json:"documentId"`
+	KnowledgeBaseID uuid.UUID `json:"knowledgeBaseId"`
+	StoragePath     string    `json:"storagePath"`
+	ContentType     string    `json:"contentType"`
+	FileName        string    `json:"fileName"`
+	TenantID        string    `json:"tenantId"`
+}
+
+// EventPublisher publishes domain events for document lifecycle changes.
+type EventPublisher interface {
+	// PublishUploaded enqueues a DocumentUploadedEvent for the extractor pipeline.
+	PublishUploaded(ctx context.Context, event DocumentUploadedEvent) error
+}
+
+// NoopEventPublisher silently discards events — used when RabbitMQ is not configured.
+type NoopEventPublisher struct{}
+
+// PublishUploaded is a no-op implementation.
+func (n *NoopEventPublisher) PublishUploaded(_ context.Context, _ DocumentUploadedEvent) error {
+	return nil
 }

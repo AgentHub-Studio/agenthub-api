@@ -116,7 +116,18 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		slog.Warn("minio: MINIO_ENDPOINT not set, document uploads will not be stored")
 		docStorage = &document.NoopStorageClient{}
 	}
-	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage))
+	// Build document event publisher — optional; requires RABBITMQ_URL.
+	var docPublisher document.EventPublisher = &document.NoopEventPublisher{}
+	if cfg.RabbitMQURL != "" {
+		pub, err := document.NewRabbitMQEventPublisher(cfg.RabbitMQURL)
+		if err != nil {
+			slog.Warn("rabbitmq: failed to connect for document events, using noop", "err", err)
+		} else {
+			docPublisher = pub
+			slog.Info("rabbitmq: document event publisher connected")
+		}
+	}
+	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher))
 	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(knowledgebase.NewRepository(pool)))
 	mcpHandler := mcp.NewHandler(mcp.NewService(mcp.NewRepository(pool)))
 

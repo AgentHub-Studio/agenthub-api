@@ -1,0 +1,85 @@
+package document
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+)
+
+const (
+	// DocumentUploadedExchange is the fanout exchange for document pipeline events.
+	DocumentUploadedExchange = ""
+	// DocumentUploadedQueue is the queue consumed by the extractor service.
+	DocumentUploadedQueue = "document.uploaded"
+)
+
+// RabbitMQEventPublisher publishes document events to a RabbitMQ queue.
+type RabbitMQEventPublisher struct {
+	conn *amqp.Connection
+	ch   *amqp.Channel
+}
+
+// NewRabbitMQEventPublisher dials url, declares the queue, and returns a publisher.
+func NewRabbitMQEventPublisher(url string) (*RabbitMQEventPublisher, error) {
+	conn, err := amqp.Dial(url)
+	if err != nil {
+		return nil, fmt.Errorf("document publisher: dial %q: %w", url, err)
+	}
+
+	ch, err := conn.Channel()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("document publisher: open channel: %w", err)
+	}
+
+	// Declare the queue so it exists before the first publish.
+	_, err = ch.QueueDeclare(
+		DocumentUploadedQueue,
+		true,  // durable
+		false, // autoDelete
+		false, // exclusive
+		false, // noWait
+		nil,
+	)
+	if err != nil {
+		ch.Close()
+		conn.Close()
+		return nil, fmt.Errorf("document publisher: declare queue: %w", err)
+	}
+
+	return &RabbitMQEventPublisher{conn: conn, ch: ch}, nil
+}
+
+// PublishUploaded encodes the event as JSON and publishes it to DocumentUploadedQueue.
+func (p *RabbitMQEventPublisher) PublishUploaded(ctx context.Context, event DocumentUploadedEvent) error {
+	body, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("document publisher: marshal event: %w", err)
+	}
+
+	return p.ch.PublishWithContext(ctx,
+		DocumentUploadedExchange, // exchange — empty = default (direct to queue)
+		DocumentUploadedQueue,    // routing key = queue name
+		false,                    // mandatory
+		false,                    // immediate
+		amqp.Publishing{
+			ContentType:  "application/json",
+			Body:         body,
+			DeliveryMode: amqp.Persistent,
+			Timestamp:    time.Now(),
+		},
+	)
+}
+
+// Close releases the AMQP channel and connection.
+func (p *RabbitMQEventPublisher) Close() {
+	if p.ch != nil {
+		p.ch.Close()
+	}
+	if p.conn != nil {
+		p.conn.Close()
+	}
+}

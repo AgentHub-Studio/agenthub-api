@@ -3,21 +3,25 @@ package document
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // Service provides business logic for Document operations.
 type Service struct {
-	repo    Repository
-	storage StorageClient
+	repo      Repository
+	storage   StorageClient
+	publisher EventPublisher
 }
 
-// NewService creates a new Service backed by the given Repository and StorageClient.
-func NewService(repo Repository, storage StorageClient) *Service {
-	return &Service{repo: repo, storage: storage}
+// NewService creates a new Service backed by the given Repository, StorageClient, and EventPublisher.
+// Pass &NoopEventPublisher{} when RabbitMQ is not configured.
+func NewService(repo Repository, storage StorageClient, publisher EventPublisher) *Service {
+	return &Service{repo: repo, storage: storage, publisher: publisher}
 }
 
 // ListByKnowledgeBase returns a paginated list of documents for a knowledge base.
@@ -44,7 +48,8 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (DocumentResponse, 
 	return ResponseFrom(d), nil
 }
 
-// Upload stores the file in object storage and creates a document record with PENDING status.
+// Upload stores the file in object storage, creates a PENDING document record, and
+// publishes a DocumentUploadedEvent so the extractor service can start the pipeline.
 func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentResponse, error) {
 	if req.FileName == "" {
 		return DocumentResponse{}, fmt.Errorf("document service: file name is required")
@@ -71,6 +76,22 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentRespon
 	created, err := s.repo.Create(ctx, d)
 	if err != nil {
 		return DocumentResponse{}, fmt.Errorf("document service: upload: %w", err)
+	}
+
+	// Publish event so the extractor picks up the document.
+	// A publish failure is logged but does not roll back the upload — the document
+	// remains in PENDING status and can be re-triggered manually if needed.
+	event := DocumentUploadedEvent{
+		DocumentID:      created.ID,
+		KnowledgeBaseID: created.KnowledgeBaseID,
+		StoragePath:     created.StoragePath,
+		ContentType:     created.ContentType,
+		FileName:        created.FileName,
+		TenantID:        tenant.FromContext(ctx),
+	}
+	if pubErr := s.publisher.PublishUploaded(ctx, event); pubErr != nil {
+		slog.Warn("document service: failed to publish uploaded event",
+			"documentId", created.ID, "err", pubErr)
 	}
 
 	return ResponseFrom(created), nil

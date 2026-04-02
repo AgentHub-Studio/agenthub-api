@@ -39,6 +39,7 @@ type Config struct {
 	CORSOrigins         []string
 	LogLevel            string
 	OAuthEncryptionKey  string // 32-byte AES-256 key; empty disables encryption (dev mode)
+	RabbitMQURL         string // RABBITMQ_URL — optional; enables document pipeline events when set
 }
 
 // Load reads configuration from environment variables.
@@ -68,6 +69,8 @@ func Load() (*Config, error) {
 	cfg.CORSOrigins = strings.Split(corsOrigins, ",")
 
 	cfg.OAuthEncryptionKey = os.Getenv("OAUTH_ENCRYPTION_KEY")
+
+	cfg.RabbitMQURL = os.Getenv("RABBITMQ_URL")
 
 	cfg.MinIO = MinIOConfig{
 		Endpoint:        os.Getenv("MINIO_ENDPOINT"),

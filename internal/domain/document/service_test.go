@@ -78,14 +78,25 @@ func (m *mockStorage) Upload(_ context.Context, key string, _ io.Reader, _ int64
 	return key, nil
 }
 
-func newSvc() (*document.Service, *mockStorage) {
+// mockPublisher is an EventPublisher that records published events for assertions.
+type mockPublisher struct {
+	events []document.DocumentUploadedEvent
+}
+
+func (m *mockPublisher) PublishUploaded(_ context.Context, e document.DocumentUploadedEvent) error {
+	m.events = append(m.events, e)
+	return nil
+}
+
+func newSvc() (*document.Service, *mockStorage, *mockPublisher) {
 	storage := &mockStorage{}
-	svc := document.NewService(newMockRepo(), storage)
-	return svc, storage
+	publisher := &mockPublisher{}
+	svc := document.NewService(newMockRepo(), storage, publisher)
+	return svc, storage, publisher
 }
 
 func TestDocumentService_Upload_Success(t *testing.T) {
-	svc, storage := newSvc()
+	svc, storage, publisher := newSvc()
 	kbID := uuid.New()
 	d, err := svc.Upload(context.Background(), document.UploadRequest{
 		KnowledgeBaseID: kbID,
@@ -104,10 +115,18 @@ func TestDocumentService_Upload_Success(t *testing.T) {
 	assert.Contains(t, d.StoragePath, d.ID.String())
 	require.Len(t, storage.uploaded, 1)
 	assert.Equal(t, d.StoragePath, storage.uploaded[0])
+	// Publisher should have been called exactly once with correct fields.
+	require.Len(t, publisher.events, 1, "upload event must be published")
+	ev := publisher.events[0]
+	assert.Equal(t, d.ID, ev.DocumentID)
+	assert.Equal(t, kbID, ev.KnowledgeBaseID)
+	assert.Equal(t, d.StoragePath, ev.StoragePath)
+	assert.Equal(t, "application/pdf", ev.ContentType)
+	assert.Equal(t, "report.pdf", ev.FileName)
 }
 
 func TestDocumentService_Upload_MissingFileName(t *testing.T) {
-	svc, _ := newSvc()
+	svc, _, _ := newSvc()
 	_, err := svc.Upload(context.Background(), document.UploadRequest{
 		KnowledgeBaseID: uuid.New(),
 		Content:         strings.NewReader("data"),
@@ -116,13 +135,13 @@ func TestDocumentService_Upload_MissingFileName(t *testing.T) {
 }
 
 func TestDocumentService_GetByID_NotFound(t *testing.T) {
-	svc, _ := newSvc()
+	svc, _, _ := newSvc()
 	_, err := svc.GetByID(context.Background(), uuid.New())
 	require.ErrorIs(t, err, document.ErrNotFound)
 }
 
 func TestDocumentService_UpdateStatus(t *testing.T) {
-	svc, _ := newSvc()
+	svc, _, _ := newSvc()
 	kbID := uuid.New()
 	created, err := svc.Upload(context.Background(), document.UploadRequest{
 		KnowledgeBaseID: kbID,
@@ -137,7 +156,7 @@ func TestDocumentService_UpdateStatus(t *testing.T) {
 }
 
 func TestDocumentService_ListByKnowledgeBase(t *testing.T) {
-	svc, _ := newSvc()
+	svc, _, _ := newSvc()
 	kbID := uuid.New()
 	for i := 0; i < 3; i++ {
 		_, err := svc.Upload(context.Background(), document.UploadRequest{
@@ -164,7 +183,7 @@ func TestDocumentService_ListByKnowledgeBase(t *testing.T) {
 }
 
 func TestDocumentService_Delete_NotFound(t *testing.T) {
-	svc, _ := newSvc()
+	svc, _, _ := newSvc()
 	err := svc.Delete(context.Background(), uuid.New())
 	require.ErrorIs(t, err, document.ErrNotFound)
 }
