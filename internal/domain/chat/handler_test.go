@@ -106,6 +106,19 @@ func (m *mockChatSvc) GetLatestAssistantMessage(_ context.Context, sessionID uui
 	return chat.ChatMessageResponse{}, false, nil
 }
 
+func (m *mockChatSvc) RunSession(_ context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan chat.RunEvent, error) {
+	if _, ok := m.sessions[sessionID]; !ok {
+		return nil, chat.ErrNotFound
+	}
+	ch := make(chan chat.RunEvent, 10)
+	go func() {
+		defer close(ch)
+		ch <- chat.RunEvent{Type: "text_delta", Data: json.RawMessage(`{"content":"Hello from agent"}`)}
+		ch <- chat.RunEvent{Type: "run_complete", Data: json.RawMessage(`{"totalTurns":1,"totalTokens":50}`)}
+	}()
+	return ch, nil
+}
+
 func setupChat() (*chi.Mux, *mockChatSvc) {
 	svc := newMockChatSvc()
 	h := chat.NewHandler(svc)
@@ -284,6 +297,75 @@ func TestChatHandler_ArchiveSession_NotFound(t *testing.T) {
 func TestChatHandler_ArchiveSession_InvalidID(t *testing.T) {
 	r, _ := setupChat()
 	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/not-a-uuid/archive", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- POST /api/chat/sessions/{id}/run (SSE) ---
+
+func TestChatHandler_RunSession_Success(t *testing.T) {
+	r, svc := setupChat()
+
+	// Create a session with an agent.
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "text/event-stream", w.Header().Get("Content-Type"))
+
+	// Parse SSE events from response body.
+	responseBody := w.Body.String()
+	assert.Contains(t, responseBody, "event: text_delta\n")
+	assert.Contains(t, responseBody, "event: run_complete\n")
+	assert.Contains(t, responseBody, `"content":"Hello from agent"`)
+}
+
+func TestChatHandler_RunSession_SessionNotFound(t *testing.T) {
+	r, _ := setupChat()
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+uuid.New().String()+"/run", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestChatHandler_RunSession_EmptyMessage(t *testing.T) {
+	r, _ := setupChat()
+	body, _ := json.Marshal(map[string]string{"message": ""})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+uuid.New().String()+"/run", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestChatHandler_RunSession_InvalidBody(t *testing.T) {
+	r, _ := setupChat()
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+uuid.New().String()+"/run", bytes.NewReader([]byte("not-json")))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestChatHandler_RunSession_InvalidSessionID(t *testing.T) {
+	r, _ := setupChat()
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/not-a-uuid/run", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
