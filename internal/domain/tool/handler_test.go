@@ -259,3 +259,31 @@ func TestToolHandler_GetDatabaseSchema_MissingParam(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
+
+func TestToolHandler_Patch_Success(t *testing.T) {
+	r, svc := setupTool()
+	id := uuid.New()
+	svc.tools[id] = tool.Response{ID: id, Name: "Original", Type: "HTTP"}
+
+	body, _ := json.Marshal(tool.UpdateRequest{Name: "Patched"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/tools/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp tool.Response
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Patched", resp.Name)
+}
+
+func TestToolHandler_Patch_NotFound(t *testing.T) {
+	r, _ := setupTool()
+	body, _ := json.Marshal(tool.UpdateRequest{Name: "x"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/tools/"+uuid.New().String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
