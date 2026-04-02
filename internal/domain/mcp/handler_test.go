@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 // mockMCPSvc satisfies the private mcpService interface in mcp.Handler.
@@ -85,20 +86,20 @@ func TestMCPHandler_List_Success(t *testing.T) {
 	id := uuid.New()
 	svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "filesystem", TransportType: "stdio"}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/mcp/servers", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	var items []mcp.McpServerConfigResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &items))
-	assert.Len(t, items, 1)
+	var page pagination.Page[mcp.McpServerConfigResponse]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	assert.Equal(t, int64(1), page.TotalElements)
 }
 
 func TestMCPHandler_Create_Success(t *testing.T) {
 	r, _ := setupMCP()
 	body, _ := json.Marshal(mcp.CreateRequest{Name: "my-server", TransportType: "stdio"})
-	req := httptest.NewRequest(http.MethodPost, "/api/mcp/servers", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/mcp-server-configs", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -111,7 +112,7 @@ func TestMCPHandler_Create_Success(t *testing.T) {
 
 func TestMCPHandler_Create_InvalidBody(t *testing.T) {
 	r, _ := setupMCP()
-	req := httptest.NewRequest(http.MethodPost, "/api/mcp/servers", bytes.NewReader([]byte("not-json")))
+	req := httptest.NewRequest(http.MethodPost, "/api/mcp-server-configs", bytes.NewReader([]byte("not-json")))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -121,7 +122,7 @@ func TestMCPHandler_Create_InvalidBody(t *testing.T) {
 
 func TestMCPHandler_GetByID_NotFound(t *testing.T) {
 	r, _ := setupMCP()
-	req := httptest.NewRequest(http.MethodGet, "/api/mcp/servers/"+uuid.New().String(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs/"+uuid.New().String(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -133,7 +134,7 @@ func TestMCPHandler_Delete_Success(t *testing.T) {
 	id := uuid.New()
 	svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "to-delete"}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/mcp/servers/"+id.String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/mcp-server-configs/"+id.String(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -142,7 +143,7 @@ func TestMCPHandler_Delete_Success(t *testing.T) {
 
 func TestMCPHandler_Delete_NotFound(t *testing.T) {
 	r, _ := setupMCP()
-	req := httptest.NewRequest(http.MethodDelete, "/api/mcp/servers/"+uuid.New().String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/mcp-server-configs/"+uuid.New().String(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

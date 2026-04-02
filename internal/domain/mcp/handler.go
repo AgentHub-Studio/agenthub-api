@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -19,6 +20,11 @@ type mcpService interface {
 	GetByID(ctx context.Context, id uuid.UUID) (McpServerConfigResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (McpServerConfigResponse, error)
 	Delete(ctx context.Context, id uuid.UUID) error
+}
+
+// listResponse wraps the flat slice in the Page envelope expected by the frontend.
+func toPage(items []McpServerConfigResponse, req pagination.PageRequest) pagination.Page[McpServerConfigResponse] {
+	return pagination.NewPage(items, int64(len(items)), req)
 }
 
 // Handler handles HTTP requests for MCP server configs.
@@ -33,11 +39,11 @@ func NewHandler(svc mcpService) *Handler {
 
 // RegisterRoutes mounts MCP server config routes onto the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/mcp/servers", h.list)
-	r.Post("/api/mcp/servers", h.create)
-	r.Get("/api/mcp/servers/{id}", h.getByID)
-	r.Put("/api/mcp/servers/{id}", h.update)
-	r.Delete("/api/mcp/servers/{id}", h.delete)
+	r.Get("/api/mcp-server-configs", h.list)
+	r.Post("/api/mcp-server-configs", h.create)
+	r.Get("/api/mcp-server-configs/{id}", h.getByID)
+	r.Put("/api/mcp-server-configs/{id}", h.update)
+	r.Delete("/api/mcp-server-configs/{id}", h.delete)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +52,8 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusInternalServerError, "failed to list MCP servers")
 		return
 	}
-	respond.JSON(w, http.StatusOK, items)
+	req := pagination.ParsePageRequest(r)
+	respond.JSON(w, http.StatusOK, toPage(items, req))
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
