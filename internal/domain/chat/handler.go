@@ -13,6 +13,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // chatService defines the methods used by Handler.
@@ -27,6 +28,8 @@ type chatService interface {
 	// GetLatestAssistantMessage returns the most recent assistant message for the session
 	// created after the given time. Returns (msg, true, nil) when found.
 	GetLatestAssistantMessage(ctx context.Context, sessionID uuid.UUID, after time.Time) (ChatMessageResponse, bool, error)
+	// RunSession starts an agentic run and returns a channel of events for SSE streaming.
+	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error)
 }
 
 // Handler handles HTTP requests for chat sessions and messages.
@@ -49,6 +52,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/chat/sessions/{id}/messages", h.listMessages)
 	r.Post("/api/chat/sessions/{id}/messages", h.addMessage)
 	r.Get("/api/chat/sessions/{id}/stream", h.streamMessages)
+	r.Post("/api/chat/sessions/{id}/run", h.runSession)
 }
 
 func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -240,6 +244,71 @@ func (h *Handler) streamMessages(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			return
+		}
+	}
+}
+
+// runSessionRequest is the body for POST /api/chat/sessions/{id}/run.
+type runSessionRequest struct {
+	Message string `json:"message"`
+}
+
+// runSession handles POST /api/chat/sessions/{id}/run.
+// It starts the agentic loop and streams RunEvents as SSE to the client.
+func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+
+	var req runSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Message == "" {
+		respond.Error(w, http.StatusBadRequest, "message is required")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respond.Error(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	tenantID := tenant.FromContext(r.Context())
+
+	ch, err := h.svc.RunSession(r.Context(), sessionID, req.Message, tenantID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "session not found")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	// Set SSE headers.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				// Channel closed — run complete.
+				return
+			}
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, ev.Data)
+			flusher.Flush()
 		}
 	}
 }
