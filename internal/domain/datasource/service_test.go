@@ -175,6 +175,48 @@ func TestDataSourceService_GetCredentials_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, datasource.ErrNotFound)
 }
 
+func TestDataSourceService_Update_PreservesPasswordWhenEmpty(t *testing.T) {
+	svc := datasource.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
+		Name: "DB", Type: datasource.DataSourceTypePostgreSQL,
+		Host: "pg.internal", Database: "appdb", DBUser: "appuser", DBPassword: "original-password",
+	})
+	require.NoError(t, err)
+
+	// Update with empty dbPassword — must keep the original password.
+	updated, err := svc.Update(context.Background(), tenantID, created.ID, datasource.CreateRequest{
+		Name: "DB Updated", Type: datasource.DataSourceTypePostgreSQL,
+		Host: "pg.internal", Database: "appdb", DBUser: "appuser",
+		DBPassword: "", // intentionally empty
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "DB Updated", updated.Name)
+
+	// Verify password is preserved via credentials endpoint.
+	creds, err := svc.GetCredentials(context.Background(), tenantID, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "original-password", creds.Password, "password must be preserved when update sends empty string")
+}
+
+func TestDataSourceService_Update_ChangesPasswordWhenProvided(t *testing.T) {
+	svc := datasource.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
+		Name: "DB", Type: datasource.DataSourceTypePostgreSQL,
+		Host: "pg", Database: "db", DBUser: "u", DBPassword: "old-pass",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.Update(context.Background(), tenantID, created.ID, datasource.CreateRequest{
+		Name: "DB", Type: datasource.DataSourceTypePostgreSQL,
+		Host: "pg", Database: "db", DBUser: "u", DBPassword: "new-pass",
+	})
+	require.NoError(t, err)
+
+	creds, err := svc.GetCredentials(context.Background(), tenantID, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "new-pass", creds.Password)
+}
+
 func TestDataSourceService_ResponseFrom_OmitsPassword(t *testing.T) {
 	ds := datasource.DataSource{
 		ID: uuid.New(), Name: "DB", Type: datasource.DataSourceTypePostgreSQL,

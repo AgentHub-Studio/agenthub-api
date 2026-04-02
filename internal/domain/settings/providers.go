@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -17,6 +19,17 @@ type ModelInfo struct {
 	ID          string `json:"id"`
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
+}
+
+// OpenRouterModelInfo represents a model from the OpenRouter API with pricing details.
+type OpenRouterModelInfo struct {
+	ID               string  `json:"id"`
+	Name             string  `json:"name"`
+	Description      string  `json:"description,omitempty"`
+	Modality         string  `json:"modality,omitempty"`
+	ContextLength    int64   `json:"contextLength,omitempty"`
+	PromptPrice      string  `json:"promptPrice,omitempty"`
+	CompletionPrice  string  `json:"completionPrice,omitempty"`
 }
 
 // ProviderInfo describes an available AI provider.
@@ -123,8 +136,8 @@ func ListOllamaModels(ctx context.Context, baseURL string) ([]ModelInfo, error) 
 	return models, nil
 }
 
-// ListOpenRouterModels fetches available models from OpenRouter.
-func ListOpenRouterModels(ctx context.Context, apiKey string) ([]ModelInfo, error) {
+// ListOpenRouterModels fetches available models from OpenRouter with pricing details.
+func ListOpenRouterModels(ctx context.Context, apiKey string) ([]OpenRouterModelInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://openrouter.ai/api/v1/models", nil)
 	if err != nil {
 		return nil, err
@@ -146,19 +159,86 @@ func ListOpenRouterModels(ctx context.Context, apiKey string) ([]ModelInfo, erro
 
 	var result struct {
 		Data []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			ContextLen  int64  `json:"context_length"`
+			Pricing     struct {
+				Prompt     string `json:"prompt"`
+				Completion string `json:"completion"`
+			} `json:"pricing"`
+			Architecture struct {
+				Modality string `json:"modality"`
+			} `json:"architecture"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("openrouter: decode: %w", err)
 	}
 
-	models := make([]ModelInfo, 0, len(result.Data))
+	models := make([]OpenRouterModelInfo, 0, len(result.Data))
 	for _, m := range result.Data {
-		models = append(models, ModelInfo{ID: m.ID, Name: m.Name})
+		models = append(models, OpenRouterModelInfo{
+			ID:              m.ID,
+			Name:            m.Name,
+			Description:     m.Description,
+			Modality:        m.Architecture.Modality,
+			ContextLength:   m.ContextLen,
+			PromptPrice:     m.Pricing.Prompt,
+			CompletionPrice: m.Pricing.Completion,
+		})
 	}
 	return models, nil
+}
+
+// ListOpenRouterEmbeddingModels returns OpenRouter models whose modality includes "text".
+// These are suitable for embedding/text-processing use cases.
+func ListOpenRouterEmbeddingModels(ctx context.Context, apiKey string) ([]OpenRouterModelInfo, error) {
+	all, err := ListOpenRouterModels(ctx, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	var embedding []OpenRouterModelInfo
+	for _, m := range all {
+		if strings.Contains(m.Modality, "text") && strings.Contains(strings.ToLower(m.ID+m.Name), "embed") {
+			embedding = append(embedding, m)
+		}
+	}
+	if embedding == nil {
+		embedding = []OpenRouterModelInfo{}
+	}
+	return embedding, nil
+}
+
+// SmtpTestRequest holds the SMTP configuration for a test connection.
+type SmtpTestRequest struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	From     string `json:"from"`
+	UseTLS   bool   `json:"useTls"`
+}
+
+// TestSMTPConnection attempts to open a TCP connection to the SMTP server.
+// A full SMTP handshake is not performed — this validates host/port reachability.
+func TestSMTPConnection(ctx context.Context, req SmtpTestRequest) error {
+	if req.Host == "" {
+		return fmt.Errorf("smtp: host is required")
+	}
+	port := req.Port
+	if port == 0 {
+		port = 587
+	}
+	addr := fmt.Sprintf("%s:%d", req.Host, port)
+
+	dialer := &net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("smtp: cannot connect to %s: %w", addr, err)
+	}
+	conn.Close()
+	return nil
 }
 
 // SetProviderHTTPClient replaces the shared HTTP client used by provider functions.

@@ -2,21 +2,62 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
+// SettingsReader is a minimal interface for reading tenant settings.
+type SettingsReader interface {
+	FindSettingByKey(ctx context.Context, key string) ([]byte, error)
+}
+
+// DatasourceReader is a minimal interface for reading datasource credentials.
+type DatasourceReader interface {
+	GetDatasourceCreds(ctx context.Context, tenantID string, id uuid.UUID) (DatasourceCreds, error)
+}
+
+// DatasourceCreds holds the connection parameters for a datasource.
+type DatasourceCreds struct {
+	Type     string
+	Host     string
+	Port     int
+	Database string
+	User     string
+	Password string
+}
+
 // Service holds business logic for tools.
 type Service struct {
-	repo ToolRepository
+	repo        ToolRepository
+	settingsRdr SettingsReader
+	dsRdr       DatasourceReader
+	tenantIDFn  func(ctx context.Context) string
 }
 
 // NewService creates a new Service.
 func NewService(repo ToolRepository) *Service {
 	return &Service{repo: repo}
+}
+
+// WithSettings attaches a settings reader for LLM generation features.
+func (s *Service) WithSettings(r SettingsReader) *Service {
+	s.settingsRdr = r
+	return s
+}
+
+// WithDatasource attaches a datasource reader for schema introspection and SQL test.
+func (s *Service) WithDatasource(r DatasourceReader, tenantIDFn func(ctx context.Context) string) *Service {
+	s.dsRdr = r
+	s.tenantIDFn = tenantIDFn
+	return s
 }
 
 // List returns a paginated list of tools.
@@ -30,6 +71,11 @@ func (s *Service) List(ctx context.Context, req pagination.PageRequest, toolType
 		content[i] = ResponseFrom(t)
 	}
 	return pagination.NewPage(content, total, req), nil
+}
+
+// ListLabels returns all distinct labels used across tools for the tenant.
+func (s *Service) ListLabels(ctx context.Context) ([]string, error) {
+	return s.repo.ListLabels(ctx)
 }
 
 // Create creates a new tool.
@@ -120,4 +166,153 @@ func (s *Service) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]SkillTo
 		}
 	}
 	return resp, nil
+}
+
+// TestTool executes a tool with the given inputs and returns the result as a string.
+// Currently supports HTTP tool type; other types return a not-implemented error.
+func (s *Service) TestTool(ctx context.Context, id uuid.UUID, inputs map[string]any) (string, error) {
+	t, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(t.Config, &cfg); err != nil {
+		return "", fmt.Errorf("tool: invalid config JSON: %w", err)
+	}
+
+	switch t.Type {
+	case ToolTypeHTTP:
+		return s.testHTTPTool(ctx, cfg, inputs)
+	case ToolTypeSQL, ToolTypeDatabase:
+		return "", fmt.Errorf("tool: SQL test requires a running datasource connection — coming soon")
+	default:
+		return "", fmt.Errorf("tool: test not supported for type %s", t.Type)
+	}
+}
+
+func (s *Service) testHTTPTool(ctx context.Context, cfg, inputs map[string]any) (string, error) {
+	rawURL, _ := cfg["url"].(string)
+	if rawURL == "" {
+		return "", fmt.Errorf("tool: HTTP tool has no url configured")
+	}
+	method, _ := cfg["method"].(string)
+	if method == "" {
+		method = "GET"
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("tool: create HTTP request: %w", err)
+	}
+
+	if headers, ok := cfg["headers"].(map[string]any); ok {
+		for k, v := range headers {
+			if vs, ok := v.(string); ok {
+				req.Header.Set(k, vs)
+			}
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("tool: HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "Status: %d %s\n\n", resp.StatusCode, resp.Status)
+	respBody := make([]byte, 4096)
+	n, _ := resp.Body.Read(respBody)
+	buf.Write(respBody[:n])
+
+	return buf.String(), nil
+}
+
+// GenerateCode uses the configured LLM to generate code for a tool.
+func (s *Service) GenerateCode(ctx context.Context, prompt, language string) (string, error) {
+	cfg, err := s.readLLMConfig(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	systemPrompt := fmt.Sprintf(
+		"You are an expert %s programmer. Generate clean, well-commented code for the given task. "+
+			"Return ONLY the code, no markdown fences, no explanation.",
+		language,
+	)
+	return callLLM(ctx, cfg, systemPrompt, prompt)
+}
+
+// GenerateBlockly uses the configured LLM to generate a Blockly workspace JSON.
+func (s *Service) GenerateBlockly(ctx context.Context, prompt string) (any, error) {
+	cfg, err := s.readLLMConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	systemPrompt := `You are an expert at creating Blockly workspace definitions.
+Generate a valid Blockly workspace JSON that implements the described logic.
+Return ONLY valid JSON, no markdown fences, no explanation.`
+
+	raw, err := callLLM(ctx, cfg, systemPrompt, prompt)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse and re-encode to ensure valid JSON.
+	var result any
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return nil, fmt.Errorf("tool: LLM did not return valid JSON: %w", err)
+	}
+	return result, nil
+}
+
+// GetDatabaseSchema connects to the datasource and returns its schema.
+func (s *Service) GetDatabaseSchema(ctx context.Context, dataSourceID string) (DatabaseSchema, error) {
+	if s.dsRdr == nil || s.tenantIDFn == nil {
+		return DatabaseSchema{}, fmt.Errorf("tool: database schema feature not configured")
+	}
+
+	dsID, err := uuid.Parse(dataSourceID)
+	if err != nil {
+		return DatabaseSchema{}, fmt.Errorf("tool: invalid dataSourceId: %w", err)
+	}
+
+	tenantID := s.tenantIDFn(ctx)
+	creds, err := s.dsRdr.GetDatasourceCreds(ctx, tenantID, dsID)
+	if err != nil {
+		return DatabaseSchema{}, fmt.Errorf("tool: get datasource: %w", err)
+	}
+
+	switch strings.ToUpper(creds.Type) {
+	case "POSTGRESQL":
+		dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=disable",
+			creds.Host, creds.Port, creds.Database, creds.User, creds.Password)
+		return fetchPostgresSchema(ctx, dsn)
+	default:
+		return DatabaseSchema{}, fmt.Errorf("tool: schema introspection not supported for %s", creds.Type)
+	}
+}
+
+// readLLMConfig reads the LLM configuration from tenant settings.
+func (s *Service) readLLMConfig(ctx context.Context) (llmConfig, error) {
+	if s.settingsRdr == nil {
+		return llmConfig{}, errors.New("tool: LLM feature not configured — set llm.tool.config in settings")
+	}
+
+	raw, err := s.settingsRdr.FindSettingByKey(ctx, "llm.tool.config")
+	if err != nil {
+		return llmConfig{}, fmt.Errorf("tool: llm.tool.config not found in settings — configure provider, apiKey and model")
+	}
+
+	var cfg llmConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return llmConfig{}, fmt.Errorf("tool: invalid llm.tool.config value: %w", err)
+	}
+	if cfg.Model == "" {
+		return llmConfig{}, errors.New("tool: llm.tool.config.model is required")
+	}
+	return cfg, nil
 }

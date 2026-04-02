@@ -93,10 +93,20 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 }
 
 // Update updates an existing datasource.
+// If req.DBPassword is empty the existing password is preserved (never overwritten with blank).
 func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (DataSource, error) {
 	applyDefaults(&req)
 	if err := validateRequest(req); err != nil {
 		return DataSource{}, err
+	}
+	// Preserve existing password when the request omits it.
+	password := req.DBPassword
+	if password == "" {
+		existing, err := s.repo.GetByID(ctx, tenantID, id)
+		if err != nil {
+			return DataSource{}, err
+		}
+		password = existing.DBPassword
 	}
 	d := DataSource{
 		Name:          req.Name,
@@ -105,7 +115,7 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		Port:          req.Port,
 		Database:      req.Database,
 		DBUser:        req.DBUser,
-		DBPassword:    req.DBPassword,
+		DBPassword:    password,
 		VpnResourceID: req.VpnResourceID,
 	}
 	return s.repo.Update(ctx, tenantID, id, d)

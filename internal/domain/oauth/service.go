@@ -143,20 +143,27 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 }
 
 // Update updates an existing OAuth credential, re-encrypting all secret fields, and clears its token cache entry.
+// Secret fields that arrive as "" or as the masked placeholder "***" are preserved unchanged.
 func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (OAuthCredential, error) {
-	clientSecret, err := s.encryptSecret(req.ClientSecret)
+	// Fetch existing credential so we can preserve secrets that were not changed.
+	existing, err := s.repo.GetByID(ctx, tenantID, id)
+	if err != nil {
+		return OAuthCredential{}, err
+	}
+
+	clientSecret, err := s.resolveUpdatedSecret(req.ClientSecret, existing.ClientSecret)
 	if err != nil {
 		return OAuthCredential{}, fmt.Errorf("oauth: encrypt client_secret: %w", err)
 	}
-	apiKeyValue, err := s.encryptSecret(req.APIKeyValue)
+	apiKeyValue, err := s.resolveUpdatedSecret(req.APIKeyValue, existing.APIKeyValue)
 	if err != nil {
 		return OAuthCredential{}, fmt.Errorf("oauth: encrypt api_key_value: %w", err)
 	}
-	bearerToken, err := s.encryptSecret(req.BearerToken)
+	bearerToken, err := s.resolveUpdatedSecret(req.BearerToken, existing.BearerToken)
 	if err != nil {
 		return OAuthCredential{}, fmt.Errorf("oauth: encrypt bearer_token: %w", err)
 	}
-	password, err := s.encryptSecret(req.Password)
+	password, err := s.resolveUpdatedSecret(req.Password, existing.Password)
 	if err != nil {
 		return OAuthCredential{}, fmt.Errorf("oauth: encrypt password: %w", err)
 	}
@@ -181,6 +188,16 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		s.mu.Unlock()
 	}
 	return result, err
+}
+
+// resolveUpdatedSecret returns the encrypted secret to store during an update.
+// When the incoming value is empty or the masked placeholder "***", the existing
+// already-encrypted value is returned unchanged (preserving the original secret).
+func (s *Service) resolveUpdatedSecret(incoming, existing string) (string, error) {
+	if incoming == "" || incoming == "***" {
+		return existing, nil
+	}
+	return s.encryptSecret(incoming)
 }
 
 // Delete removes an OAuth credential and its token cache entry.

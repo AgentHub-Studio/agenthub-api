@@ -33,6 +33,8 @@ func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
 	r.Get("/api/settings/anthropic/models", h.listAnthropicModels)
 	r.Get("/api/settings/ollama/models", h.listOllamaModels)
 	r.Get("/api/settings/openrouter/models", h.listOpenRouterModels)
+	r.Get("/api/settings/openrouter/embedding-models", h.listOpenRouterEmbeddingModels)
+	r.Post("/api/settings/smtp/test", h.testSmtp)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -133,4 +135,32 @@ func (h *Handler) listOpenRouterModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.JSON(w, http.StatusOK, models)
+}
+
+func (h *Handler) listOpenRouterEmbeddingModels(w http.ResponseWriter, r *http.Request) {
+	apiKey := r.Header.Get("X-OpenRouter-API-Key")
+	models, err := ListOpenRouterEmbeddingModels(r.Context(), apiKey)
+	if err != nil {
+		httputil.InternalServerError(w, err.Error())
+		return
+	}
+	httputil.JSON(w, http.StatusOK, models)
+}
+
+func (h *Handler) testSmtp(w http.ResponseWriter, r *http.Request) {
+	to := r.URL.Query().Get("to")
+	if to == "" {
+		httputil.BadRequest(w, "to query parameter is required")
+		return
+	}
+	var req SmtpTestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httputil.BadRequest(w, "invalid request body")
+		return
+	}
+	if err := TestSMTPConnection(r.Context(), req); err != nil {
+		httputil.InternalServerError(w, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

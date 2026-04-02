@@ -97,6 +97,20 @@ func (m *mockToolRepo) UnbindFromSkill(_ context.Context, skillID, toolID uuid.U
 	return tool.ErrNotFound
 }
 
+func (m *mockToolRepo) ListLabels(_ context.Context) ([]string, error) {
+	seen := map[string]bool{}
+	var labels []string
+	for _, t := range m.data {
+		for _, l := range t.Labels {
+			if !seen[l] {
+				seen[l] = true
+				labels = append(labels, l)
+			}
+		}
+	}
+	return labels, nil
+}
+
 func (m *mockToolRepo) ListBySkill(_ context.Context, skillID uuid.UUID) ([]tool.SkillTool, []tool.Tool, error) {
 	var bindings []tool.SkillTool
 	var tools []tool.Tool
@@ -185,6 +199,9 @@ func TestToolService_Create_ValidTypes(t *testing.T) {
 		tool.ToolTypeCustom,
 		tool.ToolTypeBlockly,
 		tool.ToolTypeComposite,
+		tool.ToolTypeCode,
+		tool.ToolTypeDatabase,
+		tool.ToolTypeDocuments,
 	}
 	for _, tt := range validTypes {
 		t.Run(tt, func(t *testing.T) {

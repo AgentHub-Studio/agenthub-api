@@ -96,6 +96,26 @@ func (m *mockToolSvc) ListBySkill(_ context.Context, skillID uuid.UUID) ([]tool.
 	return m.bindings[skillID], nil
 }
 
+func (m *mockToolSvc) ListLabels(_ context.Context) ([]string, error) {
+	return []string{}, nil
+}
+
+func (m *mockToolSvc) TestTool(_ context.Context, _ uuid.UUID, _ map[string]any) (string, error) {
+	return "test result", nil
+}
+
+func (m *mockToolSvc) GenerateCode(_ context.Context, _, _ string) (string, error) {
+	return "// generated code", nil
+}
+
+func (m *mockToolSvc) GenerateBlockly(_ context.Context, _ string) (any, error) {
+	return map[string]any{}, nil
+}
+
+func (m *mockToolSvc) GetDatabaseSchema(_ context.Context, _ string) (tool.DatabaseSchema, error) {
+	return tool.DatabaseSchema{Tables: []tool.TableSchema{}}, nil
+}
+
 func setupTool() (*chi.Mux, *mockToolSvc) {
 	svc := newMockToolSvc()
 	h := tool.NewHandler(svc)
@@ -192,4 +212,50 @@ func TestToolHandler_ListBySkill_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestToolHandler_ListLabels_Success(t *testing.T) {
+	r, _ := setupTool()
+	req := httptest.NewRequest(http.MethodGet, "/api/tools/labels", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var labels []string
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &labels))
+}
+
+func TestToolHandler_TestTool_Success(t *testing.T) {
+	r, svc := setupTool()
+	id := uuid.New()
+	svc.tools[id] = tool.Response{ID: id, Name: "HTTP Tool", Type: "HTTP"}
+
+	body, _ := json.Marshal(map[string]any{})
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/"+id.String()+"/test", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/plain")
+}
+
+func TestToolHandler_GenerateCode_MissingPrompt(t *testing.T) {
+	r, _ := setupTool()
+	body, _ := json.Marshal(map[string]any{"prompt": ""})
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/generate/code", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func TestToolHandler_GetDatabaseSchema_MissingParam(t *testing.T) {
+	r, _ := setupTool()
+	req := httptest.NewRequest(http.MethodGet, "/api/tools/database-schema", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }

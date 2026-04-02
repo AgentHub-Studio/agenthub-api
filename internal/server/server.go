@@ -1,16 +1,20 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/approval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
 	apikc "github.com/AgentHub-Studio/agenthub-api/internal/keycloak"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
@@ -78,12 +82,17 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// Instantiate domain handlers.
 	tenantHandler := tenant.NewHandler(tenant.NewService(tenant.NewRepository(pool), provisioner))
 	userHandler := user.NewHandler(user.NewService(keycloakClient))
-	settingsHandler := settings.NewHandler(settings.NewService(settings.NewRepository(pool)))
+	settingsRepo := settings.NewRepository(pool)
+	settingsHandler := settings.NewHandler(settings.NewService(settingsRepo))
 	llmpresetHandler := llmpreset.NewHandler(llmpreset.NewService(llmpreset.NewRepository(pool)))
 	agentHandler := agent.NewHandler(agent.NewService(agent.NewRepository(pool)))
 	pipelineHandler := pipeline.NewHandler(pipeline.NewService(pipeline.NewRepository(pool)))
 	skillHandler := skill.NewHandler(skill.NewService(skill.NewRepository(pool)))
-	toolHandler := tool.NewHandler(tool.NewService(tool.NewRepository(pool)))
+	datasourceSvc := datasource.NewService(datasource.NewRepository(pool))
+	toolSvc := tool.NewService(tool.NewRepository(pool)).
+		WithSettings(&toolSettingsAdapter{repo: settingsRepo}).
+		WithDatasource(&toolDatasourceAdapter{svc: datasourceSvc}, tenantctx.FromContext)
+	toolHandler := tool.NewHandler(toolSvc)
 	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
@@ -92,7 +101,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	metricsHandler := metrics.NewHandler(metrics.NewService(metrics.NewRepository(pool)))
 	experimentHandler := experiment.NewHandler(experiment.NewService(experiment.NewRepository(pool)))
 	vpnHandler := vpnresource.NewHandler(vpnresource.NewService(vpnresource.NewRepository(pool)))
-	datasourceHandler := datasource.NewHandler(datasource.NewService(datasource.NewRepository(pool)))
+	datasourceHandler := datasource.NewHandler(datasourceSvc)
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
 	chatOrchestrator := chat.NewOrchestratorClient(cfg.OrchestratorURL)
 	chatHandler := chat.NewHandler(chat.NewService(chat.NewRepository(pool), chatOrchestrator))
@@ -131,6 +140,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher))
 	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(knowledgebase.NewRepository(pool)))
 	mcpHandler := mcp.NewHandler(mcp.NewService(mcp.NewRepository(pool)))
+	approvalHandler := approval.NewHandler(approval.NewService(approval.NewRepository(pool)))
 
 	// Marketplace handlers.
 	mkplListingHandler := mkplListing.NewHandler(mkplListing.NewService(mkplListing.NewRepository(pool)))
@@ -220,7 +230,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		documentHandler.RegisterRoutes(r)
 		knowledgebaseHandler.RegisterRoutes(r)
 		mcpHandler.RegisterRoutes(r)
-		// Marketplace
+			approvalHandler.RegisterRoutes(r)
+			// Marketplace
 		mkplListingHandler.RegisterRoutes(r)
 		mkplReviewHandler.RegisterRoutes(r)
 		mkplInstallationHandler.RegisterRoutes(r)
@@ -256,4 +267,39 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// --- tool service adapters ---
+
+// toolSettingsAdapter adapts the settings.Repository to tool.SettingsReader.
+type toolSettingsAdapter struct {
+	repo settings.Repository
+}
+
+func (a *toolSettingsAdapter) FindSettingByKey(ctx context.Context, key string) ([]byte, error) {
+	s, err := a.repo.FindByKey(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(s.Value), nil
+}
+
+// toolDatasourceAdapter adapts datasource.Service to tool.DatasourceReader.
+type toolDatasourceAdapter struct {
+	svc *datasource.Service
+}
+
+func (a *toolDatasourceAdapter) GetDatasourceCreds(ctx context.Context, tenantID string, id uuid.UUID) (tool.DatasourceCreds, error) {
+	creds, err := a.svc.GetCredentials(ctx, tenantID, id)
+	if err != nil {
+		return tool.DatasourceCreds{}, err
+	}
+	return tool.DatasourceCreds{
+		Type:     string(creds.Type),
+		Host:     creds.Host,
+		Port:     creds.Port,
+		Database: creds.Database,
+		User:     creds.User,
+		Password: creds.Password,
+	}, nil
 }

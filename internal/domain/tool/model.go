@@ -16,6 +16,12 @@ const (
 	ToolTypeCustom         ToolType = "CUSTOM"
 	ToolTypeBlockly        ToolType = "BLOCKLY"
 	ToolTypeComposite      ToolType = "COMPOSITE"
+	// ToolTypeCode represents a scripted code tool (Groovy/Python/JS).
+	ToolTypeCode      ToolType = "CODE"
+	// ToolTypeDatabase is an alias for SQL (used by the frontend).
+	ToolTypeDatabase  ToolType = "DATABASE"
+	// ToolTypeDocuments is an alias for DOCUMENT_SEARCH (used by the frontend).
+	ToolTypeDocuments ToolType = "DOCUMENTS"
 )
 
 // validToolTypes is used for type validation.
@@ -26,6 +32,9 @@ var validToolTypes = map[ToolType]bool{
 	ToolTypeCustom:         true,
 	ToolTypeBlockly:        true,
 	ToolTypeComposite:      true,
+	ToolTypeCode:           true,
+	ToolTypeDatabase:       true,
+	ToolTypeDocuments:      true,
 }
 
 // IsValidToolType returns true when the given type string is a known ToolType.

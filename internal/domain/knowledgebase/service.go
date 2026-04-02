@@ -50,9 +50,12 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 	}
 
 	kb := KnowledgeBase{
-		Name:        req.Name,
-		Description: req.Description,
-		Status:      StatusActive,
+		Name:           req.Name,
+		Description:    req.Description,
+		Status:         StatusActive,
+		EmbeddingModel: req.EmbeddingModel,
+		SearchMode:     req.SearchMode,
+		ContextWindow:  req.ContextWindow,
 	}
 
 	created, err := s.repo.Create(ctx, kb)
@@ -78,6 +81,15 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 	if req.Description != nil {
 		existing.Description = *req.Description
+	}
+	if req.EmbeddingModel != nil {
+		existing.EmbeddingModel = *req.EmbeddingModel
+	}
+	if req.SearchMode != nil {
+		existing.SearchMode = *req.SearchMode
+	}
+	if req.ContextWindow != nil {
+		existing.ContextWindow = *req.ContextWindow
 	}
 
 	updated, err := s.repo.Update(ctx, existing)

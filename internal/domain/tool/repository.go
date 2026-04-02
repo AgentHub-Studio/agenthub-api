@@ -24,6 +24,7 @@ var ErrAlreadyBound = errors.New("tool: already bound to skill")
 // ToolRepository defines the persistence interface for Tool.
 type ToolRepository interface {
 	List(ctx context.Context, req pagination.PageRequest, toolType string) ([]Tool, int64, error)
+	ListLabels(ctx context.Context) ([]string, error)
 	Create(ctx context.Context, t Tool) (Tool, error)
 	GetByID(ctx context.Context, id uuid.UUID) (Tool, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Tool, error)
@@ -61,7 +62,7 @@ func (r *Repository) List(ctx context.Context, req pagination.PageRequest, toolT
 			return nil, 0, fmt.Errorf("tool: count: %w", err)
 		}
 		rows, err = conn.Query(ctx,
-			`SELECT id, name, type, config, description, created_at, updated_at
+			`SELECT id, name, type, config, description, labels, created_at, updated_at
 			 FROM tool WHERE type=$1 ORDER BY name LIMIT $2 OFFSET $3`,
 			toolType, req.Size, req.Offset(),
 		)
@@ -70,7 +71,7 @@ func (r *Repository) List(ctx context.Context, req pagination.PageRequest, toolT
 			return nil, 0, fmt.Errorf("tool: count: %w", err)
 		}
 		rows, err = conn.Query(ctx,
-			`SELECT id, name, type, config, description, created_at, updated_at
+			`SELECT id, name, type, config, description, labels, created_at, updated_at
 			 FROM tool ORDER BY name LIMIT $1 OFFSET $2`,
 			req.Size, req.Offset(),
 		)
@@ -105,11 +106,16 @@ func (r *Repository) Create(ctx context.Context, t Tool) (Tool, error) {
 		cfg = []byte("{}")
 	}
 
+	labels := t.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+
 	row := conn.QueryRow(ctx,
-		`INSERT INTO tool (name, type, config, description)
-		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, name, type, config, description, created_at, updated_at`,
-		t.Name, t.Type, cfg, t.Description,
+		`INSERT INTO tool (name, type, config, description, labels)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, name, type, config, description, labels, created_at, updated_at`,
+		t.Name, t.Type, cfg, t.Description, labels,
 	)
 	return scanTool(row)
 }
@@ -124,7 +130,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (Tool, error) {
 	defer release()
 
 	row := conn.QueryRow(ctx,
-		`SELECT id, name, type, config, description, created_at, updated_at FROM tool WHERE id=$1`, id,
+		`SELECT id, name, type, config, description, labels, created_at, updated_at FROM tool WHERE id=$1`, id,
 	)
 	t, err := scanTool(row)
 	if err != nil {
@@ -149,12 +155,16 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, req UpdateRequest
 	if len(req.Config) > 0 {
 		cfg = req.Config
 	}
+	labels := req.Labels
+	if labels == nil {
+		labels = []string{}
+	}
 
 	row := conn.QueryRow(ctx,
-		`UPDATE tool SET name=$1, type=$2, config=$3, description=$4, updated_at=NOW()
-		 WHERE id=$5
-		 RETURNING id, name, type, config, description, created_at, updated_at`,
-		req.Name, req.Type, cfg, req.Description, id,
+		`UPDATE tool SET name=$1, type=$2, config=$3, description=$4, labels=$5, updated_at=NOW()
+		 WHERE id=$6
+		 RETURNING id, name, type, config, description, labels, created_at, updated_at`,
+		req.Name, req.Type, cfg, req.Description, labels, id,
 	)
 	t, err := scanTool(row)
 	if err != nil {
@@ -246,7 +256,7 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 
 	rows, err := conn.Query(ctx,
 		`SELECT st.id, st.skill_id, st.tool_id, st.priority, st.is_active, st.created_at,
-		        t.id, t.name, t.type, t.config, t.description, t.created_at, t.updated_at
+		        t.id, t.name, t.type, t.config, t.description, t.labels, t.created_at, t.updated_at
 		 FROM skill_tool st
 		 JOIN tool t ON t.id = st.tool_id
 		 WHERE st.skill_id=$1
@@ -266,7 +276,7 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 		var cfg []byte
 		if err := rows.Scan(
 			&st.ID, &st.SkillID, &st.ToolID, &st.Priority, &st.IsActive, &st.CreatedAt,
-			&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.CreatedAt, &t.UpdatedAt,
+			&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			return nil, nil, fmt.Errorf("tool: scan skill_tool: %w", err)
 		}
@@ -282,7 +292,7 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 func scanTool(row pgx.Row) (Tool, error) {
 	var t Tool
 	var cfg []byte
-	if err := row.Scan(&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return Tool{}, fmt.Errorf("tool: scan: %w", err)
 	}
 	t.Config = cfg
@@ -292,9 +302,40 @@ func scanTool(row pgx.Row) (Tool, error) {
 func scanToolFromRows(rows pgx.Rows) (Tool, error) {
 	var t Tool
 	var cfg []byte
-	if err := rows.Scan(&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := rows.Scan(&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return Tool{}, fmt.Errorf("tool: scan: %w", err)
 	}
 	t.Config = cfg
 	return t, nil
+}
+
+// ListLabels returns all distinct labels used across tools.
+func (r *Repository) ListLabels(ctx context.Context) ([]string, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT DISTINCT unnest(labels) AS label FROM tool WHERE array_length(labels, 1) > 0 ORDER BY label`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("tool: list labels: %w", err)
+	}
+	defer rows.Close()
+
+	var labels []string
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			return nil, fmt.Errorf("tool: scan label: %w", err)
+		}
+		labels = append(labels, label)
+	}
+	if labels == nil {
+		labels = []string{}
+	}
+	return labels, rows.Err()
 }
