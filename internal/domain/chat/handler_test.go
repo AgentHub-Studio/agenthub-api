@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -95,15 +94,6 @@ func (m *mockChatSvc) AddMessage(_ context.Context, sessionID uuid.UUID, req cha
 	}
 	m.messages[sessionID] = append(m.messages[sessionID], msg)
 	return chat.MessageResponseFrom(msg), nil
-}
-
-func (m *mockChatSvc) GetLatestAssistantMessage(_ context.Context, sessionID uuid.UUID, after time.Time) (chat.ChatMessageResponse, bool, error) {
-	for _, msg := range m.messages[sessionID] {
-		if msg.Role == "assistant" && msg.CreatedAt.After(after) {
-			return chat.MessageResponseFrom(msg), true, nil
-		}
-	}
-	return chat.ChatMessageResponse{}, false, nil
 }
 
 func (m *mockChatSvc) RunSession(_ context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan chat.RunEvent, error) {
@@ -223,51 +213,6 @@ func TestChatHandler_ListMessages_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestChatHandler_StreamMessages_SSEHeaders(t *testing.T) {
-	r, svc := setupChat()
-	sessionID := uuid.New()
-	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Chat", Status: chat.StatusActive}
-	// Pre-seed an assistant message so the handler returns without long-polling.
-	svc.messages[sessionID] = []chat.ChatMessage{
-		{ID: uuid.New(), SessionID: sessionID, Role: "assistant", Content: "Hello!", CreatedAt: time.Now()},
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/stream", nil)
-	req.Header.Set("Accept", "text/event-stream")
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
-	assert.Contains(t, w.Body.String(), "data: ")
-	assert.Contains(t, w.Body.String(), "[DONE]")
-}
-
-func TestChatHandler_StreamMessages_TimeoutSendsDone(t *testing.T) {
-	r, svc := setupChat()
-	sessionID := uuid.New()
-	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Chat", Status: chat.StatusActive}
-
-	// Cancel the request after 100ms to simulate client disconnect — the handler
-	// should exit via ctx.Done() without hanging.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/stream", nil).WithContext(ctx)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
-}
-
-func TestChatHandler_StreamMessages_InvalidID(t *testing.T) {
-	r, _ := setupChat()
-	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/not-a-uuid/stream", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestChatHandler_ArchiveSession_Success(t *testing.T) {
