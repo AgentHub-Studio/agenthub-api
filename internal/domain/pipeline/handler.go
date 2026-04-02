@@ -2,8 +2,8 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -13,17 +13,12 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
-// pipelineService defines the methods used by Handler.
+// pipelineService defines the read-only methods used by Handler.
+// Write operations have been removed — pipelines are deprecated in favour of the agentic architecture.
 type pipelineService interface {
 	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[Response], error)
-	Create(ctx context.Context, req CreateRequest) (Response, error)
 	GetByID(ctx context.Context, id uuid.UUID) (Response, error)
-	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Response, error)
-	Delete(ctx context.Context, id uuid.UUID) error
-	ReplaceNodes(ctx context.Context, pipelineID uuid.UUID, nodes []NodeRequest) ([]NodeResponse, error)
-	ReplaceEdges(ctx context.Context, pipelineID uuid.UUID, edges []EdgeRequest) ([]EdgeResponse, error)
 	GetGraph(ctx context.Context, id uuid.UUID) (GraphResponse, error)
-	UpdateGraph(ctx context.Context, id uuid.UUID, req GraphRequest) (GraphResponse, error)
 }
 
 // Handler exposes pipeline HTTP endpoints.
@@ -36,19 +31,26 @@ func NewHandler(svc pipelineService) *Handler {
 	return &Handler{svc: svc}
 }
 
-// RegisterRoutes mounts pipeline routes on the given router.
+// RegisterRoutes mounts read-only pipeline routes on the given router.
+// Write operations (POST, PUT, PATCH, DELETE) have been removed — pipelines are
+// deprecated in favour of the agentic architecture (POST /api/chat/sessions/{id}/run).
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/pipelines", h.list)
-	r.Post("/api/pipelines", h.create)
-	r.Get("/api/pipelines/{id}", h.getByID)
-	r.Put("/api/pipelines/{id}", h.update)
-	r.Patch("/api/pipelines/{id}", h.update)
-	r.Delete("/api/pipelines/{id}", h.delete)
-	r.Put("/api/pipelines/{id}/nodes", h.replaceNodes)
-	r.Put("/api/pipelines/{id}/edges", h.replaceEdges)
-	// Graph endpoints — frontend-compatible format with nested position and type field.
-	r.Get("/api/pipelines/{id}/graph", h.getGraph)
-	r.Put("/api/pipelines/{id}/graph", h.updateGraph)
+	r.With(deprecated).Get("/api/pipelines", h.list)
+	r.With(deprecated).Get("/api/pipelines/{id}", h.getByID)
+	r.With(deprecated).Get("/api/pipelines/{id}/graph", h.getGraph)
+}
+
+// deprecated is a middleware that sets the Deprecated header and logs a warning.
+func deprecated(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Deprecated", "true")
+		w.Header().Set("Sunset", "2026-07-01")
+		slog.Warn("deprecated pipeline endpoint called",
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -59,24 +61,6 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, page)
-}
-
-func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.Name == "" {
-		respond.Error(w, http.StatusUnprocessableEntity, "name is required")
-		return
-	}
-	resp, err := h.svc.Create(r.Context(), req)
-	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	respond.JSON(w, http.StatusCreated, resp)
 }
 
 func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
@@ -92,98 +76,6 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	respond.JSON(w, http.StatusOK, resp)
-}
-
-func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	var req UpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	resp, err := h.svc.Update(r.Context(), id, req)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			respond.Error(w, http.StatusNotFound, "pipeline not found")
-			return
-		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	respond.JSON(w, http.StatusOK, resp)
-}
-
-func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	if err := h.svc.Delete(r.Context(), id); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			respond.Error(w, http.StatusNotFound, "pipeline not found")
-			return
-		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	respond.NoContent(w)
-}
-
-func (h *Handler) replaceNodes(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	var nodes []NodeRequest
-	if err := json.NewDecoder(r.Body).Decode(&nodes); err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	resp, err := h.svc.ReplaceNodes(r.Context(), id, nodes)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrNotFound):
-			respond.Error(w, http.StatusNotFound, "pipeline not found")
-		case errors.Is(err, ErrDuplicateNodeName):
-			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
-		default:
-			respond.Error(w, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-	respond.JSON(w, http.StatusOK, resp)
-}
-
-func (h *Handler) replaceEdges(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	var edges []EdgeRequest
-	if err := json.NewDecoder(r.Body).Decode(&edges); err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	resp, err := h.svc.ReplaceEdges(r.Context(), id, edges)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrNotFound):
-			respond.Error(w, http.StatusNotFound, "pipeline not found")
-		case errors.Is(err, ErrCyclicGraph):
-			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
-		default:
-			respond.Error(w, http.StatusInternalServerError, err.Error())
-		}
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -207,28 +99,3 @@ func (h *Handler) getGraph(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, http.StatusOK, graph)
 }
 
-func (h *Handler) updateGraph(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	var req GraphRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	graph, err := h.svc.UpdateGraph(r.Context(), id, req)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrNotFound):
-			respond.Error(w, http.StatusNotFound, "pipeline not found")
-		case errors.Is(err, ErrCyclicGraph):
-			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
-		default:
-			respond.Error(w, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-	respond.JSON(w, http.StatusOK, graph)
-}
