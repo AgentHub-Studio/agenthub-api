@@ -25,7 +25,7 @@ func newMockRepo() *mockSkillRepo {
 	}
 }
 
-func (m *mockSkillRepo) List(_ context.Context, _ pagination.PageRequest) ([]skill.Skill, int64, error) {
+func (m *mockSkillRepo) List(_ context.Context, _ *string, _ pagination.PageRequest) ([]skill.Skill, int64, error) {
 	out := make([]skill.Skill, 0, len(m.data))
 	for _, s := range m.data {
 		out = append(out, s)
@@ -174,7 +174,7 @@ func TestSkillService_List(t *testing.T) {
 		_, err := svc.Create(context.Background(), skill.CreateRequest{Name: name, Category: "misc"})
 		require.NoError(t, err)
 	}
-	page, err := svc.List(context.Background(), pagination.PageRequest{Page: 0, Size: 20})
+	page, err := svc.List(context.Background(), nil, pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), page.TotalElements)
 }
