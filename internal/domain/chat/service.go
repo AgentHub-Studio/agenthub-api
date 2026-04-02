@@ -3,20 +3,29 @@ package chat
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/http"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
+// agentRunner delegates user messages to the orchestrator for agent-based sessions.
+type agentRunner interface {
+	RunAgentExecution(ctx context.Context, bearerToken string, agentID string, userMessage string) (string, error)
+}
+
 // Service provides business logic for chat operations.
 type Service struct {
-	repo Repository
+	repo         Repository
+	orchestrator agentRunner
 }
 
 // NewService creates a new Service backed by the given Repository.
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+// Pass a non-nil orchestrator to enable AI responses for agent-based sessions.
+func NewService(repo Repository, orchestrator agentRunner) *Service {
+	return &Service{repo: repo, orchestrator: orchestrator}
 }
 
 // ListSessions returns a paginated list of chat sessions.
@@ -96,7 +105,10 @@ func (s *Service) ListMessages(ctx context.Context, sessionID uuid.UUID, req pag
 }
 
 // AddMessage adds a message to a chat session.
-func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error) {
+// For user messages on agent-bound sessions, it delegates to the orchestrator and
+// stores the assistant reply. The user message response is returned; the assistant
+// reply (if any) is stored asynchronously and the frontend can poll for it.
+func (s *Service) AddMessage(ctx context.Context, r *http.Request, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error) {
 	if req.Role == "" {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: role is required")
 	}
@@ -113,6 +125,33 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 	created, err := s.repo.CreateMessage(ctx, m)
 	if err != nil {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: add message: %w", err)
+	}
+
+	// For user messages on agent sessions, trigger orchestrator and store assistant reply.
+	if req.Role == "user" && s.orchestrator != nil {
+		session, sesErr := s.repo.GetSessionByID(ctx, sessionID)
+		if sesErr == nil && session.AgentID != nil {
+			bearerToken := r.Header.Get("Authorization")
+			go func() {
+				bgCtx := context.Background()
+				output, runErr := s.orchestrator.RunAgentExecution(bgCtx, bearerToken, session.AgentID.String(), req.Content)
+				if runErr != nil {
+					slog.Warn("chat service: orchestrator execution failed", "sessionId", sessionID, "err", runErr)
+					return
+				}
+				if output == "" {
+					return
+				}
+				assistantMsg := ChatMessage{
+					SessionID: sessionID,
+					Role:      "assistant",
+					Content:   output,
+				}
+				if _, storeErr := s.repo.CreateMessage(bgCtx, assistantMsg); storeErr != nil {
+					slog.Warn("chat service: failed to store assistant message", "sessionId", sessionID, "err", storeErr)
+				}
+			}()
+		}
 	}
 
 	return MessageResponseFrom(created), nil

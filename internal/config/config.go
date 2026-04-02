@@ -40,6 +40,7 @@ type Config struct {
 	LogLevel            string
 	OAuthEncryptionKey  string // 32-byte AES-256 key; empty disables encryption (dev mode)
 	RabbitMQURL         string // RABBITMQ_URL — optional; enables document pipeline events when set
+	OrchestratorURL     string // ORCHESTRATOR_URL — optional; enables agent execution via chat sessions when set
 }
 
 // Load reads configuration from environment variables.
@@ -71,6 +72,7 @@ func Load() (*Config, error) {
 	cfg.OAuthEncryptionKey = os.Getenv("OAUTH_ENCRYPTION_KEY")
 
 	cfg.RabbitMQURL = os.Getenv("RABBITMQ_URL")
+	cfg.OrchestratorURL = getEnv("ORCHESTRATOR_URL", "http://agenthub-orchestrator:8084")
 
 	cfg.MinIO = MinIOConfig{
 		Endpoint:        os.Getenv("MINIO_ENDPOINT"),

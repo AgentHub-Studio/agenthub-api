@@ -85,7 +85,7 @@ func (m *mockChatSvc) ListMessages(_ context.Context, sessionID uuid.UUID, req p
 	return pagination.NewPage(items, int64(len(items)), req), nil
 }
 
-func (m *mockChatSvc) AddMessage(_ context.Context, sessionID uuid.UUID, req chat.CreateMessageRequest) (chat.ChatMessageResponse, error) {
+func (m *mockChatSvc) AddMessage(_ context.Context, _ *http.Request, sessionID uuid.UUID, req chat.CreateMessageRequest) (chat.ChatMessageResponse, error) {
 	msg := chat.ChatMessage{
 		ID:        uuid.New(),
 		SessionID: sessionID,
