@@ -80,33 +80,92 @@ func TestE2E_PipelineCRUD(t *testing.T) {
 	token := os.Getenv("AUTH_TOKEN")
 	client := testutil.NewAPIClient(t, e2eConfig().backendURL, token)
 
-	// First create an agent
-	agentReq := map[string]any{"name": "Pipeline Test Agent", "description": "For pipeline testing"}
-	var agent map[string]any
-	require.Equal(t, http.StatusCreated, client.Post("/api/agents", agentReq, &agent))
-	agentID := agent["id"].(string)
-	defer client.Delete(testutil.FormatURL("/api/agents/%s", agentID))
-
 	// Create pipeline
-	pipelineReq := map[string]any{
-		"agentId": agentID,
-		"name":    "Test Pipeline",
-	}
+	pipelineReq := map[string]any{"name": "Test Pipeline", "description": "E2E test pipeline"}
 	var pipeline map[string]any
 	status := client.Post("/api/pipelines", pipelineReq, &pipeline)
 	require.Equal(t, http.StatusCreated, status, "create pipeline")
 	pipelineID := pipeline["id"].(string)
+	defer client.Delete(testutil.FormatURL("/api/pipelines/%s", pipelineID))
 
-	// Add nodes
-	inputNode := map[string]any{
-		"pipelineId": pipelineID,
-		"nodeId":     "input-1",
-		"type":       "INPUT",
-		"config":     map[string]any{},
+	// List pipelines
+	var page testutil.Page[map[string]any]
+	status = client.Get("/api/pipelines?page=0&size=10", &page)
+	assert.Equal(t, http.StatusOK, status, "list pipelines")
+	assert.GreaterOrEqual(t, page.TotalElements, int64(1))
+
+	// Get pipeline
+	var fetched map[string]any
+	status = client.Get(testutil.FormatURL("/api/pipelines/%s", pipelineID), &fetched)
+	assert.Equal(t, http.StatusOK, status, "get pipeline")
+	assert.Equal(t, "Test Pipeline", fetched["name"])
+
+	// Replace nodes via PUT /nodes
+	nodes := []map[string]any{
+		{"nodeType": "INPUT", "name": "Start", "config": map[string]any{}, "positionX": 0.0, "positionY": 0.0},
+		{"nodeType": "OUTPUT", "name": "End", "config": map[string]any{}, "positionX": 300.0, "positionY": 0.0},
 	}
-	var node map[string]any
-	status = client.Post(testutil.FormatURL("/api/pipelines/%s/nodes", pipelineID), inputNode, &node)
-	assert.Equal(t, http.StatusCreated, status, "create node")
+	var nodeResps []map[string]any
+	status = client.Put(testutil.FormatURL("/api/pipelines/%s/nodes", pipelineID), nodes, &nodeResps)
+	require.Equal(t, http.StatusOK, status, "replace nodes")
+	require.Len(t, nodeResps, 2)
+
+	startID := nodeResps[0]["id"].(string)
+	endID := nodeResps[1]["id"].(string)
+
+	// Replace edges via PUT /edges
+	edges := []map[string]any{
+		{"sourceNodeId": startID, "targetNodeId": endID, "label": ""},
+	}
+	var edgeResps []map[string]any
+	status = client.Put(testutil.FormatURL("/api/pipelines/%s/edges", pipelineID), edges, &edgeResps)
+	assert.Equal(t, http.StatusOK, status, "replace edges")
+	assert.Len(t, edgeResps, 1)
+
+	// Get graph in frontend format
+	var graph map[string]any
+	status = client.Get(testutil.FormatURL("/api/pipelines/%s/graph", pipelineID), &graph)
+	assert.Equal(t, http.StatusOK, status, "get graph")
+	graphNodes, _ := graph["nodes"].([]any)
+	graphEdges, _ := graph["edges"].([]any)
+	assert.Len(t, graphNodes, 2, "graph should have 2 nodes")
+	assert.Len(t, graphEdges, 1, "graph should have 1 edge")
+
+	// Verify graph node has frontend-compatible format (type, label, position)
+	firstNode := graphNodes[0].(map[string]any)
+	assert.NotEmpty(t, firstNode["type"], "graph node should have type field")
+	assert.NotNil(t, firstNode["position"], "graph node should have position field")
+
+	// Update graph via PUT /graph
+	graphReq := map[string]any{
+		"nodes": []map[string]any{
+			{
+				"id": startID, "type": "INPUT", "label": "Start",
+				"position": map[string]any{"x": 50.0, "y": 100.0},
+				"config":   map[string]any{},
+			},
+			{
+				"id": endID, "type": "OUTPUT", "label": "End",
+				"position": map[string]any{"x": 400.0, "y": 100.0},
+				"config":   map[string]any{},
+			},
+		},
+		"edges": []map[string]any{
+			{"id": "e1", "sourceNodeId": startID, "targetNodeId": endID},
+		},
+	}
+	var updatedGraph map[string]any
+	status = client.Put(testutil.FormatURL("/api/pipelines/%s/graph", pipelineID), graphReq, &updatedGraph)
+	assert.Equal(t, http.StatusOK, status, "update graph")
+	updatedNodes, _ := updatedGraph["nodes"].([]any)
+	assert.Len(t, updatedNodes, 2, "updated graph should have 2 nodes")
+
+	// Update pipeline metadata
+	updateReq := map[string]any{"name": "Updated Pipeline", "status": "DRAFT"}
+	var updated map[string]any
+	status = client.Put(testutil.FormatURL("/api/pipelines/%s", pipelineID), updateReq, &updated)
+	assert.Equal(t, http.StatusOK, status, "update pipeline")
+	assert.Equal(t, "Updated Pipeline", updated["name"])
 }
 
 func TestE2E_KnowledgeBaseCRUD(t *testing.T) {
