@@ -89,6 +89,27 @@ func (m *mockPipelineSvc) ReplaceEdges(_ context.Context, pipelineID uuid.UUID, 
 	return resp, nil
 }
 
+func (m *mockPipelineSvc) GetGraph(_ context.Context, id uuid.UUID) (pipeline.GraphResponse, error) {
+	if _, ok := m.pipelines[id]; !ok {
+		return pipeline.GraphResponse{}, pipeline.ErrNotFound
+	}
+	return pipeline.GraphResponse{
+		Nodes: []pipeline.GraphNodeResponse{},
+		Edges: []pipeline.GraphEdgeResponse{},
+	}, nil
+}
+
+func (m *mockPipelineSvc) UpdateGraph(_ context.Context, id uuid.UUID, req pipeline.GraphRequest) (pipeline.GraphResponse, error) {
+	if _, ok := m.pipelines[id]; !ok {
+		return pipeline.GraphResponse{}, pipeline.ErrNotFound
+	}
+	return pipeline.GraphResponse{
+		Nodes:        []pipeline.GraphNodeResponse{},
+		Edges:        []pipeline.GraphEdgeResponse{},
+		BlocklyState: req.BlocklyState,
+	}, nil
+}
+
 func setupPipeline() (*chi.Mux, *mockPipelineSvc) {
 	svc := newMockPipelineSvc()
 	h := pipeline.NewHandler(svc)
@@ -190,4 +211,73 @@ func TestPipelineHandler_ReplaceNodes_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestPipelineHandler_GetGraph_Success(t *testing.T) {
+	r, svc := setupPipeline()
+	id := uuid.New()
+	svc.pipelines[id] = pipeline.Response{ID: id, Name: "Pipeline"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pipelines/"+id.String()+"/graph", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp pipeline.GraphResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.NotNil(t, resp.Nodes)
+	assert.NotNil(t, resp.Edges)
+}
+
+func TestPipelineHandler_GetGraph_NotFound(t *testing.T) {
+	r, _ := setupPipeline()
+	req := httptest.NewRequest(http.MethodGet, "/api/pipelines/"+uuid.New().String()+"/graph", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestPipelineHandler_UpdateGraph_Success(t *testing.T) {
+	r, svc := setupPipeline()
+	id := uuid.New()
+	svc.pipelines[id] = pipeline.Response{ID: id, Name: "Pipeline"}
+
+	graphReq := pipeline.GraphRequest{
+		Nodes: []pipeline.GraphNodeRequest{
+			{ID: "n1", Type: "INPUT", Label: "Start"},
+		},
+		Edges: []pipeline.GraphEdgeRequest{},
+	}
+	body, _ := json.Marshal(graphReq)
+	req := httptest.NewRequest(http.MethodPut, "/api/pipelines/"+id.String()+"/graph", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp pipeline.GraphResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.NotNil(t, resp.Nodes)
+}
+
+func TestPipelineHandler_UpdateGraph_NotFound(t *testing.T) {
+	r, _ := setupPipeline()
+	body, _ := json.Marshal(pipeline.GraphRequest{})
+	req := httptest.NewRequest(http.MethodPut, "/api/pipelines/"+uuid.New().String()+"/graph", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestPipelineHandler_UpdateGraph_InvalidBody(t *testing.T) {
+	r, _ := setupPipeline()
+	req := httptest.NewRequest(http.MethodPut, "/api/pipelines/"+uuid.New().String()+"/graph", bytes.NewReader([]byte("not-json")))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }

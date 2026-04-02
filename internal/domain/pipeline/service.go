@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -116,6 +117,125 @@ func (s *Service) ReplaceEdges(ctx context.Context, pipelineID uuid.UUID, edges 
 		resp[i] = EdgeResponseFrom(e)
 	}
 	return resp, nil
+}
+
+// GetGraph returns the pipeline in the frontend-compatible graph format.
+func (s *Service) GetGraph(ctx context.Context, id uuid.UUID) (GraphResponse, error) {
+	p, nodes, edges, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return GraphResponse{}, err
+	}
+	nodeResps := make([]NodeResponse, len(nodes))
+	for i, n := range nodes {
+		nodeResps[i] = NodeResponseFrom(n)
+	}
+	edgeResps := make([]EdgeResponse, len(edges))
+	for i, e := range edges {
+		edgeResps[i] = EdgeResponseFrom(e)
+	}
+
+	// blocklyState is stored in pipeline.config under key "blocklyState".
+	var blocklyState json.RawMessage
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(p.Config, &cfg); err == nil {
+		if bs, ok := cfg["blocklyState"]; ok {
+			blocklyState = bs
+		}
+	}
+
+	return GraphResponseFrom(nodeResps, edgeResps, blocklyState), nil
+}
+
+// UpdateGraph replaces nodes and edges using the frontend graph format, and
+// optionally persists the Blockly workspace state inside pipeline.config.
+func (s *Service) UpdateGraph(ctx context.Context, id uuid.UUID, req GraphRequest) (GraphResponse, error) {
+	// Map GraphNodeRequest → NodeRequest.
+	nodeReqs := make([]NodeRequest, len(req.Nodes))
+	for i, gn := range req.Nodes {
+		cfg := gn.Config
+		if cfg == nil {
+			cfg = json.RawMessage("{}")
+		}
+		nodeReqs[i] = NodeRequest{
+			NodeType:  gn.Type,
+			Name:      gn.Label,
+			Config:    cfg,
+			PositionX: gn.Position.X,
+			PositionY: gn.Position.Y,
+		}
+	}
+
+	if err := validateUniqueNodeNames(nodeReqs); err != nil {
+		return GraphResponse{}, err
+	}
+	newNodes, err := s.repo.ReplaceNodes(ctx, id, nodeReqs)
+	if err != nil {
+		return GraphResponse{}, err
+	}
+
+	// Build a name→ID map to resolve edges (frontend may use node labels as IDs).
+	nodeIDByLabel := make(map[string]uuid.UUID, len(newNodes))
+	nodeIDByOldID := make(map[string]uuid.UUID, len(newNodes))
+	for j, gn := range req.Nodes {
+		if j < len(newNodes) {
+			nodeIDByLabel[gn.Label] = newNodes[j].ID
+			nodeIDByOldID[gn.ID] = newNodes[j].ID
+		}
+	}
+
+	// Map GraphEdgeRequest → EdgeRequest (resolve node IDs).
+	edgeReqs := make([]EdgeRequest, 0, len(req.Edges))
+	for _, ge := range req.Edges {
+		srcID, srcOK := nodeIDByOldID[ge.SourceNodeID]
+		tgtID, tgtOK := nodeIDByOldID[ge.TargetNodeID]
+		if !srcOK || !tgtOK {
+			continue // skip edges referencing unknown nodes
+		}
+		edgeReqs = append(edgeReqs, EdgeRequest{
+			SourceNodeID: srcID,
+			TargetNodeID: tgtID,
+			Label:        ge.Label,
+		})
+	}
+
+	if hasCycle(edgeReqs) {
+		return GraphResponse{}, fmt.Errorf("%w: edges form a cycle", ErrCyclicGraph)
+	}
+	newEdges, err := s.repo.ReplaceEdges(ctx, id, edgeReqs)
+	if err != nil {
+		return GraphResponse{}, err
+	}
+
+	// Persist blocklyState inside pipeline.config if provided.
+	if len(req.BlocklyState) > 0 {
+		p, _, _, getErr := s.repo.GetByID(ctx, id)
+		if getErr == nil {
+			var cfg map[string]json.RawMessage
+			if json.Unmarshal(p.Config, &cfg) != nil {
+				cfg = make(map[string]json.RawMessage)
+			}
+			cfg["blocklyState"] = req.BlocklyState
+			if newCfg, marshalErr := json.Marshal(cfg); marshalErr == nil {
+				updateReq := UpdateRequest{
+					Name:        p.Name,
+					Description: p.Description,
+					Status:      p.Status,
+					Config:      json.RawMessage(newCfg),
+				}
+				_, _ = s.repo.Update(ctx, id, updateReq)
+			}
+		}
+	}
+
+	nodeResps := make([]NodeResponse, len(newNodes))
+	for i, n := range newNodes {
+		nodeResps[i] = NodeResponseFrom(n)
+	}
+	edgeResps := make([]EdgeResponse, len(newEdges))
+	for i, e := range newEdges {
+		edgeResps[i] = EdgeResponseFrom(e)
+	}
+	return GraphResponseFrom(nodeResps, edgeResps, req.BlocklyState), nil
 }
 
 // validateUniqueNodeNames returns ErrDuplicateNodeName if any two nodes share the same name.

@@ -111,3 +111,86 @@ func NodeResponseFrom(n Node) NodeResponse {
 func EdgeResponseFrom(e Edge) EdgeResponse {
 	return EdgeResponse(e)
 }
+
+// GraphNodeResponse is the frontend-compatible node format used by the /graph endpoint.
+// Uses "type" (not "nodeType") and a nested "position" object.
+type GraphNodeResponse struct {
+	ID       string         `json:"id"`
+	Type     string         `json:"type"`
+	Label    string         `json:"label,omitempty"`
+	Position struct {
+		X float64 `json:"x"`
+		Y float64 `json:"y"`
+	} `json:"position"`
+	Config any `json:"config"`
+}
+
+// GraphEdgeResponse is the frontend-compatible edge format.
+type GraphEdgeResponse struct {
+	ID           string `json:"id"`
+	SourceNodeID string `json:"sourceNodeId"`
+	TargetNodeID string `json:"targetNodeId"`
+	Label        string `json:"label,omitempty"`
+}
+
+// GraphResponse is the payload returned by GET /api/pipelines/{id}/graph.
+type GraphResponse struct {
+	Nodes        []GraphNodeResponse `json:"nodes"`
+	Edges        []GraphEdgeResponse `json:"edges"`
+	BlocklyState json.RawMessage     `json:"blocklyState,omitempty"`
+}
+
+// GraphRequest is the payload accepted by PUT /api/pipelines/{id}/graph.
+type GraphRequest struct {
+	Nodes        []GraphNodeRequest `json:"nodes"`
+	Edges        []GraphEdgeRequest `json:"edges"`
+	BlocklyState json.RawMessage    `json:"blocklyState,omitempty"`
+}
+
+// GraphNodeRequest is the frontend-compatible node format for graph updates.
+type GraphNodeRequest struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Label    string `json:"label,omitempty"`
+	Position struct {
+		X float64 `json:"x"`
+		Y float64 `json:"y"`
+	} `json:"position"`
+	Config json.RawMessage `json:"config"`
+}
+
+// GraphEdgeRequest is the frontend-compatible edge format for graph updates.
+type GraphEdgeRequest struct {
+	ID           string `json:"id"`
+	SourceNodeID string `json:"sourceNodeId"`
+	TargetNodeID string `json:"targetNodeId"`
+	Label        string `json:"label,omitempty"`
+}
+
+// GraphResponseFrom converts NodeResponse/EdgeResponse slices to GraphResponse.
+func GraphResponseFrom(nodes []NodeResponse, edges []EdgeResponse, blocklyState json.RawMessage) GraphResponse {
+	gNodes := make([]GraphNodeResponse, len(nodes))
+	for i, n := range nodes {
+		gn := GraphNodeResponse{
+			ID:     n.ID.String(),
+			Type:   n.NodeType,
+			Label:  n.Name,
+			Config: n.Config,
+		}
+		gn.Position.X = n.PositionX
+		gn.Position.Y = n.PositionY
+		gNodes[i] = gn
+	}
+
+	gEdges := make([]GraphEdgeResponse, len(edges))
+	for i, e := range edges {
+		gEdges[i] = GraphEdgeResponse{
+			ID:           e.ID.String(),
+			SourceNodeID: e.SourceNodeID.String(),
+			TargetNodeID: e.TargetNodeID.String(),
+			Label:        e.Label,
+		}
+	}
+
+	return GraphResponse{Nodes: gNodes, Edges: gEdges, BlocklyState: blocklyState}
+}

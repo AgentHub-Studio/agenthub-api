@@ -22,6 +22,8 @@ type pipelineService interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 	ReplaceNodes(ctx context.Context, pipelineID uuid.UUID, nodes []NodeRequest) ([]NodeResponse, error)
 	ReplaceEdges(ctx context.Context, pipelineID uuid.UUID, edges []EdgeRequest) ([]EdgeResponse, error)
+	GetGraph(ctx context.Context, id uuid.UUID) (GraphResponse, error)
+	UpdateGraph(ctx context.Context, id uuid.UUID, req GraphRequest) (GraphResponse, error)
 }
 
 // Handler exposes pipeline HTTP endpoints.
@@ -43,6 +45,9 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Delete("/api/pipelines/{id}", h.delete)
 	r.Put("/api/pipelines/{id}/nodes", h.replaceNodes)
 	r.Put("/api/pipelines/{id}/edges", h.replaceEdges)
+	// Graph endpoints — frontend-compatible format with nested position and type field.
+	r.Get("/api/pipelines/{id}/graph", h.getGraph)
+	r.Put("/api/pipelines/{id}/graph", h.updateGraph)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -181,4 +186,48 @@ func (h *Handler) replaceEdges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) getGraph(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	graph, err := h.svc.GetGraph(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "pipeline not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, graph)
+}
+
+func (h *Handler) updateGraph(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var req GraphRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	graph, err := h.svc.UpdateGraph(r.Context(), id, req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			respond.Error(w, http.StatusNotFound, "pipeline not found")
+		case errors.Is(err, ErrCyclicGraph):
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		default:
+			respond.Error(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respond.JSON(w, http.StatusOK, graph)
 }
