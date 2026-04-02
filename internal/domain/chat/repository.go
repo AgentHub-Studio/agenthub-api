@@ -181,7 +181,10 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 	}
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, session_id, role, content, created_at
+		`SELECT id, session_id, role, content,
+		        message_type, tool_calls, tool_call_id,
+		        metadata, token_usage, finish_reason, turn_index,
+		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1
 		 ORDER BY created_at ASC
@@ -196,7 +199,12 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 	var items []ChatMessage
 	for rows.Next() {
 		var m ChatMessage
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&m.ID, &m.SessionID, &m.Role, &m.Content,
+			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
+			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex,
+			&m.CreatedAt,
+		); err != nil {
 			return nil, 0, fmt.Errorf("chat: scan message: %w", err)
 		}
 		items = append(items, m)
@@ -217,11 +225,21 @@ func (r *postgresRepository) CreateMessage(ctx context.Context, m ChatMessage) (
 
 	m.ID = uuid.New()
 	m.CreatedAt = time.Now().UTC()
+	if m.MessageType == "" {
+		m.MessageType = MessageTypeText
+	}
 
 	_, err = conn.Exec(ctx,
-		`INSERT INTO chat_message (id, session_id, role, content, created_at)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		m.ID, m.SessionID, m.Role, m.Content, m.CreatedAt,
+		`INSERT INTO chat_message
+		 (id, session_id, role, content,
+		  message_type, tool_calls, tool_call_id,
+		  metadata, token_usage, finish_reason, turn_index,
+		  created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		m.ID, m.SessionID, m.Role, m.Content,
+		m.MessageType, m.ToolCalls, m.ToolCallID,
+		m.Metadata, m.TokenUsage, m.FinishReason, m.TurnIndex,
+		m.CreatedAt,
 	)
 	if err != nil {
 		return ChatMessage{}, fmt.Errorf("chat: create message: %w", err)
@@ -239,13 +257,21 @@ func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sess
 
 	var m ChatMessage
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, role, content, created_at
+		`SELECT id, session_id, role, content,
+		        message_type, tool_calls, tool_call_id,
+		        metadata, token_usage, finish_reason, turn_index,
+		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1 AND role = 'assistant' AND created_at > $2
 		 ORDER BY created_at DESC
 		 LIMIT 1`,
 		sessionID, after,
-	).Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.CreatedAt)
+	).Scan(
+		&m.ID, &m.SessionID, &m.Role, &m.Content,
+		&m.MessageType, &m.ToolCalls, &m.ToolCallID,
+		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex,
+		&m.CreatedAt,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatMessage{}, false, nil

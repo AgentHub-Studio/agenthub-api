@@ -15,7 +15,8 @@ type AgentResponse struct {
 	Description    string          `json:"description"`
 	Status         string          `json:"status"`
 	CurrentVersion int             `json:"currentVersion"`
-	PipelineID     *uuid.UUID      `json:"pipelineId,omitempty"`
+	SystemPrompt   *string         `json:"systemPrompt,omitempty"`
+	ModelConfig    json.RawMessage `json:"modelConfig,omitempty"`
 	Config         json.RawMessage `json:"config"`
 	CreatedAt      time.Time       `json:"createdAt"`
 	UpdatedAt      time.Time       `json:"updatedAt"`
@@ -27,6 +28,10 @@ func ResponseFrom(a Agent) AgentResponse {
 	if len(config) == 0 {
 		config = json.RawMessage(`{}`)
 	}
+	var modelConfig json.RawMessage
+	if len(a.ModelConfig) > 0 {
+		modelConfig = a.ModelConfig
+	}
 	return AgentResponse{
 		ID:             a.ID,
 		Name:           a.Name,
@@ -34,7 +39,8 @@ func ResponseFrom(a Agent) AgentResponse {
 		Description:    a.Description,
 		Status:         string(a.Status),
 		CurrentVersion: a.CurrentVersion,
-		PipelineID:     a.PipelineID,
+		SystemPrompt:   a.SystemPrompt,
+		ModelConfig:    modelConfig,
 		Config:         config,
 		CreatedAt:      a.CreatedAt,
 		UpdatedAt:      a.UpdatedAt,
@@ -43,20 +49,22 @@ func ResponseFrom(a Agent) AgentResponse {
 
 // CreateAgentRequest is the JSON body for agent creation.
 type CreateAgentRequest struct {
-	Name        string          `json:"name"`
-	Slug        string          `json:"slug"`
-	Description string          `json:"description"`
-	PipelineID  *uuid.UUID      `json:"pipelineId,omitempty"`
-	Config      json.RawMessage `json:"config,omitempty"`
+	Name         string          `json:"name"`
+	Slug         string          `json:"slug"`
+	Description  string          `json:"description"`
+	SystemPrompt *string         `json:"systemPrompt,omitempty"`
+	ModelConfig  json.RawMessage `json:"modelConfig,omitempty"`
+	Config       json.RawMessage `json:"config,omitempty"`
 }
 
 // UpdateAgentRequest is the JSON body for partial agent updates.
 type UpdateAgentRequest struct {
-	Name        *string         `json:"name,omitempty"`
-	Slug        *string         `json:"slug,omitempty"`
-	Description *string         `json:"description,omitempty"`
-	PipelineID  *uuid.UUID      `json:"pipelineId,omitempty"`
-	Config      json.RawMessage `json:"config,omitempty"`
+	Name         *string         `json:"name,omitempty"`
+	Slug         *string         `json:"slug,omitempty"`
+	Description  *string         `json:"description,omitempty"`
+	SystemPrompt *string         `json:"systemPrompt,omitempty"`
+	ModelConfig  json.RawMessage `json:"modelConfig,omitempty"`
+	Config       json.RawMessage `json:"config,omitempty"`
 }
 
 // CloneAgentRequest is the JSON body for cloning an agent.

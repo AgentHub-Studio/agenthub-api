@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -28,13 +29,31 @@ type ChatSession struct {
 	UpdatedAt time.Time  `db:"updated_at"`
 }
 
+// MessageType represents the kind of chat message in the agentic loop.
+type MessageType string
+
+const (
+	MessageTypeText           MessageType = "text"
+	MessageTypeToolUse        MessageType = "tool_use"
+	MessageTypeToolResult     MessageType = "tool_result"
+	MessageTypeSystem         MessageType = "system"
+	MessageTypeCompactSummary MessageType = "compact_summary"
+)
+
 // ChatMessage is the domain entity for a message within a session.
 type ChatMessage struct {
-	ID        uuid.UUID `db:"id"`
-	SessionID uuid.UUID `db:"session_id"`
-	Role      string    `db:"role"`
-	Content   string    `db:"content"`
-	CreatedAt time.Time `db:"created_at"`
+	ID           uuid.UUID       `db:"id"`
+	SessionID    uuid.UUID       `db:"session_id"`
+	Role         string          `db:"role"`
+	Content      string          `db:"content"`
+	MessageType  MessageType     `db:"message_type"`
+	ToolCalls    json.RawMessage `db:"tool_calls"`
+	ToolCallID   *string         `db:"tool_call_id"`
+	Metadata     json.RawMessage `db:"metadata"`
+	TokenUsage   json.RawMessage `db:"token_usage"`
+	FinishReason *string         `db:"finish_reason"`
+	TurnIndex    int             `db:"turn_index"`
+	CreatedAt    time.Time       `db:"created_at"`
 }
 
 // ChatSessionResponse is the DTO for a chat session.
@@ -49,11 +68,18 @@ type ChatSessionResponse struct {
 
 // ChatMessageResponse is the DTO for a chat message.
 type ChatMessageResponse struct {
-	ID        uuid.UUID `json:"id"`
-	SessionID uuid.UUID `json:"sessionId"`
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID           uuid.UUID       `json:"id"`
+	SessionID    uuid.UUID       `json:"sessionId"`
+	Role         string          `json:"role"`
+	Content      string          `json:"content"`
+	MessageType  MessageType     `json:"messageType"`
+	ToolCalls    json.RawMessage `json:"toolCalls,omitempty"`
+	ToolCallID   *string         `json:"toolCallId,omitempty"`
+	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	TokenUsage   json.RawMessage `json:"tokenUsage,omitempty"`
+	FinishReason *string         `json:"finishReason,omitempty"`
+	TurnIndex    int             `json:"turnIndex"`
+	CreatedAt    time.Time       `json:"createdAt"`
 }
 
 // SessionResponseFrom maps a ChatSession entity to a ChatSessionResponse DTO.
@@ -69,7 +95,22 @@ func SessionResponseFrom(s ChatSession) ChatSessionResponse {
 }
 
 // MessageResponseFrom maps a ChatMessage entity to a ChatMessageResponse DTO.
-func MessageResponseFrom(m ChatMessage) ChatMessageResponse { return ChatMessageResponse(m) }
+func MessageResponseFrom(m ChatMessage) ChatMessageResponse {
+	return ChatMessageResponse{
+		ID:           m.ID,
+		SessionID:    m.SessionID,
+		Role:         m.Role,
+		Content:      m.Content,
+		MessageType:  m.MessageType,
+		ToolCalls:    m.ToolCalls,
+		ToolCallID:   m.ToolCallID,
+		Metadata:     m.Metadata,
+		TokenUsage:   m.TokenUsage,
+		FinishReason: m.FinishReason,
+		TurnIndex:    m.TurnIndex,
+		CreatedAt:    m.CreatedAt,
+	}
+}
 
 // CreateSessionRequest is the payload for creating a chat session.
 type CreateSessionRequest struct {
@@ -79,6 +120,13 @@ type CreateSessionRequest struct {
 
 // CreateMessageRequest is the payload for adding a message to a session.
 type CreateMessageRequest struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role         string          `json:"role"`
+	Content      string          `json:"content"`
+	MessageType  MessageType     `json:"messageType,omitempty"`
+	ToolCalls    json.RawMessage `json:"toolCalls,omitempty"`
+	ToolCallID   *string         `json:"toolCallId,omitempty"`
+	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	TokenUsage   json.RawMessage `json:"tokenUsage,omitempty"`
+	FinishReason *string         `json:"finishReason,omitempty"`
+	TurnIndex    int             `json:"turnIndex,omitempty"`
 }
