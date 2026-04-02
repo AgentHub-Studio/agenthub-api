@@ -15,12 +15,13 @@ case "$CMD" in
     ;;
   test)
     docker run --rm \
+      -e CGO_ENABLED=1 \
       -v "$(pwd)":/app \
       -v "${CACHE_VOL}":/go/pkg/mod \
       -v "$(dirname "$(pwd)")/agenthub-go-commons":/agenthub-go-commons \
       -v /var/run/docker.sock:/var/run/docker.sock \
       -w /app \
-      "${GO_IMAGE}" go test -v -race -coverprofile=coverage.out ./... "$@"
+      "${GO_IMAGE}" sh -c "apk add --no-cache gcc musl-dev >/dev/null 2>&1 && go test -v -race -coverprofile=coverage.out ./... $*"
     ;;
   package)
     docker build -t "agenthub-studio/agenthub-api:local" .
@@ -29,6 +30,7 @@ case "$CMD" in
     docker run --rm \
       -v "$(pwd)":/app \
       -v "${CACHE_VOL}":/go/pkg/mod \
+      -v "$(dirname "$(pwd)")/agenthub-go-commons":/agenthub-go-commons \
       -w /app \
       golangci/golangci-lint:latest golangci-lint run ./...
     ;;
