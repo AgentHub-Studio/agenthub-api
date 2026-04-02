@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -139,9 +140,9 @@ func TestSkillRuntimeClient_Execute_NonMapInput(t *testing.T) {
 }
 
 func TestSkillRuntimeClient_ExecuteParallel(t *testing.T) {
-	callCount := 0
+	var callCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		callCount++
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"output":    map[string]any{"ok": true},
@@ -160,7 +161,7 @@ func TestSkillRuntimeClient_ExecuteParallel(t *testing.T) {
 	results := client.ExecuteParallel(context.Background(), calls, 2)
 
 	assert.Len(t, results, 3)
-	assert.Equal(t, 3, callCount)
+	assert.Equal(t, int32(3), callCount.Load())
 	for _, r := range results {
 		assert.Nil(t, r.Error)
 		assert.Contains(t, string(r.Output), "ok")
