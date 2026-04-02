@@ -21,7 +21,7 @@ const (
 // ChatSession is the domain entity for a chat session.
 type ChatSession struct {
 	ID        uuid.UUID  `db:"id"`
-	AgentID   uuid.UUID  `db:"agent_id"`
+	AgentID   *uuid.UUID `db:"agent_id"`
 	Title     string     `db:"title"`
 	Status    ChatStatus `db:"status"`
 	CreatedAt time.Time  `db:"created_at"`
@@ -40,7 +40,7 @@ type ChatMessage struct {
 // ChatSessionResponse is the DTO for a chat session.
 type ChatSessionResponse struct {
 	ID        uuid.UUID  `json:"id"`
-	AgentID   uuid.UUID  `json:"agentId"`
+	AgentID   *uuid.UUID `json:"agentId,omitempty"`
 	Title     string     `json:"title"`
 	Status    ChatStatus `json:"status"`
 	CreatedAt time.Time  `json:"createdAt"`
@@ -57,15 +57,24 @@ type ChatMessageResponse struct {
 }
 
 // SessionResponseFrom maps a ChatSession entity to a ChatSessionResponse DTO.
-func SessionResponseFrom(s ChatSession) ChatSessionResponse { return ChatSessionResponse(s) }
+func SessionResponseFrom(s ChatSession) ChatSessionResponse {
+	return ChatSessionResponse{
+		ID:        s.ID,
+		AgentID:   s.AgentID,
+		Title:     s.Title,
+		Status:    s.Status,
+		CreatedAt: s.CreatedAt,
+		UpdatedAt: s.UpdatedAt,
+	}
+}
 
 // MessageResponseFrom maps a ChatMessage entity to a ChatMessageResponse DTO.
 func MessageResponseFrom(m ChatMessage) ChatMessageResponse { return ChatMessageResponse(m) }
 
 // CreateSessionRequest is the payload for creating a chat session.
 type CreateSessionRequest struct {
-	AgentID uuid.UUID `json:"agentId"`
-	Title   string    `json:"title"`
+	AgentID *uuid.UUID `json:"agentId,omitempty"`
+	Title   string     `json:"title"`
 }
 
 // CreateMessageRequest is the payload for adding a message to a session.

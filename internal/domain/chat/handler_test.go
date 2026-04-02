@@ -107,7 +107,8 @@ func setupChat() (*chi.Mux, *mockChatSvc) {
 func TestChatHandler_ListSessions_Success(t *testing.T) {
 	r, svc := setupChat()
 	id := uuid.New()
-	svc.sessions[id] = chat.ChatSession{ID: id, AgentID: uuid.New(), Title: "Session 1", Status: chat.StatusActive}
+	agentID := uuid.New()
+	svc.sessions[id] = chat.ChatSession{ID: id, AgentID: &agentID, Title: "Session 1", Status: chat.StatusActive}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions", nil)
 	w := httptest.NewRecorder()
@@ -121,7 +122,8 @@ func TestChatHandler_ListSessions_Success(t *testing.T) {
 
 func TestChatHandler_CreateSession_Success(t *testing.T) {
 	r, _ := setupChat()
-	body, _ := json.Marshal(chat.CreateSessionRequest{AgentID: uuid.New(), Title: "My Chat"})
+	agentID := uuid.New()
+	body, _ := json.Marshal(chat.CreateSessionRequest{AgentID: &agentID, Title: "My Chat"})
 	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -155,7 +157,8 @@ func TestChatHandler_GetSession_NotFound(t *testing.T) {
 func TestChatHandler_DeleteSession_Success(t *testing.T) {
 	r, svc := setupChat()
 	id := uuid.New()
-	svc.sessions[id] = chat.ChatSession{ID: id, AgentID: uuid.New(), Title: "To Delete", Status: chat.StatusActive}
+	delAgentID := uuid.New()
+	svc.sessions[id] = chat.ChatSession{ID: id, AgentID: &delAgentID, Title: "To Delete", Status: chat.StatusActive}
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/chat/sessions/"+id.String(), nil)
 	w := httptest.NewRecorder()

@@ -17,6 +17,8 @@ type mockChatRepo struct {
 	messages []chat.ChatMessage
 }
 
+func uuidPtr() *uuid.UUID { id := uuid.New(); return &id }
+
 func newMockRepo() *mockChatRepo {
 	return &mockChatRepo{sessions: make(map[uuid.UUID]chat.ChatSession)}
 }
@@ -82,7 +84,7 @@ func TestChatService_CreateSession_Success(t *testing.T) {
 	svc := chat.NewService(newMockRepo())
 	agentID := uuid.New()
 	s, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
-		AgentID: agentID,
+		AgentID: &agentID,
 		Title:   "Support Chat",
 	})
 	require.NoError(t, err)
@@ -99,7 +101,7 @@ func TestChatService_GetSession_NotFound(t *testing.T) {
 
 func TestChatService_ArchiveSession(t *testing.T) {
 	svc := chat.NewService(newMockRepo())
-	created, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuid.New(), Title: "test"})
+	created, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"test"})
 	require.NoError(t, err)
 	archived, err := svc.ArchiveSession(context.Background(), created.ID)
 	require.NoError(t, err)
@@ -108,7 +110,7 @@ func TestChatService_ArchiveSession(t *testing.T) {
 
 func TestChatService_AddMessage(t *testing.T) {
 	svc := chat.NewService(newMockRepo())
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuid.New(), Title: "q&a"})
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
 	require.NoError(t, err)
 	msg, err := svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{
 		Role:    "user",
@@ -121,7 +123,7 @@ func TestChatService_AddMessage(t *testing.T) {
 
 func TestChatService_ListMessages(t *testing.T) {
 	svc := chat.NewService(newMockRepo())
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuid.New(), Title: "q&a"})
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
 	require.NoError(t, err)
 	for i := 0; i < 3; i++ {
 		_, err = svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{Role: "user", Content: "msg"})
