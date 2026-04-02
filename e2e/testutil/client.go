@@ -46,6 +46,12 @@ func (c *APIClient) Put(path string, body, result any) int {
 	return c.doJSON(http.MethodPut, path, body, result)
 }
 
+// Patch performs PATCH with body.
+func (c *APIClient) Patch(path string, body, result any) int {
+	c.t.Helper()
+	return c.doJSON(http.MethodPatch, path, body, result)
+}
+
 // Delete performs DELETE.
 func (c *APIClient) Delete(path string) int {
 	c.t.Helper()
