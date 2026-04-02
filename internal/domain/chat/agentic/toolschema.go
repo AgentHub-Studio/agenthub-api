@@ -76,7 +76,8 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 
 // skillToLLMTool converts a single skill (plus its first active tool's config) into an LLMTool.
 func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) (LLMTool, error) {
-	description := sk.Description
+	// Use enriched description from catalog if available, otherwise fall back to DB value.
+	description := EnrichDescription(sk.Slug, sk.Description)
 	if description == "" {
 		description = sk.Name
 	}

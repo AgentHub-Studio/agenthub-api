@@ -1,0 +1,4 @@
+-- Down migration: no-op.
+-- Cannot reliably restore previous descriptions since they varied per tenant.
+-- The UP migration only updates descriptions that are shorter than the enriched version,
+-- so re-running is safe (idempotent).
