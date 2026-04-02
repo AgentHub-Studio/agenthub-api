@@ -64,7 +64,8 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	require.Len(t, tools, 2)
 
 	assert.Equal(t, "execute-sql", tools[0].Name)
-	assert.Equal(t, "Run SQL queries against configured datasources", tools[0].Description)
+	// Description is enriched from the catalog for known slugs.
+	assert.Contains(t, tools[0].Description, "PostgreSQL datasources")
 	assert.Contains(t, string(tools[0].InputSchema), `"query"`)
 
 	assert.Equal(t, "memory_store", tools[1].Name)
