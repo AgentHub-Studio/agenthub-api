@@ -84,32 +84,12 @@ type ChatMessageResponse struct {
 
 // SessionResponseFrom maps a ChatSession entity to a ChatSessionResponse DTO.
 func SessionResponseFrom(s ChatSession) ChatSessionResponse {
-	return ChatSessionResponse{
-		ID:        s.ID,
-		AgentID:   s.AgentID,
-		Title:     s.Title,
-		Status:    s.Status,
-		CreatedAt: s.CreatedAt,
-		UpdatedAt: s.UpdatedAt,
-	}
+	return ChatSessionResponse(s)
 }
 
 // MessageResponseFrom maps a ChatMessage entity to a ChatMessageResponse DTO.
 func MessageResponseFrom(m ChatMessage) ChatMessageResponse {
-	return ChatMessageResponse{
-		ID:           m.ID,
-		SessionID:    m.SessionID,
-		Role:         m.Role,
-		Content:      m.Content,
-		MessageType:  m.MessageType,
-		ToolCalls:    m.ToolCalls,
-		ToolCallID:   m.ToolCallID,
-		Metadata:     m.Metadata,
-		TokenUsage:   m.TokenUsage,
-		FinishReason: m.FinishReason,
-		TurnIndex:    m.TurnIndex,
-		CreatedAt:    m.CreatedAt,
-	}
+	return ChatMessageResponse(m)
 }
 
 // CreateSessionRequest is the payload for creating a chat session.

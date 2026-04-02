@@ -36,14 +36,6 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 
 const selectColumns = `id, name, description, status, embedding_model, search_mode, context_window, created_at, updated_at`
 
-func scanKB(row pgx.Row, kb *KnowledgeBase) error {
-	return row.Scan(
-		&kb.ID, &kb.Name, &kb.Description, &kb.Status,
-		&kb.EmbeddingModel, &kb.SearchMode, &kb.ContextWindow,
-		&kb.CreatedAt, &kb.UpdatedAt,
-	)
-}
-
 func (r *postgresRepository) List(ctx context.Context, req pagination.PageRequest) ([]KnowledgeBase, int64, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
 	if err != nil {
