@@ -150,7 +150,6 @@ func (cm *ContextManager) Compact(ctx context.Context, messages []chat.ChatMessa
 
 	// Split: old messages to summarize, tail to preserve.
 	splitIdx := len(messages) - cm.TailSize
-	toSummarize := messages[:splitIdx]
 	tail := messages[splitIdx:]
 
 	// Preserve any active tool_call chains in the tail boundary.
@@ -159,7 +158,7 @@ func (cm *ContextManager) Compact(ctx context.Context, messages []chat.ChatMessa
 		splitIdx--
 		tail = messages[splitIdx:]
 	}
-	toSummarize = messages[:splitIdx]
+	toSummarize := messages[:splitIdx]
 
 	if len(toSummarize) == 0 {
 		return &CompactResult{
