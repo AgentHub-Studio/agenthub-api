@@ -46,6 +46,9 @@ func (s *Service) List(ctx context.Context) ([]WebhookConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	if items == nil {
+		items = []WebhookConfig{}
+	}
 	for i := range items {
 		items[i].Secret = nil
 	}

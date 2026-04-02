@@ -54,7 +54,7 @@ func (r *Repository) ListAll(ctx context.Context, tenantID string, pr pagination
 	}
 	defer rows.Close()
 
-	var items []DataSource
+	items := []DataSource{}
 	for rows.Next() {
 		var d DataSource
 		if err := rows.Scan(

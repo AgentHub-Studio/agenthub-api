@@ -27,7 +27,8 @@ type Agent struct {
 	Description    string
 	Status         AgentStatus
 	CurrentVersion int
-	PipelineID     *uuid.UUID
+	SystemPrompt   *string
+	ModelConfig    json.RawMessage
 	Config         json.RawMessage
 	CreatedAt      time.Time
 	UpdatedAt      time.Time

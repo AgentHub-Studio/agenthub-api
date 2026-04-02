@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -102,6 +103,19 @@ func (s *Service) ListMessages(ctx context.Context, sessionID uuid.UUID, req pag
 	}
 
 	return pagination.NewPage(responses, total, req), nil
+}
+
+// GetLatestAssistantMessage delegates to the repository to find the newest assistant
+// message created after the given time, returning it as a DTO.
+func (s *Service) GetLatestAssistantMessage(ctx context.Context, sessionID uuid.UUID, after time.Time) (ChatMessageResponse, bool, error) {
+	msg, found, err := s.repo.GetLatestAssistantMessage(ctx, sessionID, after)
+	if err != nil {
+		return ChatMessageResponse{}, false, fmt.Errorf("chat service: get latest assistant message: %w", err)
+	}
+	if !found {
+		return ChatMessageResponse{}, false, nil
+	}
+	return MessageResponseFrom(msg), true, nil
 }
 
 // AddMessage adds a message to a chat session.

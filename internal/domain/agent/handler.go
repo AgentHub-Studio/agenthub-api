@@ -28,6 +28,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/agents", h.create)
 	r.Get("/api/agents/{id}", h.get)
 	r.Put("/api/agents/{id}", h.update)
+	r.Patch("/api/agents/{id}", h.update) // PATCH delegates to the same handler — all fields are optional
 	r.Delete("/api/agents/{id}", h.delete)
 	r.Post("/api/agents/{id}/publish", h.publish)
 	r.Post("/api/agents/{id}/archive", h.archive)

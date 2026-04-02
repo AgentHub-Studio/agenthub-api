@@ -26,7 +26,7 @@ func newMockSkillSvc() *mockSkillSvc {
 	return &mockSkillSvc{skills: make(map[uuid.UUID]skill.Response)}
 }
 
-func (m *mockSkillSvc) List(_ context.Context, req pagination.PageRequest) (pagination.Page[skill.Response], error) {
+func (m *mockSkillSvc) List(_ context.Context, _ *string, req pagination.PageRequest) (pagination.Page[skill.Response], error) {
 	items := make([]skill.Response, 0, len(m.skills))
 	for _, s := range m.skills {
 		items = append(items, s)
@@ -149,6 +149,62 @@ func TestSkillHandler_Delete_Success(t *testing.T) {
 func TestSkillHandler_Delete_NotFound(t *testing.T) {
 	r, _ := setupSkill()
 	req := httptest.NewRequest(http.MethodDelete, "/api/skills/"+uuid.New().String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestSkillHandler_Update_Success(t *testing.T) {
+	r, svc := setupSkill()
+	id := uuid.New()
+	svc.skills[id] = skill.Response{ID: id, Name: "Original"}
+
+	body, _ := json.Marshal(skill.UpdateRequest{Name: "Updated"})
+	req := httptest.NewRequest(http.MethodPut, "/api/skills/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp skill.Response
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Updated", resp.Name)
+}
+
+func TestSkillHandler_Update_NotFound(t *testing.T) {
+	r, _ := setupSkill()
+	body, _ := json.Marshal(skill.UpdateRequest{Name: "x"})
+	req := httptest.NewRequest(http.MethodPut, "/api/skills/"+uuid.New().String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestSkillHandler_Patch_Success(t *testing.T) {
+	r, svc := setupSkill()
+	id := uuid.New()
+	svc.skills[id] = skill.Response{ID: id, Name: "Original"}
+
+	body, _ := json.Marshal(skill.UpdateRequest{Name: "Patched"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/skills/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp skill.Response
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Patched", resp.Name)
+}
+
+func TestSkillHandler_Patch_NotFound(t *testing.T) {
+	r, _ := setupSkill()
+	body, _ := json.Marshal(skill.UpdateRequest{Name: "x"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/skills/"+uuid.New().String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

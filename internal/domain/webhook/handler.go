@@ -42,6 +42,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/webhooks", h.create)
 	r.Get("/api/webhooks/{id}", h.getByID)
 	r.Put("/api/webhooks/{id}", h.update)
+	r.Patch("/api/webhooks/{id}", h.update)
 	r.Delete("/api/webhooks/{id}", h.delete)
 	r.Get("/api/webhooks/{id}/deliveries", h.listDeliveries)
 	r.Post("/api/webhooks/{id}/test", h.sendTest)

@@ -1,0 +1,1 @@
+ALTER TABLE tool DROP COLUMN IF EXISTS labels;

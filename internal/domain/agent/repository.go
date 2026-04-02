@@ -40,16 +40,17 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &pgRepository{pool: pool}
 }
 
-const agentColumns = `id, name, slug, description, status, current_version, pipeline_id, config, created_at, updated_at`
+const agentColumns = `id, name, slug, description, status, current_version, system_prompt, model_config, config, created_at, updated_at`
 
 func scanAgent(row pgx.Row) (Agent, error) {
 	var a Agent
 	var status string
 	var configBytes []byte
+	var modelConfigBytes []byte
 	err := row.Scan(
 		&a.ID, &a.Name, &a.Slug, &a.Description, &status,
-		&a.CurrentVersion, &a.PipelineID, &configBytes,
-		&a.CreatedAt, &a.UpdatedAt,
+		&a.CurrentVersion, &a.SystemPrompt, &modelConfigBytes,
+		&configBytes, &a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
 		return Agent{}, err
@@ -57,6 +58,9 @@ func scanAgent(row pgx.Row) (Agent, error) {
 	a.Status = AgentStatus(status)
 	if len(configBytes) > 0 {
 		a.Config = json.RawMessage(configBytes)
+	}
+	if len(modelConfigBytes) > 0 {
+		a.ModelConfig = json.RawMessage(modelConfigBytes)
 	}
 	return a, nil
 }
@@ -147,13 +151,18 @@ func (r *pgRepository) Create(ctx context.Context, a Agent) (Agent, error) {
 		config = json.RawMessage(`{}`)
 	}
 
+	var modelConfig []byte
+	if len(a.ModelConfig) > 0 {
+		modelConfig = []byte(a.ModelConfig)
+	}
+
 	query := fmt.Sprintf(`
-		INSERT INTO agent (id, name, slug, description, status, current_version, pipeline_id, config, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		INSERT INTO agent (id, name, slug, description, status, current_version, system_prompt, model_config, config, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
 		RETURNING %s`, agentColumns)
 	row := conn.QueryRow(ctx, query,
 		a.ID, a.Name, a.Slug, a.Description, string(a.Status),
-		a.CurrentVersion, a.PipelineID, []byte(config),
+		a.CurrentVersion, a.SystemPrompt, modelConfig, []byte(config),
 	)
 	created, err := scanAgent(row)
 	if err != nil {
@@ -177,13 +186,18 @@ func (r *pgRepository) Update(ctx context.Context, a Agent) (Agent, error) {
 		config = json.RawMessage(`{}`)
 	}
 
+	var modelConfig []byte
+	if len(a.ModelConfig) > 0 {
+		modelConfig = []byte(a.ModelConfig)
+	}
+
 	query := fmt.Sprintf(`
 		UPDATE agent
-		SET name=$2, slug=$3, description=$4, pipeline_id=$5, config=$6, updated_at=NOW()
+		SET name=$2, slug=$3, description=$4, system_prompt=$5, model_config=$6, config=$7, updated_at=NOW()
 		WHERE id=$1
 		RETURNING %s`, agentColumns)
 	row := conn.QueryRow(ctx, query,
-		a.ID, a.Name, a.Slug, a.Description, a.PipelineID, []byte(config),
+		a.ID, a.Name, a.Slug, a.Description, a.SystemPrompt, modelConfig, []byte(config),
 	)
 	updated, err := scanAgent(row)
 	if errors.Is(err, pgx.ErrNoRows) {

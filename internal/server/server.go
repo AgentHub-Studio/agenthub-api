@@ -18,6 +18,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
 	apikc "github.com/AgentHub-Studio/agenthub-api/internal/keycloak"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chatsession"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
@@ -85,7 +86,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	settingsRepo := settings.NewRepository(pool)
 	settingsHandler := settings.NewHandler(settings.NewService(settingsRepo))
 	llmpresetHandler := llmpreset.NewHandler(llmpreset.NewService(llmpreset.NewRepository(pool)))
-	agentHandler := agent.NewHandler(agent.NewService(agent.NewRepository(pool)))
+	agentRepo := agent.NewRepository(pool)
+	agentHandler := agent.NewHandler(agent.NewService(agentRepo))
+	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionService(agentRepo, agent.NewVersionRepository(pool)))
 	pipelineHandler := pipeline.NewHandler(pipeline.NewService(pipeline.NewRepository(pool)))
 	skillHandler := skill.NewHandler(skill.NewService(skill.NewRepository(pool)))
 	datasourceSvc := datasource.NewService(datasource.NewRepository(pool))
@@ -187,12 +190,17 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	r.Get("/health", s.handleHealth)
 	r.Get("/ready", s.handleReady)
 
+	// Chat widget session relay — no JWT required (Angular passes token explicitly).
+	chatSessionHandler := chatsession.NewHandler()
+	chatSessionHandler.RegisterRoutes(r)
+
 	// Public routes — no JWT required.
 	r.Group(func(r chi.Router) {
 		for _, m := range chain.Public() {
 			r.Use(m)
 		}
 		tenantHandler.RegisterPublicRoutes(r)
+		webhookHandler.RegisterPublicRoutes(r)
 		regPackageHandler.RegisterPublicRoutes(r)
 		regInstallationHandler.RegisterPublicRoutes(r)
 	})
@@ -206,6 +214,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		settingsHandler.RegisterProtectedRoutes(r)
 		llmpresetHandler.RegisterProtectedRoutes(r)
 		agentHandler.RegisterRoutes(r)
+		agentVersionHandler.RegisterVersionRoutes(r)
 		pipelineHandler.RegisterRoutes(r)
 		skillHandler.RegisterRoutes(r)
 		toolHandler.RegisterRoutes(r)

@@ -30,6 +30,7 @@ func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
 	r.Get("/api/llm-config-presets/by-provider/{provider}", h.listByProvider)
 	r.Get("/api/llm-config-presets/{id}", h.get)
 	r.Put("/api/llm-config-presets/{id}", h.update)
+	r.Patch("/api/llm-config-presets/{id}", h.update)
 	r.Delete("/api/llm-config-presets/{id}", h.delete)
 	r.Put("/api/llm-config-presets/{id}/default", h.setDefault)
 }

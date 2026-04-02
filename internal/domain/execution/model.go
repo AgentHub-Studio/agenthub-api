@@ -2,6 +2,7 @@
 package execution
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -19,6 +20,9 @@ const (
 
 // ErrInvalidTransition is returned when a status transition is not allowed.
 var ErrInvalidTransition = errors.New("execution: invalid status transition")
+
+// ErrInvalidInput is returned when the request payload contains an invalid field value.
+var ErrInvalidInput = errors.New("execution: invalid input")
 
 // validTransitions maps each status to the set of statuses it may transition to.
 var validTransitions = map[string]map[string]bool{
@@ -40,16 +44,16 @@ func CanTransition(from, to string) bool {
 
 // AgentExecution tracks a single agent run.
 type AgentExecution struct {
-	ID           uuid.UUID  `json:"id"`
-	AgentID      uuid.UUID  `json:"agentId"`
-	PipelineID   *uuid.UUID `json:"pipelineId,omitempty"`
-	Status       string     `json:"status"` // PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
-	Input        []byte     `json:"input"`
-	Output       []byte     `json:"output,omitempty"`
-	ErrorMessage *string    `json:"errorMessage,omitempty"`
-	StartedAt    time.Time  `json:"startedAt"`
-	FinishedAt   *time.Time `json:"finishedAt,omitempty"`
-	DurationMs   *int64     `json:"durationMs,omitempty"`
+	ID           uuid.UUID        `json:"id"`
+	AgentID      uuid.UUID        `json:"agentId"`
+	PipelineID   *uuid.UUID       `json:"pipelineId,omitempty"`
+	Status       string           `json:"status"` // PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
+	Input        json.RawMessage  `json:"input"`
+	Output       json.RawMessage  `json:"output,omitempty"`
+	ErrorMessage *string          `json:"errorMessage,omitempty"`
+	StartedAt    time.Time        `json:"startedAt"`
+	FinishedAt   *time.Time       `json:"finishedAt,omitempty"`
+	DurationMs   *int64           `json:"durationMs,omitempty"`
 }
 
 // ExecutionDetails groups an execution with its nested nodes and tool executions.
@@ -66,29 +70,29 @@ type NodeDetails struct {
 
 // AgentExecutionNode tracks a single node execution within an agent run.
 type AgentExecutionNode struct {
-	ID           uuid.UUID  `json:"id"`
-	ExecutionID  uuid.UUID  `json:"executionId"`
-	NodeID       uuid.UUID  `json:"nodeId"`
-	NodeType     string     `json:"nodeType"`
-	Status       string     `json:"status"` // PENDING, RUNNING, SUCCESS, FAILED, SKIPPED
-	Input        []byte     `json:"input"`
-	Output       []byte     `json:"output,omitempty"`
-	ErrorMessage *string    `json:"errorMessage,omitempty"`
-	StartedAt    *time.Time `json:"startedAt,omitempty"`
-	FinishedAt   *time.Time `json:"finishedAt,omitempty"`
-	DurationMs   *int64     `json:"durationMs,omitempty"`
+	ID           uuid.UUID       `json:"id"`
+	ExecutionID  uuid.UUID       `json:"executionId"`
+	NodeID       uuid.UUID       `json:"nodeId"`
+	NodeType     string          `json:"nodeType"`
+	Status       string          `json:"status"` // PENDING, RUNNING, SUCCESS, FAILED, SKIPPED
+	Input        json.RawMessage `json:"input"`
+	Output       json.RawMessage `json:"output,omitempty"`
+	ErrorMessage *string         `json:"errorMessage,omitempty"`
+	StartedAt    *time.Time      `json:"startedAt,omitempty"`
+	FinishedAt   *time.Time      `json:"finishedAt,omitempty"`
+	DurationMs   *int64          `json:"durationMs,omitempty"`
 }
 
 // ToolExecution tracks a single tool call within a node execution.
 type ToolExecution struct {
-	ID              uuid.UUID  `json:"id"`
-	NodeExecutionID *uuid.UUID `json:"nodeExecutionId,omitempty"`
-	ToolID          uuid.UUID  `json:"toolId"`
-	Status          string     `json:"status"` // RUNNING, SUCCESS, FAILED
-	Input           []byte     `json:"input"`
-	Output          []byte     `json:"output,omitempty"`
-	ErrorMessage    *string    `json:"errorMessage,omitempty"`
-	StartedAt       time.Time  `json:"startedAt"`
-	FinishedAt      *time.Time `json:"finishedAt,omitempty"`
-	DurationMs      *int64     `json:"durationMs,omitempty"`
+	ID              uuid.UUID       `json:"id"`
+	NodeExecutionID *uuid.UUID      `json:"nodeExecutionId,omitempty"`
+	ToolID          uuid.UUID       `json:"toolId"`
+	Status          string          `json:"status"` // RUNNING, SUCCESS, FAILED
+	Input           json.RawMessage `json:"input"`
+	Output          json.RawMessage `json:"output,omitempty"`
+	ErrorMessage    *string         `json:"errorMessage,omitempty"`
+	StartedAt       time.Time       `json:"startedAt"`
+	FinishedAt      *time.Time      `json:"finishedAt,omitempty"`
+	DurationMs      *int64          `json:"durationMs,omitempty"`
 }

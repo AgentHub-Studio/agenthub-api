@@ -218,7 +218,7 @@ func scanRow(row pgx.Row) (AgentMemory, error) {
 }
 
 func scanRows(rows pgx.Rows) ([]AgentMemory, error) {
-	var items []AgentMemory
+	items := []AgentMemory{}
 	for rows.Next() {
 		var m AgentMemory
 		var embText *string

@@ -46,7 +46,7 @@ func (r *Repository) ListAll(ctx context.Context, tenantID string, pr pagination
 	}
 	defer rows.Close()
 
-	var items []VpnResource
+	items := []VpnResource{}
 	for rows.Next() {
 		var v VpnResource
 		if err := rows.Scan(

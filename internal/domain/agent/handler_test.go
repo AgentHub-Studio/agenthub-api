@@ -255,3 +255,33 @@ func TestAgentHandler_Clone_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
+
+func TestAgentHandler_Patch_Success(t *testing.T) {
+	r, svc := setupAgent()
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Original", Status: string(agent.StatusDraft)}
+
+	newName := "Patched"
+	body, _ := json.Marshal(agent.UpdateAgentRequest{Name: &newName})
+	req := httptest.NewRequest(http.MethodPatch, "/api/agents/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp agent.AgentResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Patched", resp.Name)
+}
+
+func TestAgentHandler_Patch_NotFound(t *testing.T) {
+	r, _ := setupAgent()
+	name := "x"
+	body, _ := json.Marshal(agent.UpdateAgentRequest{Name: &name})
+	req := httptest.NewRequest(http.MethodPatch, "/api/agents/"+uuid.New().String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}

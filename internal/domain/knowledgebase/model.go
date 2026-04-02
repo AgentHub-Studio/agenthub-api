@@ -27,6 +27,7 @@ type KnowledgeBase struct {
 	EmbeddingModel string              `db:"embedding_model"`
 	SearchMode     string              `db:"search_mode"`
 	ContextWindow  int                 `db:"context_window"`
+	DocumentCount  int64               `db:"document_count"`
 	CreatedAt      time.Time           `db:"created_at"`
 	UpdatedAt      time.Time           `db:"updated_at"`
 }
@@ -40,23 +41,14 @@ type KnowledgeBaseResponse struct {
 	EmbeddingModel string              `json:"embeddingModel"`
 	SearchMode     string              `json:"searchMode"`
 	ContextWindow  int                 `json:"contextWindow"`
+	DocumentCount  int64               `json:"documentCount"`
 	CreatedAt      time.Time           `json:"createdAt"`
 	UpdatedAt      time.Time           `json:"updatedAt"`
 }
 
 // ResponseFrom maps a KnowledgeBase entity to a KnowledgeBaseResponse DTO.
 func ResponseFrom(k KnowledgeBase) KnowledgeBaseResponse {
-	return KnowledgeBaseResponse{
-		ID:             k.ID,
-		Name:           k.Name,
-		Description:    k.Description,
-		Status:         k.Status,
-		EmbeddingModel: k.EmbeddingModel,
-		SearchMode:     k.SearchMode,
-		ContextWindow:  k.ContextWindow,
-		CreatedAt:      k.CreatedAt,
-		UpdatedAt:      k.UpdatedAt,
-	}
+	return KnowledgeBaseResponse(k)
 }
 
 // CreateRequest is the payload for creating a KnowledgeBase.

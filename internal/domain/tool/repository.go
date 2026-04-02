@@ -268,8 +268,8 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 	}
 	defer rows.Close()
 
-	var bindings []SkillTool
-	var tools []Tool
+	bindings := []SkillTool{}
+	tools := []Tool{}
 	for rows.Next() {
 		var st SkillTool
 		var t Tool

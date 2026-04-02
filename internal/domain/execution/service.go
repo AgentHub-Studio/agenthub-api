@@ -33,7 +33,7 @@ func (s *Service) List(ctx context.Context, agentID *uuid.UUID, status *string, 
 func (s *Service) Start(ctx context.Context, req StartExecutionRequest) (AgentExecution, error) {
 	agentID, err := uuid.Parse(req.AgentID)
 	if err != nil {
-		return AgentExecution{}, fmt.Errorf("execution: invalid agent id: %w", err)
+		return AgentExecution{}, fmt.Errorf("%w: invalid agentId: %s", ErrInvalidInput, err)
 	}
 
 	input := req.Input
@@ -45,7 +45,7 @@ func (s *Service) Start(ctx context.Context, req StartExecutionRequest) (AgentEx
 	if req.PipelineID != nil {
 		pid, err := uuid.Parse(*req.PipelineID)
 		if err != nil {
-			return AgentExecution{}, fmt.Errorf("execution: invalid pipeline id: %w", err)
+			return AgentExecution{}, fmt.Errorf("%w: invalid pipelineId: %s", ErrInvalidInput, err)
 		}
 		pipelineID = &pid
 	}

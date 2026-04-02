@@ -3,6 +3,7 @@ package chat_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -78,6 +79,15 @@ func (m *mockChatRepo) CreateMessage(_ context.Context, msg chat.ChatMessage) (c
 	msg.ID = uuid.New()
 	m.messages = append(m.messages, msg)
 	return msg, nil
+}
+
+func (m *mockChatRepo) GetLatestAssistantMessage(_ context.Context, sessionID uuid.UUID, after time.Time) (chat.ChatMessage, bool, error) {
+	for _, msg := range m.messages {
+		if msg.SessionID == sessionID && msg.Role == "assistant" && msg.CreatedAt.After(after) {
+			return msg, true, nil
+		}
+	}
+	return chat.ChatMessage{}, false, nil
 }
 
 func TestChatService_CreateSession_Success(t *testing.T) {

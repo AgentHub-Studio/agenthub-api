@@ -40,6 +40,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/knowledge-bases", h.create)
 	r.Get("/api/knowledge-bases/{id}", h.getByID)
 	r.Put("/api/knowledge-bases/{id}", h.update)
+	r.Patch("/api/knowledge-bases/{id}", h.update)
 	r.Delete("/api/knowledge-bases/{id}", h.delete)
 	r.Post("/api/knowledge-bases/{id}/activate", h.activate)
 	r.Post("/api/knowledge-bases/{id}/pause", h.pause)

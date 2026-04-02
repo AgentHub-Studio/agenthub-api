@@ -22,9 +22,9 @@ func NewService(repo SkillRepository) *Service {
 	return &Service{repo: repo}
 }
 
-// List returns a paginated list of skills.
-func (s *Service) List(ctx context.Context, req pagination.PageRequest) (pagination.Page[Response], error) {
-	skills, total, err := s.repo.List(ctx, req)
+// List returns a paginated list of skills, optionally filtered by category.
+func (s *Service) List(ctx context.Context, category *string, req pagination.PageRequest) (pagination.Page[Response], error) {
+	skills, total, err := s.repo.List(ctx, category, req)
 	if err != nil {
 		return pagination.Page[Response]{}, err
 	}

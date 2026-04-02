@@ -71,7 +71,8 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 		Description:    req.Description,
 		Status:         StatusDraft,
 		CurrentVersion: 1,
-		PipelineID:     req.PipelineID,
+		SystemPrompt:   req.SystemPrompt,
+		ModelConfig:    req.ModelConfig,
 		Config:         config,
 	}
 	created, err := s.repo.Create(ctx, a)
@@ -95,8 +96,11 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	if req.Description != nil {
 		a.Description = *req.Description
 	}
-	if req.PipelineID != nil {
-		a.PipelineID = req.PipelineID
+	if req.SystemPrompt != nil {
+		a.SystemPrompt = req.SystemPrompt
+	}
+	if len(req.ModelConfig) > 0 {
+		a.ModelConfig = req.ModelConfig
 	}
 	if len(req.Config) > 0 {
 		a.Config = req.Config
@@ -144,7 +148,8 @@ func (s *service) Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest
 		Description:    original.Description,
 		Status:         StatusDraft,
 		CurrentVersion: 1,
-		PipelineID:     original.PipelineID,
+		SystemPrompt:   original.SystemPrompt,
+		ModelConfig:    original.ModelConfig,
 		Config:         original.Config,
 	}
 	created, err := s.repo.Create(ctx, clone)
