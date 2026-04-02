@@ -43,6 +43,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/mcp-server-configs", h.create)
 	r.Get("/api/mcp-server-configs/{id}", h.getByID)
 	r.Put("/api/mcp-server-configs/{id}", h.update)
+	r.Patch("/api/mcp-server-configs/{id}", h.update)
 	r.Delete("/api/mcp-server-configs/{id}", h.delete)
 }
 

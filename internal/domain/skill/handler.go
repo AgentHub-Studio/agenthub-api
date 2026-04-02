@@ -38,6 +38,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/skills", h.create)
 	r.Get("/api/skills/{id}", h.getByID)
 	r.Put("/api/skills/{id}", h.update)
+	r.Patch("/api/skills/{id}", h.update)
 	r.Delete("/api/skills/{id}", h.delete)
 }
 

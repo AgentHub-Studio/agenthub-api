@@ -42,6 +42,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/pipelines", h.create)
 	r.Get("/api/pipelines/{id}", h.getByID)
 	r.Put("/api/pipelines/{id}", h.update)
+	r.Patch("/api/pipelines/{id}", h.update)
 	r.Delete("/api/pipelines/{id}", h.delete)
 	r.Put("/api/pipelines/{id}/nodes", h.replaceNodes)
 	r.Put("/api/pipelines/{id}/edges", h.replaceEdges)

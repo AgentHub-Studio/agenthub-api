@@ -41,6 +41,7 @@ func (h *Handler) Routes() http.Handler {
 	r.Post("/", h.create)
 	r.Get("/{id}", h.getByID)
 	r.Put("/{id}", h.update)
+	r.Patch("/{id}", h.update)
 	r.Delete("/{id}", h.delete)
 	r.Get("/{id}/resolve", h.resolve)
 	return r

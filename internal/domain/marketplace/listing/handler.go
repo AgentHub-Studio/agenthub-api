@@ -41,6 +41,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/marketplace/listings", h.create)
 	r.Get("/api/marketplace/listings/{id}", h.getByID)
 	r.Put("/api/marketplace/listings/{id}", h.update)
+	r.Patch("/api/marketplace/listings/{id}", h.update)
 	r.Delete("/api/marketplace/listings/{id}", h.delete)
 }
 

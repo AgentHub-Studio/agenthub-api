@@ -44,6 +44,7 @@ func (h *Handler) Routes() http.Handler {
 	r.Get("/", h.list)
 	r.Get("/{id}", h.getByID)
 	r.Put("/{id}", h.update)
+	r.Patch("/{id}", h.update)
 	r.Delete("/{id}", h.delete)
 	r.Post("/{id}/test", h.testConnection)
 	r.Post("/{id}/upload-config", h.uploadConfig)
