@@ -90,6 +90,16 @@ func (m *mockChatRepo) GetLatestAssistantMessage(_ context.Context, sessionID uu
 	return chat.ChatMessage{}, false, nil
 }
 
+func (m *mockChatRepo) GetLatestCompactSummary(_ context.Context, sessionID uuid.UUID) (chat.ChatMessage, bool, error) {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := m.messages[i]
+		if msg.SessionID == sessionID && msg.MessageType == chat.MessageTypeCompactSummary {
+			return msg, true, nil
+		}
+	}
+	return chat.ChatMessage{}, false, nil
+}
+
 func TestChatService_CreateSession_Success(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
 	agentID := uuid.New()

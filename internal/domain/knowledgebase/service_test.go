@@ -77,6 +77,14 @@ func (m *mockRepository) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (m *mockRepository) ListByAgentID(_ context.Context, _ uuid.UUID) ([]knowledgebase.KnowledgeBase, error) {
+	var result []knowledgebase.KnowledgeBase
+	for _, v := range m.items {
+		result = append(result, v)
+	}
+	return result, nil
+}
+
 func (m *mockRepository) UpdateStatus(_ context.Context, id uuid.UUID, status knowledgebase.KnowledgeBaseStatus) (knowledgebase.KnowledgeBase, error) {
 	if m.statusErr != nil {
 		return knowledgebase.KnowledgeBase{}, m.statusErr

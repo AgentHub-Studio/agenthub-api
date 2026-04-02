@@ -74,6 +74,14 @@ func (m *mockSkillRepo) SlugExists(_ context.Context, slug string) (bool, error)
 	return m.slugs[slug], nil
 }
 
+func (m *mockSkillRepo) ListByAgentID(_ context.Context, _ uuid.UUID) ([]skill.Skill, error) {
+	out := make([]skill.Skill, 0, len(m.data))
+	for _, s := range m.data {
+		out = append(out, s)
+	}
+	return out, nil
+}
+
 func TestSkillService_Create_AutoSlug(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	s, err := svc.Create(context.Background(), skill.CreateRequest{
