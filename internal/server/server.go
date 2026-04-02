@@ -106,8 +106,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	vpnHandler := vpnresource.NewHandler(vpnresource.NewService(vpnresource.NewRepository(pool)))
 	datasourceHandler := datasource.NewHandler(datasourceSvc)
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
-	chatOrchestrator := chat.NewOrchestratorClient(cfg.OrchestratorURL)
-	chatHandler := chat.NewHandler(chat.NewService(chat.NewRepository(pool), chatOrchestrator))
+	chatHandler := chat.NewHandler(chat.NewService(chat.NewRepository(pool), nil))
 	var docStorage document.StorageClient
 	if cfg.MinIO.IsConfigured() {
 		ds, err := document.NewMinIOStorageClient(

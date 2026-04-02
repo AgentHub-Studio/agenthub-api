@@ -90,6 +90,16 @@ func (m *mockChatRepo) GetLatestAssistantMessage(_ context.Context, sessionID uu
 	return chat.ChatMessage{}, false, nil
 }
 
+func (m *mockChatRepo) FindAllMessages(_ context.Context, sessionID uuid.UUID) ([]chat.ChatMessage, error) {
+	var out []chat.ChatMessage
+	for _, msg := range m.messages {
+		if msg.SessionID == sessionID {
+			out = append(out, msg)
+		}
+	}
+	return out, nil
+}
+
 func (m *mockChatRepo) GetLatestCompactSummary(_ context.Context, sessionID uuid.UUID) (chat.ChatMessage, bool, error) {
 	for i := len(m.messages) - 1; i >= 0; i-- {
 		msg := m.messages[i]
@@ -132,7 +142,7 @@ func TestChatService_AddMessage(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
 	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
 	require.NoError(t, err)
-	msg, err := svc.AddMessage(context.Background(), nil, session.ID, chat.CreateMessageRequest{
+	msg, err := svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{
 		Role:    "user",
 		Content: "Hello!",
 	})
@@ -141,12 +151,91 @@ func TestChatService_AddMessage(t *testing.T) {
 	assert.NotEqual(t, uuid.Nil, msg.ID)
 }
 
+// --- mock SessionRunner ---
+
+type mockSessionRunner struct {
+	events []chat.RunEvent
+	err    error
+}
+
+func (m *mockSessionRunner) RunSession(_ context.Context, _ chat.RunInput) (<-chan chat.RunEvent, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	ch := make(chan chat.RunEvent, len(m.events))
+	for _, ev := range m.events {
+		ch <- ev
+	}
+	close(ch)
+	return ch, nil
+}
+
+func TestChatService_RunSession_Success(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{
+		events: []chat.RunEvent{
+			{Type: "text_delta", Data: []byte(`{"content":"Hello"}`)},
+			{Type: "run_complete", Data: []byte(`{"totalTurns":1}`)},
+		},
+	}
+	svc := chat.NewService(repo, runner)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	ch, err := svc.RunSession(context.Background(), session.ID, "Hello", "test-tenant")
+	require.NoError(t, err)
+
+	var events []chat.RunEvent
+	for ev := range ch {
+		events = append(events, ev)
+	}
+	assert.Len(t, events, 2)
+	assert.Equal(t, "text_delta", events[0].Type)
+	assert.Equal(t, "run_complete", events[1].Type)
+}
+
+func TestChatService_RunSession_NoRunner(t *testing.T) {
+	svc := chat.NewService(newMockRepo(), nil)
+	_, err := svc.RunSession(context.Background(), uuid.New(), "Hello", "tenant")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agentic features not configured")
+}
+
+func TestChatService_RunSession_NoAgent(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(repo, runner)
+
+	// Create session WITHOUT an agent.
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		Title: "no-agent",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.RunSession(context.Background(), session.ID, "Hello", "tenant")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session has no agent")
+}
+
+func TestChatService_RunSession_SessionNotFound(t *testing.T) {
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(newMockRepo(), runner)
+
+	_, err := svc.RunSession(context.Background(), uuid.New(), "Hello", "tenant")
+	require.Error(t, err)
+}
+
 func TestChatService_ListMessages(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
 	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
 	require.NoError(t, err)
 	for i := 0; i < 3; i++ {
-		_, err = svc.AddMessage(context.Background(), nil, session.ID, chat.CreateMessageRequest{Role: "user", Content: "msg"})
+		_, err = svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{Role: "user", Content: "msg"})
 		require.NoError(t, err)
 	}
 	page, err := svc.ListMessages(context.Background(), session.ID, pagination.PageRequest{Page: 0, Size: 20})

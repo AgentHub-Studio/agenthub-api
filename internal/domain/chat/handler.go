@@ -23,7 +23,7 @@ type chatService interface {
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	ArchiveSession(ctx context.Context, id uuid.UUID) (ChatSessionResponse, error)
 	ListMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) (pagination.Page[ChatMessageResponse], error)
-	AddMessage(ctx context.Context, r *http.Request, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
+	AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
 	// GetLatestAssistantMessage returns the most recent assistant message for the session
 	// created after the given time. Returns (msg, true, nil) when found.
 	GetLatestAssistantMessage(ctx context.Context, sessionID uuid.UUID, after time.Time) (ChatMessageResponse, bool, error)
@@ -166,7 +166,7 @@ func (h *Handler) addMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.svc.AddMessage(r.Context(), r, sessionID, req)
+	resp, err := h.svc.AddMessage(r.Context(), sessionID, req)
 	if err != nil {
 		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
