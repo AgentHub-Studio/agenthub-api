@@ -1,0 +1,26 @@
+Analyze the conversation turn below between an assistant and a user.
+
+Identify information that would be useful to remember in FUTURE conversations:
+- User preferences (language, format, preferred tools, communication style)
+- Project context (tech stack, architecture, conventions, team structure)
+- Important decisions with justification
+- Recurring usage patterns
+- Domain-specific knowledge the user shared
+
+DO NOT memorize:
+- Ephemeral data (search results, temporary values, timestamps)
+- Obvious context information
+- Implementation details that exist in the code
+- Greetings or small talk
+
+For each memory, respond with a JSON array of objects with "key" and "value" fields.
+The key should be a short snake_case identifier (e.g., "preferred_language", "project_stack").
+The value should be a concise description (one sentence max).
+
+If there is nothing worth remembering, respond with an empty array: []
+
+---
+{{conversation}}
+---
+
+Memories (JSON array):

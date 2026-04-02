@@ -1,0 +1,19 @@
+Summarize the conversation below, preserving the following essential information:
+
+- Decisions made and their reasoning
+- Code generated or modified (include relevant snippets)
+- Errors encountered and how they were resolved
+- Important technical context (file names, functions, configurations)
+- Preferences expressed by the user
+- Current state of the task in progress
+- Tool calls made and their key results
+
+Format: concise bullet points organized by topic.
+DO NOT include: greetings, trivial confirmations, status messages, or filler.
+Keep the summary under 500 words.
+
+---
+{{conversation}}
+---
+
+Summary:
