@@ -19,7 +19,7 @@ var ErrNotFound = errors.New("skill: not found")
 
 // SkillRepository defines the persistence interface for Skill.
 type SkillRepository interface {
-	List(ctx context.Context, req pagination.PageRequest) ([]Skill, int64, error)
+	List(ctx context.Context, category *string, req pagination.PageRequest) ([]Skill, int64, error)
 	Create(ctx context.Context, s Skill) (Skill, error)
 	GetByID(ctx context.Context, id uuid.UUID) (Skill, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Skill, error)
@@ -37,8 +37,8 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-// List returns a paginated list of skills for the current tenant.
-func (r *Repository) List(ctx context.Context, req pagination.PageRequest) ([]Skill, int64, error) {
+// List returns a paginated list of skills for the current tenant, optionally filtered by category.
+func (r *Repository) List(ctx context.Context, category *string, req pagination.PageRequest) ([]Skill, int64, error) {
 	tenantID := tenant.FromContext(ctx)
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
@@ -46,17 +46,26 @@ func (r *Repository) List(ctx context.Context, req pagination.PageRequest) ([]Sk
 	}
 	defer release()
 
+	// Normalize empty string to nil so the SQL null-check works correctly.
+	if category != nil && *category == "" {
+		category = nil
+	}
+
 	var total int64
-	if err := conn.QueryRow(ctx, `SELECT COUNT(*) FROM skill`).Scan(&total); err != nil {
+	if err := conn.QueryRow(ctx,
+		`SELECT COUNT(*) FROM skill WHERE ($1::text IS NULL OR category = $1)`,
+		category,
+	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("skill: count: %w", err)
 	}
 
 	rows, err := conn.Query(ctx,
 		`SELECT id, name, slug, description, category, input_schema, output_schema, created_at, updated_at
 		 FROM skill
+		 WHERE ($1::text IS NULL OR category = $1)
 		 ORDER BY name
-		 LIMIT $1 OFFSET $2`,
-		req.Size, req.Offset(),
+		 LIMIT $2 OFFSET $3`,
+		category, req.Size, req.Offset(),
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("skill: list: %w", err)

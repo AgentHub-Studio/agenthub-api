@@ -57,9 +57,10 @@ func (r *postgresRepository) List(ctx context.Context, req pagination.PageReques
 	}
 
 	rows, err := conn.Query(ctx,
-		`SELECT `+selectColumns+`
-		 FROM knowledge_base
-		 ORDER BY name
+		`SELECT kb.`+selectColumns+`,
+		        (SELECT COUNT(*) FROM document d WHERE d.knowledge_base_id = kb.id) AS document_count
+		 FROM knowledge_base kb
+		 ORDER BY kb.name
 		 LIMIT $1 OFFSET $2`,
 		req.Size, req.Offset(),
 	)
@@ -74,7 +75,7 @@ func (r *postgresRepository) List(ctx context.Context, req pagination.PageReques
 		if err := rows.Scan(
 			&kb.ID, &kb.Name, &kb.Description, &kb.Status,
 			&kb.EmbeddingModel, &kb.SearchMode, &kb.ContextWindow,
-			&kb.CreatedAt, &kb.UpdatedAt,
+			&kb.CreatedAt, &kb.UpdatedAt, &kb.DocumentCount,
 		); err != nil {
 			return nil, 0, fmt.Errorf("knowledgebase: scan: %w", err)
 		}

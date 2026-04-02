@@ -78,7 +78,11 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request) {
 	}
 	e, err := h.svc.Start(r.Context(), req)
 	if err != nil {
-		respond.Error(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, ErrInvalidInput) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to start execution")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, e)

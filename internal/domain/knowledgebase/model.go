@@ -27,6 +27,7 @@ type KnowledgeBase struct {
 	EmbeddingModel string              `db:"embedding_model"`
 	SearchMode     string              `db:"search_mode"`
 	ContextWindow  int                 `db:"context_window"`
+	DocumentCount  int64               `db:"document_count"`
 	CreatedAt      time.Time           `db:"created_at"`
 	UpdatedAt      time.Time           `db:"updated_at"`
 }
@@ -40,6 +41,7 @@ type KnowledgeBaseResponse struct {
 	EmbeddingModel string              `json:"embeddingModel"`
 	SearchMode     string              `json:"searchMode"`
 	ContextWindow  int                 `json:"contextWindow"`
+	DocumentCount  int64               `json:"documentCount"`
 	CreatedAt      time.Time           `json:"createdAt"`
 	UpdatedAt      time.Time           `json:"updatedAt"`
 }
@@ -54,6 +56,7 @@ func ResponseFrom(k KnowledgeBase) KnowledgeBaseResponse {
 		EmbeddingModel: k.EmbeddingModel,
 		SearchMode:     k.SearchMode,
 		ContextWindow:  k.ContextWindow,
+		DocumentCount:  k.DocumentCount,
 		CreatedAt:      k.CreatedAt,
 		UpdatedAt:      k.UpdatedAt,
 	}

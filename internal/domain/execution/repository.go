@@ -257,7 +257,7 @@ func scanExecutionRow(row pgx.Row) (AgentExecution, error) {
 }
 
 func scanExecutionRows(rows pgx.Rows) ([]AgentExecution, error) {
-	var items []AgentExecution
+	items := []AgentExecution{}
 	for rows.Next() {
 		var e AgentExecution
 		var finishedAt *time.Time
@@ -274,7 +274,7 @@ func scanExecutionRows(rows pgx.Rows) ([]AgentExecution, error) {
 }
 
 func scanNodeRows(rows pgx.Rows) ([]AgentExecutionNode, error) {
-	var items []AgentExecutionNode
+	items := []AgentExecutionNode{}
 	for rows.Next() {
 		var n AgentExecutionNode
 		var startedAt, finishedAt *time.Time
@@ -292,7 +292,7 @@ func scanNodeRows(rows pgx.Rows) ([]AgentExecutionNode, error) {
 }
 
 func scanToolRows(rows pgx.Rows) ([]ToolExecution, error) {
-	var items []ToolExecution
+	items := []ToolExecution{}
 	for rows.Next() {
 		var t ToolExecution
 		var finishedAt *time.Time

@@ -15,7 +15,7 @@ import (
 
 // skillService defines the methods used by Handler.
 type skillService interface {
-	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[Response], error)
+	List(ctx context.Context, category *string, req pagination.PageRequest) (pagination.Page[Response], error)
 	Create(ctx context.Context, req CreateRequest) (Response, error)
 	GetByID(ctx context.Context, id uuid.UUID) (Response, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Response, error)
@@ -44,7 +44,11 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	req := pagination.ParsePageRequest(r)
-	page, err := h.svc.List(r.Context(), req)
+	var category *string
+	if v := r.URL.Query().Get("category"); v != "" {
+		category = &v
+	}
+	page, err := h.svc.List(r.Context(), category, req)
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
