@@ -23,11 +23,12 @@ type HistoryLoader interface {
 
 // RunInput carries everything needed to start an agentic run.
 type RunInput struct {
-	SessionID    uuid.UUID
-	AgentID      uuid.UUID
-	UserMessage  string
-	SystemPrompt string
-	TenantID     string
+	SessionID       uuid.UUID
+	AgentID         uuid.UUID
+	UserMessage     string
+	SystemPrompt    string
+	TenantID        string
+	PermissionRules *PermissionRules
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
@@ -230,8 +231,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			return
 
 		case "tool_calls":
-			// 5e. Execute tool calls via streaming executor.
-			toolResults := r.toolExec.ExecuteAll(ctx, ch, toolCalls, in)
+			// 5e. Apply permission rules and execute tool calls.
+			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in)
 
 			// Persist and append tool results to history.
 			for i, result := range toolResults {
@@ -531,6 +532,48 @@ func truncateToolResult(result ToolExecResult, maxChars int) ToolExecResult {
 	note := fmt.Sprintf("\n[truncated from %d chars]", originalLen)
 	result.Output = append(result.Output[:maxChars-len(note)], []byte(note)...)
 	return result
+}
+
+// executeWithPermissions evaluates permission rules for each tool call, executes
+// permitted ones via StreamingToolExecutor, and returns results in the same order
+// as the input toolCalls. Denied/confirm tools get error results without execution.
+func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput) []ToolExecResult {
+	if in.PermissionRules == nil {
+		return r.toolExec.ExecuteAll(ctx, ch, toolCalls, in)
+	}
+
+	results := make([]ToolExecResult, len(toolCalls))
+
+	// Partition: which are permitted, which are denied.
+	var permitted []ai.ToolCall
+	permittedIdx := map[int]int{} // original index → permitted index
+
+	for i, tc := range toolCalls {
+		decision := EvaluatePermission(in.PermissionRules, tc.Function.Name, tc.Function.Arguments)
+		switch decision {
+		case PermissionDeny:
+			errMsg := FormatDeniedError(tc.Function.Name)
+			results[i] = ToolExecResult{Error: &errMsg}
+		case PermissionConfirm:
+			errMsg := fmt.Sprintf("Tool '%s' requires confirmation but running in automated mode.", tc.Function.Name)
+			results[i] = ToolExecResult{Error: &errMsg}
+		default:
+			permittedIdx[i] = len(permitted)
+			permitted = append(permitted, tc)
+		}
+	}
+
+	// Execute permitted tools.
+	if len(permitted) > 0 {
+		execResults := r.toolExec.ExecuteAll(ctx, ch, permitted, in)
+		for origIdx, permIdx := range permittedIdx {
+			if permIdx < len(execResults) {
+				results[origIdx] = execResults[permIdx]
+			}
+		}
+	}
+
+	return results
 }
 
 func emitError(ch chan<- RunEvent, code string, err error) {

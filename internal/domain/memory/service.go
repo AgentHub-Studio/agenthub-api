@@ -30,12 +30,18 @@ func (s *Service) Upsert(ctx context.Context, agentID uuid.UUID, key string, req
 		return AgentMemory{}, fmt.Errorf("memory: value must be valid JSON")
 	}
 
+	memType := MemoryType(req.MemoryType)
+	if memType == "" {
+		memType = MemoryTypeGeneral
+	}
+
 	m := AgentMemory{
-		AgentID:   agentID,
-		UserID:    req.UserID,
-		Key:       key,
-		Value:     req.Value,
-		Embedding: req.Embedding,
+		AgentID:    agentID,
+		UserID:     req.UserID,
+		Key:        key,
+		Value:      req.Value,
+		MemoryType: memType,
+		Embedding:  req.Embedding,
 	}
 
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {

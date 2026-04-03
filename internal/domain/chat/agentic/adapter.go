@@ -80,11 +80,12 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	)
 
 	agenticCh := runner.Run(ctx, RunInput{
-		SessionID:    in.SessionID,
-		AgentID:      in.AgentID,
-		UserMessage:  in.UserMessage,
-		SystemPrompt: agentCfg.SystemPrompt,
-		TenantID:     in.TenantID,
+		SessionID:       in.SessionID,
+		AgentID:         in.AgentID,
+		UserMessage:     in.UserMessage,
+		SystemPrompt:    agentCfg.SystemPrompt,
+		TenantID:        in.TenantID,
+		PermissionRules: ParsePermissionRules(agentCfg.PermissionRules),
 	})
 
 	// Bridge agentic.RunEvent → chat.RunEvent.

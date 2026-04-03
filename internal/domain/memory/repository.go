@@ -40,7 +40,7 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 }
 
 // columns shared by all SELECT statements.
-const memoryColumns = `id, agent_id, user_id, key, value, embedding::text,
+const memoryColumns = `id, agent_id, user_id, key, value, memory_type, embedding::text,
 	last_accessed_at, expires_at, created_at, updated_at`
 
 // ListByAgent returns all memory entries for the given agent, optionally filtered by userID.
@@ -83,17 +83,23 @@ func (r *Repository) Upsert(ctx context.Context, m AgentMemory) (AgentMemory, er
 		embeddingExpr = float32SliceToVector(m.Embedding)
 	}
 
+	memType := string(m.MemoryType)
+	if memType == "" {
+		memType = string(MemoryTypeGeneral)
+	}
+
 	query := `
-		INSERT INTO agent_memory (agent_id, user_id, key, value, embedding, expires_at)
-		VALUES ($1, $2, $3, $4, $5::vector, $6)
+		INSERT INTO agent_memory (agent_id, user_id, key, value, memory_type, embedding, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6::vector, $7)
 		ON CONFLICT (agent_id, user_id, key) DO UPDATE
 		   SET value = EXCLUDED.value,
+		       memory_type = EXCLUDED.memory_type,
 		       embedding = EXCLUDED.embedding,
 		       expires_at = EXCLUDED.expires_at,
 		       updated_at = NOW()
 		RETURNING ` + memoryColumns
 
-	row := conn.QueryRow(ctx, query, m.AgentID, m.UserID, m.Key, m.Value, embeddingExpr, m.ExpiresAt)
+	row := conn.QueryRow(ctx, query, m.AgentID, m.UserID, m.Key, m.Value, memType, embeddingExpr, m.ExpiresAt)
 	return scanRow(row)
 }
 
@@ -202,7 +208,8 @@ func scanRow(row pgx.Row) (AgentMemory, error) {
 	var m AgentMemory
 	var embText *string
 	var expiresAt *time.Time
-	err := row.Scan(&m.ID, &m.AgentID, &m.UserID, &m.Key, &m.Value, &embText,
+	var memType string
+	err := row.Scan(&m.ID, &m.AgentID, &m.UserID, &m.Key, &m.Value, &memType, &embText,
 		&m.LastAccessedAt, &expiresAt, &m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentMemory{}, ErrNotFound
@@ -210,6 +217,7 @@ func scanRow(row pgx.Row) (AgentMemory, error) {
 	if err != nil {
 		return AgentMemory{}, fmt.Errorf("memory: scan: %w", err)
 	}
+	m.MemoryType = MemoryType(memType)
 	m.ExpiresAt = expiresAt
 	if embText != nil {
 		m.Embedding = vectorTextToFloat32Slice(*embText)
@@ -223,10 +231,12 @@ func scanRows(rows pgx.Rows) ([]AgentMemory, error) {
 		var m AgentMemory
 		var embText *string
 		var expiresAt *time.Time
-		if err := rows.Scan(&m.ID, &m.AgentID, &m.UserID, &m.Key, &m.Value, &embText,
+		var memType string
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.UserID, &m.Key, &m.Value, &memType, &embText,
 			&m.LastAccessedAt, &expiresAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("memory: scan row: %w", err)
 		}
+		m.MemoryType = MemoryType(memType)
 		m.ExpiresAt = expiresAt
 		if embText != nil {
 			m.Embedding = vectorTextToFloat32Slice(*embText)

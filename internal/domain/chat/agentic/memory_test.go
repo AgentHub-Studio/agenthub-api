@@ -77,17 +77,19 @@ func TestMemoryBridge_Recall_Success(t *testing.T) {
 	recaller := &mockRecaller{results: []memory.MemoryRecallResult{
 		{
 			AgentMemory: memory.AgentMemory{
-				Key:       "preferred_language",
-				Value:     json.RawMessage(`"Portuguese"`),
-				CreatedAt: time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC),
+				Key:        "preferred_language",
+				Value:      json.RawMessage(`"Portuguese"`),
+				MemoryType: memory.MemoryTypeUser,
+				CreatedAt:  time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC),
 			},
 			Relevance: 0.9,
 		},
 		{
 			AgentMemory: memory.AgentMemory{
-				Key:       "project_stack",
-				Value:     json.RawMessage(`"Go + chi + pgx"`),
-				CreatedAt: time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC),
+				Key:        "project_stack",
+				Value:      json.RawMessage(`"Go + chi + pgx"`),
+				MemoryType: memory.MemoryTypeProject,
+				CreatedAt:  time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC),
 			},
 			Relevance: 0.7,
 		},
@@ -98,10 +100,79 @@ func TestMemoryBridge_Recall_Success(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, result, "## Relevant Memories")
+	assert.Contains(t, result, "### User Profile")
 	assert.Contains(t, result, "preferred_language: Portuguese")
+	assert.Contains(t, result, "### Project Context")
 	assert.Contains(t, result, "project_stack: Go + chi + pgx")
 	assert.Contains(t, result, "2026-03-15")
 	assert.Contains(t, result, "2026-03-20")
+}
+
+func TestMemoryBridge_Recall_StructuredMemoryTypes(t *testing.T) {
+	agentID := uuid.New()
+	embedder := &mockEmbedder{result: []float32{0.1}}
+	recaller := &mockRecaller{results: []memory.MemoryRecallResult{
+		{
+			AgentMemory: memory.AgentMemory{
+				Key:        "no_trailing_summary",
+				Value:      json.RawMessage(`"Don't summarize at the end"`),
+				MemoryType: memory.MemoryTypeFeedback,
+				CreatedAt:  time.Now(),
+			},
+			Relevance: 0.95,
+		},
+		{
+			AgentMemory: memory.AgentMemory{
+				Key:        "grafana_url",
+				Value:      json.RawMessage(`"grafana.internal/d/api-latency"`),
+				MemoryType: memory.MemoryTypeReference,
+				CreatedAt:  time.Now(),
+			},
+			Relevance: 0.8,
+		},
+		{
+			AgentMemory: memory.AgentMemory{
+				Key:        "old_general",
+				Value:      json.RawMessage(`"some generic info"`),
+				MemoryType: "", // empty defaults to general
+				CreatedAt:  time.Now(),
+			},
+			Relevance: 0.5,
+		},
+	}}
+
+	bridge := defaultBridge(embedder, recaller, nil, nil)
+	result, err := bridge.Recall(context.Background(), agentID, "test")
+
+	require.NoError(t, err)
+	assert.Contains(t, result, "### Behavioral Guidance")
+	assert.Contains(t, result, "no_trailing_summary")
+	assert.Contains(t, result, "### External References")
+	assert.Contains(t, result, "grafana_url")
+	assert.Contains(t, result, "### General")
+	assert.Contains(t, result, "old_general")
+}
+
+func TestMemoryBridge_MaybeStore_PassesMemoryType(t *testing.T) {
+	agentID := uuid.New()
+	embedder := &mockEmbedder{result: []float32{0.5}}
+	upserter := &mockUpserter{}
+	evaluator := &mockEvaluator{results: []agentic.ExtractedMemory{
+		{Key: "user_role", Value: "Senior Go developer", MemoryType: "user"},
+		{Key: "no_mocks", Value: "Don't mock the database", MemoryType: "feedback"},
+		{Key: "untyped", Value: "Some info"},
+	}}
+
+	bridge := defaultBridge(embedder, nil, upserter, evaluator)
+	stored, err := bridge.MaybeStore(context.Background(), agentID, 0, []agentic.TurnMessage{
+		{Role: "user", Content: "I'm a senior Go dev. Don't mock the database."},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, stored)
+	assert.Equal(t, "user", upserter.calls[0].Req.MemoryType)
+	assert.Equal(t, "feedback", upserter.calls[1].Req.MemoryType)
+	assert.Equal(t, "general", upserter.calls[2].Req.MemoryType)
 }
 
 func TestMemoryBridge_Recall_FiltersByRelevance(t *testing.T) {

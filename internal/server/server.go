@@ -35,6 +35,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/prompttemplate"
 	regDependency "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/dependency"
 	regInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/installation"
 	regPackage "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
@@ -107,6 +108,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		WithDatasource(&toolDatasourceAdapter{svc: datasourceSvc}, tenantctx.FromContext)
 	toolHandler := tool.NewHandler(toolSvc)
 	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool)))
+	promptTemplateHandler := prompttemplate.NewHandler(prompttemplate.NewService(prompttemplate.NewRepository(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
 	oauthHandler := oauth.NewHandler(oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey))
@@ -233,6 +235,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		skillHandler.RegisterRoutes(r)
 		toolHandler.RegisterRoutes(r)
 		memoryHandler.RegisterRoutes(r)
+		promptTemplateHandler.RegisterRoutes(r)
 		executionHandler.RegisterRoutes(r)
 		webhookHandler.RegisterRoutes(r)
 		r.Mount("/api/oauth-credentials", oauthHandler.Routes())
@@ -407,8 +410,9 @@ func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (
 	}
 
 	return &chat.AgentRunConfig{
-		ID:           ag.ID,
-		SystemPrompt: systemPrompt,
-		ModelConfig:  ag.ModelConfig,
+		ID:              ag.ID,
+		SystemPrompt:    systemPrompt,
+		ModelConfig:     ag.ModelConfig,
+		PermissionRules: ag.PermissionRules,
 	}, nil
 }

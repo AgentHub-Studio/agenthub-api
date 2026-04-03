@@ -40,17 +40,18 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &pgRepository{pool: pool}
 }
 
-const agentColumns = `id, name, slug, description, status, current_version, system_prompt, model_config, config, created_at, updated_at`
+const agentColumns = `id, name, slug, description, status, current_version, system_prompt, model_config, permission_rules, config, created_at, updated_at`
 
 func scanAgent(row pgx.Row) (Agent, error) {
 	var a Agent
 	var status string
 	var configBytes []byte
 	var modelConfigBytes []byte
+	var permissionRulesBytes []byte
 	err := row.Scan(
 		&a.ID, &a.Name, &a.Slug, &a.Description, &status,
 		&a.CurrentVersion, &a.SystemPrompt, &modelConfigBytes,
-		&configBytes, &a.CreatedAt, &a.UpdatedAt,
+		&permissionRulesBytes, &configBytes, &a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
 		return Agent{}, err
@@ -61,6 +62,9 @@ func scanAgent(row pgx.Row) (Agent, error) {
 	}
 	if len(modelConfigBytes) > 0 {
 		a.ModelConfig = json.RawMessage(modelConfigBytes)
+	}
+	if len(permissionRulesBytes) > 0 {
+		a.PermissionRules = json.RawMessage(permissionRulesBytes)
 	}
 	return a, nil
 }
@@ -156,13 +160,18 @@ func (r *pgRepository) Create(ctx context.Context, a Agent) (Agent, error) {
 		modelConfig = []byte(a.ModelConfig)
 	}
 
+	var permissionRules []byte
+	if len(a.PermissionRules) > 0 {
+		permissionRules = []byte(a.PermissionRules)
+	}
+
 	query := fmt.Sprintf(`
-		INSERT INTO agent (id, name, slug, description, status, current_version, system_prompt, model_config, config, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+		INSERT INTO agent (id, name, slug, description, status, current_version, system_prompt, model_config, permission_rules, config, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
 		RETURNING %s`, agentColumns)
 	row := conn.QueryRow(ctx, query,
 		a.ID, a.Name, a.Slug, a.Description, string(a.Status),
-		a.CurrentVersion, a.SystemPrompt, modelConfig, []byte(config),
+		a.CurrentVersion, a.SystemPrompt, modelConfig, permissionRules, []byte(config),
 	)
 	created, err := scanAgent(row)
 	if err != nil {
@@ -191,13 +200,18 @@ func (r *pgRepository) Update(ctx context.Context, a Agent) (Agent, error) {
 		modelConfig = []byte(a.ModelConfig)
 	}
 
+	var permissionRules []byte
+	if len(a.PermissionRules) > 0 {
+		permissionRules = []byte(a.PermissionRules)
+	}
+
 	query := fmt.Sprintf(`
 		UPDATE agent
-		SET name=$2, slug=$3, description=$4, system_prompt=$5, model_config=$6, config=$7, updated_at=NOW()
+		SET name=$2, slug=$3, description=$4, system_prompt=$5, model_config=$6, permission_rules=$7, config=$8, updated_at=NOW()
 		WHERE id=$1
 		RETURNING %s`, agentColumns)
 	row := conn.QueryRow(ctx, query,
-		a.ID, a.Name, a.Slug, a.Description, a.SystemPrompt, modelConfig, []byte(config),
+		a.ID, a.Name, a.Slug, a.Description, a.SystemPrompt, modelConfig, permissionRules, []byte(config),
 	)
 	updated, err := scanAgent(row)
 	if errors.Is(err, pgx.ErrNoRows) {

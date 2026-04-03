@@ -37,8 +37,9 @@ type MemoryEvaluator interface {
 
 // ExtractedMemory represents a single memory item extracted by the LLM evaluator.
 type ExtractedMemory struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
+	Key        string `json:"key"`
+	Value      string `json:"value"`
+	MemoryType string `json:"memoryType,omitempty"` // user|feedback|project|reference|general
 }
 
 // --- MemoryBridge ---
@@ -129,15 +130,60 @@ func (mb *MemoryBridge) Recall(ctx context.Context, agentID uuid.UUID, userMessa
 	return formatMemories(relevant), nil
 }
 
-// formatMemories builds a markdown section from recalled memories.
+// memoryTypeLabel returns a human-readable section header for a memory type.
+func memoryTypeLabel(mt memory.MemoryType) string {
+	switch mt {
+	case memory.MemoryTypeUser:
+		return "User Profile"
+	case memory.MemoryTypeFeedback:
+		return "Behavioral Guidance"
+	case memory.MemoryTypeProject:
+		return "Project Context"
+	case memory.MemoryTypeReference:
+		return "External References"
+	default:
+		return "General"
+	}
+}
+
+// formatMemories builds a markdown section from recalled memories, grouped by type.
 func formatMemories(results []memory.MemoryRecallResult) string {
+	// Group by type for structured output.
+	grouped := map[memory.MemoryType][]memory.MemoryRecallResult{}
+	typeOrder := []memory.MemoryType{
+		memory.MemoryTypeFeedback,
+		memory.MemoryTypeUser,
+		memory.MemoryTypeProject,
+		memory.MemoryTypeReference,
+		memory.MemoryTypeGeneral,
+	}
+	for _, r := range results {
+		mt := r.MemoryType
+		if mt == "" {
+			mt = memory.MemoryTypeGeneral
+		}
+		grouped[mt] = append(grouped[mt], r)
+	}
+
 	var sb strings.Builder
 	sb.WriteString("## Relevant Memories\n")
-	for _, r := range results {
-		date := r.CreatedAt.Format("2006-01-02")
-		value := extractValueText(r.Value)
-		if value != "" {
-			fmt.Fprintf(&sb, "- [%s] %s: %s\n", date, r.Key, value)
+
+	for _, mt := range typeOrder {
+		items, ok := grouped[mt]
+		if !ok || len(items) == 0 {
+			continue
+		}
+		fmt.Fprintf(&sb, "\n### %s\n", memoryTypeLabel(mt))
+		for _, r := range items {
+			date := r.CreatedAt.Format("2006-01-02")
+			value := extractValueText(r.Value)
+			if value != "" {
+				// Truncate long memories to 200 chars.
+				if len(value) > 200 {
+					value = value[:200] + "..."
+				}
+				fmt.Fprintf(&sb, "- [%s] %s: %s\n", date, r.Key, value)
+			}
 		}
 	}
 	return sb.String()
@@ -197,9 +243,15 @@ func (mb *MemoryBridge) MaybeStore(ctx context.Context, agentID uuid.UUID, turnI
 			continue
 		}
 
+		memType := m.MemoryType
+		if memType == "" {
+			memType = "general"
+		}
+
 		_, err = mb.upserter.Upsert(ctx, agentID, m.Key, memory.UpsertMemoryRequest{
-			Value:     valueJSON,
-			Embedding: embedding,
+			Value:      valueJSON,
+			MemoryType: memType,
+			Embedding:  embedding,
 		})
 		if err != nil {
 			continue
@@ -219,12 +271,16 @@ type TurnMessage struct {
 // buildEvaluationPrompt creates the prompt sent to the LLM for memory extraction.
 func buildEvaluationPrompt(messages []TurnMessage) string {
 	var sb strings.Builder
-	sb.WriteString("Analyze the following conversation turn. Extract any information about the user, ")
-	sb.WriteString("their preferences, project context, or important facts that would be useful to ")
-	sb.WriteString("remember in future conversations.\n\n")
-	sb.WriteString("For each memory, respond with a JSON array of objects with \"key\" and \"value\" fields.\n")
+	sb.WriteString("Analyze the following conversation turn. Extract any information worth remembering.\n\n")
+	sb.WriteString("For each memory, respond with a JSON array of objects with \"key\", \"value\", and \"memoryType\" fields.\n")
 	sb.WriteString("The key should be a short snake_case identifier (e.g., \"preferred_language\", \"project_stack\").\n")
-	sb.WriteString("The value should be a concise description.\n\n")
+	sb.WriteString("The value should be a concise description.\n")
+	sb.WriteString("The memoryType must be one of:\n")
+	sb.WriteString("  - \"user\": information about the user (role, preferences, expertise)\n")
+	sb.WriteString("  - \"feedback\": guidance on how to approach work (corrections, confirmations)\n")
+	sb.WriteString("  - \"project\": ongoing work context (deadlines, decisions, initiatives)\n")
+	sb.WriteString("  - \"reference\": pointers to external resources (URLs, docs, dashboards)\n")
+	sb.WriteString("  - \"general\": anything else worth remembering\n\n")
 	sb.WriteString("If there is nothing worth remembering, respond with an empty array: []\n\n")
 	sb.WriteString("---\n")
 

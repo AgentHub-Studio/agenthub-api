@@ -699,3 +699,94 @@ func TestRunner_EventSequence(t *testing.T) {
 	assert.Greater(t, textDeltaIdx, firstTurnComplete, "text_delta should follow first turn_complete")
 	assert.Greater(t, runCompleteIdx, textDeltaIdx, "run_complete should be last")
 }
+
+func TestRunner_PermissionDeny(t *testing.T) {
+	// LLM calls a denied tool. The runner should return error result without executing.
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			if idx == 0 {
+				return makeToolCallStream("tc_1", "execute-sql", `{"query":"DROP TABLE users"}`), nil
+			}
+			// After denied result, LLM should produce a text response.
+			return makeTextStream("I cannot execute that query."), nil
+		},
+	}
+
+	config := agentic.DefaultRunConfig()
+	config.ToolTimeout = 2 * time.Second
+	runner := newTestRunner(model, &mockPersister{}, &mockHistoryLoader{}, config)
+
+	ch := runner.Run(context.Background(), agentic.RunInput{
+		SessionID:   uuid.New(),
+		AgentID:     uuid.New(),
+		UserMessage: "drop users table",
+		TenantID:    "test-tenant",
+		PermissionRules: &agentic.PermissionRules{
+			Deny: []string{"execute-sql"},
+		},
+	})
+
+	events := collectEvents(ch)
+
+	// Find tool result with error.
+	var foundDenied bool
+	for _, ev := range events {
+		if ev.Type == agentic.EventToolResult {
+			var data agentic.ToolResultData
+			require.NoError(t, json.Unmarshal(ev.Data, &data))
+			if data.Error != nil && data.Name == "execute-sql" {
+				assert.Contains(t, *data.Error, "not permitted")
+				foundDenied = true
+			}
+		}
+	}
+	assert.True(t, foundDenied, "should have a denied tool result")
+
+	// Should still reach run_complete (LLM generates text after denial).
+	types := make([]agentic.RunEventType, len(events))
+	for i, ev := range events {
+		types[i] = ev.Type
+	}
+	assert.Contains(t, types, agentic.EventRunComplete)
+}
+
+func TestRunner_PermissionAllowList(t *testing.T) {
+	// Only document-search is allowed. execute-sql should be denied.
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			if idx == 0 {
+				return makeToolCallStream("tc_1", "execute-sql", `{}`), nil
+			}
+			return makeTextStream("OK"), nil
+		},
+	}
+
+	config := agentic.DefaultRunConfig()
+	runner := newTestRunner(model, &mockPersister{}, &mockHistoryLoader{}, config)
+
+	ch := runner.Run(context.Background(), agentic.RunInput{
+		SessionID:   uuid.New(),
+		AgentID:     uuid.New(),
+		UserMessage: "test",
+		TenantID:    "test-tenant",
+		PermissionRules: &agentic.PermissionRules{
+			Allow: []string{"document-search"},
+		},
+	})
+
+	events := collectEvents(ch)
+
+	// Tool result should have permission error.
+	var foundDenied bool
+	for _, ev := range events {
+		if ev.Type == agentic.EventToolResult {
+			var data agentic.ToolResultData
+			require.NoError(t, json.Unmarshal(ev.Data, &data))
+			if data.Error != nil {
+				assert.Contains(t, *data.Error, "not permitted")
+				foundDenied = true
+			}
+		}
+	}
+	assert.True(t, foundDenied, "execute-sql should be denied by allow list")
+}
