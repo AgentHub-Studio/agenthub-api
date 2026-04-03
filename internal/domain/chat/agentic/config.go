@@ -56,6 +56,13 @@ type RunConfig struct {
 
 	// Temperature for the LLM call (0.0–2.0).
 	Temperature float64 `json:"temperature"`
+
+	// StallCheckInterval is how often the stall detector checks each tool (default 15s).
+	StallCheckInterval time.Duration `json:"stallCheckInterval"`
+
+	// StallThreshold is the duration without output after which a tool is considered
+	// stalled (default 45s). Set to 0 to disable stall detection.
+	StallThreshold time.Duration `json:"stallThreshold"`
 }
 
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
@@ -76,6 +83,8 @@ func DefaultRunConfig() RunConfig {
 		Provider:            "anthropic",
 		Model:               "claude-sonnet-4-20250514",
 		Temperature:         0.7,
+		StallCheckInterval:  15 * time.Second,
+		StallThreshold:      45 * time.Second,
 	}
 }
 
