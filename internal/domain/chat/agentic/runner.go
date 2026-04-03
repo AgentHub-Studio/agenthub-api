@@ -185,9 +185,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			return
 		}
 
+		// Per-turn token budget (may be escalated).
+		turnBudget := r.config.EffectiveTurnBudget(turnIndex)
+		maxTokensForCall := r.config.MaxTokensPerCall
+		if turnBudget > 0 && (maxTokensForCall == 0 || turnBudget < maxTokensForCall) {
+			maxTokensForCall = turnBudget
+		}
+
 		opts := ai.ChatOptions{
 			Model:       r.config.Model,
-			MaxTokens:   r.config.MaxTokensPerCall,
+			MaxTokens:   maxTokensForCall,
 			Temperature: r.config.Temperature,
 			Tools:       aiTools,
 			Stream:      true,
@@ -209,6 +216,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 
 		totalTokens += usage.TotalTokens
+
+		// Check per-turn budget after consuming the stream.
+		if turnBudget > 0 && usage.TotalTokens > turnBudget {
+			emitError(ch, "turn_budget_exceeded",
+				fmt.Errorf("turn %d used %d tokens, exceeding budget of %d", turnIndex, usage.TotalTokens, turnBudget))
+		}
 
 		// Accumulate cost.
 		turnCost := EstimateCostUSD(r.config.Model, usage)
@@ -239,8 +252,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		switch finishReason {
 		case "stop":
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
-				TurnIndex:  turnIndex,
-				TokenUsage: tokenUsageWithCost(usage, turnCost),
+				TurnIndex:   turnIndex,
+				TokenUsage:  tokenUsageWithCost(usage, turnCost),
+				BudgetUsed:  usage.TotalTokens,
+				BudgetLimit: turnBudget,
 			})
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,
@@ -295,8 +310,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			}
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
-				TurnIndex:  turnIndex,
-				TokenUsage: tokenUsageWithCost(usage, turnCost),
+				TurnIndex:   turnIndex,
+				TokenUsage:  tokenUsageWithCost(usage, turnCost),
+				BudgetUsed:  usage.TotalTokens,
+				BudgetLimit: turnBudget,
 			})
 
 			// Check context compaction using progressive stages.
@@ -324,8 +341,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		default:
 			// Unknown finish reason, treat as stop.
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
-				TurnIndex:  turnIndex,
-				TokenUsage: tokenUsageWithCost(usage, turnCost),
+				TurnIndex:   turnIndex,
+				TokenUsage:  tokenUsageWithCost(usage, turnCost),
+				BudgetUsed:  usage.TotalTokens,
+				BudgetLimit: turnBudget,
 			})
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,

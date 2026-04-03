@@ -2,6 +2,7 @@ package agentic
 
 import (
 	"encoding/json"
+	"math"
 	"time"
 )
 
@@ -56,6 +57,18 @@ type RunConfig struct {
 
 	// Temperature for the LLM call (0.0–2.0).
 	Temperature float64 `json:"temperature"`
+
+	// MaxTokensPerTurn caps total tokens (prompt+completion) for a single turn.
+	// Zero means no per-turn limit (only the global MaxBudgetUSD applies).
+	MaxTokensPerTurn int `json:"maxTokensPerTurn,omitempty"`
+
+	// BudgetEscalation enables automatic budget increase on subsequent turns.
+	// When true, the per-turn limit scales as: base * EscalationFactor^turnIndex.
+	BudgetEscalation bool `json:"budgetEscalation,omitempty"`
+
+	// EscalationFactor is the multiplier applied per turn when BudgetEscalation is true.
+	// Default 1.5.
+	EscalationFactor float64 `json:"escalationFactor,omitempty"`
 }
 
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
@@ -92,6 +105,9 @@ type modelConfig struct {
 	MaxToolResultChars *int     `json:"maxToolResultChars"`
 	RetryMaxAttempts   *int     `json:"retryMaxAttempts"`
 	MaxDepth           *int     `json:"maxDepth"`
+	MaxTokensPerTurn   *int     `json:"maxTokensPerTurn,omitempty"`
+	BudgetEscalation   *bool    `json:"budgetEscalation,omitempty"`
+	EscalationFactor   *float64 `json:"escalationFactor,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -138,5 +154,33 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	if mc.MaxDepth != nil {
 		cfg.MaxDepth = *mc.MaxDepth
 	}
+	if mc.MaxTokensPerTurn != nil {
+		cfg.MaxTokensPerTurn = *mc.MaxTokensPerTurn
+	}
+	if mc.BudgetEscalation != nil {
+		cfg.BudgetEscalation = *mc.BudgetEscalation
+	}
+	if mc.EscalationFactor != nil {
+		cfg.EscalationFactor = *mc.EscalationFactor
+	}
 	return cfg
+}
+
+// EffectiveTurnBudget calculates the token budget for a given turn.
+// If MaxTokensPerTurn is 0, returns 0 (no limit).
+// When BudgetEscalation is enabled, scales the base budget by EscalationFactor^turnIndex.
+func (c RunConfig) EffectiveTurnBudget(turnIndex int) int {
+	if c.MaxTokensPerTurn <= 0 {
+		return 0
+	}
+	if !c.BudgetEscalation || turnIndex <= 0 {
+		return c.MaxTokensPerTurn
+	}
+	factor := c.EscalationFactor
+	if factor <= 0 {
+		factor = 1.5
+	}
+	// base * factor^turnIndex
+	escalated := float64(c.MaxTokensPerTurn) * math.Pow(factor, float64(turnIndex))
+	return int(escalated)
 }
