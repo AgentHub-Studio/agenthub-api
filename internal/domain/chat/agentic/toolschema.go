@@ -28,14 +28,23 @@ type LLMTool struct {
 // ToolSchemaBuilder converts the skills/tools linked to an agent into LLMTool
 // definitions compatible with the LLM function-calling API.
 type ToolSchemaBuilder struct {
-	skills SkillLister
-	tools  ToolsBySkillLister
-	kbs    KBLister
+	skills       SkillLister
+	tools        ToolsBySkillLister
+	kbs          KBLister
+	currentDepth int
+	maxDepth     int
 }
 
 // NewToolSchemaBuilder creates a ToolSchemaBuilder.
 func NewToolSchemaBuilder(skills SkillLister, tools ToolsBySkillLister, kbs KBLister) *ToolSchemaBuilder {
-	return &ToolSchemaBuilder{skills: skills, tools: tools, kbs: kbs}
+	return &ToolSchemaBuilder{skills: skills, tools: tools, kbs: kbs, maxDepth: 3}
+}
+
+// WithDepthLimits sets the current and max depth for sub-agent tool availability.
+func (b *ToolSchemaBuilder) WithDepthLimits(currentDepth, maxDepth int) *ToolSchemaBuilder {
+	b.currentDepth = currentDepth
+	b.maxDepth = maxDepth
+	return b
 }
 
 // Build returns the tool definitions for the given agent.
@@ -67,6 +76,11 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 
 	// Builtin: memory_store — always available.
 	tools = append(tools, memoryStoreTool())
+
+	// Builtin: agent — available when depth < maxDepth (enables sub-agent spawning).
+	if b.currentDepth < b.maxDepth {
+		tools = append(tools, agentTool(b.maxDepth-b.currentDepth))
+	}
 
 	if tools == nil {
 		tools = []LLMTool{}
@@ -204,6 +218,39 @@ func memoryStoreTool() LLMTool {
 			},
 			"required": ["content"]
 		}`),
+	}
+}
+
+// agentTool returns the builtin agent tool for sub-agent spawning.
+func agentTool(remainingLevels int) LLMTool {
+	desc := fmt.Sprintf(
+		"Spawn a sub-agent to handle a specific subtask autonomously. "+
+			"The sub-agent inherits all your tools, knowledge bases, and permissions. "+
+			"Use this to delegate complex subtasks that can be worked on independently. "+
+			"The sub-agent will return its result as text. "+
+			"You can spawn multiple sub-agents in parallel for independent tasks. "+
+			"Remaining delegation depth: %d level(s).",
+		remainingLevels,
+	)
+	schema := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"prompt": {
+				"type": "string",
+				"description": "Clear, specific description of the subtask for the sub-agent to complete"
+			},
+			"tools": {
+				"type": "array",
+				"items": {"type": "string"},
+				"description": "Optional list of specific tool names the sub-agent should use. If omitted, all tools are available."
+			}
+		},
+		"required": ["prompt"]
+	}`)
+	return LLMTool{
+		Name:        agentToolName,
+		Description: desc,
+		InputSchema: schema,
 	}
 }
 

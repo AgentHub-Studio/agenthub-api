@@ -44,6 +44,10 @@ type RunConfig struct {
 	// RetryMaxAttempts is the maximum number of retries for transient LLM errors.
 	RetryMaxAttempts int `json:"retryMaxAttempts"`
 
+	// MaxDepth is the maximum recursion depth for sub-agent spawning.
+	// The root agent runs at depth 0. Default 3.
+	MaxDepth int `json:"maxDepth"`
+
 	// Provider is the LLM provider name (e.g. "anthropic", "openai", "ollama").
 	Provider string `json:"provider"`
 
@@ -68,6 +72,7 @@ func DefaultRunConfig() RunConfig {
 		MaxBudgetUSD:        0, // no limit by default
 		MaxToolResultChars:  50000,
 		RetryMaxAttempts:    3,
+		MaxDepth:            3,
 		Provider:            "anthropic",
 		Model:               "claude-sonnet-4-20250514",
 		Temperature:         0.7,
@@ -86,6 +91,7 @@ type modelConfig struct {
 	MaxBudgetUSD       *float64 `json:"maxBudgetUsd"`
 	MaxToolResultChars *int     `json:"maxToolResultChars"`
 	RetryMaxAttempts   *int     `json:"retryMaxAttempts"`
+	MaxDepth           *int     `json:"maxDepth"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -128,6 +134,9 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	}
 	if mc.RetryMaxAttempts != nil {
 		cfg.RetryMaxAttempts = *mc.RetryMaxAttempts
+	}
+	if mc.MaxDepth != nil {
+		cfg.MaxDepth = *mc.MaxDepth
 	}
 	return cfg
 }

@@ -29,6 +29,15 @@ type RunInput struct {
 	SystemPrompt    string
 	TenantID        string
 	PermissionRules *PermissionRules
+
+	// CurrentDepth is the recursion depth of this run. Root agent = 0.
+	CurrentDepth int
+	// RemainingBudgetUSD is the budget left for this run and any sub-agents.
+	// Zero means no budget limit (inherit from config.MaxBudgetUSD).
+	RemainingBudgetUSD float64
+	// ParentEventCh, when set, receives forwarded events from sub-agent runs.
+	// This allows the parent SSE stream to include sub-agent activity.
+	ParentEventCh chan<- RunEvent
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
@@ -42,11 +51,12 @@ type Runner struct {
 	persister    MessagePersister
 	history      HistoryLoader
 	toolExec     *StreamingToolExecutor
+	subtaskExec  *SubtaskExecutor
 	config       RunConfig
 }
 
 // NewRunner creates a Runner with the given dependencies.
-// ctxManager, memory, and hookExecutor may be nil (features are skipped).
+// ctxManager, memory, hookExecutor, and subtaskExec may be nil (features are skipped).
 func NewRunner(
 	chatModel ai.ChatModel,
 	skillClient *SkillRuntimeClient,
@@ -71,6 +81,12 @@ func NewRunner(
 		toolExec:    NewStreamingToolExecutor(skillClient, hookExecutor, config),
 		config:      config,
 	}
+}
+
+// WithSubtaskExecutor attaches a SubtaskExecutor to the Runner.
+func (r *Runner) WithSubtaskExecutor(exec *SubtaskExecutor) *Runner {
+	r.subtaskExec = exec
+	return r
 }
 
 // Run starts the agentic loop in a goroutine and returns a channel of events.
@@ -106,18 +122,21 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 	}
 
+	coordinatorMode := r.subtaskExec != nil && in.CurrentDepth < r.config.MaxDepth
 	systemPrompt, err := r.prompt.Build(ctx, PromptInput{
-		AgentID:      in.AgentID,
-		SessionID:    in.SessionID,
-		SystemPrompt: in.SystemPrompt,
-		Memories:     memories,
+		AgentID:         in.AgentID,
+		SessionID:       in.SessionID,
+		SystemPrompt:    in.SystemPrompt,
+		Memories:        memories,
+		CoordinatorMode: coordinatorMode,
 	})
 	if err != nil {
 		emitError(ch, "prompt_build", err)
 		return
 	}
 
-	// 2. Build tool schemas.
+	// 2. Build tool schemas (with depth limits for sub-agent availability).
+	r.tools.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
 	llmTools, err := r.tools.Build(ctx, in.AgentID)
 	if err != nil {
 		emitError(ch, "tool_schema_build", err)
@@ -153,6 +172,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	totalTokens := 0
 	totalCost := 0.0
 	turnIndex := 0
+
+	// Effective budget: prefer explicit remaining budget (from parent), fall back to config.
+	effectiveBudget := r.config.MaxBudgetUSD
+	if in.RemainingBudgetUSD > 0 {
+		effectiveBudget = in.RemainingBudgetUSD
+	}
 
 	for turnIndex < r.config.MaxIterations {
 		if err := ctx.Err(); err != nil {
@@ -190,8 +215,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		totalCost += turnCost
 
 		// Budget check.
-		if r.config.MaxBudgetUSD > 0 && totalCost > r.config.MaxBudgetUSD {
-			emitError(ch, "budget_exceeded", fmt.Errorf("run cost $%.4f exceeded budget $%.4f", totalCost, r.config.MaxBudgetUSD))
+		if effectiveBudget > 0 && totalCost > effectiveBudget {
+			emitError(ch, "budget_exceeded", fmt.Errorf("run cost $%.4f exceeded budget $%.4f", totalCost, effectiveBudget))
 			return
 		}
 
@@ -232,7 +257,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		case "tool_calls":
 			// 5e. Apply permission rules and execute tool calls.
-			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in)
+			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost)
 
 			// Persist and append tool results to history.
 			for i, result := range toolResults {
@@ -537,38 +562,58 @@ func truncateToolResult(result ToolExecResult, maxChars int) ToolExecResult {
 // executeWithPermissions evaluates permission rules for each tool call, executes
 // permitted ones via StreamingToolExecutor, and returns results in the same order
 // as the input toolCalls. Denied/confirm tools get error results without execution.
-func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput) []ToolExecResult {
-	if in.PermissionRules == nil {
-		return r.toolExec.ExecuteAll(ctx, ch, toolCalls, in)
-	}
-
+// Agent tool calls are routed to the SubtaskExecutor for sub-agent spawning.
+func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput, totalCost float64) []ToolExecResult {
 	results := make([]ToolExecResult, len(toolCalls))
 
-	// Partition: which are permitted, which are denied.
-	var permitted []ai.ToolCall
-	permittedIdx := map[int]int{} // original index → permitted index
+	// Partition tool calls into categories.
+	var regularTools []ai.ToolCall
+	regularIdx := map[int]int{} // original index → regular index
+	var agentTools []ai.ToolCall
+	agentIdx := map[int]int{} // original index → agent index
 
 	for i, tc := range toolCalls {
-		decision := EvaluatePermission(in.PermissionRules, tc.Function.Name, tc.Function.Arguments)
-		switch decision {
-		case PermissionDeny:
-			errMsg := FormatDeniedError(tc.Function.Name)
-			results[i] = ToolExecResult{Error: &errMsg}
-		case PermissionConfirm:
-			errMsg := fmt.Sprintf("Tool '%s' requires confirmation but running in automated mode.", tc.Function.Name)
-			results[i] = ToolExecResult{Error: &errMsg}
-		default:
-			permittedIdx[i] = len(permitted)
-			permitted = append(permitted, tc)
+		// Check permissions first.
+		if in.PermissionRules != nil {
+			decision := EvaluatePermission(in.PermissionRules, tc.Function.Name, tc.Function.Arguments)
+			switch decision {
+			case PermissionDeny:
+				errMsg := FormatDeniedError(tc.Function.Name)
+				results[i] = ToolExecResult{Error: &errMsg}
+				continue
+			case PermissionConfirm:
+				errMsg := fmt.Sprintf("Tool '%s' requires confirmation but running in automated mode.", tc.Function.Name)
+				results[i] = ToolExecResult{Error: &errMsg}
+				continue
+			}
+		}
+
+		// Route agent tool calls to SubtaskExecutor.
+		if IsAgentToolCall(tc) && r.subtaskExec != nil {
+			agentIdx[i] = len(agentTools)
+			agentTools = append(agentTools, tc)
+		} else {
+			regularIdx[i] = len(regularTools)
+			regularTools = append(regularTools, tc)
 		}
 	}
 
-	// Execute permitted tools.
-	if len(permitted) > 0 {
-		execResults := r.toolExec.ExecuteAll(ctx, ch, permitted, in)
-		for origIdx, permIdx := range permittedIdx {
-			if permIdx < len(execResults) {
-				results[origIdx] = execResults[permIdx]
+	// Execute regular tools.
+	if len(regularTools) > 0 {
+		execResults := r.toolExec.ExecuteAll(ctx, ch, regularTools, in)
+		for origIdx, regIdx := range regularIdx {
+			if regIdx < len(execResults) {
+				results[origIdx] = execResults[regIdx]
+			}
+		}
+	}
+
+	// Execute agent tool calls (sub-agents).
+	if len(agentTools) > 0 {
+		agentResults := r.subtaskExec.ExecuteParallel(ctx, ch, agentTools, in, r.config, totalCost)
+		for origIdx, agtIdx := range agentIdx {
+			if agtIdx < len(agentResults) {
+				results[origIdx] = agentResults[agtIdx]
 			}
 		}
 	}

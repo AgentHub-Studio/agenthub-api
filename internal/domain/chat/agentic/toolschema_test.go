@@ -60,8 +60,8 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// 1 skill tool + memory_store builtin
-	require.Len(t, tools, 2)
+	// 1 skill tool + memory_store + agent builtins
+	require.Len(t, tools, 3)
 
 	assert.Equal(t, "execute-sql", tools[0].Name)
 	// Description is enriched from the catalog for known slugs.
@@ -69,6 +69,7 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	assert.Contains(t, string(tools[0].InputSchema), `"query"`)
 
 	assert.Equal(t, "memory_store", tools[1].Name)
+	assert.Equal(t, "agent", tools[2].Name)
 }
 
 func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
@@ -82,8 +83,8 @@ func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// document_search + memory_store
-	require.Len(t, tools, 2)
+	// document_search + memory_store + agent
+	require.Len(t, tools, 3)
 
 	assert.Equal(t, "document_search", tools[0].Name)
 	assert.Contains(t, tools[0].Description, "Technical Docs")
@@ -91,6 +92,7 @@ func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
 	assert.Contains(t, string(tools[0].InputSchema), `"query"`)
 
 	assert.Equal(t, "memory_store", tools[1].Name)
+	assert.Equal(t, "agent", tools[2].Name)
 }
 
 func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T) {
@@ -119,7 +121,7 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 2) // http-call + memory_store
+	require.Len(t, tools, 3) // http-call + memory_store + agent
 
 	assert.Equal(t, "http-call", tools[0].Name)
 	assert.Contains(t, string(tools[0].InputSchema), `"url"`)
@@ -135,7 +137,7 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 2)
+	require.Len(t, tools, 3) // empty-skill + memory_store + agent
 
 	// Should have a default empty schema.
 	assert.Contains(t, string(tools[0].InputSchema), `"type":"object"`)
@@ -146,9 +148,10 @@ func TestToolSchemaBuilder_Build_NoSkillsNoKBs(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// Only memory_store builtin.
-	require.Len(t, tools, 1)
+	// memory_store + agent builtins.
+	require.Len(t, tools, 2)
 	assert.Equal(t, "memory_store", tools[0].Name)
+	assert.Equal(t, "agent", tools[1].Name)
 }
 
 func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
@@ -165,7 +168,7 @@ func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 2)
+	require.Len(t, tools, 3) // bad-schema + memory_store + agent
 	// Should fall back to empty schema.
 	assert.Contains(t, string(tools[0].InputSchema), `"type":"object"`)
 }
@@ -175,7 +178,7 @@ func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 1)
+	require.Len(t, tools, 2) // memory_store + agent
 
 	var schema map[string]any
 	require.NoError(t, json.Unmarshal(tools[0].InputSchema, &schema))
