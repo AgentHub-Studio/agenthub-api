@@ -194,15 +194,26 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			SystemMsg:   systemPrompt,
 		}
 
-		// 5a. Call LLM with streaming (with retry for transient errors).
-		stream, err := retryStream(ctx, r.chatModel, messages, opts, r.config.RetryMaxAttempts)
+		// 5a. Call LLM with streaming (with retry + model fallback).
+		fallbackResult, err := retryStreamWithFallback(ctx, r.chatModel, messages, opts, r.config,
+			func(from, to string, fallbackErr error) {
+				ch <- NewRunEvent(EventModelFallback, ModelFallbackData{
+					FromModel: from,
+					ToModel:   to,
+					Reason:    fallbackErr.Error(),
+				})
+			},
+		)
 		if err != nil {
 			emitError(ch, "llm_call", err)
 			return
 		}
 
+		// Track which model was actually used for cost estimation.
+		effectiveModel := fallbackResult.ModelUsed
+
 		// 5b. Consume stream, accumulate response.
-		assistantContent, toolCalls, finishReason, usage, streamErr := r.consumeStream(ctx, ch, stream)
+		assistantContent, toolCalls, finishReason, usage, streamErr := r.consumeStream(ctx, ch, fallbackResult.Stream)
 		if streamErr != nil {
 			emitError(ch, "stream_consume", streamErr)
 			return
@@ -210,8 +221,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		totalTokens += usage.TotalTokens
 
-		// Accumulate cost.
-		turnCost := EstimateCostUSD(r.config.Model, usage)
+		// Accumulate cost using the effective model (may be a fallback).
+		turnCost := EstimateCostUSD(effectiveModel, usage)
 		totalCost += turnCost
 
 		// Budget check.
@@ -240,7 +251,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		case "stop":
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
-				TokenUsage: tokenUsageWithCost(usage, turnCost),
+				TokenUsage: tokenUsageWithCost(usage, turnCost, effectiveModel),
 			})
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,
@@ -296,7 +307,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
-				TokenUsage: tokenUsageWithCost(usage, turnCost),
+				TokenUsage: tokenUsageWithCost(usage, turnCost, effectiveModel),
 			})
 
 			// Check context compaction using progressive stages.
@@ -325,7 +336,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			// Unknown finish reason, treat as stop.
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
-				TokenUsage: tokenUsageWithCost(usage, turnCost),
+				TokenUsage: tokenUsageWithCost(usage, turnCost, effectiveModel),
 			})
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,
@@ -537,13 +548,14 @@ func formatToolResult(r ToolExecResult) string {
 	return "{}"
 }
 
-// tokenUsageWithCost creates a TokenUsage with cost information.
-func tokenUsageWithCost(usage ai.Usage, cost float64) TokenUsage {
+// tokenUsageWithCost creates a TokenUsage with cost and model information.
+func tokenUsageWithCost(usage ai.Usage, cost float64, model string) TokenUsage {
 	return TokenUsage{
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		TotalTokens:      usage.TotalTokens,
 		CostUSD:          cost,
+		Model:            model,
 	}
 }
 
