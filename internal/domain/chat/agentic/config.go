@@ -56,6 +56,11 @@ type RunConfig struct {
 
 	// Temperature for the LLM call (0.0–2.0).
 	Temperature float64 `json:"temperature"`
+
+	// DenialEscalationThreshold is the number of consecutive denials of the same
+	// tool before the Runner injects an escalation hint into the LLM context.
+	// Default 3. Set to 0 to disable escalation.
+	DenialEscalationThreshold int `json:"denialEscalationThreshold"`
 }
 
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
@@ -75,7 +80,8 @@ func DefaultRunConfig() RunConfig {
 		MaxDepth:            3,
 		Provider:            "anthropic",
 		Model:               "claude-sonnet-4-20250514",
-		Temperature:         0.7,
+		Temperature:                0.7,
+		DenialEscalationThreshold: 3,
 	}
 }
 

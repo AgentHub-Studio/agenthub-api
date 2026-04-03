@@ -42,17 +42,18 @@ type RunInput struct {
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
 type Runner struct {
-	chatModel    ai.ChatModel
-	skillClient  *SkillRuntimeClient
-	prompt       *PromptBuilder
-	tools        *ToolSchemaBuilder
-	ctxManager   *ContextManager
-	memory       *MemoryBridge
-	persister    MessagePersister
-	history      HistoryLoader
-	toolExec     *StreamingToolExecutor
-	subtaskExec  *SubtaskExecutor
-	config       RunConfig
+	chatModel      ai.ChatModel
+	skillClient    *SkillRuntimeClient
+	prompt         *PromptBuilder
+	tools          *ToolSchemaBuilder
+	ctxManager     *ContextManager
+	memory         *MemoryBridge
+	persister      MessagePersister
+	history        HistoryLoader
+	toolExec       *StreamingToolExecutor
+	subtaskExec    *SubtaskExecutor
+	denialTracker  *DenialTracker
+	config         RunConfig
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -69,17 +70,23 @@ func NewRunner(
 	hookExecutor *HookExecutor,
 	config RunConfig,
 ) *Runner {
+	var dt *DenialTracker
+	if config.DenialEscalationThreshold > 0 {
+		dt = NewDenialTracker(config.DenialEscalationThreshold)
+	}
+
 	return &Runner{
-		chatModel:   chatModel,
-		skillClient: skillClient,
-		prompt:      prompt,
-		tools:       tools,
-		ctxManager:  ctxManager,
-		memory:      memory,
-		persister:   persister,
-		history:     history,
-		toolExec:    NewStreamingToolExecutor(skillClient, hookExecutor, config),
-		config:      config,
+		chatModel:     chatModel,
+		skillClient:   skillClient,
+		prompt:        prompt,
+		tools:         tools,
+		ctxManager:    ctxManager,
+		memory:        memory,
+		persister:     persister,
+		history:       history,
+		toolExec:      NewStreamingToolExecutor(skillClient, hookExecutor, config),
+		denialTracker: dt,
+		config:        config,
 	}
 }
 
@@ -183,6 +190,20 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		if err := ctx.Err(); err != nil {
 			emitError(ch, "context_cancelled", err)
 			return
+		}
+
+		// Inject escalation hints from denial tracker.
+		if r.denialTracker != nil {
+			if hints := r.denialTracker.EscalationHints(); len(hints) > 0 {
+				hintMsg := "[SYSTEM] The following tools have been repeatedly denied by permission rules:\n"
+				for _, h := range hints {
+					hintMsg += "- " + h + "\n"
+				}
+				messages = append(messages, ai.Message{
+					Role:    ai.RoleUser,
+					Content: hintMsg,
+				})
+			}
 		}
 
 		opts := ai.ChatOptions{
@@ -580,10 +601,38 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			case PermissionDeny:
 				errMsg := FormatDeniedError(tc.Function.Name)
 				results[i] = ToolExecResult{Error: &errMsg}
+
+				// Track denial and emit event.
+				denialCount := 1
+				escalated := false
+				if r.denialTracker != nil {
+					escalated = r.denialTracker.RecordDenial(tc.Function.Name, tc.Function.Arguments)
+					if rec := r.denialTracker.GetRecord(tc.Function.Name); rec != nil {
+						denialCount = rec.Count
+					}
+				}
+				ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
+					ID:          tc.ID,
+					Name:        tc.Function.Name,
+					Reason:      errMsg,
+					DenialCount: denialCount,
+					Escalated:   escalated,
+				})
 				continue
+
 			case PermissionConfirm:
 				errMsg := fmt.Sprintf("Tool '%s' requires confirmation but running in automated mode.", tc.Function.Name)
 				results[i] = ToolExecResult{Error: &errMsg}
+
+				// Track as denial too — confirm in automated mode is effectively a deny.
+				if r.denialTracker != nil {
+					r.denialTracker.RecordDenial(tc.Function.Name, tc.Function.Arguments)
+				}
+				ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
+					ID:     tc.ID,
+					Name:   tc.Function.Name,
+					Reason: errMsg,
+				})
 				continue
 			}
 		}
@@ -604,6 +653,10 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 		for origIdx, regIdx := range regularIdx {
 			if regIdx < len(execResults) {
 				results[origIdx] = execResults[regIdx]
+				// Reset denial counter on successful execution.
+				if r.denialTracker != nil && execResults[regIdx].Error == nil {
+					r.denialTracker.RecordAllow(regularTools[regIdx].Function.Name)
+				}
 			}
 		}
 	}
