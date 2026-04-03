@@ -63,16 +63,27 @@ func (t *TrackedTool) abort() {
 type StreamingToolExecutor struct {
 	skillClient    *SkillRuntimeClient
 	hookExecutor   *HookExecutor
+	cache          *ToolResultCache
 	config         RunConfig
 }
 
 // NewStreamingToolExecutor creates a StreamingToolExecutor.
 func NewStreamingToolExecutor(skillClient *SkillRuntimeClient, hookExecutor *HookExecutor, config RunConfig) *StreamingToolExecutor {
+	var cache *ToolResultCache
+	if config.ToolCacheCapacity > 0 {
+		cache = NewToolResultCache(config.ToolCacheCapacity)
+	}
 	return &StreamingToolExecutor{
 		skillClient:  skillClient,
 		hookExecutor: hookExecutor,
+		cache:        cache,
 		config:       config,
 	}
+}
+
+// Cache returns the tool result cache (may be nil if caching is disabled).
+func (e *StreamingToolExecutor) Cache() *ToolResultCache {
+	return e.cache
 }
 
 // ExecuteAll runs all tool calls with state tracking, hooks, and abort cascade.
@@ -143,6 +154,20 @@ func (e *StreamingToolExecutor) ExecuteAll(
 				return
 			}
 
+			// Check cache for cacheable tools.
+			toolInput := json.RawMessage(tc.Function.Arguments)
+			if e.cache != nil && IsCacheable(tc.Function.Name) {
+				if cached := e.cache.Get(tc.Function.Name, toolInput); cached != nil {
+					tt.complete(*cached)
+					results[idx] = truncateToolResult(*cached, e.config.MaxToolResultChars)
+
+					ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+						ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
+					})
+					return
+				}
+			}
+
 			// Transition to executing.
 			tt.transition(ToolStateExecuting)
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
@@ -156,7 +181,7 @@ func (e *StreamingToolExecutor) ExecuteAll(
 					AgentID:   in.AgentID.String(),
 					SessionID: in.SessionID.String(),
 					ToolName:  tc.Function.Name,
-					ToolInput: json.RawMessage(tc.Function.Arguments),
+					ToolInput: toolInput,
 				})
 			}
 
@@ -171,7 +196,7 @@ func (e *StreamingToolExecutor) ExecuteAll(
 			result, err := e.skillClient.Execute(
 				toolCtx,
 				tc.Function.Name,
-				json.RawMessage(tc.Function.Arguments),
+				toolInput,
 				in.TenantID, in.AgentID.String(), in.SessionID.String(),
 			)
 
@@ -191,6 +216,11 @@ func (e *StreamingToolExecutor) ExecuteAll(
 			} else {
 				tt.complete(*result)
 				results[idx] = truncateToolResult(*result, e.config.MaxToolResultChars)
+
+				// Cache successful results for cacheable tools.
+				if e.cache != nil && IsCacheable(tc.Function.Name) && result.Error == nil {
+					e.cache.Put(tc.Function.Name, toolInput, *result)
+				}
 			}
 
 			// Completed state.
@@ -205,7 +235,7 @@ func (e *StreamingToolExecutor) ExecuteAll(
 					AgentID:    in.AgentID.String(),
 					SessionID:  in.SessionID.String(),
 					ToolName:   tc.Function.Name,
-					ToolInput:  json.RawMessage(tc.Function.Arguments),
+					ToolInput:  toolInput,
 					ToolOutput: results[idx].Output,
 					ToolError:  results[idx].Error,
 				})

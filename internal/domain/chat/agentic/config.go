@@ -56,6 +56,11 @@ type RunConfig struct {
 
 	// Temperature for the LLM call (0.0–2.0).
 	Temperature float64 `json:"temperature"`
+
+	// ToolCacheCapacity is the max number of entries in the per-run tool result
+	// LRU cache. Cacheable tools (read-only, idempotent) have their results cached
+	// to avoid redundant re-execution. Default 64. Set to 0 to disable caching.
+	ToolCacheCapacity int `json:"toolCacheCapacity"`
 }
 
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
@@ -75,7 +80,8 @@ func DefaultRunConfig() RunConfig {
 		MaxDepth:            3,
 		Provider:            "anthropic",
 		Model:               "claude-sonnet-4-20250514",
-		Temperature:         0.7,
+		Temperature:       0.7,
+		ToolCacheCapacity: 64,
 	}
 }
 
