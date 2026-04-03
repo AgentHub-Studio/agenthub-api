@@ -9,17 +9,18 @@ import (
 
 // AgentResponse is the JSON response envelope for an Agent.
 type AgentResponse struct {
-	ID             uuid.UUID       `json:"id"`
-	Name           string          `json:"name"`
-	Slug           string          `json:"slug"`
-	Description    string          `json:"description"`
-	Status         string          `json:"status"`
-	CurrentVersion int             `json:"currentVersion"`
-	SystemPrompt   *string         `json:"systemPrompt,omitempty"`
-	ModelConfig    json.RawMessage `json:"modelConfig,omitempty"`
-	Config         json.RawMessage `json:"config"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	ID              uuid.UUID       `json:"id"`
+	Name            string          `json:"name"`
+	Slug            string          `json:"slug"`
+	Description     string          `json:"description"`
+	Status          string          `json:"status"`
+	CurrentVersion  int             `json:"currentVersion"`
+	SystemPrompt    *string         `json:"systemPrompt,omitempty"`
+	ModelConfig     json.RawMessage `json:"modelConfig,omitempty"`
+	PermissionRules json.RawMessage `json:"permissionRules,omitempty"`
+	Config          json.RawMessage `json:"config"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
 }
 
 // ResponseFrom converts an Agent entity to AgentResponse.
@@ -32,39 +33,46 @@ func ResponseFrom(a Agent) AgentResponse {
 	if len(a.ModelConfig) > 0 {
 		modelConfig = a.ModelConfig
 	}
+	var permissionRules json.RawMessage
+	if len(a.PermissionRules) > 0 {
+		permissionRules = a.PermissionRules
+	}
 	return AgentResponse{
-		ID:             a.ID,
-		Name:           a.Name,
-		Slug:           a.Slug,
-		Description:    a.Description,
-		Status:         string(a.Status),
-		CurrentVersion: a.CurrentVersion,
-		SystemPrompt:   a.SystemPrompt,
-		ModelConfig:    modelConfig,
-		Config:         config,
-		CreatedAt:      a.CreatedAt,
-		UpdatedAt:      a.UpdatedAt,
+		ID:              a.ID,
+		Name:            a.Name,
+		Slug:            a.Slug,
+		Description:     a.Description,
+		Status:          string(a.Status),
+		CurrentVersion:  a.CurrentVersion,
+		SystemPrompt:    a.SystemPrompt,
+		ModelConfig:     modelConfig,
+		PermissionRules: permissionRules,
+		Config:          config,
+		CreatedAt:       a.CreatedAt,
+		UpdatedAt:       a.UpdatedAt,
 	}
 }
 
 // CreateAgentRequest is the JSON body for agent creation.
 type CreateAgentRequest struct {
-	Name         string          `json:"name"`
-	Slug         string          `json:"slug"`
-	Description  string          `json:"description"`
-	SystemPrompt *string         `json:"systemPrompt,omitempty"`
-	ModelConfig  json.RawMessage `json:"modelConfig,omitempty"`
-	Config       json.RawMessage `json:"config,omitempty"`
+	Name            string          `json:"name"`
+	Slug            string          `json:"slug"`
+	Description     string          `json:"description"`
+	SystemPrompt    *string         `json:"systemPrompt,omitempty"`
+	ModelConfig     json.RawMessage `json:"modelConfig,omitempty"`
+	PermissionRules json.RawMessage `json:"permissionRules,omitempty"`
+	Config          json.RawMessage `json:"config,omitempty"`
 }
 
 // UpdateAgentRequest is the JSON body for partial agent updates.
 type UpdateAgentRequest struct {
-	Name         *string         `json:"name,omitempty"`
-	Slug         *string         `json:"slug,omitempty"`
-	Description  *string         `json:"description,omitempty"`
-	SystemPrompt *string         `json:"systemPrompt,omitempty"`
-	ModelConfig  json.RawMessage `json:"modelConfig,omitempty"`
-	Config       json.RawMessage `json:"config,omitempty"`
+	Name            *string         `json:"name,omitempty"`
+	Slug            *string         `json:"slug,omitempty"`
+	Description     *string         `json:"description,omitempty"`
+	SystemPrompt    *string         `json:"systemPrompt,omitempty"`
+	ModelConfig     json.RawMessage `json:"modelConfig,omitempty"`
+	PermissionRules json.RawMessage `json:"permissionRules,omitempty"`
+	Config          json.RawMessage `json:"config,omitempty"`
 }
 
 // CloneAgentRequest is the JSON body for cloning an agent.

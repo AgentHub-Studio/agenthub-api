@@ -8,6 +8,17 @@ import (
 	"github.com/google/uuid"
 )
 
+// MemoryType categorizes a memory entry for structured selection.
+type MemoryType string
+
+const (
+	MemoryTypeUser      MemoryType = "user"
+	MemoryTypeFeedback  MemoryType = "feedback"
+	MemoryTypeProject   MemoryType = "project"
+	MemoryTypeReference MemoryType = "reference"
+	MemoryTypeGeneral   MemoryType = "general"
+)
+
 const (
 	// relevanceDecayLambda controls how fast relevance decays over time.
 	// With lambda=0.01, relevance halves in ~69 hours (~3 days).
@@ -21,6 +32,7 @@ type AgentMemory struct {
 	UserID         *string    `json:"userId,omitempty"`
 	Key            string     `json:"key"`
 	Value          []byte     `json:"value"` // raw JSONB
+	MemoryType     MemoryType `json:"memoryType"`
 	Embedding      []float32  `json:"embedding,omitempty"`
 	LastAccessedAt time.Time  `json:"lastAccessedAt"`
 	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`

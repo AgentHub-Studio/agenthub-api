@@ -65,15 +65,16 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 		config = json.RawMessage(`{}`)
 	}
 	a := Agent{
-		ID:             uuid.New(),
-		Name:           req.Name,
-		Slug:           slug,
-		Description:    req.Description,
-		Status:         StatusDraft,
-		CurrentVersion: 1,
-		SystemPrompt:   req.SystemPrompt,
-		ModelConfig:    req.ModelConfig,
-		Config:         config,
+		ID:              uuid.New(),
+		Name:            req.Name,
+		Slug:            slug,
+		Description:     req.Description,
+		Status:          StatusDraft,
+		CurrentVersion:  1,
+		SystemPrompt:    req.SystemPrompt,
+		ModelConfig:     req.ModelConfig,
+		PermissionRules: req.PermissionRules,
+		Config:          config,
 	}
 	created, err := s.repo.Create(ctx, a)
 	if err != nil {
@@ -101,6 +102,9 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	}
 	if len(req.ModelConfig) > 0 {
 		a.ModelConfig = req.ModelConfig
+	}
+	if len(req.PermissionRules) > 0 {
+		a.PermissionRules = req.PermissionRules
 	}
 	if len(req.Config) > 0 {
 		a.Config = req.Config
@@ -142,15 +146,16 @@ func (s *service) Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest
 		name = original.Name + " (copy)"
 	}
 	clone := Agent{
-		ID:             uuid.New(),
-		Name:           name,
-		Slug:           toSlug(name),
-		Description:    original.Description,
-		Status:         StatusDraft,
-		CurrentVersion: 1,
-		SystemPrompt:   original.SystemPrompt,
-		ModelConfig:    original.ModelConfig,
-		Config:         original.Config,
+		ID:              uuid.New(),
+		Name:            name,
+		Slug:            toSlug(name),
+		Description:     original.Description,
+		Status:          StatusDraft,
+		CurrentVersion:  1,
+		SystemPrompt:    original.SystemPrompt,
+		ModelConfig:     original.ModelConfig,
+		PermissionRules: original.PermissionRules,
+		Config:          original.Config,
 	}
 	created, err := s.repo.Create(ctx, clone)
 	if err != nil {

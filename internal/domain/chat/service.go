@@ -18,9 +18,10 @@ type AgentLoader interface {
 
 // AgentRunConfig carries agent fields consumed by the agentic Runner.
 type AgentRunConfig struct {
-	ID           uuid.UUID
-	SystemPrompt string
-	ModelConfig  json.RawMessage // raw JSON — passed to RunConfigFromModelConfig
+	ID              uuid.UUID
+	SystemPrompt    string
+	ModelConfig     json.RawMessage // raw JSON — passed to RunConfigFromModelConfig
+	PermissionRules json.RawMessage // raw JSON — {"allow":[],"deny":[],"confirm":[]}
 }
 
 // RunEvent is the envelope emitted by the agentic loop.
