@@ -120,7 +120,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
-	sessionRunner := buildAgenticRunner(cfg, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo)
+	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo)
 	chatHandler := chat.NewHandler(chat.NewService(chatRepo, sessionRunner))
 	var docStorage document.StorageClient
 	if cfg.MinIO.IsConfigured() {
@@ -333,6 +333,7 @@ func (a *toolDatasourceAdapter) GetDatasourceCreds(ctx context.Context, tenantID
 // Returns nil (disabling agentic features) if no AI provider is configured.
 func buildAgenticRunner(
 	cfg *config.Config,
+	pool *pgxpool.Pool,
 	chatRepo chat.Repository,
 	agentRepo agent.Repository,
 	skillRepo *skill.Repository,
@@ -351,6 +352,8 @@ func buildAgenticRunner(
 	promptBuilder := agentic.NewPromptBuilder(skillRepo, kbRepo, chatRepo, agentic.DefaultPromptConfig())
 	toolSchemaBuilder := agentic.NewToolSchemaBuilder(skillRepo, toolRepo, kbRepo)
 	ctxManager := agentic.NewContextManager()
+	hookRepo := agentic.NewHookRepository(pool)
+	hookExecutor := agentic.NewHookExecutor(hookRepo)
 
 	return agentic.NewSessionRunnerAdapter(
 		chatModel,
@@ -359,6 +362,7 @@ func buildAgenticRunner(
 		toolSchemaBuilder,
 		ctxManager,
 		nil, // MemoryBridge — requires Embedder, wired later
+		hookExecutor,
 		chatRepo,
 		&agentConfigAdapter{repo: agentRepo},
 	)

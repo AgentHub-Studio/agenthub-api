@@ -18,14 +18,15 @@ type AgentConfigLoader interface {
 // SessionRunnerAdapter implements chat.SessionRunner by creating a Runner
 // on-demand and bridging agentic.RunEvent → chat.RunEvent.
 type SessionRunnerAdapter struct {
-	chatModel   ai.ChatModel
-	skillClient *SkillRuntimeClient
-	prompt      *PromptBuilder
-	tools       *ToolSchemaBuilder
-	ctxManager  *ContextManager
-	memory      *MemoryBridge
-	repo        chat.Repository
-	agentLoader AgentConfigLoader
+	chatModel    ai.ChatModel
+	skillClient  *SkillRuntimeClient
+	prompt       *PromptBuilder
+	tools        *ToolSchemaBuilder
+	ctxManager   *ContextManager
+	memory       *MemoryBridge
+	hookExecutor *HookExecutor
+	repo         chat.Repository
+	agentLoader  AgentConfigLoader
 }
 
 // NewSessionRunnerAdapter creates an adapter that wires the chat.Service
@@ -37,18 +38,20 @@ func NewSessionRunnerAdapter(
 	tools *ToolSchemaBuilder,
 	ctxManager *ContextManager,
 	memory *MemoryBridge,
+	hookExecutor *HookExecutor,
 	repo chat.Repository,
 	agentLoader AgentConfigLoader,
 ) *SessionRunnerAdapter {
 	return &SessionRunnerAdapter{
-		chatModel:   chatModel,
-		skillClient: skillClient,
-		prompt:      prompt,
-		tools:       tools,
-		ctxManager:  ctxManager,
-		memory:      memory,
-		repo:        repo,
-		agentLoader: agentLoader,
+		chatModel:    chatModel,
+		skillClient:  skillClient,
+		prompt:       prompt,
+		tools:        tools,
+		ctxManager:   ctxManager,
+		memory:       memory,
+		hookExecutor: hookExecutor,
+		repo:         repo,
+		agentLoader:  agentLoader,
 	}
 }
 
@@ -72,6 +75,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		a.memory,
 		a.repo, // MessagePersister — Repository implements CreateMessage
 		&repoHistoryLoader{repo: a.repo},
+		a.hookExecutor,
 		config,
 	)
 
