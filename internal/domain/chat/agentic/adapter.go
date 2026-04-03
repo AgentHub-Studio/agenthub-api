@@ -55,6 +55,30 @@ func NewSessionRunnerAdapter(
 	}
 }
 
+// adapterRunnerFactory implements RunnerFactory using the adapter's dependencies.
+type adapterRunnerFactory struct {
+	adapter *SessionRunnerAdapter
+}
+
+func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
+	runner := NewRunner(
+		f.adapter.chatModel,
+		f.adapter.skillClient,
+		f.adapter.prompt,
+		f.adapter.tools,
+		f.adapter.ctxManager,
+		f.adapter.memory,
+		f.adapter.repo,
+		&repoHistoryLoader{repo: f.adapter.repo},
+		f.adapter.hookExecutor,
+		config,
+	)
+	// Sub-runners also get subtask execution capability (recursive).
+	subtaskExec := NewSubtaskExecutor(f)
+	runner.WithSubtaskExecutor(subtaskExec)
+	return runner
+}
+
 // RunSession implements chat.SessionRunner. It creates a Runner with the
 // agent's model configuration and bridges agentic events to chat events.
 func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput) (<-chan chat.RunEvent, error) {
@@ -66,6 +90,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 
 	config := RunConfigFromModelConfig(agentCfg.ModelConfig)
 
+	factory := &adapterRunnerFactory{adapter: a}
 	runner := NewRunner(
 		a.chatModel,
 		a.skillClient,
@@ -78,6 +103,8 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		a.hookExecutor,
 		config,
 	)
+	subtaskExec := NewSubtaskExecutor(factory)
+	runner.WithSubtaskExecutor(subtaskExec)
 
 	agenticCh := runner.Run(ctx, RunInput{
 		SessionID:       in.SessionID,

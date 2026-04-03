@@ -14,6 +14,8 @@ const (
 	EventError            RunEventType = "error"
 	EventContextCompacted RunEventType = "context_compacted"
 	EventToolProgress     RunEventType = "tool_progress"
+	EventSubtaskStart     RunEventType = "subtask_start"
+	EventSubtaskComplete  RunEventType = "subtask_complete"
 )
 
 // RunEvent is the envelope sent through the Runner's output channel.
@@ -100,4 +102,20 @@ type ToolProgressData struct {
 	ID    string    `json:"id"`
 	Name  string    `json:"name"`
 	State ToolState `json:"state"`
+}
+
+// SubtaskStartData is emitted when a sub-agent is spawned.
+type SubtaskStartData struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Depth       int    `json:"depth"`
+}
+
+// SubtaskCompleteData is emitted when a sub-agent finishes.
+type SubtaskCompleteData struct {
+	ID          string  `json:"id"`
+	TotalTurns  int     `json:"totalTurns"`
+	TotalTokens int     `json:"totalTokens"`
+	TotalCost   float64 `json:"totalCostUsd,omitempty"`
+	Error       *string `json:"error,omitempty"`
 }

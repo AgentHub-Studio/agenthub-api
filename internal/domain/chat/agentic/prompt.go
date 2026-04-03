@@ -67,6 +67,8 @@ type PromptInput struct {
 	SystemPrompt string
 	// Memories is a pre-formatted block of recalled memories (injected by MemoryBridge).
 	Memories string
+	// CoordinatorMode enables coordinator instructions when sub-agent spawning is available.
+	CoordinatorMode bool
 }
 
 // Build assembles the full system prompt from all dynamic sections.
@@ -91,6 +93,11 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 
 	// 3. Tool Usage Instructions (static rules)
 	sections = append(sections, toolUsageInstructions)
+
+	// 3b. Coordinator instructions (when sub-agent spawning is enabled).
+	if in.CoordinatorMode {
+		sections = append(sections, coordinatorInstructions)
+	}
 
 	// 4. Knowledge Base Context
 	if b.kbs != nil {
@@ -160,6 +167,27 @@ func formatKBSection(kbs []knowledgebase.KnowledgeBase) string {
 	}
 	return sb.String()
 }
+
+// coordinatorInstructions is injected when the agent tool is available for sub-agent spawning.
+const coordinatorInstructions = `## Coordinator Mode
+
+You can spawn sub-agents to handle subtasks in parallel using the 'agent' tool.
+
+### When to Delegate
+- Tasks that are independent and can run concurrently
+- Complex tasks that benefit from decomposition into focused subtasks
+- Tasks that require different tool expertise
+
+### When NOT to Delegate
+- Simple tasks you can handle directly with a single tool call
+- Tasks with strong sequential dependencies
+- Trivial questions that don't require tool usage
+
+### Guidelines
+- Write clear, specific prompts — sub-agents start with zero conversation context
+- Include all necessary context in the prompt
+- Spawn multiple sub-agents simultaneously for independent subtasks
+- Synthesize sub-agent results into a coherent final answer`
 
 // toolUsageInstructions is the static section injected into every agentic prompt.
 const toolUsageInstructions = `## Tool Usage Instructions
