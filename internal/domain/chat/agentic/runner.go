@@ -52,6 +52,7 @@ type Runner struct {
 	history      HistoryLoader
 	toolExec     *StreamingToolExecutor
 	subtaskExec  *SubtaskExecutor
+	progress     *RunProgressTracker
 	config       RunConfig
 }
 
@@ -79,8 +80,14 @@ func NewRunner(
 		persister:   persister,
 		history:     history,
 		toolExec:    NewStreamingToolExecutor(skillClient, hookExecutor, config),
+		progress:    NewRunProgressTracker(10),
 		config:      config,
 	}
+}
+
+// Progress returns the Runner's progress tracker for external monitoring.
+func (r *Runner) Progress() *RunProgressTracker {
+	return r.progress
 }
 
 // WithSubtaskExecutor attaches a SubtaskExecutor to the Runner.
@@ -214,6 +221,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		turnCost := EstimateCostUSD(r.config.Model, usage)
 		totalCost += turnCost
 
+		// Update progress tracker.
+		r.progress.SetTurnIndex(turnIndex)
+		r.progress.RecordLLMCall(usage.TotalTokens, turnCost, r.config.Model)
+
 		// Budget check.
 		if effectiveBudget > 0 && totalCost > effectiveBudget {
 			emitError(ch, "budget_exceeded", fmt.Errorf("run cost $%.4f exceeded budget $%.4f", totalCost, effectiveBudget))
@@ -242,6 +253,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				TurnIndex:  turnIndex,
 				TokenUsage: tokenUsageWithCost(usage, turnCost),
 			})
+			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,
 				TotalTokens: totalTokens,
@@ -292,12 +304,18 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					DurationMs: result.LatencyMs,
 					Error:      result.Error,
 				})
+
+				// Track tool execution in progress.
+				r.progress.RecordToolCall(toolName)
 			}
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
 				TokenUsage: tokenUsageWithCost(usage, turnCost),
 			})
+
+			// Emit consolidated progress.
+			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
 
 			// Check context compaction using progressive stages.
 			if r.ctxManager != nil {
@@ -327,6 +345,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				TurnIndex:  turnIndex,
 				TokenUsage: tokenUsageWithCost(usage, turnCost),
 			})
+			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,
 				TotalTokens: totalTokens,

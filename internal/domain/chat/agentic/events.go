@@ -16,6 +16,7 @@ const (
 	EventToolProgress     RunEventType = "tool_progress"
 	EventSubtaskStart     RunEventType = "subtask_start"
 	EventSubtaskComplete  RunEventType = "subtask_complete"
+	EventRunProgress      RunEventType = "run_progress"
 )
 
 // RunEvent is the envelope sent through the Runner's output channel.
