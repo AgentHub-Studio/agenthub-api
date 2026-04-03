@@ -195,6 +195,138 @@ func (cm *ContextManager) Compact(ctx context.Context, messages []chat.ChatMessa
 	}, nil
 }
 
+// CompactStage identifies how aggressively the context was compacted.
+type CompactStage string
+
+const (
+	StageToolResultTruncation CompactStage = "tool_result_truncation"
+	StageHistorySnip          CompactStage = "history_snip"
+	StageMicrocompact         CompactStage = "microcompact"
+	StageFullSummarization    CompactStage = "full_summarization"
+)
+
+// ReactiveCompactResult extends CompactResult with the stage applied.
+type ReactiveCompactResult struct {
+	CompactResult
+	Stage CompactStage
+}
+
+// ReactiveCompact applies progressive compaction stages based on context pressure.
+// Stage 1 (75% threshold): Truncate old tool results to 200 chars
+// Stage 2 (80% threshold): Snip oldest messages beyond tail
+// Stage 3 (85% threshold): Microcompact — truncate all non-tail messages
+// Stage 4 (90% threshold): Full LLM summarization
+func (cm *ContextManager) ReactiveCompact(ctx context.Context, messages []chat.ChatMessage, systemTokens int, cfg RunConfig, summarizer Summarizer) (*ReactiveCompactResult, error) {
+	windowSize := GetContextWindowSize(cfg.Model, cfg.ContextWindowSize)
+	totalTokens := EstimateTokens(messages) + systemTokens
+	usage := float64(totalTokens) / float64(windowSize)
+
+	// Stage 1: Truncate old tool results (75-80%).
+	if usage >= 0.75 && usage < 0.80 {
+		compacted := truncateOldToolResults(messages, cm.TailSize, 200)
+		return &ReactiveCompactResult{
+			CompactResult: CompactResult{
+				Messages:       compacted,
+				OriginalCount:  len(messages),
+				CompactedCount: len(compacted),
+			},
+			Stage: StageToolResultTruncation,
+		}, nil
+	}
+
+	// Stage 2: History snip — remove oldest messages beyond tail (80-85%).
+	if usage >= 0.80 && usage < 0.85 {
+		snipped := snipOldHistory(messages, cm.TailSize*2)
+		return &ReactiveCompactResult{
+			CompactResult: CompactResult{
+				Messages:       snipped,
+				OriginalCount:  len(messages),
+				CompactedCount: len(snipped),
+			},
+			Stage: StageHistorySnip,
+		}, nil
+	}
+
+	// Stage 3: Microcompact — aggressively truncate non-tail messages (85-90%).
+	if usage >= 0.85 && usage < 0.90 {
+		micro := microcompact(messages, cm.TailSize)
+		return &ReactiveCompactResult{
+			CompactResult: CompactResult{
+				Messages:       micro,
+				OriginalCount:  len(messages),
+				CompactedCount: len(micro),
+			},
+			Stage: StageMicrocompact,
+		}, nil
+	}
+
+	// Stage 4: Full summarization (>= 90%).
+	if usage >= 0.90 {
+		result, err := cm.Compact(ctx, messages, summarizer)
+		if err != nil {
+			return nil, err
+		}
+		return &ReactiveCompactResult{
+			CompactResult: *result,
+			Stage:         StageFullSummarization,
+		}, nil
+	}
+
+	// No compaction needed.
+	return &ReactiveCompactResult{
+		CompactResult: CompactResult{
+			Messages:       messages,
+			OriginalCount:  len(messages),
+			CompactedCount: len(messages),
+		},
+	}, nil
+}
+
+// truncateOldToolResults truncates tool_result content in messages outside the tail.
+func truncateOldToolResults(messages []chat.ChatMessage, tailSize, maxChars int) []chat.ChatMessage {
+	result := make([]chat.ChatMessage, len(messages))
+	copy(result, messages)
+
+	boundary := len(result) - tailSize
+	if boundary < 0 {
+		boundary = 0
+	}
+
+	for i := 0; i < boundary; i++ {
+		if result[i].MessageType == chat.MessageTypeToolResult && len(result[i].Content) > maxChars {
+			result[i].Content = result[i].Content[:maxChars] + "\n[truncated]"
+		}
+	}
+	return result
+}
+
+// snipOldHistory keeps only the most recent N messages.
+func snipOldHistory(messages []chat.ChatMessage, keep int) []chat.ChatMessage {
+	if len(messages) <= keep {
+		return messages
+	}
+	return messages[len(messages)-keep:]
+}
+
+// microcompact aggressively truncates all messages outside the tail to 100 chars.
+func microcompact(messages []chat.ChatMessage, tailSize int) []chat.ChatMessage {
+	result := make([]chat.ChatMessage, len(messages))
+	copy(result, messages)
+
+	boundary := len(result) - tailSize
+	if boundary < 0 {
+		boundary = 0
+	}
+
+	for i := 0; i < boundary; i++ {
+		if len(result[i].Content) > 100 {
+			result[i].Content = result[i].Content[:100] + "..."
+		}
+		result[i].ToolCalls = nil // strip tool_calls JSON from old messages
+	}
+	return result
+}
+
 // buildSummarizationPrompt creates the prompt sent to the LLM for context compression.
 func buildSummarizationPrompt(messages []chat.ChatMessage) string {
 	var conversation string

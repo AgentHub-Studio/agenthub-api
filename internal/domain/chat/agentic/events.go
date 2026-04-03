@@ -13,6 +13,7 @@ const (
 	EventRunComplete      RunEventType = "run_complete"
 	EventError            RunEventType = "error"
 	EventContextCompacted RunEventType = "context_compacted"
+	EventToolProgress     RunEventType = "tool_progress"
 )
 
 // RunEvent is the envelope sent through the Runner's output channel.
@@ -82,4 +83,21 @@ type ErrorData struct {
 type CompactData struct {
 	OriginalMessages int `json:"originalMessages"`
 	CompactedTo      int `json:"compactedTo"`
+}
+
+// ToolState represents the lifecycle of a tool execution.
+type ToolState string
+
+const (
+	ToolStateQueued    ToolState = "queued"
+	ToolStateExecuting ToolState = "executing"
+	ToolStateCompleted ToolState = "completed"
+	ToolStateAborted   ToolState = "aborted"
+)
+
+// ToolProgressData is emitted when a tool's state changes.
+type ToolProgressData struct {
+	ID    string    `json:"id"`
+	Name  string    `json:"name"`
+	State ToolState `json:"state"`
 }

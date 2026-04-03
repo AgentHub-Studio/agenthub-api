@@ -40,11 +40,12 @@ type Runner struct {
 	memory       *MemoryBridge
 	persister    MessagePersister
 	history      HistoryLoader
+	toolExec     *StreamingToolExecutor
 	config       RunConfig
 }
 
 // NewRunner creates a Runner with the given dependencies.
-// ctxManager and memory may be nil (features are skipped).
+// ctxManager, memory, and hookExecutor may be nil (features are skipped).
 func NewRunner(
 	chatModel ai.ChatModel,
 	skillClient *SkillRuntimeClient,
@@ -54,6 +55,7 @@ func NewRunner(
 	memory *MemoryBridge,
 	persister MessagePersister,
 	history HistoryLoader,
+	hookExecutor *HookExecutor,
 	config RunConfig,
 ) *Runner {
 	return &Runner{
@@ -65,6 +67,7 @@ func NewRunner(
 		memory:      memory,
 		persister:   persister,
 		history:     history,
+		toolExec:    NewStreamingToolExecutor(skillClient, hookExecutor, config),
 		config:      config,
 	}
 }
@@ -227,8 +230,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			return
 
 		case "tool_calls":
-			// 5e. Execute tool calls.
-			toolResults := r.executeToolCalls(ctx, ch, toolCalls, in)
+			// 5e. Execute tool calls via streaming executor.
+			toolResults := r.toolExec.ExecuteAll(ctx, ch, toolCalls, in)
 
 			// Persist and append tool results to history.
 			for i, result := range toolResults {
@@ -270,14 +273,17 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				TokenUsage: tokenUsageWithCost(usage, turnCost),
 			})
 
-			// Check context compaction (heuristic based on message count × avg tokens).
+			// Check context compaction using progressive stages.
 			if r.ctxManager != nil {
 				systemTokens := EstimateStringTokens(systemPrompt)
 				chatMsgs := aiMessagesToChatMessages(messages)
-				if ShouldCompact(chatMsgs, systemTokens, r.config) {
+				result, err := r.ctxManager.ReactiveCompact(ctx, chatMsgs, systemTokens, r.config, nil)
+				if err == nil && result.Stage != "" {
+					// Apply compacted messages back.
+					messages = chatMessagesToAI(result.Messages)
 					ch <- NewRunEvent(EventContextCompacted, CompactData{
-						OriginalMessages: len(messages),
-						CompactedTo:      len(messages), // no-op until Summarizer is wired
+						OriginalMessages: result.OriginalCount,
+						CompactedTo:      result.CompactedCount,
 					})
 				}
 			}
@@ -382,48 +388,6 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 	}
 
 	return content, toolCalls, finishReason, usage, nil
-}
-
-// executeToolCalls runs the tool calls either in parallel (read-only) or serially.
-func (r *Runner) executeToolCalls(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput) []ToolExecResult {
-	results := make([]ToolExecResult, len(toolCalls))
-
-	// Emit tool_call_start events.
-	for _, tc := range toolCalls {
-		ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
-			ID:    tc.ID,
-			Name:  tc.Function.Name,
-			Input: json.RawMessage(tc.Function.Arguments),
-		})
-	}
-
-	// Build ToolCall structs for parallel execution.
-	calls := make([]ToolCall, len(toolCalls))
-	for i, tc := range toolCalls {
-		calls[i] = ToolCall{
-			ID:        tc.ID,
-			Slug:      tc.Function.Name,
-			Input:     json.RawMessage(tc.Function.Arguments),
-			TenantID:  in.TenantID,
-			AgentID:   in.AgentID.String(),
-			SessionID: in.SessionID.String(),
-		}
-	}
-
-	// Execute all in parallel using the skill client's semaphore.
-	toolCtx := ctx
-	if r.config.ToolTimeout > 0 {
-		var cancel context.CancelFunc
-		toolCtx, cancel = context.WithTimeout(ctx, r.config.ToolTimeout)
-		defer cancel()
-	}
-
-	execResults := r.skillClient.ExecuteParallel(toolCtx, calls, r.config.ConcurrentReadTools)
-	for i, res := range execResults {
-		results[i] = truncateToolResult(res, r.config.MaxToolResultChars)
-	}
-
-	return results
 }
 
 // loadHistory loads messages from the database and converts to ai.Message format.
@@ -581,6 +545,25 @@ func derefString(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// chatMessagesToAI converts chat.ChatMessage slice back to ai.Message slice.
+func chatMessagesToAI(msgs []chat.ChatMessage) []ai.Message {
+	result := make([]ai.Message, len(msgs))
+	for i, m := range msgs {
+		result[i] = ai.Message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: derefString(m.ToolCallID),
+		}
+		if len(m.ToolCalls) > 0 {
+			var tcs []ai.ToolCall
+			if err := json.Unmarshal(m.ToolCalls, &tcs); err == nil {
+				result[i].ToolCalls = tcs
+			}
+		}
+	}
+	return result
 }
 
 // aiMessagesToChatMessages converts ai.Message slice to chat.ChatMessage slice

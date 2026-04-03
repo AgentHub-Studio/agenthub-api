@@ -178,7 +178,7 @@ func TestBuildAgenticRunner_NilWhenNoProvider(t *testing.T) {
 	// buildAgenticRunner checks chatModel first and returns nil before using repos.
 	runner := buildAgenticRunner(
 		&config.Config{SkillRuntimeURL: "http://localhost:8083"},
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
 	)
 	assert.Nil(t, runner)
 }
@@ -190,7 +190,7 @@ func TestBuildAgenticRunner_ReturnsRunnerWhenProviderConfigured(t *testing.T) {
 	// the repos are wrapped in adapters but not called at construction time.
 	runner := buildAgenticRunner(
 		&config.Config{SkillRuntimeURL: "http://localhost:8083"},
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
 	)
 	assert.NotNil(t, runner)
 }

@@ -286,3 +286,93 @@ func TestNewContextManager_Defaults(t *testing.T) {
 	cm := agentic.NewContextManager()
 	assert.Equal(t, 4, cm.TailSize)
 }
+
+// --- ReactiveCompact ---
+
+func makeMessages(n int, contentLen int) []chat.ChatMessage {
+	content := make([]byte, contentLen)
+	for i := range content {
+		content[i] = 'x'
+	}
+	msgs := make([]chat.ChatMessage, n)
+	for i := 0; i < n; i++ {
+		msgs[i] = chat.ChatMessage{
+			Role:        "user",
+			Content:     string(content),
+			MessageType: chat.MessageTypeText,
+		}
+	}
+	return msgs
+}
+
+func reactiveCompactConfig(windowSize int) agentic.RunConfig {
+	cfg := agentic.DefaultRunConfig()
+	cfg.Model = "test-model" // unknown model so GetContextWindowSize uses fallback
+	cfg.ContextWindowSize = windowSize
+	return cfg
+}
+
+func TestReactiveCompact_NoCompactionNeeded(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(200000)
+
+	msgs := makeMessages(5, 100) // ~125 tokens total, well below 75%
+	result, err := cm.ReactiveCompact(context.Background(), msgs, 0, cfg, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, len(msgs), result.CompactedCount)
+	assert.Equal(t, agentic.CompactStage(""), result.Stage) // no stage applied
+}
+
+func TestReactiveCompact_ToolResultTruncation(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(1000)
+
+	// Create messages where tool result is outside the tail (tailSize=4).
+	msgs := []chat.ChatMessage{
+		{Role: "user", Content: "old question", MessageType: chat.MessageTypeText},
+		{Role: "tool", Content: string(make([]byte, 400)), MessageType: chat.MessageTypeToolResult},
+		{Role: "assistant", Content: "old answer", MessageType: chat.MessageTypeText},
+		// -- tail boundary (last 4 messages) --
+		{Role: "user", Content: "question 2", MessageType: chat.MessageTypeText},
+		{Role: "assistant", Content: "answer 2", MessageType: chat.MessageTypeText},
+		{Role: "user", Content: "follow up", MessageType: chat.MessageTypeText},
+		{Role: "assistant", Content: "response", MessageType: chat.MessageTypeText},
+	}
+
+	// System tokens push us into 75-80% range.
+	result, err := cm.ReactiveCompact(context.Background(), msgs, 610, cfg, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, agentic.StageToolResultTruncation, result.Stage)
+	// The tool result at index 1 (outside tail) should be truncated (200 chars + "\n[truncated]").
+	assert.LessOrEqual(t, len(result.Messages[1].Content), 220)
+}
+
+func TestReactiveCompact_HistorySnip(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(1000)
+
+	msgs := makeMessages(10, 40) // ~10 * (40/4 + 4) = 140 tokens
+	// System tokens push us into 80-85% range (140 + 680 = 820 / 1000 = 82%).
+	result, err := cm.ReactiveCompact(context.Background(), msgs, 680, cfg, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, agentic.StageHistorySnip, result.Stage)
+	assert.Less(t, result.CompactedCount, result.OriginalCount)
+}
+
+func TestReactiveCompact_FullSummarization(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(1000)
+
+	msgs := makeMessages(10, 40) // ~140 tokens
+	summarizer := &mockSummarizer{result: "Summary of conversation"}
+
+	// System tokens push us above 90% (140 + 770 = 910 / 1000 = 91%).
+	result, err := cm.ReactiveCompact(context.Background(), msgs, 770, cfg, summarizer)
+
+	require.NoError(t, err)
+	assert.Equal(t, agentic.StageFullSummarization, result.Stage)
+	assert.Less(t, result.CompactedCount, result.OriginalCount)
+}

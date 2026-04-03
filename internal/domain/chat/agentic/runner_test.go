@@ -159,7 +159,9 @@ func newTestRunner(
 	return agentic.NewRunner(
 		model, skillClient, prompt, tools,
 		nil, nil, // no context manager or memory bridge
-		persister, history, config,
+		persister, history,
+		nil, // no hook executor
+		config,
 	)
 }
 
