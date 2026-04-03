@@ -147,6 +147,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 	// 5. Agentic loop.
 	totalTokens := 0
+	totalCost := 0.0
 	turnIndex := 0
 
 	for turnIndex < r.config.MaxIterations {
@@ -164,8 +165,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			SystemMsg:   systemPrompt,
 		}
 
-		// 5a. Call LLM with streaming.
-		stream, err := r.chatModel.ChatStream(ctx, messages, opts)
+		// 5a. Call LLM with streaming (with retry for transient errors).
+		stream, err := retryStream(ctx, r.chatModel, messages, opts, r.config.RetryMaxAttempts)
 		if err != nil {
 			emitError(ch, "llm_call", err)
 			return
@@ -179,6 +180,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 
 		totalTokens += usage.TotalTokens
+
+		// Accumulate cost.
+		turnCost := EstimateCostUSD(r.config.Model, usage)
+		totalCost += turnCost
+
+		// Budget check.
+		if r.config.MaxBudgetUSD > 0 && totalCost > r.config.MaxBudgetUSD {
+			emitError(ch, "budget_exceeded", fmt.Errorf("run cost $%.4f exceeded budget $%.4f", totalCost, r.config.MaxBudgetUSD))
+			return
+		}
 
 		// 5c. Build and persist assistant message.
 		assistantMsg := r.buildAssistantMessage(in.SessionID, assistantContent, toolCalls, finishReason, usage, turnIndex)
@@ -200,11 +211,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		case "stop":
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
-				TokenUsage: TokenUsage(usage),
+				TokenUsage: tokenUsageWithCost(usage, turnCost),
 			})
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,
 				TotalTokens: totalTokens,
+				TotalCost:   totalCost,
 			})
 
 			// Maybe store memories.
@@ -255,7 +267,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
-				TokenUsage: TokenUsage(usage),
+				TokenUsage: tokenUsageWithCost(usage, turnCost),
 			})
 
 			// Check context compaction (heuristic based on message count × avg tokens).
@@ -281,11 +293,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			// Unknown finish reason, treat as stop.
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
-				TokenUsage: TokenUsage(usage),
+				TokenUsage: tokenUsageWithCost(usage, turnCost),
 			})
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,
 				TotalTokens: totalTokens,
+				TotalCost:   totalCost,
 			})
 			return
 		}
@@ -310,6 +323,17 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 
 		if chunk.Error != nil {
 			return "", nil, "", ai.Usage{}, chunk.Error
+		}
+
+		// Accumulate usage from stream (providers may send partial usage across chunks).
+		if chunk.Usage != nil {
+			if chunk.Usage.PromptTokens > 0 {
+				usage.PromptTokens = chunk.Usage.PromptTokens
+			}
+			if chunk.Usage.CompletionTokens > 0 {
+				usage.CompletionTokens = chunk.Usage.CompletionTokens
+			}
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 		}
 
 		if chunk.Delta != "" {
@@ -395,7 +419,9 @@ func (r *Runner) executeToolCalls(ctx context.Context, ch chan<- RunEvent, toolC
 	}
 
 	execResults := r.skillClient.ExecuteParallel(toolCtx, calls, r.config.ConcurrentReadTools)
-	copy(results, execResults)
+	for i, res := range execResults {
+		results[i] = truncateToolResult(res, r.config.MaxToolResultChars)
+	}
 
 	return results
 }
@@ -519,6 +545,28 @@ func formatToolResult(r ToolExecResult) string {
 		return string(r.Output)
 	}
 	return "{}"
+}
+
+// tokenUsageWithCost creates a TokenUsage with cost information.
+func tokenUsageWithCost(usage ai.Usage, cost float64) TokenUsage {
+	return TokenUsage{
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		TotalTokens:      usage.TotalTokens,
+		CostUSD:          cost,
+	}
+}
+
+// truncateToolResult truncates the output if it exceeds maxChars.
+// Returns the result unmodified if maxChars is 0 or output is within limit.
+func truncateToolResult(result ToolExecResult, maxChars int) ToolExecResult {
+	if maxChars <= 0 || len(result.Output) <= maxChars {
+		return result
+	}
+	originalLen := len(result.Output)
+	note := fmt.Sprintf("\n[truncated from %d chars]", originalLen)
+	result.Output = append(result.Output[:maxChars-len(note)], []byte(note)...)
+	return result
 }
 
 func emitError(ch chan<- RunEvent, code string, err error) {

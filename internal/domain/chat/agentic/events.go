@@ -52,9 +52,10 @@ type ToolResultData struct {
 
 // TokenUsage tracks prompt and completion token counts for a single LLM call.
 type TokenUsage struct {
-	PromptTokens     int `json:"promptTokens"`
-	CompletionTokens int `json:"completionTokens"`
-	TotalTokens      int `json:"totalTokens"`
+	PromptTokens     int     `json:"promptTokens"`
+	CompletionTokens int     `json:"completionTokens"`
+	TotalTokens      int     `json:"totalTokens"`
+	CostUSD          float64 `json:"costUsd,omitempty"`
 }
 
 // TurnCompleteData is emitted at the end of each agentic turn
@@ -66,8 +67,9 @@ type TurnCompleteData struct {
 
 // RunCompleteData is the final event emitted when the agentic loop finishes.
 type RunCompleteData struct {
-	TotalTurns  int `json:"totalTurns"`
-	TotalTokens int `json:"totalTokens"`
+	TotalTurns  int     `json:"totalTurns"`
+	TotalTokens int     `json:"totalTokens"`
+	TotalCost   float64 `json:"totalCostUsd,omitempty"`
 }
 
 // ErrorData carries error information.

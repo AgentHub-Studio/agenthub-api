@@ -72,3 +72,30 @@ func TestRunConfigFromModelConfig_ZeroTemperature(t *testing.T) {
 	cfg := agentic.RunConfigFromModelConfig(raw)
 	assert.Equal(t, 0.0, cfg.Temperature)
 }
+
+func TestDefaultRunConfig_NewFields(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	assert.Equal(t, 0.0, cfg.MaxBudgetUSD, "default budget should be 0 (no limit)")
+	assert.Equal(t, 50000, cfg.MaxToolResultChars)
+	assert.Equal(t, 3, cfg.RetryMaxAttempts)
+}
+
+func TestRunConfigFromModelConfig_NewFieldsOverride(t *testing.T) {
+	raw := json.RawMessage(`{
+		"maxBudgetUsd": 5.0,
+		"maxToolResultChars": 10000,
+		"retryMaxAttempts": 5
+	}`)
+	cfg := agentic.RunConfigFromModelConfig(raw)
+	assert.Equal(t, 5.0, cfg.MaxBudgetUSD)
+	assert.Equal(t, 10000, cfg.MaxToolResultChars)
+	assert.Equal(t, 5, cfg.RetryMaxAttempts)
+}
+
+func TestRunConfigFromModelConfig_NewFieldsDefaults(t *testing.T) {
+	raw := json.RawMessage(`{"model": "gpt-4o"}`)
+	cfg := agentic.RunConfigFromModelConfig(raw)
+	assert.Equal(t, 0.0, cfg.MaxBudgetUSD, "should keep default")
+	assert.Equal(t, 50000, cfg.MaxToolResultChars, "should keep default")
+	assert.Equal(t, 3, cfg.RetryMaxAttempts, "should keep default")
+}

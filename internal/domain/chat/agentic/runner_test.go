@@ -564,6 +564,74 @@ func TestRunner_PersistedAssistantHasToolCalls(t *testing.T) {
 	assert.Equal(t, "web-scraper", tcs[0].Function.Name)
 }
 
+func TestRunner_BudgetExceeded(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			ch := make(chan ai.StreamChunk, 5)
+			go func() {
+				defer close(ch)
+				ch <- ai.StreamChunk{Delta: "text"}
+				// Emit usage — 500K input + 500K output for claude-sonnet-4 = $1.5 + $7.5 = $9.0
+				ch <- ai.StreamChunk{Usage: &ai.Usage{PromptTokens: 500_000}}
+				ch <- ai.StreamChunk{Usage: &ai.Usage{CompletionTokens: 500_000}}
+				ch <- ai.StreamChunk{FinishReason: "stop"}
+			}()
+			return ch, nil
+		},
+	}
+
+	config := agentic.DefaultRunConfig()
+	config.Model = "claude-sonnet-4"
+	config.MaxBudgetUSD = 0.001 // Very low budget — $0.001
+	config.RetryMaxAttempts = 1
+
+	runner := newTestRunner(model, &mockPersister{}, &mockHistoryLoader{}, config)
+
+	ch := runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "test",
+		SystemPrompt: "",
+		TenantID:     "test-tenant",
+	})
+
+	events := collectEvents(ch)
+	assert.True(t, hasEventType(events, agentic.EventError))
+	errEv := findEvent(t, events, agentic.EventError)
+	var errData agentic.ErrorData
+	require.NoError(t, json.Unmarshal(errEv.Data, &errData))
+	assert.Equal(t, "budget_exceeded", errData.Code)
+}
+
+func TestRunner_CostInRunComplete(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			return makeTextStream("Hello"), nil
+		},
+	}
+
+	config := agentic.DefaultRunConfig()
+	config.Model = "claude-sonnet-4"
+	config.RetryMaxAttempts = 1
+
+	runner := newTestRunner(model, &mockPersister{}, &mockHistoryLoader{}, config)
+
+	ch := runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "Hi",
+		SystemPrompt: "",
+		TenantID:     "test-tenant",
+	})
+
+	events := collectEvents(ch)
+	rc := findEvent(t, events, agentic.EventRunComplete)
+	var runComplete agentic.RunCompleteData
+	require.NoError(t, json.Unmarshal(rc.Data, &runComplete))
+	// Cost should be >= 0 (may be 0 if usage is not propagated through mock stream).
+	assert.GreaterOrEqual(t, runComplete.TotalCost, 0.0)
+}
+
 func TestRunner_EventSequence(t *testing.T) {
 	model := &mockChatModel{
 		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {

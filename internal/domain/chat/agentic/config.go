@@ -33,6 +33,17 @@ type RunConfig struct {
 	// StreamBufferSize is the capacity of the RunEvent channel.
 	StreamBufferSize int `json:"streamBufferSize"`
 
+	// MaxBudgetUSD is the maximum total cost in USD for the entire run.
+	// Zero means no budget limit.
+	MaxBudgetUSD float64 `json:"maxBudgetUsd"`
+
+	// MaxToolResultChars is the maximum character length for a single tool result.
+	// Results exceeding this are truncated with a note. Zero means no truncation.
+	MaxToolResultChars int `json:"maxToolResultChars"`
+
+	// RetryMaxAttempts is the maximum number of retries for transient LLM errors.
+	RetryMaxAttempts int `json:"retryMaxAttempts"`
+
 	// Provider is the LLM provider name (e.g. "anthropic", "openai", "ollama").
 	Provider string `json:"provider"`
 
@@ -54,6 +65,9 @@ func DefaultRunConfig() RunConfig {
 		TotalTimeout:        5 * time.Minute,
 		ConcurrentReadTools: 3,
 		StreamBufferSize:    64,
+		MaxBudgetUSD:        0, // no limit by default
+		MaxToolResultChars:  50000,
+		RetryMaxAttempts:    3,
 		Provider:            "anthropic",
 		Model:               "claude-sonnet-4-20250514",
 		Temperature:         0.7,
@@ -62,13 +76,16 @@ func DefaultRunConfig() RunConfig {
 
 // modelConfig mirrors the JSON shape stored in agent.model_config.
 type modelConfig struct {
-	Provider         string   `json:"provider"`
-	Model            string   `json:"model"`
-	Temperature      *float64 `json:"temperature"`
-	MaxTokens        *int     `json:"maxTokens"`
-	ContextWindow    *int     `json:"contextWindow"`
-	MaxIterations    *int     `json:"maxIterations"`
-	CompactThreshold *float64 `json:"compactThreshold"`
+	Provider           string   `json:"provider"`
+	Model              string   `json:"model"`
+	Temperature        *float64 `json:"temperature"`
+	MaxTokens          *int     `json:"maxTokens"`
+	ContextWindow      *int     `json:"contextWindow"`
+	MaxIterations      *int     `json:"maxIterations"`
+	CompactThreshold   *float64 `json:"compactThreshold"`
+	MaxBudgetUSD       *float64 `json:"maxBudgetUsd"`
+	MaxToolResultChars *int     `json:"maxToolResultChars"`
+	RetryMaxAttempts   *int     `json:"retryMaxAttempts"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -102,6 +119,15 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	}
 	if mc.CompactThreshold != nil {
 		cfg.CompactThreshold = *mc.CompactThreshold
+	}
+	if mc.MaxBudgetUSD != nil {
+		cfg.MaxBudgetUSD = *mc.MaxBudgetUSD
+	}
+	if mc.MaxToolResultChars != nil {
+		cfg.MaxToolResultChars = *mc.MaxToolResultChars
+	}
+	if mc.RetryMaxAttempts != nil {
+		cfg.RetryMaxAttempts = *mc.RetryMaxAttempts
 	}
 	return cfg
 }
