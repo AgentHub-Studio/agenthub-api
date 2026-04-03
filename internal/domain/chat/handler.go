@@ -30,12 +30,16 @@ type chatService interface {
 
 // Handler handles HTTP requests for chat sessions and messages.
 type Handler struct {
-	svc chatService
+	svc        chatService
+	bgRegistry *BackgroundRunRegistry
 }
 
 // NewHandler creates a new Handler.
 func NewHandler(svc chatService) *Handler {
-	return &Handler{svc: svc}
+	return &Handler{
+		svc:        svc,
+		bgRegistry: NewBackgroundRunRegistry(0),
+	}
 }
 
 // RegisterRoutes mounts chat routes onto the given router.
@@ -48,6 +52,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/chat/sessions/{id}/messages", h.listMessages)
 	r.Post("/api/chat/sessions/{id}/messages", h.addMessage)
 	r.Post("/api/chat/sessions/{id}/run", h.runSession)
+	r.Get("/api/chat/sessions/{id}/run/{runId}/status", h.runStatus)
+	r.Post("/api/chat/sessions/{id}/run/{runId}/cancel", h.cancelRun)
 }
 
 func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +187,7 @@ type runSessionRequest struct {
 
 // runSession handles POST /api/chat/sessions/{id}/run.
 // It starts the agentic loop and streams RunEvents as SSE to the client.
+// The run continues in the background even if the SSE client disconnects.
 func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -206,8 +213,13 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 
 	tenantID := tenant.FromContext(r.Context())
 
-	ch, err := h.svc.RunSession(r.Context(), sessionID, req.Message, tenantID)
+	// Register a background run with a context decoupled from the HTTP request.
+	// This ensures the Runner continues even if the SSE client disconnects.
+	runID, runCtx := h.bgRegistry.Register(sessionID)
+
+	ch, err := h.svc.RunSession(runCtx, sessionID, req.Message, tenantID)
 	if err != nil {
+		h.bgRegistry.Cancel(runID)
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "session not found")
 			return
@@ -216,25 +228,98 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.bgRegistry.AttachEvents(runID, ch)
+
 	// Set SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("X-Run-ID", runID)
 	w.WriteHeader(http.StatusOK)
+
+	// Stream events to client. The goroutine is the sole consumer of the Runner's
+	// channel. It forwards events to sseCh for the HTTP handler. When the client
+	// disconnects, events are discarded (but the Runner continues in background).
+	sseCh := make(chan RunEvent, 64)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(sseCh)
+		for ev := range ch {
+			select {
+			case sseCh <- ev:
+			default:
+				// SSE writer can't keep up or disconnected — discard event.
+				// The Runner persists everything, so no data is lost.
+			}
+		}
+		h.bgRegistry.MarkCompleted(runID)
+	}()
 
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
+			// Client disconnected — run continues in background.
 			return
-		case ev, ok := <-ch:
+		case <-done:
+			// Run completed while we were connected.
+			return
+		case ev, ok := <-sseCh:
 			if !ok {
-				// Channel closed — run complete.
 				return
 			}
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, ev.Data)
 			flusher.Flush()
 		}
 	}
+}
+
+// runStatusResponse is returned by the run status endpoint.
+type runStatusResponse struct {
+	RunID     string    `json:"runId"`
+	SessionID uuid.UUID `json:"sessionId"`
+	Status    RunStatus `json:"status"`
+	StartedAt string    `json:"startedAt"`
+}
+
+// runStatus handles GET /api/chat/sessions/{id}/run/{runId}/status.
+func (h *Handler) runStatus(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+	if runID == "" {
+		respond.Error(w, http.StatusBadRequest, "runId is required")
+		return
+	}
+
+	run := h.bgRegistry.Get(runID)
+	if run == nil {
+		respond.Error(w, http.StatusNotFound, "run not found")
+		return
+	}
+
+	respond.JSON(w, http.StatusOK, runStatusResponse{
+		RunID:     run.RunID,
+		SessionID: run.SessionID,
+		Status:    run.Status,
+		StartedAt: run.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+	})
+}
+
+// cancelRun handles POST /api/chat/sessions/{id}/run/{runId}/cancel.
+func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runId")
+	if runID == "" {
+		respond.Error(w, http.StatusBadRequest, "runId is required")
+		return
+	}
+
+	run := h.bgRegistry.Get(runID)
+	if run == nil {
+		respond.Error(w, http.StatusNotFound, "run not found")
+		return
+	}
+
+	h.bgRegistry.Cancel(runID)
+	respond.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
