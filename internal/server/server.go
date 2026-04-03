@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
 	apikc "github.com/AgentHub-Studio/agenthub-api/internal/keycloak"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chatsession"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
@@ -46,6 +48,12 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/vpnresource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
 	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
+
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/anthropic"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/ollama"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/openai"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/openrouter"
 )
 
 // Server is the HTTP server for agenthub-api.
@@ -90,9 +98,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentHandler := agent.NewHandler(agent.NewService(agentRepo))
 	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionService(agentRepo, agent.NewVersionRepository(pool)))
 	pipelineHandler := pipeline.NewHandler(pipeline.NewService(pipeline.NewRepository(pool)))
-	skillHandler := skill.NewHandler(skill.NewService(skill.NewRepository(pool)))
+	skillRepo := skill.NewRepository(pool)
+	skillHandler := skill.NewHandler(skill.NewService(skillRepo))
 	datasourceSvc := datasource.NewService(datasource.NewRepository(pool))
-	toolSvc := tool.NewService(tool.NewRepository(pool)).
+	toolRepo := tool.NewRepository(pool)
+	toolSvc := tool.NewService(toolRepo).
 		WithSettings(&toolSettingsAdapter{repo: settingsRepo}).
 		WithDatasource(&toolDatasourceAdapter{svc: datasourceSvc}, tenantctx.FromContext)
 	toolHandler := tool.NewHandler(toolSvc)
@@ -106,7 +116,12 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	vpnHandler := vpnresource.NewHandler(vpnresource.NewService(vpnresource.NewRepository(pool)))
 	datasourceHandler := datasource.NewHandler(datasourceSvc)
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
-	chatHandler := chat.NewHandler(chat.NewService(chat.NewRepository(pool), nil))
+	kbRepo := knowledgebase.NewRepository(pool)
+
+	// Build agentic runner and wire it into the chat service.
+	chatRepo := chat.NewRepository(pool)
+	sessionRunner := buildAgenticRunner(cfg, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo)
+	chatHandler := chat.NewHandler(chat.NewService(chatRepo, sessionRunner))
 	var docStorage document.StorageClient
 	if cfg.MinIO.IsConfigured() {
 		ds, err := document.NewMinIOStorageClient(
@@ -140,7 +155,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		}
 	}
 	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher))
-	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(knowledgebase.NewRepository(pool)))
+	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(kbRepo))
 	mcpHandler := mcp.NewHandler(mcp.NewService(mcp.NewRepository(pool)))
 	approvalHandler := approval.NewHandler(approval.NewService(approval.NewRepository(pool)))
 
@@ -309,5 +324,87 @@ func (a *toolDatasourceAdapter) GetDatasourceCreds(ctx context.Context, tenantID
 		Database: creds.Database,
 		User:     creds.User,
 		Password: creds.Password,
+	}, nil
+}
+
+// --- agentic wiring ---
+
+// buildAgenticRunner creates the SessionRunner that powers the agentic chat loop.
+// Returns nil (disabling agentic features) if no AI provider is configured.
+func buildAgenticRunner(
+	cfg *config.Config,
+	chatRepo chat.Repository,
+	agentRepo agent.Repository,
+	skillRepo *skill.Repository,
+	kbRepo knowledgebase.Repository,
+	toolRepo *tool.Repository,
+) chat.SessionRunner {
+	chatModel := buildDefaultChatModel()
+	if chatModel == nil {
+		slog.Warn("agentic: no AI provider configured (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OLLAMA_BASE_URL), agentic features disabled")
+		return nil
+	}
+
+	slog.Info("agentic: wired AI provider", "provider", chatModel.GetProviderName())
+
+	skillClient := agentic.NewSkillRuntimeClient(cfg.SkillRuntimeURL)
+	promptBuilder := agentic.NewPromptBuilder(skillRepo, kbRepo, chatRepo, agentic.DefaultPromptConfig())
+	toolSchemaBuilder := agentic.NewToolSchemaBuilder(skillRepo, toolRepo, kbRepo)
+	ctxManager := agentic.NewContextManager()
+
+	return agentic.NewSessionRunnerAdapter(
+		chatModel,
+		skillClient,
+		promptBuilder,
+		toolSchemaBuilder,
+		ctxManager,
+		nil, // MemoryBridge — requires Embedder, wired later
+		chatRepo,
+		&agentConfigAdapter{repo: agentRepo},
+	)
+}
+
+// buildDefaultChatModel creates a ChatModel from environment variables.
+// Tries providers in order: Anthropic, OpenAI, Ollama, OpenRouter.
+// Returns nil if no provider is configured.
+func buildDefaultChatModel() ai.ChatModel {
+	envCfg := ai.EnvConfigFromEnvironment()
+
+	if envCfg.AnthropicAPIKey != "" {
+		return anthropic.New(envCfg.AnthropicAPIKey, envCfg.AnthropicBaseURL)
+	}
+	if envCfg.OpenAIAPIKey != "" {
+		return openai.New(envCfg.OpenAIAPIKey, envCfg.OpenAIBaseURL)
+	}
+	if envCfg.OllamaBaseURL != "" && envCfg.OllamaBaseURL != "http://localhost:11434" {
+		return ollama.New(envCfg.OllamaBaseURL)
+	}
+	if envCfg.OpenRouterAPIKey != "" {
+		return openrouter.New(envCfg.OpenRouterAPIKey, envCfg.OpenRouterBaseURL, "agenthub")
+	}
+
+	return nil
+}
+
+// agentConfigAdapter adapts agent.Repository to agentic.AgentConfigLoader.
+type agentConfigAdapter struct {
+	repo agent.Repository
+}
+
+func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (*chat.AgentRunConfig, error) {
+	ag, err := a.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("agent config: %w", err)
+	}
+
+	systemPrompt := ""
+	if ag.SystemPrompt != nil {
+		systemPrompt = *ag.SystemPrompt
+	}
+
+	return &chat.AgentRunConfig{
+		ID:           ag.ID,
+		SystemPrompt: systemPrompt,
+		ModelConfig:  ag.ModelConfig,
 	}, nil
 }
