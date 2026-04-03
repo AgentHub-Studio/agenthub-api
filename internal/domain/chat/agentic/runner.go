@@ -38,6 +38,12 @@ type RunInput struct {
 	// ParentEventCh, when set, receives forwarded events from sub-agent runs.
 	// This allows the parent SSE stream to include sub-agent activity.
 	ParentEventCh chan<- RunEvent
+	// SubtaskID is the identity of this sub-agent for mailbox messaging.
+	// Empty for the root agent.
+	SubtaskID string
+	// ParentSessionID is the root session ID used as the mailbox key.
+	// Sub-agents use this to share a mailbox with siblings.
+	ParentSessionID uuid.UUID
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
@@ -52,6 +58,7 @@ type Runner struct {
 	history      HistoryLoader
 	toolExec     *StreamingToolExecutor
 	subtaskExec  *SubtaskExecutor
+	mailbox      *Mailbox
 	config       RunConfig
 }
 
@@ -86,6 +93,12 @@ func NewRunner(
 // WithSubtaskExecutor attaches a SubtaskExecutor to the Runner.
 func (r *Runner) WithSubtaskExecutor(exec *SubtaskExecutor) *Runner {
 	r.subtaskExec = exec
+	return r
+}
+
+// WithMailbox attaches a Mailbox to the Runner for inter-agent messaging.
+func (r *Runner) WithMailbox(m *Mailbox) *Runner {
+	r.mailbox = m
 	return r
 }
 
@@ -183,6 +196,17 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		if err := ctx.Err(); err != nil {
 			emitError(ch, "context_cancelled", err)
 			return
+		}
+
+		// Drain mailbox messages for sub-agents before each LLM call.
+		if r.mailbox != nil && in.SubtaskID != "" && in.ParentSessionID != uuid.Nil {
+			mailboxContent := DrainMailbox(r.mailbox, in.ParentSessionID, in.SubtaskID)
+			if mailboxContent != "" {
+				messages = append(messages, ai.Message{
+					Role:    ai.RoleUser,
+					Content: mailboxContent,
+				})
+			}
 		}
 
 		opts := ai.ChatOptions{
@@ -592,10 +616,21 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 		if IsAgentToolCall(tc) && r.subtaskExec != nil {
 			agentIdx[i] = len(agentTools)
 			agentTools = append(agentTools, tc)
-		} else {
-			regularIdx[i] = len(regularTools)
-			regularTools = append(regularTools, tc)
+			continue
 		}
+
+		// Route send_message tool calls to the mailbox handler.
+		if IsSendMessageToolCall(tc.Function.Name) && r.mailbox != nil {
+			sessionID := in.ParentSessionID
+			if sessionID == uuid.Nil {
+				sessionID = in.SessionID
+			}
+			results[i] = HandleSendMessage(r.mailbox, sessionID, in.SubtaskID, json.RawMessage(tc.Function.Arguments), ch)
+			continue
+		}
+
+		regularIdx[i] = len(regularTools)
+		regularTools = append(regularTools, tc)
 	}
 
 	// Execute regular tools.

@@ -82,6 +82,11 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 		tools = append(tools, agentTool(b.maxDepth-b.currentDepth))
 	}
 
+	// Builtin: send_message — available to sub-agents (depth > 0) for inter-agent messaging.
+	if b.currentDepth > 0 {
+		tools = append(tools, sendMessageTool())
+	}
+
 	if tools == nil {
 		tools = []LLMTool{}
 	}

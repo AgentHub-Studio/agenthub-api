@@ -16,6 +16,7 @@ const (
 	EventToolProgress     RunEventType = "tool_progress"
 	EventSubtaskStart     RunEventType = "subtask_start"
 	EventSubtaskComplete  RunEventType = "subtask_complete"
+	EventAgentMessage     RunEventType = "agent_message"
 )
 
 // RunEvent is the envelope sent through the Runner's output channel.
@@ -118,4 +119,12 @@ type SubtaskCompleteData struct {
 	TotalTokens int     `json:"totalTokens"`
 	TotalCost   float64 `json:"totalCostUsd,omitempty"`
 	Error       *string `json:"error,omitempty"`
+}
+
+// AgentMessageData is emitted when a sub-agent sends a message via the mailbox.
+type AgentMessageData struct {
+	ID      string `json:"id"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Content string `json:"content"`
 }

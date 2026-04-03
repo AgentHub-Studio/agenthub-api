@@ -58,6 +58,7 @@ func NewSessionRunnerAdapter(
 // adapterRunnerFactory implements RunnerFactory using the adapter's dependencies.
 type adapterRunnerFactory struct {
 	adapter *SessionRunnerAdapter
+	mailbox *Mailbox
 }
 
 func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
@@ -73,8 +74,10 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 		f.adapter.hookExecutor,
 		config,
 	)
+	runner.WithMailbox(f.mailbox)
 	// Sub-runners also get subtask execution capability (recursive).
 	subtaskExec := NewSubtaskExecutor(f)
+	subtaskExec.WithMailbox(f.mailbox)
 	runner.WithSubtaskExecutor(subtaskExec)
 	return runner
 }
@@ -90,7 +93,10 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 
 	config := RunConfigFromModelConfig(agentCfg.ModelConfig)
 
-	factory := &adapterRunnerFactory{adapter: a}
+	// Create a shared mailbox for inter-agent messaging within this run.
+	mailbox := NewMailbox()
+
+	factory := &adapterRunnerFactory{adapter: a, mailbox: mailbox}
 	runner := NewRunner(
 		a.chatModel,
 		a.skillClient,
@@ -103,7 +109,9 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		a.hookExecutor,
 		config,
 	)
+	runner.WithMailbox(mailbox)
 	subtaskExec := NewSubtaskExecutor(factory)
+	subtaskExec.WithMailbox(mailbox)
 	runner.WithSubtaskExecutor(subtaskExec)
 
 	agenticCh := runner.Run(ctx, RunInput{

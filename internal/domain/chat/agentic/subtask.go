@@ -31,6 +31,8 @@ type SubtaskExecutor struct {
 	// runnerFactory creates a new Runner for the sub-agent.
 	// It receives the parent's RunConfig (with adjusted budget/depth).
 	runnerFactory RunnerFactory
+	// mailbox is the shared inter-agent mailbox for sub-agent communication.
+	mailbox *Mailbox
 }
 
 // RunnerFactory builds a Runner with the given configuration.
@@ -43,6 +45,12 @@ type RunnerFactory interface {
 // NewSubtaskExecutor creates a SubtaskExecutor.
 func NewSubtaskExecutor(factory RunnerFactory) *SubtaskExecutor {
 	return &SubtaskExecutor{runnerFactory: factory}
+}
+
+// WithMailbox attaches a shared mailbox for inter-agent messaging.
+func (s *SubtaskExecutor) WithMailbox(m *Mailbox) *SubtaskExecutor {
+	s.mailbox = m
+	return s
 }
 
 // IsAgentToolCall returns true if the tool call is for the agent builtin.
@@ -116,9 +124,18 @@ func (s *SubtaskExecutor) Execute(
 
 	// Create child runner.
 	childRunner := s.runnerFactory.NewRunner(childConfig)
+	if s.mailbox != nil {
+		childRunner.WithMailbox(s.mailbox)
+	}
 
 	// Create a sub-session ID for the child (ephemeral — not persisted as a chat session).
 	subSessionID := uuid.New()
+
+	// Determine the parent session ID for the shared mailbox.
+	parentSessionID := parentInput.ParentSessionID
+	if parentSessionID == uuid.Nil {
+		parentSessionID = parentInput.SessionID
+	}
 
 	childInput := RunInput{
 		SessionID:          subSessionID,
@@ -130,6 +147,8 @@ func (s *SubtaskExecutor) Execute(
 		CurrentDepth:       nextDepth,
 		RemainingBudgetUSD: remainingBudget,
 		ParentEventCh:      parentCh,
+		SubtaskID:          subtaskID,
+		ParentSessionID:    parentSessionID,
 	}
 
 	// Run the sub-agent and collect results.
@@ -156,8 +175,8 @@ func (s *SubtaskExecutor) Execute(
 			// Forward tool events from sub-agent.
 			parentCh <- ev
 
-		case EventSubtaskStart, EventSubtaskComplete:
-			// Forward nested subtask events (sub-sub-agents).
+		case EventSubtaskStart, EventSubtaskComplete, EventAgentMessage:
+			// Forward nested subtask and agent message events.
 			parentCh <- ev
 
 		case EventRunComplete:
