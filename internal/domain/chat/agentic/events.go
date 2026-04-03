@@ -16,6 +16,7 @@ const (
 	EventToolProgress     RunEventType = "tool_progress"
 	EventSubtaskStart     RunEventType = "subtask_start"
 	EventSubtaskComplete  RunEventType = "subtask_complete"
+	EventToolDenied       RunEventType = "tool_denied"
 )
 
 // RunEvent is the envelope sent through the Runner's output channel.
@@ -118,4 +119,13 @@ type SubtaskCompleteData struct {
 	TotalTokens int     `json:"totalTokens"`
 	TotalCost   float64 `json:"totalCostUsd,omitempty"`
 	Error       *string `json:"error,omitempty"`
+}
+
+// ToolDeniedData is emitted when a tool call is denied by permission rules.
+type ToolDeniedData struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Reason      string `json:"reason"`
+	DenialCount int    `json:"denialCount"`
+	Escalated   bool   `json:"escalated"`
 }
