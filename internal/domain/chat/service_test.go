@@ -57,6 +57,16 @@ func (m *mockChatRepo) UpdateSessionStatus(_ context.Context, id uuid.UUID, stat
 	return s, nil
 }
 
+func (m *mockChatRepo) UpdateSessionTitle(_ context.Context, id uuid.UUID, title string) (chat.ChatSession, error) {
+	s, ok := m.sessions[id]
+	if !ok {
+		return chat.ChatSession{}, chat.ErrNotFound
+	}
+	s.Title = title
+	m.sessions[id] = s
+	return s, nil
+}
+
 func (m *mockChatRepo) DeleteSession(_ context.Context, id uuid.UUID) error {
 	if _, ok := m.sessions[id]; !ok {
 		return chat.ErrNotFound

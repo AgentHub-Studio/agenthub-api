@@ -23,8 +23,17 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 			if origin != "" && (allowAll || originsMap[origin]) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Access-Control-Max-Age", "86400")
+
+				// Mirror requested headers so any custom header the client sends is allowed.
+				// This eliminates the need to maintain a fixed allowlist and handles
+				// headers like X-OpenAI-API-Key, X-Tenant-ID, X-Request-ID, etc.
+				if requested := r.Header.Get("Access-Control-Request-Headers"); requested != "" {
+					w.Header().Set("Access-Control-Allow-Headers", requested)
+				} else {
+					w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Request-ID, Cache-Control")
+				}
 			}
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -37,7 +38,7 @@ func (m *mockExecutionSvc) List(_ context.Context, _ *uuid.UUID, _ *string, req 
 func (m *mockExecutionSvc) Start(_ context.Context, req execution.StartExecutionRequest) (execution.AgentExecution, error) {
 	agentID, err := uuid.Parse(req.AgentID)
 	if err != nil {
-		return execution.AgentExecution{}, err
+		return execution.AgentExecution{}, fmt.Errorf("%w: invalid agentId", execution.ErrInvalidInput)
 	}
 	id := uuid.New()
 	e := execution.AgentExecution{ID: id, AgentID: agentID, Status: "RUNNING"}
@@ -167,4 +168,18 @@ func TestExecutionHandler_ListNodes_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestExecutionHandler_Start_InvalidAgentID_Returns422(t *testing.T) {
+	r, _ := setupExecution()
+	body, _ := json.Marshal(execution.StartExecutionRequest{
+		AgentID: "not-a-uuid",
+		Input:   json.RawMessage(`{}`),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/executions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }

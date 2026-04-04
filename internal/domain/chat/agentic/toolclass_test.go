@@ -95,25 +95,25 @@ func TestPartitionToolCalls_Mixed(t *testing.T) {
 		{ID: "4", Function: ai.ToolFunction{Name: "execute-sql", Arguments: `{"query":"SELECT 1"}`}},
 	}
 
-	readOnly, sideEffect := agentic.PartitionToolCalls(calls, nil)
+	readOnly, sideEffect := agentic.SplitToolCallsByEffect(calls, nil)
 	assert.Len(t, readOnly, 3)
 	assert.Len(t, sideEffect, 1)
 	assert.Equal(t, "send-email", sideEffect[0].Function.Name)
 }
 
-func TestPartitionToolCalls_AllReadOnly(t *testing.T) {
+func TestSplitToolCallsByEffect_AllReadOnly(t *testing.T) {
 	calls := []ai.ToolCall{
 		{ID: "1", Function: ai.ToolFunction{Name: "document_search"}},
 		{ID: "2", Function: ai.ToolFunction{Name: "memory_recall"}},
 	}
 
-	readOnly, sideEffect := agentic.PartitionToolCalls(calls, nil)
+	readOnly, sideEffect := agentic.SplitToolCallsByEffect(calls, nil)
 	assert.Len(t, readOnly, 2)
 	assert.Empty(t, sideEffect)
 }
 
-func TestPartitionToolCalls_Empty(t *testing.T) {
-	readOnly, sideEffect := agentic.PartitionToolCalls(nil, nil)
+func TestSplitToolCallsByEffect_Empty(t *testing.T) {
+	readOnly, sideEffect := agentic.SplitToolCallsByEffect(nil, nil)
 	assert.Empty(t, readOnly)
 	assert.Empty(t, sideEffect)
 }
@@ -126,7 +126,7 @@ func TestPartitionToolCalls_WithOverrides(t *testing.T) {
 		"custom-api": agentic.ToolEffectReadOnly,
 	}
 
-	readOnly, sideEffect := agentic.PartitionToolCalls(calls, overrides)
+	readOnly, sideEffect := agentic.SplitToolCallsByEffect(calls, overrides)
 	assert.Len(t, readOnly, 1)
 	assert.Empty(t, sideEffect)
 }

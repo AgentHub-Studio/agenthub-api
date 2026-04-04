@@ -55,9 +55,7 @@ func TestE2E_ApprovalCRUD(t *testing.T) {
 	require.NotNil(t, approval["id"], "created approval must have id")
 
 	approvalID := approval["id"].(string)
-	t.Cleanup(func() {
-		// No delete endpoint — just verify idempotent resolve
-	})
+	t.Cleanup(func() { c.Delete("/api/approvals/" + approvalID) })
 
 	t.Run("create approval fields", func(t *testing.T) {
 		assert.Equal(t, "Deploy to production?", approval["title"])
@@ -137,6 +135,31 @@ func TestE2E_ApprovalCRUD(t *testing.T) {
 		var errResp testutil.ErrorResponse
 		s := c.Get("/api/approvals/not-a-uuid", &errResp)
 		assert.Equal(t, http.StatusBadRequest, s)
+	})
+
+	// --- Delete ---
+	t.Run("delete approval removes it", func(t *testing.T) {
+		// Create a fresh approval to delete
+		var toDelete map[string]any
+		require.Equal(t, http.StatusCreated, c.Post("/api/approvals", map[string]any{
+			"executionId": "00000000-0000-0000-0000-000000000010",
+			"nodeId":      "node-to-delete",
+			"title":       "Approval to be deleted",
+		}, &toDelete))
+		deleteID := toDelete["id"].(string)
+
+		s := c.Delete("/api/approvals/" + deleteID)
+		assert.Equal(t, http.StatusNoContent, s)
+
+		// Must be gone
+		var errResp testutil.ErrorResponse
+		s = c.Get("/api/approvals/"+deleteID, &errResp)
+		assert.Equal(t, http.StatusNotFound, s)
+	})
+
+	t.Run("delete unknown approval returns 404", func(t *testing.T) {
+		s := c.Delete("/api/approvals/00000000-0000-0000-0000-000000000099")
+		assert.Equal(t, http.StatusNotFound, s)
 	})
 }
 

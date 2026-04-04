@@ -15,10 +15,18 @@ type AgentConfigLoader interface {
 	GetAgentForRun(ctx context.Context, id uuid.UUID) (*chat.AgentRunConfig, error)
 }
 
+// ChatModelFactory builds a ChatModel for a given provider name.
+// Implementations are responsible for loading credentials (e.g. from settings)
+// and constructing the appropriate client. The context carries the tenant ID,
+// so per-tenant settings can be fetched.
+type ChatModelFactory interface {
+	Build(ctx context.Context, provider string) (ai.ChatModel, error)
+}
+
 // SessionRunnerAdapter implements chat.SessionRunner by creating a Runner
 // on-demand and bridging agentic.RunEvent → chat.RunEvent.
 type SessionRunnerAdapter struct {
-	chatModel    ai.ChatModel
+	modelFactory ChatModelFactory
 	skillClient  *SkillRuntimeClient
 	prompt       *PromptBuilder
 	tools        *ToolSchemaBuilder
@@ -30,7 +38,9 @@ type SessionRunnerAdapter struct {
 }
 
 // NewSessionRunnerAdapter creates an adapter that wires the chat.Service
-// to the agentic.Runner.
+// to the agentic.Runner. The provided chatModel is used as a static fallback
+// factory (all agents use the same provider). Prefer NewSessionRunnerAdapterWithFactory
+// when per-agent provider selection from settings is needed.
 func NewSessionRunnerAdapter(
 	chatModel ai.ChatModel,
 	skillClient *SkillRuntimeClient,
@@ -42,8 +52,27 @@ func NewSessionRunnerAdapter(
 	repo chat.Repository,
 	agentLoader AgentConfigLoader,
 ) *SessionRunnerAdapter {
+	return NewSessionRunnerAdapterWithFactory(
+		staticModelFactory{model: chatModel},
+		skillClient, prompt, tools, ctxManager, memory, hookExecutor, repo, agentLoader,
+	)
+}
+
+// NewSessionRunnerAdapterWithFactory creates an adapter that uses the provided
+// ChatModelFactory to select the correct provider per agent at request time.
+func NewSessionRunnerAdapterWithFactory(
+	factory ChatModelFactory,
+	skillClient *SkillRuntimeClient,
+	prompt *PromptBuilder,
+	tools *ToolSchemaBuilder,
+	ctxManager *ContextManager,
+	memory *MemoryBridge,
+	hookExecutor *HookExecutor,
+	repo chat.Repository,
+	agentLoader AgentConfigLoader,
+) *SessionRunnerAdapter {
 	return &SessionRunnerAdapter{
-		chatModel:    chatModel,
+		modelFactory: factory,
 		skillClient:  skillClient,
 		prompt:       prompt,
 		tools:        tools,
@@ -55,14 +84,27 @@ func NewSessionRunnerAdapter(
 	}
 }
 
-// adapterRunnerFactory implements RunnerFactory using the adapter's dependencies.
+// staticModelFactory always returns the same ChatModel regardless of provider.
+type staticModelFactory struct {
+	model ai.ChatModel
+}
+
+func (f staticModelFactory) Build(_ context.Context, _ string) (ai.ChatModel, error) {
+	if f.model == nil {
+		return nil, fmt.Errorf("no AI provider configured")
+	}
+	return f.model, nil
+}
+
+// adapterRunnerFactory implements RunnerFactory for sub-runner spawning.
 type adapterRunnerFactory struct {
-	adapter *SessionRunnerAdapter
+	adapter   *SessionRunnerAdapter
+	chatModel ai.ChatModel
 }
 
 func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	runner := NewRunner(
-		f.adapter.chatModel,
+		f.chatModel,
 		f.adapter.skillClient,
 		f.adapter.prompt,
 		f.adapter.tools,
@@ -73,7 +115,6 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 		f.adapter.hookExecutor,
 		config,
 	)
-	// Sub-runners also get subtask execution capability (recursive).
 	subtaskExec := NewSubtaskExecutor(f)
 	runner.WithSubtaskExecutor(subtaskExec)
 
@@ -84,10 +125,9 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	return runner
 }
 
-// RunSession implements chat.SessionRunner. It creates a Runner with the
-// agent's model configuration and bridges agentic events to chat events.
+// RunSession implements chat.SessionRunner. It resolves the ChatModel for the
+// agent's configured provider from the settings table, then runs the agentic loop.
 func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput) (<-chan chat.RunEvent, error) {
-	// Load agent config to determine model settings.
 	agentCfg, err := a.agentLoader.GetAgentForRun(ctx, in.AgentID)
 	if err != nil {
 		return nil, fmt.Errorf("session runner: load agent: %w", err)
@@ -95,15 +135,22 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 
 	config := RunConfigFromModelConfig(agentCfg.ModelConfig)
 
-	factory := &adapterRunnerFactory{adapter: a}
+	// Resolve the ChatModel for this agent's provider from the factory.
+	// The context carries the tenant ID so settings can be fetched per-tenant.
+	chatModel, err := a.modelFactory.Build(ctx, config.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("session runner: build model for provider %q: %w", config.Provider, err)
+	}
+
+	factory := &adapterRunnerFactory{adapter: a, chatModel: chatModel}
 	runner := NewRunner(
-		a.chatModel,
+		chatModel,
 		a.skillClient,
 		a.prompt,
 		a.tools,
 		a.ctxManager,
 		a.memory,
-		a.repo, // MessagePersister — Repository implements CreateMessage
+		a.repo,
 		&repoHistoryLoader{repo: a.repo},
 		a.hookExecutor,
 		config,
@@ -125,7 +172,6 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		PermissionRules: ParsePermissionRules(agentCfg.PermissionRules),
 	})
 
-	// Bridge agentic.RunEvent → chat.RunEvent.
 	chatCh := make(chan chat.RunEvent, config.StreamBufferSize)
 	go func() {
 		defer close(chatCh)
@@ -148,4 +194,3 @@ type repoHistoryLoader struct {
 func (l *repoHistoryLoader) FindAllMessages(ctx context.Context, sessionID uuid.UUID) ([]chat.ChatMessage, error) {
 	return l.repo.FindAllMessages(ctx, sessionID)
 }
-

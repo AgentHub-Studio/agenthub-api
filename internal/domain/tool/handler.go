@@ -259,6 +259,10 @@ func (h *Handler) bindToSkill(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusConflict, "tool already bound to this skill")
 			return
 		}
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "tool not found")
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}

@@ -14,6 +14,7 @@ type CreateRequest struct {
 	Config      json.RawMessage `json:"config"`
 	Description string          `json:"description"`
 	Labels      []string        `json:"labels"`
+	ReadOnly    bool            `json:"readOnly"`
 }
 
 // UpdateRequest is the payload for updating a tool.
@@ -23,6 +24,7 @@ type UpdateRequest struct {
 	Config      json.RawMessage `json:"config"`
 	Description string          `json:"description"`
 	Labels      []string        `json:"labels"`
+	ReadOnly    bool            `json:"readOnly"`
 }
 
 // BindRequest is the payload for binding a tool to a skill.
@@ -40,6 +42,7 @@ type Response struct {
 	Config      any       `json:"config"`
 	Description string    `json:"description"`
 	Labels      []string  `json:"labels"`
+	ReadOnly    bool      `json:"readOnly"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -69,6 +72,7 @@ func ResponseFrom(t Tool) Response {
 		Config:      config,
 		Description: t.Description,
 		Labels:      labels,
+		ReadOnly:    t.ReadOnly,
 		CreatedAt:   t.CreatedAt,
 		UpdatedAt:   t.UpdatedAt,
 	}

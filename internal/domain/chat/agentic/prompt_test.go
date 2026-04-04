@@ -186,3 +186,80 @@ func TestPromptBuilder_Build_SkillWithoutDescription(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "**My Tool** (`my-tool`)")
 }
+
+func TestPromptBuilder_Build_DeferredTools(t *testing.T) {
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	)
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:           uuid.New(),
+		SessionID:         uuid.New(),
+		SystemPrompt:      "You are an assistant.",
+		DeferredToolNames: []string{"agenthub_create_agent", "agenthub_delete_skill"},
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "## Deferred Tools")
+	assert.Contains(t, prompt, "`agenthub_create_agent`")
+	assert.Contains(t, prompt, "`agenthub_delete_skill`")
+	assert.Contains(t, prompt, "tool_search")
+}
+
+func TestPromptBuilder_Build_UserOnlySkills(t *testing.T) {
+	// Skills with DisableModelInvocation=true should appear in User Commands,
+	// not in Available Tools.
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{Name: "Document Search", Slug: "document-search", Description: "Search docs"},
+		{Name: "Debug Agent", Slug: "debug-agent", Description: "Diagnose agent failures", DisableModelInvocation: true},
+		{Name: "Optimize Agent", Slug: "optimize-agent", Description: "Optimize agent config", DisableModelInvocation: true},
+	}}
+	builder := agentic.NewPromptBuilder(skills, &mockKBLister{}, &mockSummaryFinder{found: false}, agentic.DefaultPromptConfig())
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:   uuid.New(),
+		SessionID: uuid.New(),
+		UserOnlySkills: []skill.Skill{
+			{Name: "Debug Agent", Slug: "debug-agent", Description: "Diagnose agent failures"},
+			{Name: "Optimize Agent", Slug: "optimize-agent", Description: "Optimize agent config"},
+		},
+	})
+
+	require.NoError(t, err)
+	// User-only skills should be in User Commands section.
+	assert.Contains(t, prompt, "## User Commands")
+	assert.Contains(t, prompt, "/debug-agent")
+	assert.Contains(t, prompt, "/optimize-agent")
+	// User-only skills should NOT be in Available Tools section.
+	assert.Contains(t, prompt, "## Available Tools")
+	assert.Contains(t, prompt, "document-search")
+	// debug-agent should not appear in Available Tools (DisableModelInvocation=true).
+	toolsIdx := strings.Index(prompt, "## Available Tools")
+	userCmdIdx := strings.Index(prompt, "## User Commands")
+	if toolsIdx >= 0 && userCmdIdx >= 0 {
+		toolsSection := prompt[toolsIdx:userCmdIdx]
+		assert.NotContains(t, toolsSection, "debug-agent")
+		assert.NotContains(t, toolsSection, "optimize-agent")
+	}
+}
+
+func TestPromptBuilder_Build_NoDeferredTools(t *testing.T) {
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	)
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:      uuid.New(),
+		SessionID:    uuid.New(),
+		SystemPrompt: "You are an assistant.",
+	})
+
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, "## Deferred Tools")
+}

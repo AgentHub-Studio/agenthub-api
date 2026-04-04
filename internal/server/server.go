@@ -98,6 +98,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentRepo := agent.NewRepository(pool)
 	agentHandler := agent.NewHandler(agent.NewService(agentRepo))
 	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionService(agentRepo, agent.NewVersionRepository(pool)))
+	agentBindingHandler := agent.NewBindingHandler(agentRepo, agent.NewBindingRepository(pool))
 	pipelineHandler := pipeline.NewHandler(pipeline.NewService(pipeline.NewRepository(pool)))
 	skillRepo := skill.NewRepository(pool)
 	skillHandler := skill.NewHandler(skill.NewService(skillRepo))
@@ -122,7 +123,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
-	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo)
+	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo)
 	chatHandler := chat.NewHandler(chat.NewService(chatRepo, sessionRunner))
 	var docStorage document.StorageClient
 	if cfg.MinIO.IsConfigured() {
@@ -231,6 +232,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		llmpresetHandler.RegisterProtectedRoutes(r)
 		agentHandler.RegisterRoutes(r)
 		agentVersionHandler.RegisterVersionRoutes(r)
+		agentBindingHandler.RegisterBindingRoutes(r)
 		pipelineHandler.RegisterRoutes(r)
 		skillHandler.RegisterRoutes(r)
 		toolHandler.RegisterRoutes(r)
@@ -333,7 +335,9 @@ func (a *toolDatasourceAdapter) GetDatasourceCreds(ctx context.Context, tenantID
 // --- agentic wiring ---
 
 // buildAgenticRunner creates the SessionRunner that powers the agentic chat loop.
-// Returns nil (disabling agentic features) if no AI provider is configured.
+// Provider credentials are resolved per-request from the tenant's settings table,
+// so all configured providers (OpenAI, Anthropic, Ollama, OpenRouter) are available
+// to agents regardless of environment variables.
 func buildAgenticRunner(
 	cfg *config.Config,
 	pool *pgxpool.Pool,
@@ -342,14 +346,19 @@ func buildAgenticRunner(
 	skillRepo *skill.Repository,
 	kbRepo knowledgebase.Repository,
 	toolRepo *tool.Repository,
+	settingsRepo settings.Repository,
 ) chat.SessionRunner {
-	chatModel := buildDefaultChatModel()
-	if chatModel == nil {
-		slog.Warn("agentic: no AI provider configured (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OLLAMA_BASE_URL), agentic features disabled")
-		return nil
+	// Build an env-based fallback for agents that have no provider configured.
+	// This keeps backward-compatibility with existing deployments that set env vars.
+	fallback := buildDefaultChatModel()
+	if fallback != nil {
+		slog.Info("agentic: env-based fallback provider configured", "provider", fallback.GetProviderName())
 	}
 
-	slog.Info("agentic: wired AI provider", "provider", chatModel.GetProviderName())
+	factory := &settingsChatModelFactory{
+		settingsRepo: settingsRepo,
+		fallback:     fallback,
+	}
 
 	skillClient := agentic.NewSkillRuntimeClient(cfg.SkillRuntimeURL)
 	promptBuilder := agentic.NewPromptBuilder(skillRepo, kbRepo, chatRepo, agentic.DefaultPromptConfig())
@@ -358,8 +367,8 @@ func buildAgenticRunner(
 	hookRepo := agentic.NewHookRepository(pool)
 	hookExecutor := agentic.NewHookExecutor(hookRepo)
 
-	return agentic.NewSessionRunnerAdapter(
-		chatModel,
+	return agentic.NewSessionRunnerAdapterWithFactory(
+		factory,
 		skillClient,
 		promptBuilder,
 		toolSchemaBuilder,
@@ -371,12 +380,11 @@ func buildAgenticRunner(
 	)
 }
 
-// buildDefaultChatModel creates a ChatModel from environment variables.
+// buildDefaultChatModel creates a ChatModel from environment variables as a fallback.
 // Tries providers in order: Anthropic, OpenAI, Ollama, OpenRouter.
 // Returns nil if no provider is configured.
 func buildDefaultChatModel() ai.ChatModel {
 	envCfg := ai.EnvConfigFromEnvironment()
-
 	if envCfg.AnthropicAPIKey != "" {
 		return anthropic.New(envCfg.AnthropicAPIKey, envCfg.AnthropicBaseURL)
 	}
@@ -389,7 +397,6 @@ func buildDefaultChatModel() ai.ChatModel {
 	if envCfg.OpenRouterAPIKey != "" {
 		return openrouter.New(envCfg.OpenRouterAPIKey, envCfg.OpenRouterBaseURL, "agenthub")
 	}
-
 	return nil
 }
 

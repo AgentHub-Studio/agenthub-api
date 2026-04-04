@@ -17,7 +17,8 @@ import (
 
 func TestGetSkillDescriptionCatalog_NotEmpty(t *testing.T) {
 	catalog := agentic.GetSkillDescriptionCatalog()
-	assert.GreaterOrEqual(t, len(catalog), 6)
+	// 10 generic/utility + 9 platform + 6 diagnostic/optimization/workflow = 25
+	assert.GreaterOrEqual(t, len(catalog), 25)
 }
 
 func TestGetSkillDescriptionCatalog_AllHaveRequiredFields(t *testing.T) {
@@ -133,6 +134,10 @@ func TestGenerateUpdateSQL_NotEmpty(t *testing.T) {
 	assert.Contains(t, sql, "document-search")
 	assert.Contains(t, sql, "execute-sql")
 	assert.Contains(t, sql, "http-request")
+	// New skills should also be in the generated SQL.
+	assert.Contains(t, sql, "debug-agent")
+	assert.Contains(t, sql, "optimize-agent")
+	assert.Contains(t, sql, "health-check")
 }
 
 func TestGenerateUpdateSQL_EscapesSingleQuotes(t *testing.T) {
@@ -160,6 +165,17 @@ func TestDescriptionPattern_NotEmpty(t *testing.T) {
 
 // --- HTTP Handlers ---
 
+func TestGetSkillDescription_NewDiagnosticSkills(t *testing.T) {
+	newSlugs := []string{"debug-agent", "optimize-agent", "onboard-agent", "curate-memory", "health-check", "data-explorer"}
+	for _, slug := range newSlugs {
+		desc := agentic.GetSkillDescription(slug)
+		assert.NotEmpty(t, desc, "description should exist for %s", slug)
+		// All new descriptions should follow the pattern.
+		suggestions := agentic.ValidateDescription(desc)
+		assert.Empty(t, suggestions, "description for %s should follow pattern, got: %v", slug, suggestions)
+	}
+}
+
 func TestSkillDescHandler_ListDescriptions(t *testing.T) {
 	handler := agentic.NewSkillDescHandler()
 	req := httptest.NewRequest(http.MethodGet, "/api/skill-descriptions", nil)
@@ -172,7 +188,7 @@ func TestSkillDescHandler_ListDescriptions(t *testing.T) {
 
 	var catalog []agentic.SkillDescription
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&catalog))
-	assert.GreaterOrEqual(t, len(catalog), 6)
+	assert.GreaterOrEqual(t, len(catalog), 25)
 }
 
 func TestSkillDescHandler_GetPattern(t *testing.T) {

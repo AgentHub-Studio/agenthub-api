@@ -60,16 +60,15 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// 1 skill tool + memory_store + agent builtins
+	// agent + memory_store (builtins) + execute-sql (skill)
 	require.Len(t, tools, 3)
 
-	assert.Equal(t, "execute-sql", tools[0].Name)
-	// Description is enriched from the catalog for known slugs.
-	assert.Contains(t, tools[0].Description, "PostgreSQL datasources")
-	assert.Contains(t, string(tools[0].InputSchema), `"query"`)
-
+	assert.Equal(t, "agent", tools[0].Name)
 	assert.Equal(t, "memory_store", tools[1].Name)
-	assert.Equal(t, "agent", tools[2].Name)
+	assert.Equal(t, "execute-sql", tools[2].Name)
+	// Description is enriched from the catalog for known slugs.
+	assert.Contains(t, tools[2].Description, "PostgreSQL datasources")
+	assert.Contains(t, string(tools[2].InputSchema), `"query"`)
 }
 
 func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
@@ -83,16 +82,15 @@ func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// document_search + memory_store + agent
+	// document_search + memory_store + agent (sorted by name)
 	require.Len(t, tools, 3)
 
-	assert.Equal(t, "document_search", tools[0].Name)
-	assert.Contains(t, tools[0].Description, "Technical Docs")
-	assert.Contains(t, tools[0].Description, "FAQ")
-	assert.Contains(t, string(tools[0].InputSchema), `"query"`)
-
-	assert.Equal(t, "memory_store", tools[1].Name)
-	assert.Equal(t, "agent", tools[2].Name)
+	assert.Equal(t, "agent", tools[0].Name)
+	assert.Equal(t, "document_search", tools[1].Name)
+	assert.Contains(t, tools[1].Description, "Technical Docs")
+	assert.Contains(t, tools[1].Description, "FAQ")
+	assert.Contains(t, string(tools[1].InputSchema), `"query"`)
+	assert.Equal(t, "memory_store", tools[2].Name)
 }
 
 func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T) {
@@ -121,10 +119,13 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 3) // http-call + memory_store + agent
+	require.Len(t, tools, 3) // agent + memory_store (builtins) + http-call (skill)
 
-	assert.Equal(t, "http-call", tools[0].Name)
-	assert.Contains(t, string(tools[0].InputSchema), `"url"`)
+	// Builtins first, then skill tools.
+	assert.Equal(t, "agent", tools[0].Name)
+	assert.Equal(t, "memory_store", tools[1].Name)
+	assert.Equal(t, "http-call", tools[2].Name)
+	assert.Contains(t, string(tools[2].InputSchema), `"url"`)
 }
 
 func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
@@ -137,10 +138,13 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 3) // empty-skill + memory_store + agent
+	require.Len(t, tools, 3) // agent + memory_store (builtins) + empty-skill (skill)
 
+	assert.Equal(t, "agent", tools[0].Name)
+	assert.Equal(t, "memory_store", tools[1].Name)
+	assert.Equal(t, "empty-skill", tools[2].Name)
 	// Should have a default empty schema.
-	assert.Contains(t, string(tools[0].InputSchema), `"type":"object"`)
+	assert.Contains(t, string(tools[2].InputSchema), `"type":"object"`)
 }
 
 func TestToolSchemaBuilder_Build_NoSkillsNoKBs(t *testing.T) {
@@ -148,10 +152,10 @@ func TestToolSchemaBuilder_Build_NoSkillsNoKBs(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// memory_store + agent builtins.
+	// memory_store + agent builtins (sorted).
 	require.Len(t, tools, 2)
-	assert.Equal(t, "memory_store", tools[0].Name)
-	assert.Equal(t, "agent", tools[1].Name)
+	assert.Equal(t, "agent", tools[0].Name)
+	assert.Equal(t, "memory_store", tools[1].Name)
 }
 
 func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
@@ -168,9 +172,12 @@ func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 3) // bad-schema + memory_store + agent
+	require.Len(t, tools, 3) // agent + memory_store (builtins) + bad-schema (skill)
+	assert.Equal(t, "agent", tools[0].Name)
+	assert.Equal(t, "memory_store", tools[1].Name)
+	assert.Equal(t, "bad-schema", tools[2].Name)
 	// Should fall back to empty schema.
-	assert.Contains(t, string(tools[0].InputSchema), `"type":"object"`)
+	assert.Contains(t, string(tools[2].InputSchema), `"type":"object"`)
 }
 
 func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
@@ -178,13 +185,216 @@ func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 2) // memory_store + agent
+	require.Len(t, tools, 2) // agent + memory_store (sorted)
 
+	// memory_store is at index 1 after sorting.
 	var schema map[string]any
-	require.NoError(t, json.Unmarshal(tools[0].InputSchema, &schema))
+	require.NoError(t, json.Unmarshal(tools[1].InputSchema, &schema))
 	assert.Equal(t, "object", schema["type"])
 	props, ok := schema["properties"].(map[string]any)
 	require.True(t, ok)
 	assert.Contains(t, props, "content")
 	assert.Contains(t, props, "category")
+}
+
+func TestToolSchemaBuilder_Build_SortedByPartition(t *testing.T) {
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: uuid.New(), Slug: "zebra-tool", Name: "Zebra", Description: "Z tool"},
+		{ID: uuid.New(), Slug: "alpha-tool", Name: "Alpha", Description: "A tool"},
+	}}
+	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1"}}}
+
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs)
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	// 2 skills + document_search + memory_store + agent = 5 tools
+	require.Len(t, tools, 5)
+
+	// Builtins first (agent, document_search, memory_store), then skills (alpha-tool, zebra-tool).
+	// Within each partition, sorted alphabetically.
+	builtinEnd := 0
+	for i, t := range tools {
+		if !t.Builtin {
+			builtinEnd = i
+			break
+		}
+	}
+	assert.Equal(t, 3, builtinEnd, "should have 3 builtins as prefix")
+
+	// Builtins sorted.
+	for i := 1; i < builtinEnd; i++ {
+		assert.True(t, tools[i-1].Name <= tools[i].Name,
+			"builtins should be sorted: %s <= %s", tools[i-1].Name, tools[i].Name)
+	}
+	// Skills sorted.
+	for i := builtinEnd + 1; i < len(tools); i++ {
+		assert.True(t, tools[i-1].Name <= tools[i].Name,
+			"skills should be sorted: %s <= %s", tools[i-1].Name, tools[i].Name)
+	}
+}
+
+func TestToolSchemaBuilder_ReadOnlyFlag(t *testing.T) {
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: uuid.New(), Slug: "document-search", Name: "Doc Search", Description: "Search docs"},
+		{ID: uuid.New(), Slug: "execute-sql", Name: "SQL", Description: "Run SQL"},
+	}}
+	kbs := &mockKBLister{}
+
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs)
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+
+	// Find tools by name and check ReadOnly flag.
+	toolMap := map[string]agentic.LLMTool{}
+	for _, t := range tools {
+		toolMap[t.Name] = t
+	}
+
+	assert.True(t, toolMap["document-search"].ReadOnly, "document-search should be read-only")
+	assert.False(t, toolMap["execute-sql"].ReadOnly, "execute-sql should NOT be read-only")
+	assert.False(t, toolMap["memory_store"].ReadOnly, "memory_store should NOT be read-only")
+}
+
+func TestToolSchemaBuilder_Build_BuiltinsFormContiguousPrefix(t *testing.T) {
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: uuid.New(), Slug: "zebra-tool", Name: "Zebra", Description: "Z tool"},
+		{ID: uuid.New(), Slug: "alpha-tool", Name: "Alpha", Description: "A tool"},
+		{ID: uuid.New(), Slug: "mid-tool", Name: "Mid", Description: "M tool"},
+	}}
+	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1"}}}
+
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs)
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	// 3 skills + document_search + memory_store + agent = 6 tools
+	require.Len(t, tools, 6)
+
+	// Builtins (agent, document_search, memory_store) should be the first 3, sorted alphabetically.
+	assert.True(t, tools[0].Builtin)
+	assert.Equal(t, "agent", tools[0].Name)
+	assert.True(t, tools[1].Builtin)
+	assert.Equal(t, "document_search", tools[1].Name)
+	assert.True(t, tools[2].Builtin)
+	assert.Equal(t, "memory_store", tools[2].Name)
+
+	// Skill tools should follow, also sorted alphabetically.
+	assert.False(t, tools[3].Builtin)
+	assert.Equal(t, "alpha-tool", tools[3].Name)
+	assert.False(t, tools[4].Builtin)
+	assert.Equal(t, "mid-tool", tools[4].Name)
+	assert.False(t, tools[5].Builtin)
+	assert.Equal(t, "zebra-tool", tools[5].Name)
+}
+
+func TestToolSchemaBuilder_Build_BuiltinFlagIsSet(t *testing.T) {
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: uuid.New(), Slug: "custom-skill", Name: "Custom", Description: "User skill"},
+	}}
+	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB"}}}
+
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs)
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+
+	toolMap := map[string]agentic.LLMTool{}
+	for _, t := range tools {
+		toolMap[t.Name] = t
+	}
+
+	assert.True(t, toolMap["agent"].Builtin, "agent should be builtin")
+	assert.True(t, toolMap["document_search"].Builtin, "document_search should be builtin")
+	assert.True(t, toolMap["memory_store"].Builtin, "memory_store should be builtin")
+	assert.False(t, toolMap["custom-skill"].Builtin, "custom-skill should NOT be builtin")
+}
+
+func TestIsReadOnlyTool(t *testing.T) {
+	assert.True(t, agentic.IsReadOnlyTool("document-search"))
+	assert.True(t, agentic.IsReadOnlyTool("document_search"))
+	assert.True(t, agentic.IsReadOnlyTool("web-scraper"))
+	assert.False(t, agentic.IsReadOnlyTool("execute-sql"))
+	assert.False(t, agentic.IsReadOnlyTool("send-email"))
+	assert.False(t, agentic.IsReadOnlyTool("memory_store"))
+	assert.False(t, agentic.IsReadOnlyTool("unknown-tool"))
+}
+
+func TestToolSchemaBuilder_BuildWithDeferred_BelowThreshold(t *testing.T) {
+	// With fewer tools than DeferredToolThreshold, all should be loaded (no deferred).
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: uuid.New(), Slug: "execute-sql", Name: "SQL"},
+	}}
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), &mockKBLister{})
+	result, err := builder.BuildWithDeferred(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	assert.Len(t, result.Loaded, len(result.All), "below threshold: all tools should be loaded")
+	assert.Nil(t, result.Deferred, "below threshold: no deferred tools")
+}
+
+func TestToolSchemaBuilder_BuildWithDeferred_AboveThreshold(t *testing.T) {
+	// Create enough skills to exceed DeferredToolThreshold (15).
+	var skills []skill.Skill
+	toolsMock := newMockToolsBySkill()
+	for i := 0; i < 20; i++ {
+		id := uuid.New()
+		slug := "skill-" + string(rune('a'+i))
+		sk := skill.Skill{ID: id, Name: slug, Slug: slug}
+		skills = append(skills, sk)
+
+		// Mark half of them as ShouldDefer via bound tool.
+		if i >= 10 {
+			toolID := uuid.New()
+			toolsMock.bySkill[id] = struct {
+				bindings []tool.SkillTool
+				tools    []tool.Tool
+			}{
+				bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: id, ToolID: toolID, IsActive: true}},
+				tools:    []tool.Tool{{ID: toolID, Name: slug + "-tool", ShouldDefer: true}},
+			}
+		}
+	}
+
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{skills: skills}, toolsMock, &mockKBLister{})
+	result, err := builder.BuildWithDeferred(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	assert.Greater(t, len(result.All), agentic.DeferredToolThreshold,
+		"total tools should exceed threshold")
+	assert.Greater(t, len(result.Deferred), 0, "should have deferred tools")
+	assert.Less(t, len(result.Loaded), len(result.All),
+		"loaded should be fewer than all")
+
+	// Deferred tool names should not appear in loaded.
+	loadedNames := map[string]bool{}
+	for _, t := range result.Loaded {
+		loadedNames[t.Name] = true
+	}
+	for _, tool := range result.Deferred {
+		assert.False(t, loadedNames[tool.Name],
+			"deferred tool %s should not be in loaded set", tool.Name)
+	}
+
+	// tool_search builtin should be in loaded.
+	assert.True(t, loadedNames["tool_search"], "tool_search should be in loaded when deferred exist")
+}
+
+func TestToolBuildResult_DeferredToolNames(t *testing.T) {
+	result := &agentic.ToolBuildResult{
+		Deferred: []agentic.LLMTool{
+			{Name: "tool-a"},
+			{Name: "tool-b"},
+			{Name: "tool-c"},
+		},
+	}
+	names := result.DeferredToolNames()
+	assert.Equal(t, []string{"tool-a", "tool-b", "tool-c"}, names)
+}
+
+func TestToolBuildResult_DeferredToolNames_Empty(t *testing.T) {
+	result := &agentic.ToolBuildResult{}
+	names := result.DeferredToolNames()
+	assert.Empty(t, names)
 }

@@ -24,6 +24,7 @@ type approvalService interface {
 	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[PendingApproval], error)
 	PendingCount(ctx context.Context) (PendingCountResponse, error)
 	Respond(ctx context.Context, id uuid.UUID, respondedBy string, req RespondRequest) (PendingApproval, error)
+	Delete(ctx context.Context, id uuid.UUID) error
 }
 
 // Handler exposes the HTTP interface for approval management.
@@ -43,6 +44,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/approvals/pending-count", h.pendingCount)
 	r.Get("/api/approvals/stream", h.stream)
 	r.Get("/api/approvals/{id}", h.getByID)
+	r.Delete("/api/approvals/{id}", h.delete)
 	r.Post("/api/approvals/{id}/respond", h.respond)
 }
 
@@ -125,6 +127,23 @@ func (h *Handler) respond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, a)
+}
+
+func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid approval id")
+		return
+	}
+	if err := h.svc.Delete(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "approval not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to delete approval")
+		return
+	}
+	respond.NoContent(w)
 }
 
 // stream sends Server-Sent Events when the pending count changes.
