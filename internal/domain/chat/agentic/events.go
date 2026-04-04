@@ -126,5 +126,6 @@ type SubtaskCompleteData struct {
 	TotalTurns  int     `json:"totalTurns"`
 	TotalTokens int     `json:"totalTokens"`
 	TotalCost   float64 `json:"totalCostUsd,omitempty"`
+	Summary     string  `json:"summary,omitempty"`
 	Error       *string `json:"error,omitempty"`
 }
