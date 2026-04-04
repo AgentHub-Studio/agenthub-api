@@ -62,7 +62,7 @@ func (r *Repository) List(ctx context.Context, req pagination.PageRequest, toolT
 			return nil, 0, fmt.Errorf("tool: count: %w", err)
 		}
 		rows, err = conn.Query(ctx,
-			`SELECT id, name, type, config, description, labels, created_at, updated_at
+			`SELECT id, name, type, config, description, labels, read_only, created_at, updated_at
 			 FROM tool WHERE type=$1 ORDER BY name LIMIT $2 OFFSET $3`,
 			toolType, req.Size, req.Offset(),
 		)
@@ -71,7 +71,7 @@ func (r *Repository) List(ctx context.Context, req pagination.PageRequest, toolT
 			return nil, 0, fmt.Errorf("tool: count: %w", err)
 		}
 		rows, err = conn.Query(ctx,
-			`SELECT id, name, type, config, description, labels, created_at, updated_at
+			`SELECT id, name, type, config, description, labels, read_only, created_at, updated_at
 			 FROM tool ORDER BY name LIMIT $1 OFFSET $2`,
 			req.Size, req.Offset(),
 		)
@@ -112,10 +112,10 @@ func (r *Repository) Create(ctx context.Context, t Tool) (Tool, error) {
 	}
 
 	row := conn.QueryRow(ctx,
-		`INSERT INTO tool (name, type, config, description, labels)
-		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, name, type, config, description, labels, created_at, updated_at`,
-		t.Name, t.Type, cfg, t.Description, labels,
+		`INSERT INTO tool (name, type, config, description, labels, read_only)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, name, type, config, description, labels, read_only, created_at, updated_at`,
+		t.Name, t.Type, cfg, t.Description, labels, t.ReadOnly,
 	)
 	return scanTool(row)
 }
@@ -130,7 +130,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (Tool, error) {
 	defer release()
 
 	row := conn.QueryRow(ctx,
-		`SELECT id, name, type, config, description, labels, created_at, updated_at FROM tool WHERE id=$1`, id,
+		`SELECT id, name, type, config, description, labels, read_only, created_at, updated_at FROM tool WHERE id=$1`, id,
 	)
 	t, err := scanTool(row)
 	if err != nil {
@@ -161,10 +161,10 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, req UpdateRequest
 	}
 
 	row := conn.QueryRow(ctx,
-		`UPDATE tool SET name=$1, type=$2, config=$3, description=$4, labels=$5, updated_at=NOW()
-		 WHERE id=$6
-		 RETURNING id, name, type, config, description, labels, created_at, updated_at`,
-		req.Name, req.Type, cfg, req.Description, labels, id,
+		`UPDATE tool SET name=$1, type=$2, config=$3, description=$4, labels=$5, read_only=$6, updated_at=NOW()
+		 WHERE id=$7
+		 RETURNING id, name, type, config, description, labels, read_only, created_at, updated_at`,
+		req.Name, req.Type, cfg, req.Description, labels, req.ReadOnly, id,
 	)
 	t, err := scanTool(row)
 	if err != nil {
@@ -256,7 +256,7 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 
 	rows, err := conn.Query(ctx,
 		`SELECT st.id, st.skill_id, st.tool_id, st.priority, st.is_active, st.created_at,
-		        t.id, t.name, t.type, t.config, t.description, t.labels, t.created_at, t.updated_at
+		        t.id, t.name, t.type, t.config, t.description, t.labels, t.read_only, t.created_at, t.updated_at
 		 FROM skill_tool st
 		 JOIN tool t ON t.id = st.tool_id
 		 WHERE st.skill_id=$1
@@ -276,7 +276,7 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 		var cfg []byte
 		if err := rows.Scan(
 			&st.ID, &st.SkillID, &st.ToolID, &st.Priority, &st.IsActive, &st.CreatedAt,
-			&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.CreatedAt, &t.UpdatedAt,
+			&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.ReadOnly, &t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			return nil, nil, fmt.Errorf("tool: scan skill_tool: %w", err)
 		}
@@ -292,7 +292,7 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 func scanTool(row pgx.Row) (Tool, error) {
 	var t Tool
 	var cfg []byte
-	if err := row.Scan(&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.ReadOnly, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return Tool{}, fmt.Errorf("tool: scan: %w", err)
 	}
 	t.Config = cfg
@@ -302,7 +302,7 @@ func scanTool(row pgx.Row) (Tool, error) {
 func scanToolFromRows(rows pgx.Rows) (Tool, error) {
 	var t Tool
 	var cfg []byte
-	if err := rows.Scan(&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := rows.Scan(&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.ReadOnly, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return Tool{}, fmt.Errorf("tool: scan: %w", err)
 	}
 	t.Config = cfg

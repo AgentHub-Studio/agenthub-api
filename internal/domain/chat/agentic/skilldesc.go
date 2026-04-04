@@ -117,6 +117,216 @@ var knownSkillDescriptions = []SkillDescription{
 			"ALWAYS confirm event details with the user before creating or modifying. " +
 			"Returns event details including any conflicts detected.",
 	},
+	{
+		Slug:     "troubleshoot",
+		Name:     "Troubleshoot",
+		Category: "system",
+		Description: "Auto-diagnoses errors and failures during tool execution. " +
+			"Use when a previous tool call failed and the user needs help understanding what went wrong. " +
+			"Analyzes the error, suggests fixes, and optionally retries with corrected parameters. " +
+			"Parameters: 'error' (the error message), 'tool_name' (which tool failed), 'original_input' (what was sent). " +
+			"Returns diagnosis and suggested next steps.",
+	},
+	{
+		Slug:     "memory-recall",
+		Name:     "Memory Recall",
+		Category: "system",
+		Description: "Searches the agent's long-term memory for relevant facts, preferences, and decisions from past conversations. " +
+			"Use when the user references something discussed before, or when context from previous sessions would improve the response. " +
+			"Parameters: 'query' (semantic search query), 'limit' (max results). " +
+			"Returns matching memories with timestamps and relevance scores.",
+	},
+	// --- Platform management skills (enriched for LLM tool-calling) ---
+	{
+		Slug:     "agent-management",
+		Name:     "Agent Management",
+		Category: "platform",
+		Description: "Full CRUD management of agents in the AgentHub platform: create, read, update, delete, publish, archive, clone, and version agents. " +
+			"Use when the user asks about agents, wants to create or modify an agent, check versions, manage hooks, or change agent status. " +
+			"Key parameters: 'name', 'system_prompt' (agent instructions), 'model_config' (provider/model JSON), optional 'skill_ids' array to bind capabilities. " +
+			"Supported operations include listing agents, getting agent details, creating/updating/deleting agents, " +
+			"publishing drafts, archiving, cloning, listing versions, and managing agent hooks (create/update/delete). " +
+			"ALWAYS confirm destructive operations (delete, archive) with the user before executing. " +
+			"Returns agent objects with id, name, status, system prompt, model config, and linked skills.",
+	},
+	{
+		Slug:     "skill-management",
+		Name:     "Skill Management",
+		Category: "platform",
+		Description: "Manages skills (abstract capabilities that group tools): list, get, create, update, delete skills and their tool bindings. " +
+			"Use when the user asks about available skills, wants to create or modify a skill, or manage which tools implement a skill. " +
+			"Key parameters: 'name', 'slug' (kebab-case identifier), 'description', 'category', 'input_schema' (JSON Schema), optional 'allowed_tools' array. " +
+			"ALWAYS confirm changes with the user before executing write operations. " +
+			"Returns skill objects with id, name, slug, description, category, input schema, and bound tools.",
+	},
+	{
+		Slug:     "tool-management",
+		Name:     "Tool Management",
+		Category: "platform",
+		Description: "Manages tool implementations: list, get, create, update, delete tools (HTTP, SQL, DocumentSearch, Custom). " +
+			"Use when the user asks about tool configurations, wants to create or modify a tool endpoint, or check tool details. " +
+			"Key parameters: 'name', 'type' (HTTP/SQL/DOCUMENT_SEARCH/CUSTOM), 'config' (type-specific JSON with method, 'url', headers or SQL query), 'labels', 'read_only'. " +
+			"ALWAYS confirm changes with the user before executing write operations. " +
+			"Returns tool objects with id, name, type, config (method, URL, headers), labels, and read-only flag.",
+	},
+	{
+		Slug:     "knowledge-base-management",
+		Name:     "Knowledge Base Management",
+		Category: "platform",
+		Description: "Manages knowledge bases and their documents: list, get, create, update, delete, sync KBs; upload and manage documents. " +
+			"Use when the user asks about knowledge bases, wants to add documents, trigger reindexing, or check KB status. " +
+			"Key parameters: 'kb_id' (UUID) to target a specific KB; 'name', 'description' for creation; 'file' for document upload. " +
+			"After uploading documents, suggest using sync to trigger reindexing. " +
+			"Returns KB objects with id, name, description, document count, and indexing status.",
+	},
+	{
+		Slug:     "mcp-management",
+		Name:     "MCP Server Management",
+		Category: "platform",
+		Description: "Manages MCP (Model Context Protocol) server configurations: list, get, create, update, delete MCP servers. " +
+			"Use when the user asks about MCP integrations, wants to add/modify external tool servers, or check MCP status. " +
+			"Key parameters: 'name', 'transport_type' (stdio/http), 'http_base_url' for HTTP servers, 'command' and 'args' for stdio servers, 'auto_start', 'enabled'. " +
+			"ALWAYS confirm destructive operations (delete) and configuration changes with the user. " +
+			"Returns MCP config objects with id, name, transport type, URL, auto-start, and enabled status.",
+	},
+	{
+		Slug:     "chat-management",
+		Name:     "Chat Session Management",
+		Category: "platform",
+		Description: "Manages chat sessions: list sessions, get session details, run conversations, archive sessions, and list messages with pagination. " +
+			"Use when the user asks about conversation history, wants to review past messages, or manage active sessions. " +
+			"Key parameter: 'session_id' (UUID) to target a specific session; pagination parameters 'page' and 'size' for message lists. " +
+			"Returns session objects with id, agent, status, message count, and paginated message lists.",
+	},
+	{
+		Slug:     "datasource-management",
+		Name:     "Datasource Management",
+		Category: "platform",
+		Description: "Manages database datasource connections: list, get, create, update, delete datasources (PostgreSQL, MySQL, SQL Server). " +
+			"Use when the user asks about database connections, wants to configure a new datasource, or check connection status. " +
+			"Key parameters: 'type' (POSTGRESQL/MYSQL/SQL_SERVER), 'host', 'port', 'database', 'db_user', 'db_password', and optional 'vpn_resource_id'. " +
+			"ALWAYS confirm credential changes and destructive operations with the user. " +
+			"Returns datasource objects with id, name, type, host, port, database, and VPN resource binding.",
+	},
+	{
+		Slug:     "settings-management",
+		Name:     "Settings Management",
+		Category: "platform",
+		Description: "Manages platform settings: LLM provider configurations, tenant preferences, and system parameters. " +
+			"Use when the user asks about LLM configurations, API keys, or system settings. " +
+			"ALWAYS confirm changes with the user before modifying settings. " +
+			"Returns configuration objects with provider details, model lists, and active status.",
+	},
+	{
+		Slug:     "prompt-template-management",
+		Name:     "Prompt Template Management",
+		Category: "platform",
+		Description: "Manages prompt templates: list, get, create, update, delete reusable system prompt templates. " +
+			"Use when the user asks about prompt templates, wants to create or modify templates for agents. " +
+			"Key parameters: 'name' (template identifier), 'content' (the system prompt text), 'category', optional 'allowed_tools' array and 'model_override'. " +
+			"Templates can include allowed tools restrictions and model overrides. " +
+			"Returns template objects with id, name, content, category, allowed tools, and model override.",
+	},
+	// --- Diagnostic, optimization, and workflow skills ---
+	{
+		Slug:     "debug-agent",
+		Name:     "Debug Agent",
+		Category: "diagnostic",
+		Description: "Diagnoses agent execution failures by analyzing recent executions, error patterns, and configuration issues. " +
+			"Use when an agent is failing, producing incorrect results, or behaving unexpectedly. " +
+			"Analyzes execution logs, tool call history, system prompt effectiveness, and skill bindings. " +
+			"Parameters: 'agent_id' (target agent UUID), 'issue' (optional description of the problem). " +
+			"Returns a structured diagnosis with root cause analysis, affected components, and suggested fixes.",
+	},
+	{
+		Slug:     "optimize-agent",
+		Name:     "Optimize Agent",
+		Category: "optimization",
+		Description: "Reviews an agent's configuration and suggests optimizations for better performance, accuracy, and efficiency. " +
+			"Use when the user wants to improve an agent's behavior, reduce token usage, or fix quality issues. " +
+			"Analyzes: system prompt quality, skill selection, tool binding efficiency, knowledge base coverage, and model config. " +
+			"Parameters: 'agent_id' (target agent UUID), 'focus' (optional: 'prompt', 'tools', 'performance', 'cost'). " +
+			"Returns a structured report with specific, actionable recommendations ranked by impact.",
+	},
+	{
+		Slug:     "onboard-agent",
+		Name:     "Onboard Agent",
+		Category: "wizard",
+		Description: "Interactive wizard that guides the user through creating a fully configured agent step by step. " +
+			"Use when the user wants to create a new agent from scratch or needs help setting one up properly. " +
+			"Steps: (1) Define purpose and identity, (2) Generate system prompt, (3) Select and bind skills, " +
+			"(4) Configure knowledge bases, (5) Set model and parameters, (6) Create hooks for automation. " +
+			"ALWAYS ask for user confirmation at each step before proceeding. " +
+			"Returns a fully configured agent ready for publishing.",
+	},
+	{
+		Slug:     "curate-memory",
+		Name:     "Curate Memory",
+		Category: "memory",
+		Description: "Reviews and curates an agent's long-term memory using the four-type taxonomy: " +
+			"user (preferences, expertise), feedback (corrections, confirmed approaches with WHY), " +
+			"project (deadlines, decisions — absolute dates), and reference (pointers to external systems). " +
+			"Use when the user wants to audit, clean up, or understand what the agent has learned about them. " +
+			"Steps: (1) List memories by type, (2) Identify duplicates/conflicts/outdated entries per type, " +
+			"(3) Present a structured report grouped by type, (4) Apply requested operations. " +
+			"Parameters: 'agent_id' (target agent UUID), 'action' (optional: 'audit', 'deduplicate', 'clean', 'list'). " +
+			"Returns a typed memory audit report with per-type counts and recommended operations.",
+	},
+	{
+		Slug:     "health-check",
+		Name:     "Health Check",
+		Category: "diagnostic",
+		Description: "Performs a comprehensive health check of the AgentHub platform: agents, knowledge bases, MCP servers, and recent executions. " +
+			"Use when the user asks about platform status, wants to check if everything is working, or suspects issues. " +
+			"Checks: (1) Agent status distribution, (2) KB indexing status, (3) MCP server connectivity, " +
+			"(4) Recent execution success/failure rates, (5) Pending document processing. " +
+			"Parameters: 'scope' (optional: 'agents', 'kbs', 'mcp', 'executions', or 'all'). " +
+			"Returns a structured health report with status indicators and any detected issues.",
+	},
+	{
+		Slug:     "data-explorer",
+		Name:     "Data Explorer",
+		Category: "analysis",
+		Description: "Combines SQL queries and document search to answer complex data questions that span structured and unstructured sources. " +
+			"Use when the user asks analytical questions that may require both database queries and document lookups. " +
+			"Automatically determines which data sources to query based on the question. " +
+			"Parameters: 'question' (the analytical question), 'datasource_id' (optional: specific datasource). " +
+			"Returns a synthesized analysis combining results from all relevant sources with citations.",
+	},
+	// --- New skills from migration 000025 ---
+	{
+		Slug:     "review-agent",
+		Name:     "Review Agent",
+		Category: "diagnostic",
+		Description: "Performs a deep quality review of an agent: analyzes recent execution success/failure rates, " +
+			"evaluates system prompt clarity and completeness, verifies skill and KB bindings, " +
+			"and produces a structured improvement report with concrete action items. " +
+			"Use when the user asks to audit, evaluate, or improve an existing agent. " +
+			"Key parameters: 'agent_id' (UUID of the agent), optional 'focus' (prompt|skills|executions|all). " +
+			"Runs in fork mode to keep diagnostic data out of the main conversation. " +
+			"Returns a structured report with findings and prioritized recommendations.",
+	},
+	{
+		Slug:     "batch-execute",
+		Name:     "Batch Execute",
+		Category: "orchestration",
+		Description: "Orchestrates a large, parallelizable task by researching scope, decomposing into independent work units, " +
+			"spawning parallel sub-agents (one per unit), tracking progress, and synthesizing results. " +
+			"Use when a task can be split into 5–30 independent parallel workstreams that do not depend on each other. " +
+			"Key parameter: 'instruction' (the overall task to parallelize); optional 'max_agents' (default 10). " +
+			"Returns a progress table with status per unit and a final synthesis.",
+	},
+	{
+		Slug:     "review-memory",
+		Name:     "Review Memory",
+		Category: "memory",
+		Description: "Reviews an agent's memory landscape: lists entries by type, identifies duplicates and outdated entries, " +
+			"checks for conflicts between memory types, and proposes promotions to agent instructions. " +
+			"Use when an agent is behaving inconsistently across sessions or memories seem stale or contradictory. " +
+			"Key parameters: 'agent_id' (UUID), optional 'action' (audit|deduplicate|clean|promote). " +
+			"Presents proposed changes for confirmation — does NOT modify memories without explicit approval. " +
+			"Returns a structured report grouped by action type.",
+	},
 }
 
 // GetSkillDescriptionCatalog returns the full catalog of known skill descriptions.

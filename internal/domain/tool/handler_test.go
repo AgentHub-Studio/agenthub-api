@@ -287,3 +287,86 @@ func TestToolHandler_Patch_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
+
+func TestToolHandler_Update_Success(t *testing.T) {
+	r, svc := setupTool()
+	id := uuid.New()
+	svc.tools[id] = tool.Response{ID: id, Name: "Original", Type: "HTTP"}
+
+	body, _ := json.Marshal(tool.UpdateRequest{Name: "Updated"})
+	req := httptest.NewRequest(http.MethodPut, "/api/tools/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp tool.Response
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Updated", resp.Name)
+}
+
+func TestToolHandler_Update_NotFound(t *testing.T) {
+	r, _ := setupTool()
+	body, _ := json.Marshal(tool.UpdateRequest{Name: "x"})
+	req := httptest.NewRequest(http.MethodPut, "/api/tools/"+uuid.New().String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestToolHandler_BindToSkill_Success(t *testing.T) {
+	r, svc := setupTool()
+	skillID := uuid.New()
+	toolID := uuid.New()
+	svc.tools[toolID] = tool.Response{ID: toolID, Name: "HTTP Tool", Type: "HTTP"}
+
+	body, _ := json.Marshal(tool.BindRequest{ToolID: toolID})
+	req := httptest.NewRequest(http.MethodPost, "/api/skills/"+skillID.String()+"/tools", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	var resp tool.SkillToolResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, skillID, resp.SkillID)
+	assert.Equal(t, toolID, resp.Tool.ID)
+}
+
+func TestToolHandler_BindToSkill_ToolNotFound(t *testing.T) {
+	r, _ := setupTool()
+	skillID := uuid.New()
+
+	body, _ := json.Marshal(tool.BindRequest{ToolID: uuid.New()})
+	req := httptest.NewRequest(http.MethodPost, "/api/skills/"+skillID.String()+"/tools", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestToolHandler_UnbindFromSkill_Success(t *testing.T) {
+	r, svc := setupTool()
+	skillID := uuid.New()
+	toolID := uuid.New()
+	// seed a binding so UnbindFromSkill does not return ErrNotFound
+	svc.bindings[skillID] = []tool.SkillToolResponse{{ID: uuid.New(), SkillID: skillID}}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/skills/"+skillID.String()+"/tools/"+toolID.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+}
+
+func TestToolHandler_UnbindFromSkill_NotFound(t *testing.T) {
+	r, _ := setupTool()
+	req := httptest.NewRequest(http.MethodDelete, "/api/skills/"+uuid.New().String()+"/tools/"+uuid.New().String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}

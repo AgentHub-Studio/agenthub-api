@@ -1,278 +1,337 @@
 package agentic_test
 
 import (
-	"encoding/json"
-	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
 )
 
-func TestMailbox_SendAndReadUnread(t *testing.T) {
-	mb := agentic.NewMailbox()
-	sessionID := uuid.New()
+// --- MessageSource ---
 
-	msg := mb.Send(sessionID, "agent-a", "agent-b", "found schema info")
+func TestMessageSource_Constants(t *testing.T) {
+	assert.Equal(t, agentic.MessageSource("user"), agentic.SourceUser)
+	assert.Equal(t, agentic.MessageSource("teammate"), agentic.SourceTeammate)
+	assert.Equal(t, agentic.MessageSource("system"), agentic.SourceSystem)
+	assert.Equal(t, agentic.MessageSource("tick"), agentic.SourceTick)
+	assert.Equal(t, agentic.MessageSource("task"), agentic.SourceTask)
+}
+
+// --- NewMailMessage ---
+
+func TestNewMailMessage(t *testing.T) {
+	msg := agentic.NewMailMessage(agentic.SourceUser, "hello")
+	assert.Equal(t, agentic.SourceUser, msg.Source)
+	assert.Equal(t, "hello", msg.Content)
 	assert.NotEmpty(t, msg.ID)
-	assert.Equal(t, "agent-a", msg.From)
-	assert.Equal(t, "agent-b", msg.To)
-	assert.Equal(t, "found schema info", msg.Content)
-	assert.False(t, msg.Read)
-	assert.Equal(t, 1, mb.Len(sessionID))
-
-	// agent-b reads the message.
-	msgs := mb.ReadUnread(sessionID, "agent-b")
-	require.Len(t, msgs, 1)
-	assert.Equal(t, "found schema info", msgs[0].Content)
-	assert.True(t, msgs[0].Read)
-
-	// Reading again returns nothing (already read).
-	msgs = mb.ReadUnread(sessionID, "agent-b")
-	assert.Empty(t, msgs)
+	assert.False(t, msg.Timestamp.IsZero())
 }
 
-func TestMailbox_Broadcast(t *testing.T) {
-	mb := agentic.NewMailbox()
-	sessionID := uuid.New()
-
-	mb.Send(sessionID, "agent-a", "*", "broadcast message")
-
-	// First recipient gets the broadcast.
-	msgs := mb.ReadUnread(sessionID, "agent-b")
-	require.Len(t, msgs, 1)
-	assert.Equal(t, "broadcast message", msgs[0].Content)
-
-	// Once read, another agent won't see it (already marked read).
-	msgs = mb.ReadUnread(sessionID, "agent-c")
-	assert.Empty(t, msgs)
-}
-
-func TestMailbox_MultipleMessages(t *testing.T) {
-	mb := agentic.NewMailbox()
-	sessionID := uuid.New()
-
-	mb.Send(sessionID, "a", "b", "msg1")
-	mb.Send(sessionID, "c", "b", "msg2")
-	mb.Send(sessionID, "a", "d", "msg3") // not for b
-
-	msgs := mb.ReadUnread(sessionID, "b")
-	require.Len(t, msgs, 2)
-	assert.Equal(t, "msg1", msgs[0].Content)
-	assert.Equal(t, "msg2", msgs[1].Content)
-}
-
-func TestMailbox_PendingCount(t *testing.T) {
-	mb := agentic.NewMailbox()
-	sessionID := uuid.New()
-
-	assert.Equal(t, 0, mb.PendingCount(sessionID, "b"))
-
-	mb.Send(sessionID, "a", "b", "msg1")
-	mb.Send(sessionID, "a", "b", "msg2")
-	mb.Send(sessionID, "a", "c", "not-for-b")
-
-	assert.Equal(t, 2, mb.PendingCount(sessionID, "b"))
-
-	mb.ReadUnread(sessionID, "b")
-	assert.Equal(t, 0, mb.PendingCount(sessionID, "b"))
-}
-
-func TestMailbox_Cleanup(t *testing.T) {
-	mb := agentic.NewMailbox()
-	sessionID := uuid.New()
-
-	mb.Send(sessionID, "a", "b", "msg1")
-	assert.Equal(t, 1, mb.Len(sessionID))
-
-	mb.Cleanup(sessionID)
-	assert.Equal(t, 0, mb.Len(sessionID))
-
-	// ReadUnread after cleanup returns nothing.
-	msgs := mb.ReadUnread(sessionID, "b")
-	assert.Empty(t, msgs)
-}
-
-func TestMailbox_IsolatedSessions(t *testing.T) {
-	mb := agentic.NewMailbox()
-	session1 := uuid.New()
-	session2 := uuid.New()
-
-	mb.Send(session1, "a", "b", "session 1 msg")
-	mb.Send(session2, "a", "b", "session 2 msg")
-
-	msgs := mb.ReadUnread(session1, "b")
-	require.Len(t, msgs, 1)
-	assert.Equal(t, "session 1 msg", msgs[0].Content)
-
-	msgs = mb.ReadUnread(session2, "b")
-	require.Len(t, msgs, 1)
-	assert.Equal(t, "session 2 msg", msgs[0].Content)
-}
-
-func TestDrainMailbox_NoPending(t *testing.T) {
-	mb := agentic.NewMailbox()
-	sessionID := uuid.New()
-
-	result := agentic.DrainMailbox(mb, sessionID, "agent-b")
-	assert.Empty(t, result)
-}
-
-func TestDrainMailbox_NilMailbox(t *testing.T) {
-	result := agentic.DrainMailbox(nil, uuid.New(), "agent-b")
-	assert.Empty(t, result)
-}
-
-func TestDrainMailbox_WithMessages(t *testing.T) {
-	mb := agentic.NewMailbox()
-	sessionID := uuid.New()
-
-	mb.Send(sessionID, "agent-a", "agent-b", "found the schema")
-	mb.Send(sessionID, "agent-c", "agent-b", "query results ready")
-
-	result := agentic.DrainMailbox(mb, sessionID, "agent-b")
-	assert.Contains(t, result, "[From agent-a]: found the schema")
-	assert.Contains(t, result, "[From agent-c]: query results ready")
-	assert.Contains(t, result, "--- Messages from other agents ---")
-}
-
-func TestHandleSendMessage_Success(t *testing.T) {
-	mb := agentic.NewMailbox()
-	sessionID := uuid.New()
-	ch := make(chan agentic.RunEvent, 10)
-
-	input, _ := json.Marshal(map[string]string{
-		"to":      "agent-b",
-		"message": "hello from a",
-	})
-
-	result := agentic.HandleSendMessage(mb, sessionID, "agent-a", input, ch)
-	assert.Nil(t, result.Error)
-	assert.NotNil(t, result.Output)
-
-	var output agentic.SendMessageOutput
-	require.NoError(t, json.Unmarshal(result.Output, &output))
-	assert.Equal(t, "delivered", output.Status)
-	assert.Equal(t, "agent-b", output.To)
-	assert.NotEmpty(t, output.MessageID)
-
-	// Check SSE event was emitted.
-	select {
-	case ev := <-ch:
-		assert.Equal(t, agentic.EventAgentMessage, ev.Type)
-		var data agentic.AgentMessageData
-		require.NoError(t, json.Unmarshal(ev.Data, &data))
-		assert.Equal(t, "agent-a", data.From)
-		assert.Equal(t, "agent-b", data.To)
-		assert.Equal(t, "hello from a", data.Content)
-	default:
-		t.Fatal("expected agent_message event")
-	}
-
-	// Verify message is in mailbox.
-	msgs := mb.ReadUnread(sessionID, "agent-b")
-	require.Len(t, msgs, 1)
-	assert.Equal(t, "hello from a", msgs[0].Content)
-}
-
-func TestHandleSendMessage_EmptyMessage(t *testing.T) {
-	mb := agentic.NewMailbox()
-	ch := make(chan agentic.RunEvent, 10)
-
-	input, _ := json.Marshal(map[string]string{
-		"to":      "agent-b",
-		"message": "",
-	})
-
-	result := agentic.HandleSendMessage(mb, uuid.New(), "agent-a", input, ch)
-	assert.NotNil(t, result.Error)
-	assert.Contains(t, *result.Error, "requires a 'message'")
-}
-
-func TestHandleSendMessage_EmptyTo(t *testing.T) {
-	mb := agentic.NewMailbox()
-	ch := make(chan agentic.RunEvent, 10)
-
-	input, _ := json.Marshal(map[string]string{
-		"to":      "",
-		"message": "hello",
-	})
-
-	result := agentic.HandleSendMessage(mb, uuid.New(), "agent-a", input, ch)
-	assert.NotNil(t, result.Error)
-	assert.Contains(t, *result.Error, "requires a 'to'")
-}
-
-func TestHandleSendMessage_InvalidJSON(t *testing.T) {
-	mb := agentic.NewMailbox()
-	ch := make(chan agentic.RunEvent, 10)
-
-	result := agentic.HandleSendMessage(mb, uuid.New(), "agent-a", json.RawMessage("not-json"), ch)
-	assert.NotNil(t, result.Error)
-	assert.Contains(t, *result.Error, "invalid send_message input")
-}
-
-func TestIsSendMessageToolCall(t *testing.T) {
-	assert.True(t, agentic.IsSendMessageToolCall("send_message"))
-	assert.False(t, agentic.IsSendMessageToolCall("agent"))
-	assert.False(t, agentic.IsSendMessageToolCall("other_tool"))
-}
-
-func TestSendMessageTool_InToolSchema_SubAgent(t *testing.T) {
-	builder := agentic.NewToolSchemaBuilder(
-		&mockSkillLister{},
-		nil,
-		nil,
-	).WithDepthLimits(1, 3) // depth 1 = sub-agent
-	tools, err := builder.Build(context.Background(), uuid.New())
-	require.NoError(t, err)
-
-	found := false
-	for _, tool := range tools {
-		if tool.Name == "send_message" {
-			found = true
-			assert.Contains(t, tool.Description, "Send a message")
-		}
-	}
-	assert.True(t, found, "send_message should be available for sub-agents (depth > 0)")
-}
-
-func TestSendMessageTool_NotInRootAgent(t *testing.T) {
-	builder := agentic.NewToolSchemaBuilder(
-		&mockSkillLister{},
-		nil,
-		nil,
-	).WithDepthLimits(0, 3) // depth 0 = root agent
-	tools, err := builder.Build(context.Background(), uuid.New())
-	require.NoError(t, err)
-
-	for _, tool := range tools {
-		assert.NotEqual(t, "send_message", tool.Name, "send_message should not be available for root agent")
+func TestNewMailMessage_UniqueIDs(t *testing.T) {
+	ids := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		msg := agentic.NewMailMessage(agentic.SourceSystem, "test")
+		assert.False(t, ids[msg.ID], "duplicate ID generated")
+		ids[msg.ID] = true
 	}
 }
 
-func TestMailbox_ConcurrentAccess(t *testing.T) {
+// --- Send / Poll ---
+
+func TestMailbox_SendAndPoll(t *testing.T) {
 	mb := agentic.NewMailbox()
-	sessionID := uuid.New()
+	msg := agentic.NewMailMessage(agentic.SourceUser, "hi")
+	mb.Send(msg)
+
+	got, ok := mb.Poll()
+	assert.True(t, ok)
+	assert.Equal(t, "hi", got.Content)
+}
+
+func TestMailbox_PollEmpty(t *testing.T) {
+	mb := agentic.NewMailbox()
+	_, ok := mb.Poll()
+	assert.False(t, ok)
+}
+
+func TestMailbox_FIFO(t *testing.T) {
+	mb := agentic.NewMailbox()
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "first"))
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "second"))
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "third"))
+
+	msg1, _ := mb.Poll()
+	msg2, _ := mb.Poll()
+	msg3, _ := mb.Poll()
+	assert.Equal(t, "first", msg1.Content)
+	assert.Equal(t, "second", msg2.Content)
+	assert.Equal(t, "third", msg3.Content)
+}
+
+// --- PollAll ---
+
+func TestMailbox_PollAll(t *testing.T) {
+	mb := agentic.NewMailbox()
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "a"))
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "b"))
+
+	msgs := mb.PollAll()
+	assert.Len(t, msgs, 2)
+	assert.Equal(t, "a", msgs[0].Content)
+	assert.Equal(t, "b", msgs[1].Content)
+
+	// Queue should be empty now.
+	assert.Nil(t, mb.PollAll())
+}
+
+func TestMailbox_PollAllEmpty(t *testing.T) {
+	mb := agentic.NewMailbox()
+	assert.Nil(t, mb.PollAll())
+}
+
+// --- Pending ---
+
+func TestMailbox_Pending(t *testing.T) {
+	mb := agentic.NewMailbox()
+	assert.Equal(t, 0, mb.Pending())
+
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "a"))
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "b"))
+	assert.Equal(t, 2, mb.Pending())
+
+	mb.Poll()
+	assert.Equal(t, 1, mb.Pending())
+}
+
+// --- Receive (blocking) ---
+
+func TestMailbox_ReceiveImmediate(t *testing.T) {
+	mb := agentic.NewMailbox()
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "ready"))
+
+	done := make(chan struct{})
+	msg, ok := mb.Receive(done)
+	assert.True(t, ok)
+	assert.Equal(t, "ready", msg.Content)
+}
+
+func TestMailbox_ReceiveBlocks(t *testing.T) {
+	mb := agentic.NewMailbox()
 	done := make(chan struct{})
 
-	// Writer goroutine.
+	var received agentic.MailMessage
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
-		for i := 0; i < 100; i++ {
-			mb.Send(sessionID, "writer", "reader", "msg")
-		}
-		close(done)
+		defer wg.Done()
+		received, _ = mb.Receive(done)
 	}()
 
-	// Reader goroutine.
-	for i := 0; i < 50; i++ {
-		mb.ReadUnread(sessionID, "reader")
-		mb.PendingCount(sessionID, "reader")
-	}
+	// Give goroutine time to block.
+	time.Sleep(20 * time.Millisecond)
+	mb.Send(agentic.NewMailMessage(agentic.SourceTeammate, "delayed"))
 
-	<-done
-	assert.Equal(t, 100, mb.Len(sessionID))
+	wg.Wait()
+	assert.Equal(t, "delayed", received.Content)
+}
+
+func TestMailbox_ReceiveDoneCancels(t *testing.T) {
+	mb := agentic.NewMailbox()
+	done := make(chan struct{})
+
+	var ok bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, ok = mb.Receive(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	close(done)
+	wg.Wait()
+	assert.False(t, ok)
+}
+
+func TestMailbox_ReceiveWaiterDeferral(t *testing.T) {
+	mb := agentic.NewMailbox()
+	done := make(chan struct{})
+
+	// Two waiters.
+	var msg1, msg2 agentic.MailMessage
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		msg1, _ = mb.Receive(done)
+	}()
+	go func() {
+		defer wg.Done()
+		msg2, _ = mb.Receive(done)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+
+	// Send two messages — both waiters should be served directly.
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "one"))
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "two"))
+	wg.Wait()
+
+	// Both should have received a message; nothing in queue.
+	assert.NotEmpty(t, msg1.Content)
+	assert.NotEmpty(t, msg2.Content)
+	assert.Equal(t, 0, mb.Pending())
+}
+
+// --- Subscribe ---
+
+func TestMailbox_Subscribe(t *testing.T) {
+	mb := agentic.NewMailbox()
+
+	var received []string
+	mb.Subscribe(func(msg agentic.MailMessage) {
+		received = append(received, msg.Content)
+	})
+
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "first"))
+	mb.Send(agentic.NewMailMessage(agentic.SourceSystem, "second"))
+
+	assert.Equal(t, []string{"first", "second"}, received)
+}
+
+func TestMailbox_SubscribeUnsubscribe(t *testing.T) {
+	mb := agentic.NewMailbox()
+
+	var count int
+	unsub := mb.Subscribe(func(msg agentic.MailMessage) {
+		count++
+	})
+
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "a"))
+	assert.Equal(t, 1, count)
+
+	unsub()
+
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "b"))
+	assert.Equal(t, 1, count, "should not increment after unsubscribe")
+}
+
+func TestMailbox_MultipleSubscribers(t *testing.T) {
+	mb := agentic.NewMailbox()
+
+	var count1, count2 int
+	mb.Subscribe(func(msg agentic.MailMessage) { count1++ })
+	mb.Subscribe(func(msg agentic.MailMessage) { count2++ })
+
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "msg"))
+	assert.Equal(t, 1, count1)
+	assert.Equal(t, 1, count2)
+}
+
+// --- Close ---
+
+func TestMailbox_Close(t *testing.T) {
+	mb := agentic.NewMailbox()
+	mb.Close()
+
+	// Send after close should be ignored.
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "ignored"))
+	assert.Equal(t, 0, mb.Pending())
+}
+
+func TestMailbox_CloseUnblocksWaiters(t *testing.T) {
+	mb := agentic.NewMailbox()
+	done := make(chan struct{})
+
+	var ok bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, ok = mb.Receive(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	mb.Close()
+	wg.Wait()
+	assert.False(t, ok)
+}
+
+// --- FilterBySource ---
+
+func TestMailbox_FilterBySource(t *testing.T) {
+	mb := agentic.NewMailbox()
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "user msg"))
+	mb.Send(agentic.NewMailMessage(agentic.SourceSystem, "sys msg"))
+	mb.Send(agentic.NewMailMessage(agentic.SourceUser, "user msg 2"))
+
+	userMsgs := mb.FilterBySource(agentic.SourceUser)
+	assert.Len(t, userMsgs, 2)
+
+	sysMsgs := mb.FilterBySource(agentic.SourceSystem)
+	assert.Len(t, sysMsgs, 1)
+
+	taskMsgs := mb.FilterBySource(agentic.SourceTask)
+	assert.Len(t, taskMsgs, 0)
+}
+
+// --- Send auto-fills ---
+
+func TestMailbox_SendAutoFillsTimestamp(t *testing.T) {
+	mb := agentic.NewMailbox()
+	mb.Send(agentic.MailMessage{Source: agentic.SourceUser, Content: "bare"})
+
+	msg, ok := mb.Poll()
+	require.True(t, ok)
+	assert.False(t, msg.Timestamp.IsZero())
+	assert.NotEmpty(t, msg.ID)
+}
+
+// --- Metadata ---
+
+func TestMailMessage_Metadata(t *testing.T) {
+	msg := agentic.MailMessage{
+		Source:   agentic.SourceTask,
+		Content:  "done",
+		Metadata: map[string]any{"taskId": "t-123", "exitCode": 0},
+	}
+	assert.Equal(t, "t-123", msg.Metadata["taskId"])
+	assert.Equal(t, 0, msg.Metadata["exitCode"])
+}
+
+// --- Concurrency ---
+
+func TestMailbox_ConcurrentSendPoll(t *testing.T) {
+	mb := agentic.NewMailbox()
+	const n = 100
+
+	var wg sync.WaitGroup
+	// Send n messages concurrently.
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mb.Send(agentic.NewMailMessage(agentic.SourceUser, "msg"))
+		}()
+	}
+	wg.Wait()
+
+	// Poll all.
+	var polled int32
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, ok := mb.Poll(); ok {
+				atomic.AddInt32(&polled, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(n), polled)
 }

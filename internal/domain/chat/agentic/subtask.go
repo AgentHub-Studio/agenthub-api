@@ -72,7 +72,7 @@ type SubtaskExecutor struct {
 	// It receives the parent's RunConfig (with adjusted budget/depth).
 	runnerFactory RunnerFactory
 	// mailbox is the shared inter-agent mailbox for sub-agent communication.
-	mailbox *Mailbox
+	agentMailbox *AgentMailbox
 }
 
 // RunnerFactory builds a Runner with the given configuration.
@@ -88,8 +88,8 @@ func NewSubtaskExecutor(factory RunnerFactory) *SubtaskExecutor {
 }
 
 // WithMailbox attaches a shared mailbox for inter-agent messaging.
-func (s *SubtaskExecutor) WithMailbox(m *Mailbox) *SubtaskExecutor {
-	s.mailbox = m
+func (s *SubtaskExecutor) WithAgentMailbox(m *AgentMailbox) *SubtaskExecutor {
+	s.agentMailbox = m
 	return s
 }
 
@@ -164,8 +164,8 @@ func (s *SubtaskExecutor) Execute(
 
 	// Create child runner.
 	childRunner := s.runnerFactory.NewRunner(childConfig)
-	if s.mailbox != nil {
-		childRunner.WithMailbox(s.mailbox)
+	if s.agentMailbox != nil {
+		childRunner.WithAgentMailbox(s.agentMailbox)
 	}
 
 	// Create a sub-session ID for the child (ephemeral — not persisted as a chat session).

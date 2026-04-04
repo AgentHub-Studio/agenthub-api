@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/google/uuid"
 )
 
 // Summarizer abstracts the LLM call used to compress conversation history.
@@ -15,15 +18,113 @@ type Summarizer interface {
 	Summarize(ctx context.Context, prompt string) (string, error)
 }
 
+// AutoCompactTracking tracks the state of the auto-compaction lifecycle across
+// turns. It enables analytics correlation, turn counting since last compaction,
+// and a circuit breaker to stop retrying when context is irrecoverably over limit.
+//
+// Inspired by Claude Code's AutoCompactTrackingState in services/compact/autoCompact.ts.
+type AutoCompactTracking struct {
+	// Compacted indicates whether at least one compaction has occurred in this chain.
+	Compacted bool `json:"compacted"`
+	// TurnCounter counts turns elapsed since the last successful compaction.
+	// Reset to 0 on each new compaction. Enables analytics to measure how many
+	// turns the agent runs before needing to compact again.
+	TurnCounter int `json:"turnCounter"`
+	// TurnID is a unique UUID generated on each successful compaction event.
+	// Allows analytics to correlate post-compact turns with the compaction that
+	// triggered them (e.g. RecompactionInfo).
+	TurnID string `json:"turnId"`
+	// ConsecutiveFailures tracks how many compactions in a row have failed or
+	// had no effect. Acts as a circuit breaker to avoid wasting API calls on
+	// irrecoverable context overflow (e.g. a single huge system prompt).
+	ConsecutiveFailures int `json:"consecutiveFailures"`
+}
+
+// RecompactionInfo provides context about the compaction chain for analytics.
+// Inspired by Claude Code's RecompactionInfo in services/compact/compact.ts.
+type RecompactionInfo struct {
+	// IsRecompactionInChain is true when a previous compaction already happened.
+	IsRecompactionInChain bool `json:"isRecompactionInChain"`
+	// TurnsSincePreviousCompact is the number of turns since the last compaction.
+	// -1 means no previous compaction in this chain.
+	TurnsSincePreviousCompact int `json:"turnsSincePreviousCompact"`
+	// PreviousCompactTurnID is the TurnID of the most recent compaction.
+	PreviousCompactTurnID string `json:"previousCompactTurnId,omitempty"`
+}
+
+// RecompactionInfo returns analytics context about the current compaction chain.
+func (t AutoCompactTracking) RecompactionInfo() RecompactionInfo {
+	return RecompactionInfo{
+		IsRecompactionInChain:     t.Compacted,
+		TurnsSincePreviousCompact: t.TurnCounter,
+		PreviousCompactTurnID:     t.TurnID,
+	}
+}
+
+// RecompactionInfoPtr returns analytics context, handling nil pointer receivers.
+// Returns -1 for TurnsSincePreviousCompact when nil (no tracking state).
+func RecompactionInfoFromPtr(t *AutoCompactTracking) RecompactionInfo {
+	if t == nil {
+		return RecompactionInfo{TurnsSincePreviousCompact: -1}
+	}
+	return t.RecompactionInfo()
+}
+
 // ContextManager handles token estimation and context window compression.
 type ContextManager struct {
 	// TailSize is the number of recent messages to preserve when compacting.
 	TailSize int
+	// tracking holds the auto-compact lifecycle state.
+	tracking AutoCompactTracking
 }
+
+// maxConsecutiveCompactFailures stops auto-compaction after this many
+// consecutive failures to avoid wasting API calls when context is
+// irrecoverably over the limit (e.g. a single huge system prompt).
+const maxConsecutiveCompactFailures = 3
 
 // NewContextManager creates a ContextManager with sensible defaults.
 func NewContextManager() *ContextManager {
 	return &ContextManager{TailSize: 4}
+}
+
+// Tracking returns the current auto-compact tracking state.
+func (cm *ContextManager) Tracking() AutoCompactTracking {
+	return cm.tracking
+}
+
+// RecordCompactSuccess resets the failure counter, sets the compacted flag,
+// generates a new TurnID, and resets TurnCounter to 0.
+func (cm *ContextManager) RecordCompactSuccess() {
+	cm.tracking.Compacted = true
+	cm.tracking.TurnID = uuid.New().String()
+	cm.tracking.TurnCounter = 0
+	cm.tracking.ConsecutiveFailures = 0
+}
+
+// RecordCompactFailure increments the consecutive failure counter.
+func (cm *ContextManager) RecordCompactFailure() {
+	cm.tracking.ConsecutiveFailures++
+}
+
+// RecordTurnAfterCompact increments the turn counter if a compaction has
+// occurred. Should be called after each successful LLM turn.
+func (cm *ContextManager) RecordTurnAfterCompact() {
+	if cm.tracking.Compacted {
+		cm.tracking.TurnCounter++
+	}
+}
+
+// CompactCircuitOpen returns true when auto-compaction should be skipped
+// because too many consecutive compactions have failed.
+func (cm *ContextManager) CompactCircuitOpen() bool {
+	return cm.tracking.ConsecutiveFailures >= maxConsecutiveCompactFailures
+}
+
+// ResetTracking clears the tracking state. Used when reactive-compact recovery
+// takes over to avoid double-tracking.
+func (cm *ContextManager) ResetTracking() {
+	cm.tracking = AutoCompactTracking{}
 }
 
 // --- Token estimation ---
@@ -46,6 +147,22 @@ func EstimateStringTokens(s string) int {
 	}
 	// ~4 chars per token for English, add small overhead for message framing.
 	return len(s)/4 + 3
+}
+
+// EstimateStringTokensForType returns a rough token count using file-type-aware
+// ratios. JSON content uses ~2 chars/token (many single-char tokens like braces,
+// colons, commas). Other content uses ~4 chars/token.
+// Inspired by Claude Code's roughTokenCountEstimationForFileType in tokens.ts.
+func EstimateStringTokensForType(s string, fileExt string) int {
+	if len(s) == 0 {
+		return 0
+	}
+	bytesPerToken := 4
+	switch strings.ToLower(fileExt) {
+	case ".json", ".jsonl", ".jsonc", ".geojson":
+		bytesPerToken = 2
+	}
+	return len(s)/bytesPerToken + 3
 }
 
 // estimateMessageTokens estimates the token count for a single message.
@@ -282,6 +399,39 @@ func (cm *ContextManager) ReactiveCompact(ctx context.Context, messages []chat.C
 	}, nil
 }
 
+// VerifyCompaction checks whether the compacted result actually reduced token usage
+// below the threshold that triggered it. If not, it escalates to the next stage.
+// This prevents compaction loops where the same stage is applied repeatedly without effect.
+func (cm *ContextManager) VerifyCompaction(ctx context.Context, result *ReactiveCompactResult, systemTokens int, cfg RunConfig, summarizer Summarizer) (*ReactiveCompactResult, error) {
+	if result.Stage == "" {
+		return result, nil // no compaction was applied
+	}
+
+	windowSize := GetContextWindowSize(cfg.Model, cfg.ContextWindowSize)
+	newTokens := EstimateTokens(result.Messages) + systemTokens
+	newUsage := float64(newTokens) / float64(windowSize)
+
+	// Check if we're still above the stage's lower bound.
+	var threshold float64
+	switch result.Stage {
+	case StageToolResultTruncation:
+		threshold = 0.75
+	case StageHistorySnip:
+		threshold = 0.80
+	case StageMicrocompact:
+		threshold = 0.85
+	case StageFullSummarization:
+		return result, nil // can't escalate beyond full summarization
+	}
+
+	if newUsage < threshold {
+		return result, nil // compaction was effective
+	}
+
+	// Escalate: apply the next stage on the already-compacted messages.
+	return cm.ReactiveCompact(ctx, result.Messages, systemTokens, cfg, summarizer)
+}
+
 // truncateOldToolResults truncates tool_result content in messages outside the tail.
 func truncateOldToolResults(messages []chat.ChatMessage, tailSize, maxChars int) []chat.ChatMessage {
 	result := make([]chat.ChatMessage, len(messages))
@@ -300,12 +450,74 @@ func truncateOldToolResults(messages []chat.ChatMessage, tailSize, maxChars int)
 	return result
 }
 
-// snipOldHistory keeps only the most recent N messages.
+// snipOldHistory keeps only the most recent N messages, adjusting the cut
+// point to preserve tool_use/tool_result pairs (API invariant).
 func snipOldHistory(messages []chat.ChatMessage, keep int) []chat.ChatMessage {
 	if len(messages) <= keep {
 		return messages
 	}
-	return messages[len(messages)-keep:]
+	startIdx := len(messages) - keep
+	startIdx = adjustSplitForToolPairs(messages, startIdx)
+	return messages[startIdx:]
+}
+
+// adjustSplitForToolPairs adjusts a split index backward to avoid orphaning
+// tool_result messages. If the first kept message is a tool_result, it pulls
+// the index back to include the preceding tool_use (assistant) message.
+// Inspired by Claude Code's adjustIndexToPreserveAPIInvariants.
+func adjustSplitForToolPairs(messages []chat.ChatMessage, startIdx int) int {
+	if startIdx <= 0 || startIdx >= len(messages) {
+		return startIdx
+	}
+
+	// Collect tool_call_ids from tool_result messages in the kept range
+	// that need matching tool_use messages.
+	neededIDs := map[string]bool{}
+	for i := startIdx; i < len(messages); i++ {
+		if messages[i].MessageType == chat.MessageTypeToolResult && messages[i].ToolCallID != nil {
+			neededIDs[*messages[i].ToolCallID] = true
+		}
+	}
+
+	if len(neededIDs) == 0 {
+		return startIdx
+	}
+
+	// Check if matching tool_use messages are already in the kept range.
+	for i := startIdx; i < len(messages); i++ {
+		if messages[i].MessageType == chat.MessageTypeToolUse && len(messages[i].ToolCalls) > 0 {
+			// Parse tool call IDs from this message.
+			var tcs []struct{ ID string `json:"id"` }
+			if err := json.Unmarshal(messages[i].ToolCalls, &tcs); err == nil {
+				for _, tc := range tcs {
+					delete(neededIDs, tc.ID)
+				}
+			}
+		}
+	}
+
+	if len(neededIDs) == 0 {
+		return startIdx
+	}
+
+	// Look backward for assistant messages containing the needed tool_use IDs.
+	for i := startIdx - 1; i >= 0 && len(neededIDs) > 0; i-- {
+		if messages[i].MessageType == chat.MessageTypeToolUse && len(messages[i].ToolCalls) > 0 {
+			var tcs []struct{ ID string `json:"id"` }
+			if err := json.Unmarshal(messages[i].ToolCalls, &tcs); err == nil {
+				for _, tc := range tcs {
+					if neededIDs[tc.ID] {
+						delete(neededIDs, tc.ID)
+						if i < startIdx {
+							startIdx = i
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return startIdx
 }
 
 // microcompact aggressively truncates all messages outside the tail to 100 chars.
@@ -325,6 +537,136 @@ func microcompact(messages []chat.ChatMessage, tailSize int) []chat.ChatMessage 
 		result[i].ToolCalls = nil // strip tool_calls JSON from old messages
 	}
 	return result
+}
+
+// TimeBasedEvictionConfig controls when idle sessions should proactively
+// clear old tool results. When the server-side prompt cache has expired
+// (e.g. after 60 minutes idle), the full prefix will be rewritten anyway,
+// so clearing old results shrinks the rewritten payload.
+// Inspired by Claude Code's timeBasedMCConfig.
+type TimeBasedEvictionConfig struct {
+	// GapThreshold is the duration since the last turn that triggers eviction.
+	// Default: 60 minutes (safe choice — server's 1h cache TTL is guaranteed expired).
+	GapThreshold time.Duration
+	// KeepRecent is the number of most-recent tool results to preserve.
+	// Default: 5.
+	KeepRecent int
+}
+
+// DefaultTimeBasedEvictionConfig returns sensible defaults matching
+// Claude Code's time-based microcompact configuration.
+func DefaultTimeBasedEvictionConfig() TimeBasedEvictionConfig {
+	return TimeBasedEvictionConfig{
+		GapThreshold: 60 * time.Minute,
+		KeepRecent:   5,
+	}
+}
+
+// EvictStaleToolResults clears old tool_result content when the session has
+// been idle for longer than cfg.GapThreshold. Keeps only the most recent
+// cfg.KeepRecent tool results intact; older ones get their content replaced
+// with a placeholder. Returns the messages unmodified if the gap is below
+// threshold or there aren't enough tool results to evict.
+func EvictStaleToolResults(messages []chat.ChatMessage, timeSinceLastTurn time.Duration, cfg TimeBasedEvictionConfig) []chat.ChatMessage {
+	if timeSinceLastTurn < cfg.GapThreshold {
+		return messages
+	}
+
+	// Count tool_result messages.
+	var toolResultIndices []int
+	for i, m := range messages {
+		if m.MessageType == chat.MessageTypeToolResult {
+			toolResultIndices = append(toolResultIndices, i)
+		}
+	}
+
+	// Nothing to evict if within keep budget.
+	if len(toolResultIndices) <= cfg.KeepRecent {
+		return messages
+	}
+
+	// Copy messages to avoid mutating the original slice.
+	result := make([]chat.ChatMessage, len(messages))
+	copy(result, messages)
+
+	// Clear content of older tool results, keeping the most recent N.
+	evictCount := len(toolResultIndices) - cfg.KeepRecent
+	for j := 0; j < evictCount; j++ {
+		idx := toolResultIndices[j]
+		result[idx].Content = "[tool result cleared: session idle > " + cfg.GapThreshold.String() + "]"
+	}
+
+	return result
+}
+
+// CompactForPTLRetry truncates oldest messages to recover from a prompt-too-long error.
+// If the error message contains parseable token counts (e.g. "210000 tokens > 200000"),
+// it uses the exact gap to calculate how many messages to drop. Otherwise it falls back
+// to dropping 20% of messages. Returns nil if there are too few messages to truncate.
+// Inspired by Claude Code's truncateHeadForPTLRetry.
+func (cm *ContextManager) CompactForPTLRetry(messages []chat.ChatMessage, errMsg string) []chat.ChatMessage {
+	if len(messages) <= cm.TailSize+1 {
+		return nil // too few messages to truncate
+	}
+
+	tokenGap := getPromptTooLongTokenGap(errMsg)
+	var dropCount int
+
+	if tokenGap > 0 {
+		// Precise: accumulate token counts from oldest messages until reaching the gap.
+		acc := 0
+		for i := 0; i < len(messages)-cm.TailSize; i++ {
+			acc += estimateMessageTokens(messages[i])
+			dropCount++
+			if acc >= tokenGap {
+				break
+			}
+		}
+	} else {
+		// Fallback: drop 20% of messages when error format is unrecognised.
+		dropCount = len(messages) / 5
+		if dropCount < 1 {
+			dropCount = 1
+		}
+	}
+
+	// Don't drop more than available (keep tail).
+	maxDrop := len(messages) - cm.TailSize
+	if dropCount > maxDrop {
+		dropCount = maxDrop
+	}
+	if dropCount < 1 {
+		return nil
+	}
+
+	sliced := messages[dropCount:]
+
+	// Fix tool_result orphaning at the new boundary.
+	startIdx := adjustSplitForToolPairs(messages, dropCount)
+	if startIdx != dropCount {
+		sliced = messages[startIdx:]
+	}
+
+	return sliced
+}
+
+// TruncateToTokens truncates content to fit within a token budget using the
+// chars/4 heuristic. Preserves the beginning of the content (instruction headers)
+// and appends a truncation marker. Returns content unchanged if it fits.
+// Inspired by Claude Code's truncateToTokens in services/compact/compact.ts.
+func TruncateToTokens(content string, maxTokens int) string {
+	if EstimateStringTokens(content) <= maxTokens {
+		return content
+	}
+	const marker = "\n\n[... content truncated for compaction]"
+	charBudget := maxTokens*4 - len(marker)
+	if charBudget < 0 {
+		charBudget = 0
+	}
+	if charBudget >= len(content) {
+		return content
+	}
+	return content[:charBudget] + marker
 }
 
 // buildSummarizationPrompt creates the prompt sent to the LLM for context compression.

@@ -42,11 +42,18 @@ func DefaultPromptConfig() PromptConfig {
 }
 
 // PromptBuilder assembles the full system prompt for an agentic chat session.
+// Sections are cached after first computation and only recomputed on ClearCache().
+// This mirrors Claude Code's systemPromptSection memoization pattern that
+// computes sections once and caches until /clear or /compact.
 type PromptBuilder struct {
 	skills  SkillLister
 	kbs     KBLister
 	summFn  CompactSummaryFinder
 	config  PromptConfig
+	// sectionCache stores computed prompt sections by name.
+	// Cache is cleared on context compaction or explicit reset.
+	// Inspired by Claude Code's systemPromptSectionCache in state.ts.
+	sectionCache map[string]string
 }
 
 // NewPromptBuilder creates a PromptBuilder.
@@ -54,7 +61,35 @@ func NewPromptBuilder(skills SkillLister, kbs KBLister, summFn CompactSummaryFin
 	if cfg.MaxEstimatedTokens == 0 {
 		cfg = DefaultPromptConfig()
 	}
-	return &PromptBuilder{skills: skills, kbs: kbs, summFn: summFn, config: cfg}
+	return &PromptBuilder{
+		skills:       skills,
+		kbs:          kbs,
+		summFn:       summFn,
+		config:       cfg,
+		sectionCache: make(map[string]string),
+	}
+}
+
+// ClearCache resets all cached prompt sections.
+// Should be called on context compaction or /clear to allow section recomputation.
+// Inspired by Claude Code's clearSystemPromptSections() in systemPromptSections.ts.
+func (b *PromptBuilder) ClearCache() {
+	b.sectionCache = make(map[string]string)
+}
+
+// getCachedOrCompute returns a cached section or computes and caches it.
+func (b *PromptBuilder) getCachedOrCompute(name string, compute func() (string, error)) (string, error) {
+	if cached, ok := b.sectionCache[name]; ok {
+		return cached, nil
+	}
+	result, err := compute()
+	if err != nil {
+		return "", err
+	}
+	if result != "" {
+		b.sectionCache[name] = result
+	}
+	return result, nil
 }
 
 // PromptInput carries everything the builder needs to compose the system prompt.
@@ -69,53 +104,97 @@ type PromptInput struct {
 	Memories string
 	// CoordinatorMode enables coordinator instructions when sub-agent spawning is available.
 	CoordinatorMode bool
+	// DeferredToolNames lists tools whose schemas are not in the initial tools[] array.
+	// The LLM can load them on demand via the tool_search builtin.
+	// Inspired by Claude Code's deferred tool announcement in system prompt.
+	DeferredToolNames []string
+	// UserOnlySkills lists skills with disableModelInvocation=true. These are
+	// announced in the prompt so the LLM can suggest them to the user, but the LLM
+	// cannot invoke them directly. Inspired by Claude Code's user-invocable skills
+	// that appear in /help but not in the tools[] array.
+	UserOnlySkills []skill.Skill
 }
 
 // Build assembles the full system prompt from all dynamic sections.
+// Stable sections (tools, KBs, static instructions) are cached across turns
+// to preserve prompt cache prefix stability. Volatile sections (memories,
+// summaries, deferred tools) recompute every turn.
+// Inspired by Claude Code's systemPromptSection (cached) vs
+// DANGEROUS_uncachedSystemPromptSection (volatile) pattern.
 func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, error) {
 	var sections []string
 
-	// 1. Agent Identity & Instructions
+	// 1. Agent Identity & Instructions (cached — stable across turns)
 	if in.SystemPrompt != "" {
 		sections = append(sections, in.SystemPrompt)
 	}
 
-	// 2. Available Tools
+	// 2. Available Tools (cached — only changes on skill config changes)
 	if b.skills != nil {
-		skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
+		toolsSection, err := b.getCachedOrCompute("tools:"+in.AgentID.String(), func() (string, error) {
+			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
+			if err != nil {
+				return "", fmt.Errorf("prompt: list skills: %w", err)
+			}
+			if len(skills) > 0 {
+				return formatToolsSection(skills), nil
+			}
+			return "", nil
+		})
 		if err != nil {
-			return "", fmt.Errorf("prompt: list skills: %w", err)
+			return "", err
 		}
-		if len(skills) > 0 {
-			sections = append(sections, formatToolsSection(skills))
+		if toolsSection != "" {
+			sections = append(sections, toolsSection)
 		}
 	}
 
-	// 3. Tool Usage Instructions (static rules)
+	// 3. Tool Usage Instructions (static — always cached)
 	sections = append(sections, toolUsageInstructions)
 
-	// 3b. Coordinator instructions (when sub-agent spawning is enabled).
+	// 3b. Deferred tools announcement (volatile — changes per BuildWithDeferred result).
+	if len(in.DeferredToolNames) > 0 {
+		sections = append(sections, formatDeferredToolsSection(in.DeferredToolNames))
+	}
+
+	// 3c. User-only skills announcement (cached — stable within a run).
+	// These skills have disableModelInvocation=true but the LLM should know
+	// they exist so it can suggest them to the user when relevant.
+	if len(in.UserOnlySkills) > 0 {
+		sections = append(sections, formatUserOnlySkillsSection(in.UserOnlySkills))
+	}
+
+	// 3d. Coordinator instructions (cached — stable within a run).
 	if in.CoordinatorMode {
 		sections = append(sections, coordinatorInstructions)
 	}
 
-	// 4. Knowledge Base Context
+	// 4. Knowledge Base Context (cached — only changes on KB config changes)
 	if b.kbs != nil {
-		kbs, err := b.kbs.ListByAgentID(ctx, in.AgentID)
+		kbSection, err := b.getCachedOrCompute("kbs:"+in.AgentID.String(), func() (string, error) {
+			kbs, err := b.kbs.ListByAgentID(ctx, in.AgentID)
+			if err != nil {
+				return "", fmt.Errorf("prompt: list knowledge bases: %w", err)
+			}
+			if len(kbs) > 0 {
+				return formatKBSection(kbs), nil
+			}
+			return "", nil
+		})
 		if err != nil {
-			return "", fmt.Errorf("prompt: list knowledge bases: %w", err)
+			return "", err
 		}
-		if len(kbs) > 0 {
-			sections = append(sections, formatKBSection(kbs))
+		if kbSection != "" {
+			sections = append(sections, kbSection)
 		}
 	}
 
-	// 5. Memories
+	// 5. Memories (volatile — changes per recall)
 	if in.Memories != "" {
 		sections = append(sections, "## Relevant Memories\n\n"+in.Memories)
 	}
 
-	// 6. Conversation Summary (compact_summary)
+	// 6. Conversation Summary (volatile — changes after compaction)
 	if b.summFn != nil {
 		msg, found, err := b.summFn.GetLatestCompactSummary(ctx, in.SessionID)
 		if err != nil {
@@ -138,15 +217,27 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 }
 
 // formatToolsSection produces a markdown block listing the available skills.
+// Skills with DisableModelInvocation=true are excluded (they appear in the
+// User Commands section instead).
+// For skills with WhenToUse set, it injects a "When to use:" sub-bullet so the
+// LLM can make more precise selection decisions. This keeps the tool description
+// focused on WHAT the skill does while WhenToUse explains WHEN to invoke it.
+// Inspired by Claude Code's BundledSkillDefinition.whenToUse injection pattern.
 func formatToolsSection(skills []skill.Skill) string {
 	var sb strings.Builder
 	sb.WriteString("## Available Tools\n\n")
 	for _, s := range skills {
+		if s.DisableModelInvocation {
+			continue
+		}
 		fmt.Fprintf(&sb, "- **%s** (`%s`)", s.Name, s.Slug)
 		if s.Description != "" {
 			sb.WriteString(": " + s.Description)
 		}
 		sb.WriteString("\n")
+		if s.WhenToUse != nil && *s.WhenToUse != "" {
+			fmt.Fprintf(&sb, "  - *When to use:* %s\n", *s.WhenToUse)
+		}
 	}
 	return sb.String()
 }
@@ -168,26 +259,138 @@ func formatKBSection(kbs []knowledgebase.KnowledgeBase) string {
 	return sb.String()
 }
 
+// formatUserOnlySkillsSection produces a markdown block listing user-only slash commands.
+// The LLM cannot invoke these but should suggest them when relevant.
+// Shows argument_hint inline (e.g. "/debug-agent <agent_id>") and when_to_use as a sub-bullet
+// so the LLM can suggest proper usage without trial-and-error.
+// Inspired by Claude Code's userInvocable skills in /help with argumentHint and whenToUse.
+func formatUserOnlySkillsSection(skills []skill.Skill) string {
+	var sb strings.Builder
+	sb.WriteString("## User Commands\n\n")
+	sb.WriteString("The following commands are available to the user (not callable by you directly). ")
+	sb.WriteString("Suggest them when relevant to the user's needs.\n\n")
+	for _, s := range skills {
+		// Format: "- **/slug** `<arg_hint>`" or "- **/slug**" if no hint
+		if s.ArgumentHint != nil && *s.ArgumentHint != "" {
+			fmt.Fprintf(&sb, "- **/%s** `%s`", s.Slug, *s.ArgumentHint)
+		} else {
+			fmt.Fprintf(&sb, "- **/%s**", s.Slug)
+		}
+		if s.Description != "" {
+			sb.WriteString(": " + s.Description)
+		}
+		sb.WriteString("\n")
+		if s.WhenToUse != nil && *s.WhenToUse != "" {
+			fmt.Fprintf(&sb, "  - *When to suggest:* %s\n", *s.WhenToUse)
+		}
+	}
+	return sb.String()
+}
+
+// formatDeferredToolsSection produces a system-reminder block announcing deferred tools.
+// The LLM sees these names but must call tool_search to load their full schemas.
+// Inspired by Claude Code's deferred tool announcement in ToolSearchTool/prompt.ts.
+func formatDeferredToolsSection(names []string) string {
+	var sb strings.Builder
+	sb.WriteString("## Deferred Tools\n\n")
+	sb.WriteString("The following tools are available but their schemas are not loaded yet. ")
+	sb.WriteString("Use the `tool_search` tool to load a tool's full schema before calling it.\n\n")
+	for _, name := range names {
+		fmt.Fprintf(&sb, "- `%s`\n", name)
+	}
+	return sb.String()
+}
+
 // coordinatorInstructions is injected when the agent tool is available for sub-agent spawning.
+// Inspired by Claude Code's coordinatorMode.ts — detailed guidance on delegation,
+// synthesis, verification, and prompt quality.
 const coordinatorInstructions = `## Coordinator Mode
 
-You can spawn sub-agents to handle subtasks in parallel using the 'agent' tool.
+You are a **coordinator**. Your job is to:
+- Help the user achieve their goal
+- Direct sub-agents to research, implement, and verify
+- Synthesize results and communicate with the user
+- Answer questions directly when possible — don't delegate work you can handle without tools
 
-### When to Delegate
-- Tasks that are independent and can run concurrently
-- Complex tasks that benefit from decomposition into focused subtasks
-- Tasks that require different tool expertise
+Sub-agent results are internal signals, not conversation partners — never thank or acknowledge them. Summarize new information for the user as it arrives.
+
+### Your Tools
+
+- **agent** — Spawn a new sub-agent
+- To launch sub-agents in parallel, make multiple tool calls in a single message
+
+When calling the agent tool:
+- Do not use one sub-agent to check on another
+- Do not use sub-agents for trivial operations — give them higher-level tasks
+- After launching agents, briefly tell the user what you launched and end your response
+- Never fabricate or predict agent results — results arrive as separate messages
+
+### Task Workflow
+
+Most tasks follow these phases:
+
+| Phase | Who | Purpose |
+|-------|-----|---------|
+| Research | Sub-agents (parallel) | Investigate codebase, find files, understand problem |
+| Synthesis | **You** (coordinator) | Read findings, craft implementation specs |
+| Implementation | Sub-agents | Make targeted changes per spec |
+| Verification | Sub-agents | Test changes work |
+
+### Concurrency
+
+**Parallelism is your superpower.** Launch independent sub-agents concurrently whenever possible. When doing research, cover multiple angles.
+
+- **Read-only tasks** (research) — run in parallel freely
+- **Write-heavy tasks** (implementation) — one at a time per set of files
+- **Verification** can sometimes run alongside implementation on different file areas
+
+### Writing Sub-Agent Prompts
+
+**Sub-agents cannot see your conversation.** Every prompt must be self-contained with everything the sub-agent needs.
+
+#### Always synthesize — your most important job
+
+When sub-agents report research findings, **you must understand them before directing follow-up work**. Read the findings. Identify the approach. Then write a prompt that proves you understood by including specific file paths, line numbers, and exactly what to change.
+
+Never write "based on your findings" — these phrases delegate understanding instead of doing it yourself.
+
+Bad: "Based on the research, fix the auth bug"
+Good: "Fix the null pointer in src/auth/validate.go:42. The user field is undefined when sessions expire but the token remains cached. Add a nil check before user.ID access — if nil, return 401. Run tests and report results."
+
+#### Add a purpose statement
+
+Include a brief purpose so sub-agents can calibrate depth:
+- "This research will inform implementation — report file paths, line numbers, and type signatures."
+- "This is a quick check — just verify the happy path."
+
+#### Prompt tips
+
+- Include file paths, line numbers, error messages — sub-agents start fresh
+- State what "done" looks like
+- For implementation: "Run relevant tests, then report results"
+- For research: "Report findings — do not modify files"
+- For verification: "Prove the code works, don't just confirm it exists"
+- For verification: "Try edge cases and error paths — don't just re-run happy paths"
+
+### What Real Verification Looks Like
+
+Verification means **proving the code works**, not confirming it exists:
+- Run tests **with the feature enabled** — not just "tests pass"
+- Run builds and **investigate errors** — don't dismiss as "unrelated"
+- Be skeptical — if something looks off, dig in
+- **Test independently** — prove the change works, don't rubber-stamp
+
+### Handling Failures
+
+When a sub-agent reports failure (tests failed, build errors, file not found):
+- Spawn a new sub-agent with the error context and a corrected approach
+- If a correction attempt fails, try a different approach or report to the user
 
 ### When NOT to Delegate
-- Simple tasks you can handle directly with a single tool call
-- Tasks with strong sequential dependencies
-- Trivial questions that don't require tool usage
 
-### Guidelines
-- Write clear, specific prompts — sub-agents start with zero conversation context
-- Include all necessary context in the prompt
-- Spawn multiple sub-agents simultaneously for independent subtasks
-- Synthesize sub-agent results into a coherent final answer`
+- Simple tasks you can handle directly with a single tool call
+- Tasks with strong sequential dependencies (sub-agent B needs sub-agent A's result)
+- Trivial questions that don't require tool usage`
 
 // toolUsageInstructions is the static section injected into every agentic prompt.
 const toolUsageInstructions = `## Tool Usage Instructions

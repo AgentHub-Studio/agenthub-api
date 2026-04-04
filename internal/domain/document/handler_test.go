@@ -65,6 +65,16 @@ func (m *mockDocumentSvc) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (m *mockDocumentSvc) Reprocess(_ context.Context, id uuid.UUID) (document.DocumentResponse, error) {
+	d, ok := m.docs[id]
+	if !ok {
+		return document.DocumentResponse{}, document.ErrNotFound
+	}
+	d.Status = document.StatusPending
+	m.docs[id] = d
+	return d, nil
+}
+
 func setupDocument() (*chi.Mux, *mockDocumentSvc) {
 	svc := newMockDocumentSvc()
 	h := document.NewHandler(svc)
@@ -151,6 +161,32 @@ func TestDocumentHandler_Delete_NotFound(t *testing.T) {
 	r, _ := setupDocument()
 	kbID := uuid.New()
 	req := httptest.NewRequest(http.MethodDelete, "/api/knowledge-bases/"+kbID.String()+"/documents/"+uuid.New().String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestDocumentHandler_Reprocess_Success(t *testing.T) {
+	r, svc := setupDocument()
+	kbID := uuid.New()
+	docID := uuid.New()
+	svc.docs[docID] = document.DocumentResponse{ID: docID, KnowledgeBaseID: kbID, FileName: "report.pdf", Status: document.StatusFailed}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents/"+docID.String()+"/reprocess", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp document.DocumentResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, document.StatusPending, resp.Status)
+}
+
+func TestDocumentHandler_Reprocess_NotFound(t *testing.T) {
+	r, _ := setupDocument()
+	kbID := uuid.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents/"+uuid.New().String()+"/reprocess", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

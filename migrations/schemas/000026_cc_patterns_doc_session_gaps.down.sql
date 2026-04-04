@@ -1,0 +1,69 @@
+-- Revert migration 000026
+
+-- Remove indexes
+DROP INDEX IF EXISTS idx_tool_has_activity_desc;
+DROP INDEX IF EXISTS idx_skill_availability;
+DROP INDEX IF EXISTS idx_skill_user_invocable;
+
+-- Remove new tools (c078–c088)
+DELETE FROM skill_tool WHERE tool_id IN (
+    'c1000000-0000-0000-0000-000000000078',
+    'c1000000-0000-0000-0000-000000000079',
+    'c1000000-0000-0000-0000-000000000080',
+    'c1000000-0000-0000-0000-000000000081',
+    'c1000000-0000-0000-0000-000000000082',
+    'c1000000-0000-0000-0000-000000000083',
+    'c1000000-0000-0000-0000-000000000084',
+    'c1000000-0000-0000-0000-000000000085',
+    'c1000000-0000-0000-0000-000000000086',
+    'c1000000-0000-0000-0000-000000000087',
+    'c1000000-0000-0000-0000-000000000088'
+);
+DELETE FROM tool WHERE id IN (
+    'c1000000-0000-0000-0000-000000000078',
+    'c1000000-0000-0000-0000-000000000079',
+    'c1000000-0000-0000-0000-000000000080',
+    'c1000000-0000-0000-0000-000000000081',
+    'c1000000-0000-0000-0000-000000000082',
+    'c1000000-0000-0000-0000-000000000083',
+    'c1000000-0000-0000-0000-000000000084',
+    'c1000000-0000-0000-0000-000000000085',
+    'c1000000-0000-0000-0000-000000000086',
+    'c1000000-0000-0000-0000-000000000087',
+    'c1000000-0000-0000-0000-000000000088'
+);
+
+-- Remove new skills (b010–b012)
+DELETE FROM agent_skill WHERE skill_id IN (
+    'b1000000-0000-0000-0002-000000000010',
+    'b1000000-0000-0000-0002-000000000011',
+    'b1000000-0000-0000-0002-000000000012'
+);
+DELETE FROM skill WHERE id IN (
+    'b1000000-0000-0000-0002-000000000010',
+    'b1000000-0000-0000-0002-000000000011',
+    'b1000000-0000-0000-0002-000000000012'
+);
+
+-- Reset user_invocable
+UPDATE skill SET user_invocable = TRUE
+WHERE slug IN (
+    'agent-management', 'skill-management', 'tool-management',
+    'knowledge-base-management', 'settings-management',
+    'datasource-management', 'mcp-management', 'batch-execute'
+);
+
+-- Remove tool UI hint columns
+ALTER TABLE tool
+    DROP COLUMN IF EXISTS activity_description,
+    DROP COLUMN IF EXISTS tool_summary;
+
+-- Remove agent_hook async_rewake
+ALTER TABLE agent_hook
+    DROP COLUMN IF EXISTS async_rewake;
+
+-- Remove skill enhancement columns
+ALTER TABLE skill
+    DROP COLUMN IF EXISTS fork_agent_type,
+    DROP COLUMN IF EXISTS availability,
+    DROP COLUMN IF EXISTS user_invocable;

@@ -21,6 +21,13 @@ type Repository interface {
 	GetSessionByID(ctx context.Context, id uuid.UUID) (ChatSession, error)
 	CreateSession(ctx context.Context, s ChatSession) (ChatSession, error)
 	UpdateSessionStatus(ctx context.Context, id uuid.UUID, status ChatStatus) (ChatSession, error)
+	UpdateSessionTitle(ctx context.Context, id uuid.UUID, title string) (ChatSession, error)
+	// UpdateSessionAgent binds an agent to a session that has none.
+	UpdateSessionAgent(ctx context.Context, sessionID uuid.UUID, agentID uuid.UUID) error
+	// FindDefaultAgentID returns the ID of the default agent for the tenant
+	// (slug='agenthub-assistant', PUBLISHED). Falls back to any PUBLISHED agent.
+	// Returns nil, nil when no published agent exists.
+	FindDefaultAgentID(ctx context.Context) (*uuid.UUID, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	FindMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) ([]ChatMessage, int64, error)
 	CreateMessage(ctx context.Context, m ChatMessage) (ChatMessage, error)
@@ -156,6 +163,32 @@ func (r *postgresRepository) UpdateSessionStatus(ctx context.Context, id uuid.UU
 	return s, nil
 }
 
+func (r *postgresRepository) UpdateSessionTitle(ctx context.Context, id uuid.UUID, title string) (ChatSession, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return ChatSession{}, err
+	}
+	defer release()
+
+	now := time.Now().UTC()
+	var s ChatSession
+	err = conn.QueryRow(ctx,
+		`UPDATE chat_session
+		 SET title = $1, updated_at = $2
+		 WHERE id = $3
+		 RETURNING id, agent_id, title, status, created_at, updated_at`,
+		title, now, id,
+	).Scan(&s.ID, &s.AgentID, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ChatSession{}, ErrNotFound
+		}
+		return ChatSession{}, fmt.Errorf("chat: update session title: %w", err)
+	}
+
+	return s, nil
+}
+
 func (r *postgresRepository) DeleteSession(ctx context.Context, id uuid.UUID) error {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
 	if err != nil {
@@ -172,6 +205,49 @@ func (r *postgresRepository) DeleteSession(ctx context.Context, id uuid.UUID) er
 	}
 
 	return nil
+}
+
+func (r *postgresRepository) UpdateSessionAgent(ctx context.Context, sessionID uuid.UUID, agentID uuid.UUID) error {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	tag, err := conn.Exec(ctx,
+		`UPDATE chat_session SET agent_id = $1, updated_at = $2 WHERE id = $3`,
+		agentID, time.Now().UTC(), sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: update session agent: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *postgresRepository) FindDefaultAgentID(ctx context.Context) (*uuid.UUID, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	var id uuid.UUID
+	// Prefer the well-known AgentHub Assistant; fall back to any published agent.
+	err = conn.QueryRow(ctx,
+		`SELECT id FROM agent WHERE status = 'PUBLISHED'
+		 ORDER BY (slug = 'agenthub-assistant') DESC, created_at ASC
+		 LIMIT 1`,
+	).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("chat: find default agent: %w", err)
+	}
+	return &id, nil
 }
 
 func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) ([]ChatMessage, int64, error) {

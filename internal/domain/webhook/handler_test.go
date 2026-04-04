@@ -88,7 +88,11 @@ func (m *mockWebhookSvc) ListDeliveries(_ context.Context, webhookID uuid.UUID, 
 	return pagination.NewPage(logs, int64(len(logs)), req), nil
 }
 
-func (m *mockWebhookSvc) IngestWebhook(_ context.Context, token, sourceType string, payload []byte, signature, eventType string) (webhook.WebhookDeliveryLog, error) {
+func (m *mockWebhookSvc) IngestWebhook(_ context.Context, token, _ string, _ []byte, _, eventType string) (webhook.WebhookDeliveryLog, error) {
+	// Simulate not-found when token starts with "unknown-"
+	if len(token) >= 8 && token[:8] == "unknown-" {
+		return webhook.WebhookDeliveryLog{}, webhook.ErrNotFound
+	}
 	d := webhook.WebhookDeliveryLog{
 		ID:        uuid.New(),
 		EventType: eventType,
@@ -116,6 +120,15 @@ func setupWebhook() (*chi.Mux, *mockWebhookSvc) {
 	h := webhook.NewHandler(svc)
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
+	return r, svc
+}
+
+func setupWebhookWithPublic() (*chi.Mux, *mockWebhookSvc) {
+	svc := newMockWebhookSvc()
+	h := webhook.NewHandler(svc)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	h.RegisterPublicRoutes(r)
 	return r, svc
 }
 
@@ -223,4 +236,65 @@ func TestWebhookHandler_ListDeliveries_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestWebhookHandler_Ingest_Success(t *testing.T) {
+	r, _ := setupWebhookWithPublic()
+
+	body := []byte(`{"ref":"refs/heads/main","commits":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/valid-token/ingest", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", "sha256=abc123")
+	req.Header.Set("X-GitHub-Event", "push")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "PENDING", resp["status"])
+	assert.Equal(t, "push", resp["eventType"])
+}
+
+func TestWebhookHandler_Ingest_GitLabSource(t *testing.T) {
+	r, _ := setupWebhookWithPublic()
+
+	body := []byte(`{"object_kind":"push"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/valid-token/ingest", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Gitlab-Token", "mysecret")
+	req.Header.Set("X-Gitlab-Event", "Push Hook")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Push Hook", resp["eventType"])
+}
+
+func TestWebhookHandler_Ingest_UnknownToken(t *testing.T) {
+	r, _ := setupWebhookWithPublic()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/unknown-abc/ingest", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestWebhookHandler_Ingest_DefaultEventType(t *testing.T) {
+	r, _ := setupWebhookWithPublic()
+
+	// No event header — should default to "push"
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/valid-token/ingest", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "push", resp["eventType"])
 }

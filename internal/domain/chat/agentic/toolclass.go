@@ -64,8 +64,8 @@ func ClassifyTool(toolName string, toolInput string, overrides map[string]ToolEf
 	return ToolEffectSideEffect
 }
 
-// PartitionToolCalls splits tool calls into read-only and side-effect groups.
-func PartitionToolCalls(toolCalls []ai.ToolCall, overrides map[string]ToolEffect) (readOnly, sideEffect []ai.ToolCall) {
+// SplitToolCallsByEffect splits tool calls into read-only and side-effect groups.
+func SplitToolCallsByEffect(toolCalls []ai.ToolCall, overrides map[string]ToolEffect) (readOnly, sideEffect []ai.ToolCall) {
 	for _, tc := range toolCalls {
 		if ClassifyTool(tc.Function.Name, tc.Function.Arguments, overrides) == ToolEffectReadOnly {
 			readOnly = append(readOnly, tc)
@@ -74,10 +74,6 @@ func PartitionToolCalls(toolCalls []ai.ToolCall, overrides map[string]ToolEffect
 		}
 	}
 	return readOnly, sideEffect
-}
-
-func isSQLTool(name string) bool {
-	return strings.Contains(name, "sql") || strings.Contains(name, "query") || name == "execute-sql"
 }
 
 func isSelectOnly(input string) bool {

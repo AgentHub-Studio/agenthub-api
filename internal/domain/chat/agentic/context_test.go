@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,6 +73,57 @@ func TestEstimateStringTokens_Empty(t *testing.T) {
 func TestEstimateStringTokens_Short(t *testing.T) {
 	// len("hello")/4 + 3 = 1 + 3 = 4
 	assert.Equal(t, 4, agentic.EstimateStringTokens("hello"))
+}
+
+// --- EstimateStringTokensForType ---
+
+func TestEstimateStringTokensForType_JSON(t *testing.T) {
+	s := `{"key":"value","arr":[1,2,3]}`
+	tokens := agentic.EstimateStringTokensForType(s, ".json")
+	// JSON uses 2 bytes/token: len(s)/2 + 3
+	expected := len(s)/2 + 3
+	assert.Equal(t, expected, tokens)
+}
+
+func TestEstimateStringTokensForType_JSONL(t *testing.T) {
+	s := `{"line":1}`
+	tokens := agentic.EstimateStringTokensForType(s, ".jsonl")
+	expected := len(s)/2 + 3
+	assert.Equal(t, expected, tokens)
+}
+
+func TestEstimateStringTokensForType_GeoJSON(t *testing.T) {
+	s := `{"type":"Feature"}`
+	tokens := agentic.EstimateStringTokensForType(s, ".geojson")
+	expected := len(s)/2 + 3
+	assert.Equal(t, expected, tokens)
+}
+
+func TestEstimateStringTokensForType_NonJSON(t *testing.T) {
+	s := "func main() { fmt.Println(hello) }"
+	tokens := agentic.EstimateStringTokensForType(s, ".go")
+	// Non-JSON uses 4 bytes/token: len(s)/4 + 3
+	expected := len(s)/4 + 3
+	assert.Equal(t, expected, tokens)
+}
+
+func TestEstimateStringTokensForType_EmptyString(t *testing.T) {
+	assert.Equal(t, 0, agentic.EstimateStringTokensForType("", ".json"))
+	assert.Equal(t, 0, agentic.EstimateStringTokensForType("", ".go"))
+}
+
+func TestEstimateStringTokensForType_CaseInsensitive(t *testing.T) {
+	s := `{"test":true}`
+	tokensLower := agentic.EstimateStringTokensForType(s, ".json")
+	tokensUpper := agentic.EstimateStringTokensForType(s, ".JSON")
+	assert.Equal(t, tokensLower, tokensUpper)
+}
+
+func TestEstimateStringTokensForType_UnknownExtFallsBackTo4(t *testing.T) {
+	s := "some content here"
+	tokens := agentic.EstimateStringTokensForType(s, ".txt")
+	// Should match standard estimation: len/4 + 3
+	assert.Equal(t, agentic.EstimateStringTokens(s), tokens)
 }
 
 func TestEstimateStringTokens_Long(t *testing.T) {
@@ -375,4 +428,514 @@ func TestReactiveCompact_FullSummarization(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agentic.StageFullSummarization, result.Stage)
 	assert.Less(t, result.CompactedCount, result.OriginalCount)
+}
+
+// --- SnipOldHistory with tool pair preservation ---
+
+func toolCallID(id string) *string { return &id }
+
+func TestHistorySnip_PreservesToolPairs(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(1000)
+
+	// Build a history where a tool_result in the kept range depends on
+	// a tool_use that would be snipped without adjustment.
+	toolCalls := json.RawMessage(`[{"id":"tc_1","type":"function","function":{"name":"search","arguments":"{}"}}]`)
+
+	msgs := []chat.ChatMessage{
+		{Role: "user", Content: "old msg 1", MessageType: chat.MessageTypeText},
+		{Role: "user", Content: "old msg 2", MessageType: chat.MessageTypeText},
+		{Role: "assistant", Content: "calling tool", MessageType: chat.MessageTypeToolUse, ToolCalls: toolCalls},
+		{Role: "tool", Content: "result", MessageType: chat.MessageTypeToolResult, ToolCallID: toolCallID("tc_1")},
+		{Role: "assistant", Content: "here is the answer", MessageType: chat.MessageTypeText},
+		{Role: "user", Content: "thanks", MessageType: chat.MessageTypeText},
+		{Role: "assistant", Content: "welcome", MessageType: chat.MessageTypeText},
+		{Role: "user", Content: "bye", MessageType: chat.MessageTypeText},
+	}
+
+	// Push into 80-85% range for StageHistorySnip.
+	// msgs tokens ~= 8*(4 + ~10/4) = ~56; keep = tailSize*2 = 8 → all kept normally.
+	// Use smaller keep to force a snip. We test via ReactiveCompact.
+	// Instead, test the snip directly by pushing usage into the right range.
+	// With windowSize=100, msgs~56 tokens + systemTokens to reach 80-85%.
+	result, err := cm.ReactiveCompact(context.Background(), msgs, 25, cfg, nil)
+	require.NoError(t, err)
+
+	if result.Stage == agentic.StageHistorySnip {
+		// Verify no orphaned tool_result: for every tool_result, a matching tool_use must exist.
+		for _, m := range result.Messages {
+			if m.MessageType == chat.MessageTypeToolResult && m.ToolCallID != nil {
+				found := false
+				for _, m2 := range result.Messages {
+					if m2.MessageType == chat.MessageTypeToolUse && len(m2.ToolCalls) > 0 {
+						var tcs []struct{ ID string `json:"id"` }
+						if err := json.Unmarshal(m2.ToolCalls, &tcs); err == nil {
+							for _, tc := range tcs {
+								if tc.ID == *m.ToolCallID {
+									found = true
+								}
+							}
+						}
+					}
+				}
+				assert.True(t, found, "tool_result %s has no matching tool_use", *m.ToolCallID)
+			}
+		}
+	}
+}
+
+func TestHistorySnip_NoOrphanedToolResults(t *testing.T) {
+	// Directly test that snipOldHistory (via HistorySnip stage) pulls in
+	// the tool_use when the split point falls between a tool_use and tool_result.
+	cm := agentic.NewContextManager() // TailSize = 4
+	cfg := reactiveCompactConfig(500)
+
+	toolCalls := json.RawMessage(`[{"id":"tc_A","type":"function","function":{"name":"search","arguments":"{}"}}]`)
+
+	msgs := []chat.ChatMessage{
+		// These get snipped:
+		{Role: "user", Content: string(make([]byte, 80)), MessageType: chat.MessageTypeText},
+		{Role: "assistant", Content: string(make([]byte, 80)), MessageType: chat.MessageTypeText},
+		{Role: "user", Content: string(make([]byte, 80)), MessageType: chat.MessageTypeText},
+		// tool_use that MUST be preserved if tool_result is in the kept range:
+		{Role: "assistant", Content: "tool call", MessageType: chat.MessageTypeToolUse, ToolCalls: toolCalls},
+		// tool_result that would be kept:
+		{Role: "tool", Content: "output", MessageType: chat.MessageTypeToolResult, ToolCallID: toolCallID("tc_A")},
+		// tail messages:
+		{Role: "assistant", Content: "answer", MessageType: chat.MessageTypeText},
+		{Role: "user", Content: "ok", MessageType: chat.MessageTypeText},
+		{Role: "assistant", Content: "done", MessageType: chat.MessageTypeText},
+		{Role: "user", Content: "bye", MessageType: chat.MessageTypeText},
+		{Role: "assistant", Content: "goodbye", MessageType: chat.MessageTypeText},
+	}
+
+	// Push into 80-85% range.
+	// Approx tokens: 10 msgs * (4 + ~20) = ~240 from messages.
+	// Need 80-85% of 500 → 400-425 total → systemTokens ~170.
+	result, err := cm.ReactiveCompact(context.Background(), msgs, 170, cfg, nil)
+	require.NoError(t, err)
+
+	if result.Stage == agentic.StageHistorySnip {
+		// If tool_result tc_A is in the output, tool_use must also be.
+		hasToolResult := false
+		hasToolUse := false
+		for _, m := range result.Messages {
+			if m.MessageType == chat.MessageTypeToolResult && m.ToolCallID != nil && *m.ToolCallID == "tc_A" {
+				hasToolResult = true
+			}
+			if m.MessageType == chat.MessageTypeToolUse && len(m.ToolCalls) > 0 {
+				var tcs []struct{ ID string `json:"id"` }
+				_ = json.Unmarshal(m.ToolCalls, &tcs)
+				for _, tc := range tcs {
+					if tc.ID == "tc_A" {
+						hasToolUse = true
+					}
+				}
+			}
+		}
+		if hasToolResult {
+			assert.True(t, hasToolUse, "tool_result tc_A kept but matching tool_use was snipped")
+		}
+	}
+}
+
+func TestReactiveCompact_Microcompact(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(1000)
+
+	msgs := makeMessages(10, 40) // ~140 tokens
+	// System tokens push us into 85-90% range (140 + 720 = 860 / 1000 = 86%).
+	result, err := cm.ReactiveCompact(context.Background(), msgs, 720, cfg, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, agentic.StageMicrocompact, result.Stage)
+	// Non-tail messages should be truncated to 100 chars.
+	for i := 0; i < len(result.Messages)-cm.TailSize; i++ {
+		assert.LessOrEqual(t, len(result.Messages[i].Content), 103) // 100 + "..."
+	}
+}
+
+// --- VerifyCompaction ---
+
+func TestVerifyCompaction_NoStage(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(1000)
+
+	// No stage applied → returns as-is.
+	result := &agentic.ReactiveCompactResult{
+		CompactResult: agentic.CompactResult{
+			Messages: makeMessages(5, 40),
+		},
+	}
+	verified, err := cm.VerifyCompaction(context.Background(), result, 0, cfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, result, verified)
+}
+
+func TestVerifyCompaction_EffectiveCompaction(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(1000)
+
+	// Stage 1 applied and result is below 75% → no escalation.
+	result := &agentic.ReactiveCompactResult{
+		CompactResult: agentic.CompactResult{
+			Messages:      makeMessages(5, 40), // ~70 tokens
+			OriginalCount: 10,
+			CompactedCount: 5,
+		},
+		Stage: agentic.StageToolResultTruncation,
+	}
+	// 70 tokens + 0 system = 7% of 1000 → well below 75%.
+	verified, err := cm.VerifyCompaction(context.Background(), result, 0, cfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, agentic.StageToolResultTruncation, verified.Stage)
+}
+
+func TestVerifyCompaction_Escalates(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(1000)
+
+	// Stage 1 applied but we're still above 75% → escalates.
+	// Create messages that push into 80-85% range after Stage 1.
+	bigMsgs := makeMessages(10, 320) // ~10 * (4 + 80) = ~840 tokens = 84%
+	result := &agentic.ReactiveCompactResult{
+		CompactResult: agentic.CompactResult{
+			Messages:       bigMsgs,
+			OriginalCount:  15,
+			CompactedCount: 10,
+		},
+		Stage: agentic.StageToolResultTruncation,
+	}
+	// 840 tokens + 0 system = 84% of 1000 → above 75%, escalates to HistorySnip (80-85%).
+	verified, err := cm.VerifyCompaction(context.Background(), result, 0, cfg, nil)
+	require.NoError(t, err)
+	// Should have escalated to a higher stage.
+	assert.NotEqual(t, agentic.StageToolResultTruncation, verified.Stage)
+}
+
+func TestVerifyCompaction_FullSummarizationNoEscalation(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cfg := reactiveCompactConfig(1000)
+
+	// Full summarization can't escalate further → returns as-is.
+	result := &agentic.ReactiveCompactResult{
+		CompactResult: agentic.CompactResult{
+			Messages:      makeMessages(5, 400), // still big
+			OriginalCount: 20,
+			CompactedCount: 5,
+		},
+		Stage: agentic.StageFullSummarization,
+	}
+	verified, err := cm.VerifyCompaction(context.Background(), result, 0, cfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, agentic.StageFullSummarization, verified.Stage)
+}
+
+// --- CompactForPTLRetry ---
+
+func TestCompactForPTLRetry_PreciseTruncation(t *testing.T) {
+	cm := agentic.NewContextManager() // TailSize = 4
+
+	// 10 messages, each ~50 chars → ~(50/4 + 4) = ~16 tokens each.
+	msgs := makeMessages(10, 50)
+
+	// Error says 200 tokens > 180 → gap of 20 tokens → need to drop ~2 messages (16 each).
+	errMsg := "Prompt is too long: 200 tokens > 180"
+	result := cm.CompactForPTLRetry(msgs, errMsg)
+
+	require.NotNil(t, result)
+	assert.Less(t, len(result), len(msgs))
+	// Should have dropped at least 1 message from the head.
+	assert.GreaterOrEqual(t, len(msgs)-len(result), 1)
+	// Tail (last 4) should still be present.
+	assert.Equal(t, msgs[len(msgs)-1].Content, result[len(result)-1].Content)
+}
+
+func TestCompactForPTLRetry_FallbackDrops20Percent(t *testing.T) {
+	cm := agentic.NewContextManager() // TailSize = 4
+
+	msgs := makeMessages(10, 50)
+
+	// Error with no parseable token counts → falls back to 20%.
+	errMsg := "context_length_exceeded: prompt too large"
+	result := cm.CompactForPTLRetry(msgs, errMsg)
+
+	require.NotNil(t, result)
+	// 20% of 10 = 2 messages dropped.
+	assert.Equal(t, 8, len(result))
+}
+
+func TestCompactForPTLRetry_TooFewMessages(t *testing.T) {
+	cm := agentic.NewContextManager() // TailSize = 4
+
+	// Only 4 messages → can't truncate (need more than TailSize+1).
+	msgs := makeMessages(4, 50)
+	result := cm.CompactForPTLRetry(msgs, "Prompt is too long: 200 tokens > 180")
+
+	assert.Nil(t, result)
+}
+
+func TestCompactForPTLRetry_PreservesToolPairs(t *testing.T) {
+	cm := agentic.NewContextManager() // TailSize = 4
+
+	toolCalls := json.RawMessage(`[{"id":"tc_1","type":"function","function":{"name":"search","arguments":"{}"}}]`)
+
+	msgs := []chat.ChatMessage{
+		{Role: "user", Content: string(make([]byte, 200)), MessageType: chat.MessageTypeText},
+		{Role: "user", Content: string(make([]byte, 200)), MessageType: chat.MessageTypeText},
+		{Role: "assistant", Content: "tool call", MessageType: chat.MessageTypeToolUse, ToolCalls: toolCalls},
+		{Role: "tool", Content: "output", MessageType: chat.MessageTypeToolResult, ToolCallID: toolCallID("tc_1")},
+		{Role: "assistant", Content: "answer", MessageType: chat.MessageTypeText},
+		{Role: "user", Content: "ok", MessageType: chat.MessageTypeText},
+		{Role: "assistant", Content: "done", MessageType: chat.MessageTypeText},
+		{Role: "user", Content: "bye", MessageType: chat.MessageTypeText},
+	}
+
+	// Unparseable error → 20% fallback → drop 1 message.
+	// If drop point falls such that tool_result is orphaned, it should adjust.
+	result := cm.CompactForPTLRetry(msgs, "context_length_exceeded")
+	require.NotNil(t, result)
+
+	// Verify no orphaned tool_results.
+	for _, m := range result {
+		if m.MessageType == chat.MessageTypeToolResult && m.ToolCallID != nil {
+			found := false
+			for _, m2 := range result {
+				if m2.MessageType == chat.MessageTypeToolUse && len(m2.ToolCalls) > 0 {
+					var tcs []struct{ ID string `json:"id"` }
+					if err := json.Unmarshal(m2.ToolCalls, &tcs); err == nil {
+						for _, tc := range tcs {
+							if tc.ID == *m.ToolCallID {
+								found = true
+							}
+						}
+					}
+				}
+			}
+			assert.True(t, found, "tool_result %s has no matching tool_use", *m.ToolCallID)
+		}
+	}
+}
+
+// --- Compact circuit breaker ---
+
+func TestCompactCircuitBreaker_InitiallyClosed(t *testing.T) {
+	cm := agentic.NewContextManager()
+	assert.False(t, cm.CompactCircuitOpen())
+}
+
+func TestCompactCircuitBreaker_OpensAfterConsecutiveFailures(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cm.RecordCompactFailure()
+	cm.RecordCompactFailure()
+	assert.False(t, cm.CompactCircuitOpen())
+	cm.RecordCompactFailure() // 3rd consecutive
+	assert.True(t, cm.CompactCircuitOpen())
+}
+
+func TestCompactCircuitBreaker_SuccessResets(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cm.RecordCompactFailure()
+	cm.RecordCompactFailure()
+	cm.RecordCompactSuccess() // resets
+	assert.False(t, cm.CompactCircuitOpen())
+	cm.RecordCompactFailure()
+	assert.False(t, cm.CompactCircuitOpen()) // only 1 now
+}
+
+// --- AutoCompactTracking ---
+
+func TestAutoCompactTracking_InitialState(t *testing.T) {
+	cm := agentic.NewContextManager()
+	tracking := cm.Tracking()
+	assert.False(t, tracking.Compacted)
+	assert.Equal(t, 0, tracking.TurnCounter)
+	assert.Empty(t, tracking.TurnID)
+	assert.Equal(t, 0, tracking.ConsecutiveFailures)
+}
+
+func TestAutoCompactTracking_SuccessSetsCompactedAndTurnID(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cm.RecordCompactSuccess()
+
+	tracking := cm.Tracking()
+	assert.True(t, tracking.Compacted)
+	assert.NotEmpty(t, tracking.TurnID, "TurnID should be generated on success")
+	assert.Equal(t, 0, tracking.TurnCounter)
+	assert.Equal(t, 0, tracking.ConsecutiveFailures)
+}
+
+func TestAutoCompactTracking_TurnCounterIncrementsAfterCompact(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cm.RecordCompactSuccess()
+
+	cm.RecordTurnAfterCompact()
+	cm.RecordTurnAfterCompact()
+	cm.RecordTurnAfterCompact()
+
+	assert.Equal(t, 3, cm.Tracking().TurnCounter)
+}
+
+func TestAutoCompactTracking_TurnCounterNoOpBeforeCompact(t *testing.T) {
+	cm := agentic.NewContextManager()
+	// No compaction yet — turns should not count.
+	cm.RecordTurnAfterCompact()
+	cm.RecordTurnAfterCompact()
+
+	assert.Equal(t, 0, cm.Tracking().TurnCounter)
+}
+
+func TestAutoCompactTracking_RecompactResetsTurnCounter(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cm.RecordCompactSuccess()
+	cm.RecordTurnAfterCompact()
+	cm.RecordTurnAfterCompact()
+	assert.Equal(t, 2, cm.Tracking().TurnCounter)
+
+	// Second compaction resets counter and generates new TurnID.
+	firstTurnID := cm.Tracking().TurnID
+	cm.RecordCompactSuccess()
+	assert.Equal(t, 0, cm.Tracking().TurnCounter)
+	assert.NotEqual(t, firstTurnID, cm.Tracking().TurnID)
+}
+
+func TestAutoCompactTracking_RecompactionInfo_NoCompaction(t *testing.T) {
+	cm := agentic.NewContextManager()
+	info := cm.Tracking().RecompactionInfo()
+
+	assert.False(t, info.IsRecompactionInChain)
+	assert.Equal(t, 0, info.TurnsSincePreviousCompact)
+	assert.Empty(t, info.PreviousCompactTurnID)
+}
+
+func TestAutoCompactTracking_RecompactionInfo_AfterCompact(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cm.RecordCompactSuccess()
+	cm.RecordTurnAfterCompact()
+	cm.RecordTurnAfterCompact()
+
+	info := cm.Tracking().RecompactionInfo()
+	assert.True(t, info.IsRecompactionInChain)
+	assert.Equal(t, 2, info.TurnsSincePreviousCompact)
+	assert.NotEmpty(t, info.PreviousCompactTurnID)
+}
+
+func TestAutoCompactTracking_RecompactionInfoFromPtr_Nil(t *testing.T) {
+	info := agentic.RecompactionInfoFromPtr(nil)
+	assert.False(t, info.IsRecompactionInChain)
+	assert.Equal(t, -1, info.TurnsSincePreviousCompact)
+}
+
+func TestAutoCompactTracking_ResetTracking(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cm.RecordCompactSuccess()
+	cm.RecordTurnAfterCompact()
+	assert.True(t, cm.Tracking().Compacted)
+
+	cm.ResetTracking()
+	tracking := cm.Tracking()
+	assert.False(t, tracking.Compacted)
+	assert.Equal(t, 0, tracking.TurnCounter)
+	assert.Empty(t, tracking.TurnID)
+	assert.Equal(t, 0, tracking.ConsecutiveFailures)
+}
+
+func TestAutoCompactTracking_FailurePreservesOtherState(t *testing.T) {
+	cm := agentic.NewContextManager()
+	cm.RecordCompactSuccess()
+	turnID := cm.Tracking().TurnID
+	cm.RecordTurnAfterCompact()
+
+	cm.RecordCompactFailure()
+	tracking := cm.Tracking()
+	// Failure should only increment failures, not touch other fields.
+	assert.True(t, tracking.Compacted)
+	assert.Equal(t, turnID, tracking.TurnID)
+	assert.Equal(t, 1, tracking.TurnCounter)
+	assert.Equal(t, 1, tracking.ConsecutiveFailures)
+}
+
+// --- Time-based tool result eviction ---
+
+func TestEvictStaleToolResults_BelowThreshold(t *testing.T) {
+	cfg := agentic.DefaultTimeBasedEvictionConfig()
+	msgs := []chat.ChatMessage{
+		{Role: "user", Content: "hello", MessageType: "text"},
+		{Role: "assistant", Content: "result", MessageType: "tool_result"},
+	}
+	result := agentic.EvictStaleToolResults(msgs, 30*time.Minute, cfg)
+	assert.Equal(t, msgs, result) // no changes — under threshold
+}
+
+func TestEvictStaleToolResults_EvictsOldResults(t *testing.T) {
+	cfg := agentic.TimeBasedEvictionConfig{
+		GapThreshold: 60 * time.Minute,
+		KeepRecent:   2,
+	}
+	msgs := []chat.ChatMessage{
+		{Role: "user", Content: "q1", MessageType: "text"},
+		{Role: "user", Content: "result1 very long", MessageType: "tool_result"},
+		{Role: "user", Content: "result2 very long", MessageType: "tool_result"},
+		{Role: "user", Content: "result3 recent", MessageType: "tool_result"},
+		{Role: "user", Content: "result4 recent", MessageType: "tool_result"},
+	}
+	result := agentic.EvictStaleToolResults(msgs, 2*time.Hour, cfg)
+	require.Len(t, result, 5)
+
+	// First two tool results should be cleared.
+	assert.Contains(t, result[1].Content, "tool result cleared")
+	assert.Contains(t, result[2].Content, "tool result cleared")
+	// Last two should be preserved.
+	assert.Equal(t, "result3 recent", result[3].Content)
+	assert.Equal(t, "result4 recent", result[4].Content)
+}
+
+func TestEvictStaleToolResults_NotEnoughToEvict(t *testing.T) {
+	cfg := agentic.TimeBasedEvictionConfig{
+		GapThreshold: 60 * time.Minute,
+		KeepRecent:   5,
+	}
+	msgs := []chat.ChatMessage{
+		{Role: "user", Content: "result1", MessageType: "tool_result"},
+		{Role: "user", Content: "result2", MessageType: "tool_result"},
+	}
+	result := agentic.EvictStaleToolResults(msgs, 2*time.Hour, cfg)
+	assert.Equal(t, msgs, result) // only 2 results, keep=5 → no eviction
+}
+
+// --- TruncateToTokens ---
+
+func TestTruncateToTokens_FitsWithinBudget(t *testing.T) {
+	content := "short text"
+	result := agentic.TruncateToTokens(content, 100)
+	assert.Equal(t, content, result) // no truncation needed
+}
+
+func TestTruncateToTokens_TruncatesLongContent(t *testing.T) {
+	// Create content that exceeds 10 tokens (40 chars)
+	content := strings.Repeat("a", 200) // ~50 tokens
+	result := agentic.TruncateToTokens(content, 10)
+	assert.Less(t, len(result), len(content))
+	assert.Contains(t, result, "[... content truncated for compaction")
+}
+
+func TestTruncateToTokens_PreservesBeginning(t *testing.T) {
+	content := "HEADER: important instructions\n" + strings.Repeat("x", 500)
+	result := agentic.TruncateToTokens(content, 20)
+	assert.True(t, strings.HasPrefix(result, "HEADER: important"))
+}
+
+func TestEvictStaleToolResults_DoesNotMutateOriginal(t *testing.T) {
+	cfg := agentic.TimeBasedEvictionConfig{
+		GapThreshold: 60 * time.Minute,
+		KeepRecent:   0,
+	}
+	msgs := []chat.ChatMessage{
+		{Role: "user", Content: "original content", MessageType: "tool_result"},
+	}
+	result := agentic.EvictStaleToolResults(msgs, 2*time.Hour, cfg)
+	// Original should be untouched.
+	assert.Equal(t, "original content", msgs[0].Content)
+	// Result should be cleared.
+	assert.Contains(t, result[0].Content, "tool result cleared")
 }

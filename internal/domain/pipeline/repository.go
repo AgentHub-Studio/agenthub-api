@@ -140,16 +140,17 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, req UpdateRequest
 	if len(req.Config) > 0 {
 		config = req.Config
 	}
-	status := req.Status
-	if status == "" {
-		status = "DRAFT"
-	}
 
 	row := conn.QueryRow(ctx,
-		`UPDATE pipeline SET name=$1, description=$2, status=$3, config=$4, updated_at=NOW()
+		`UPDATE pipeline SET
+		   name=$1,
+		   description=$2,
+		   status=CASE WHEN $3::text = '' THEN status ELSE $3::text END,
+		   config=$4,
+		   updated_at=NOW()
 		 WHERE id=$5
 		 RETURNING id, name, description, agent_id, status, config, created_at, updated_at`,
-		req.Name, req.Description, status, config, id,
+		req.Name, req.Description, req.Status, config, id,
 	)
 	p, err := scanPipeline(row)
 	if err != nil {
