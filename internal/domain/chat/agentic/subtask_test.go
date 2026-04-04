@@ -76,10 +76,14 @@ func TestSubtaskExecutor_SimpleTextResponse(t *testing.T) {
 	assert.Nil(t, result.Error)
 	assert.Greater(t, result.LatencyMs, int64(-1))
 
-	var output map[string]any
+	var output agentic.SubtaskResult
 	require.NoError(t, json.Unmarshal(result.Output, &output))
-	assert.Contains(t, output["result"], "Sub-agent result: analysis complete.")
-	assert.Equal(t, float64(1), output["turns"])
+	assert.Contains(t, output.Result, "Sub-agent result: analysis complete.")
+	assert.Equal(t, 1, output.TotalTurns)
+	assert.Equal(t, agentic.SubtaskCompleted, output.Status)
+	assert.NotEmpty(t, output.SubtaskID)
+	assert.NotEmpty(t, output.Summary)
+	assert.Greater(t, output.DurationMs, int64(-1))
 
 	// Check events forwarded to parent.
 	var events []agentic.RunEvent
@@ -103,6 +107,7 @@ func TestSubtaskExecutor_SimpleTextResponse(t *testing.T) {
 	var completeData agentic.SubtaskCompleteData
 	require.NoError(t, json.Unmarshal(completeEv.Data, &completeData))
 	assert.Equal(t, 1, completeData.TotalTurns)
+	assert.NotEmpty(t, completeData.Summary)
 	assert.Nil(t, completeData.Error)
 }
 
@@ -436,4 +441,110 @@ func TestRunConfig_MaxDepthFromModelConfig(t *testing.T) {
 	raw := json.RawMessage(`{"maxDepth": 5}`)
 	config := agentic.RunConfigFromModelConfig(raw)
 	assert.Equal(t, 5, config.MaxDepth)
+}
+
+func TestSubtaskResult_FailedStatus(t *testing.T) {
+	// When sub-agent hits depth limit, result should have failed status.
+	factory := &mockRunnerFactory{model: &mockChatModel{}, persister: &mockPersister{}}
+	exec := agentic.NewSubtaskExecutor(factory)
+
+	parentCh := make(chan agentic.RunEvent, 100)
+	config := agentic.DefaultRunConfig()
+	config.MaxDepth = 1
+
+	tc := ai.ToolCall{
+		ID: "tc_fail", Type: "function",
+		Function: ai.ToolFunction{Name: "agent", Arguments: `{"prompt":"fail"}`},
+	}
+
+	result := exec.Execute(context.Background(), parentCh, tc, agentic.RunInput{
+		SessionID: uuid.New(), AgentID: uuid.New(), TenantID: "test", CurrentDepth: 1,
+	}, config, 0)
+	close(parentCh)
+
+	assert.NotNil(t, result.Error)
+	// Output is not set for depth-limit errors (returned before running).
+}
+
+func TestSubtaskResult_StructuredOutput(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			return makeTextStream("Analysis: The Q3 report shows 15% growth in revenue."), nil
+		},
+	}
+
+	factory := &mockRunnerFactory{model: model, persister: &mockPersister{}}
+	exec := agentic.NewSubtaskExecutor(factory)
+
+	parentCh := make(chan agentic.RunEvent, 100)
+	config := agentic.DefaultRunConfig()
+	config.MaxDepth = 3
+
+	tc := ai.ToolCall{
+		ID: "tc_structured", Type: "function",
+		Function: ai.ToolFunction{Name: "agent", Arguments: `{"prompt":"Analyze Q3"}`},
+	}
+
+	result := exec.Execute(context.Background(), parentCh, tc, agentic.RunInput{
+		SessionID: uuid.New(), AgentID: uuid.New(), TenantID: "test", CurrentDepth: 0,
+	}, config, 0)
+	close(parentCh)
+
+	require.Nil(t, result.Error)
+
+	var sr agentic.SubtaskResult
+	require.NoError(t, json.Unmarshal(result.Output, &sr))
+
+	assert.Equal(t, agentic.SubtaskCompleted, sr.Status)
+	assert.NotEmpty(t, sr.SubtaskID)
+	assert.Contains(t, sr.Result, "Q3 report")
+	assert.Contains(t, sr.Summary, "Q3 report")
+	assert.Equal(t, 1, sr.TotalTurns)
+	assert.Greater(t, sr.DurationMs, int64(-1))
+}
+
+func TestSubtaskResult_SummaryTruncation(t *testing.T) {
+	// Generate a long response that exceeds 200 chars.
+	longText := ""
+	for i := 0; i < 50; i++ {
+		longText += "This is a very long line of text. "
+	}
+
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			return makeTextStream(longText), nil
+		},
+	}
+
+	factory := &mockRunnerFactory{model: model, persister: &mockPersister{}}
+	exec := agentic.NewSubtaskExecutor(factory)
+
+	parentCh := make(chan agentic.RunEvent, 100)
+	config := agentic.DefaultRunConfig()
+	config.MaxDepth = 3
+
+	tc := ai.ToolCall{
+		ID: "tc_long", Type: "function",
+		Function: ai.ToolFunction{Name: "agent", Arguments: `{"prompt":"long task"}`},
+	}
+
+	result := exec.Execute(context.Background(), parentCh, tc, agentic.RunInput{
+		SessionID: uuid.New(), AgentID: uuid.New(), TenantID: "test", CurrentDepth: 0,
+	}, config, 0)
+	close(parentCh)
+
+	var sr agentic.SubtaskResult
+	require.NoError(t, json.Unmarshal(result.Output, &sr))
+
+	// Summary should be truncated to ~200 chars.
+	assert.LessOrEqual(t, len(sr.Summary), 200)
+	assert.True(t, len(sr.Summary) > 0)
+	// Full result should have the complete text.
+	assert.Greater(t, len(sr.Result), 200)
+}
+
+func TestSubtaskStatus_Constants(t *testing.T) {
+	assert.Equal(t, agentic.SubtaskStatus("completed"), agentic.SubtaskCompleted)
+	assert.Equal(t, agentic.SubtaskStatus("failed"), agentic.SubtaskFailed)
+	assert.Equal(t, agentic.SubtaskStatus("killed"), agentic.SubtaskKilled)
 }

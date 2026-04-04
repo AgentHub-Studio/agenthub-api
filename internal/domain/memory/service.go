@@ -95,3 +95,68 @@ func (s *Service) DeleteByKey(ctx context.Context, agentID uuid.UUID, userID *st
 func (s *Service) ClearByAgent(ctx context.Context, agentID uuid.UUID) error {
 	return s.repo.ClearByAgent(ctx, agentID)
 }
+
+// ListByType returns memory entries filtered by memory type.
+func (s *Service) ListByType(ctx context.Context, agentID uuid.UUID, userID *string, memoryType MemoryType) ([]AgentMemory, error) {
+	return s.repo.ListByAgentAndType(ctx, agentID, userID, memoryType)
+}
+
+// SearchByText returns memories matching a text pattern in key or value.
+func (s *Service) SearchByText(ctx context.Context, agentID uuid.UUID, query string, limit int) ([]AgentMemory, error) {
+	if query == "" {
+		return nil, fmt.Errorf("memory: search query is required")
+	}
+	return s.repo.SearchByText(ctx, agentID, query, limit)
+}
+
+// MemoryStats holds aggregated statistics for agent memories.
+type MemoryStats struct {
+	Total  int            `json:"total"`
+	ByType map[string]int `json:"byType"`
+}
+
+// Stats returns aggregated memory statistics for an agent.
+func (s *Service) Stats(ctx context.Context, agentID uuid.UUID) (MemoryStats, error) {
+	counts, err := s.repo.CountByType(ctx, agentID)
+	if err != nil {
+		return MemoryStats{}, err
+	}
+
+	total := 0
+	byType := make(map[string]int, len(counts))
+	for mt, count := range counts {
+		byType[string(mt)] = count
+		total += count
+	}
+
+	return MemoryStats{Total: total, ByType: byType}, nil
+}
+
+// BulkUpsert imports multiple memory entries at once.
+func (s *Service) BulkUpsert(ctx context.Context, agentID uuid.UUID, entries []BulkMemoryEntry) (int, error) {
+	stored := 0
+	for _, entry := range entries {
+		value := entry.Value
+		if len(value) == 0 || !json.Valid(value) {
+			continue
+		}
+		_, err := s.Upsert(ctx, agentID, entry.Key, UpsertMemoryRequest{
+			Value:      value,
+			MemoryType: entry.MemoryType,
+			UserID:     entry.UserID,
+		})
+		if err != nil {
+			continue
+		}
+		stored++
+	}
+	return stored, nil
+}
+
+// BulkMemoryEntry represents a single entry in a bulk import.
+type BulkMemoryEntry struct {
+	Key        string          `json:"key"`
+	Value      json.RawMessage `json:"value"`
+	MemoryType string          `json:"memoryType,omitempty"`
+	UserID     *string         `json:"userId,omitempty"`
+}

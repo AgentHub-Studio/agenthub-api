@@ -16,6 +16,7 @@ const (
 	EventToolProgress     RunEventType = "tool_progress"
 	EventSubtaskStart     RunEventType = "subtask_start"
 	EventSubtaskComplete  RunEventType = "subtask_complete"
+	EventModelFallback    RunEventType = "model_fallback"
 )
 
 // RunEvent is the envelope sent through the Runner's output channel.
@@ -59,6 +60,14 @@ type TokenUsage struct {
 	CompletionTokens int     `json:"completionTokens"`
 	TotalTokens      int     `json:"totalTokens"`
 	CostUSD          float64 `json:"costUsd,omitempty"`
+	Model            string  `json:"model,omitempty"`
+}
+
+// ModelFallbackData is emitted when a fallback model is used.
+type ModelFallbackData struct {
+	FromModel string `json:"fromModel"`
+	ToModel   string `json:"toModel"`
+	Reason    string `json:"reason"`
 }
 
 // TurnCompleteData is emitted at the end of each agentic turn
@@ -118,5 +127,6 @@ type SubtaskCompleteData struct {
 	TotalTurns  int     `json:"totalTurns"`
 	TotalTokens int     `json:"totalTokens"`
 	TotalCost   float64 `json:"totalCostUsd,omitempty"`
+	Summary     string  `json:"summary,omitempty"`
 	Error       *string `json:"error,omitempty"`
 }
