@@ -19,11 +19,11 @@ const (
 	EventRunProgress      RunEventType = "run_progress"
 	EventModelFallback    RunEventType = "model_fallback"
 	EventToolDenied       RunEventType = "tool_denied"
+	EventAgentMessage     RunEventType = "agent_message"
 	EventThinkingDelta    RunEventType = "thinking_delta"
 	EventSubtaskProgress  RunEventType = "subtask_progress"
 	EventToolUseSummary   RunEventType = "tool_use_summary"
 	EventStopHookSummary  RunEventType = "stop_hook_summary"
-	EventAgentMessage     RunEventType = "agent_message"
 )
 
 // ToolUseSummaryData carries a human-readable summary of a completed tool batch.

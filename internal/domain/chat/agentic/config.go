@@ -101,6 +101,11 @@ type RunConfig struct {
 	// stalled (default 45s). Set to 0 to disable stall detection.
 	StallThreshold time.Duration `json:"stallThreshold"`
 
+	// DenialEscalationThreshold is the number of consecutive denials of the same
+	// tool before the Runner injects an escalation hint into the LLM context.
+	// Default 3. Set to 0 to disable escalation.
+	DenialEscalationThreshold int `json:"denialEscalationThreshold"`
+
 	// ModelFallbacks is an ordered list of fallback models to try when the
 	// primary model fails with transient errors (rate limit, overload, timeout).
 	ModelFallbacks []string `json:"modelFallbacks,omitempty"`
@@ -138,11 +143,6 @@ type RunConfig struct {
 	// LRU cache. Cacheable tools (read-only, idempotent) have their results cached
 	// to avoid redundant re-execution. Default 64. Set to 0 to disable caching.
 	ToolCacheCapacity int `json:"toolCacheCapacity"`
-
-	// DenialEscalationThreshold is the number of consecutive denials of the same
-	// tool before the Runner injects an escalation hint into the LLM context.
-	// Default 3. Set to 0 to disable escalation.
-	DenialEscalationThreshold int `json:"denialEscalationThreshold"`
 }
 
 // RunGates captures immutable, pre-computed boolean flags and derived values
@@ -208,9 +208,9 @@ func DefaultRunConfig() RunConfig {
 		MaxDepth:            3,
 		Provider:            "anthropic",
 		Model:               "claude-sonnet-4-20250514",
-		Temperature:         0.7,
-		StallCheckInterval:  15 * time.Second,
-		StallThreshold:      45 * time.Second,
+		Temperature:                0.7,
+		StallCheckInterval:         15 * time.Second,
+		StallThreshold:             45 * time.Second,
 		ToolCacheCapacity:          64,
 		DenialEscalationThreshold: 3,
 	}

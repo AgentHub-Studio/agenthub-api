@@ -292,6 +292,20 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			}
 		}
 
+		// Inject escalation hints from denial tracker.
+		if r.denialTracker != nil {
+			if hints := r.denialTracker.EscalationHints(); len(hints) > 0 {
+				hintMsg := "[SYSTEM] The following tools have been repeatedly denied by permission rules:\n"
+				for _, h := range hints {
+					hintMsg += "- " + h + "\n"
+				}
+				messages = append(messages, ai.Message{
+					Role:    ai.RoleUser,
+					Content: hintMsg,
+				})
+			}
+		}
+
 		// Per-turn token budget (may be escalated).
 		turnBudget := r.config.EffectiveTurnBudget(turnIndex)
 		maxTokensForCall := r.config.MaxTokensPerCall
@@ -1110,7 +1124,7 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			case PermissionDeny:
 				errMsg := FormatDeniedError(tc.Function.Name)
 				results[i] = ToolExecResult{Error: &errMsg}
-// Track denial and emit event.
+				// Track denial and emit event.
 				denialCount := 1
 				escalated := false
 				if r.denialTracker != nil {
