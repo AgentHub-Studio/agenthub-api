@@ -92,6 +92,11 @@ type RunConfig struct {
 	// LRU cache. Cacheable tools (read-only, idempotent) have their results cached
 	// to avoid redundant re-execution. Default 64. Set to 0 to disable caching.
 	ToolCacheCapacity int `json:"toolCacheCapacity"`
+
+	// DenialEscalationThreshold is the number of consecutive denials of the same
+	// tool before the Runner injects an escalation hint into the LLM context.
+	// Default 3. Set to 0 to disable escalation.
+	DenialEscalationThreshold int `json:"denialEscalationThreshold"`
 }
 
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
@@ -114,7 +119,8 @@ func DefaultRunConfig() RunConfig {
 		Temperature:         0.7,
 		StallCheckInterval:  15 * time.Second,
 		StallThreshold:      45 * time.Second,
-		ToolCacheCapacity:   64,
+		ToolCacheCapacity:          64,
+		DenialEscalationThreshold: 3,
 	}
 }
 
