@@ -265,6 +265,11 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	// This ensures the Runner continues even if the SSE client disconnects.
 	runID, runCtx := h.bgRegistry.Register(sessionID)
 
+	// Inject tenant and raw token into the background context so that
+	// repository calls (which use tenant.FromContext) work correctly.
+	rawToken := tenant.TokenFromContext(r.Context())
+	runCtx = tenant.NewContextWithToken(runCtx, tenantID, rawToken)
+
 	ch, err := h.svc.RunSession(runCtx, sessionID, req.Message, tenantID)
 	if err != nil {
 		h.bgRegistry.Cancel(runID)
@@ -442,6 +447,7 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "event: reconnect_overflow\ndata: %s\n\n", overflowData)
 		flusher.Flush()
 	}
+	events = filterReplayableEvents(events)
 
 	// Send replayed events.
 	for _, ev := range events {
@@ -514,4 +520,66 @@ func (h *Handler) respondElicitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.NoContent(w)
+}
+
+// filterReplayableEvents drops stale input_request events that have already been
+// resolved later in the same buffered event window. This prevents a resumed SSE
+// connection from re-opening an already answered form.
+func filterReplayableEvents(events []BufferedEvent) []BufferedEvent {
+	if len(events) == 0 {
+		return events
+	}
+
+	resolvedAt := make(map[string]uint64)
+	for _, ev := range events {
+		switch ev.Event.Type {
+		case "tool_result":
+			var data struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(ev.Event.Data, &data); err == nil && data.ID != "" {
+				if _, exists := resolvedAt[data.ID]; !exists {
+					resolvedAt[data.ID] = ev.ID
+				}
+			}
+		case "tool_progress":
+			var data struct {
+				ID    string `json:"id"`
+				State string `json:"state"`
+			}
+			if err := json.Unmarshal(ev.Event.Data, &data); err == nil && data.ID != "" && data.State == "completed" {
+				if _, exists := resolvedAt[data.ID]; !exists {
+					resolvedAt[data.ID] = ev.ID
+				}
+			}
+		}
+	}
+
+	if len(resolvedAt) == 0 {
+		return events
+	}
+
+	filtered := make([]BufferedEvent, 0, len(events))
+	for _, ev := range events {
+		if ev.Event.Type != "input_request" {
+			filtered = append(filtered, ev)
+			continue
+		}
+
+		var data struct {
+			RequestID string `json:"requestId"`
+		}
+		if err := json.Unmarshal(ev.Event.Data, &data); err != nil || data.RequestID == "" {
+			filtered = append(filtered, ev)
+			continue
+		}
+
+		if resolvedSeq, resolved := resolvedAt[data.RequestID]; resolved && ev.ID < resolvedSeq {
+			continue
+		}
+
+		filtered = append(filtered, ev)
+	}
+
+	return filtered
 }

@@ -186,6 +186,27 @@ func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
 	assert.Contains(t, string(tools[3].InputSchema), `"type":"object"`)
 }
 
+func TestToolSchemaBuilder_Build_PrefersDatabaseDescriptionOverStaticCatalog(t *testing.T) {
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{
+			ID:          uuid.New(),
+			Name:        "Execute SQL",
+			Slug:        "execute-sql",
+			Description: "Custom DB description for SQL tool.",
+			Category:    "data",
+		},
+	}}
+
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), &mockKBLister{})
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	require.Len(t, tools, 4)
+	assert.Equal(t, "execute-sql", tools[3].Name)
+	assert.Equal(t, "Custom DB description for SQL tool.", tools[3].Description)
+	assert.NotContains(t, tools[3].Description, "PostgreSQL datasources")
+}
+
 func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
 	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{})
 	tools, err := builder.Build(context.Background(), uuid.New())

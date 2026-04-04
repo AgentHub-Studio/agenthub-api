@@ -168,19 +168,19 @@ func TestBuildDefaultChatModel_PriorityOrder(t *testing.T) {
 
 // --- buildAgenticRunner tests ---
 
-func TestBuildAgenticRunner_NilWhenNoProvider(t *testing.T) {
+func TestBuildAgenticRunner_ReturnsRunnerWithoutEnvProvider(t *testing.T) {
 	// Ensure no providers are configured.
 	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-	// buildAgenticRunner checks chatModel first and returns nil before using repos.
+	// The runner is still constructed; provider resolution may happen later via settings.
 	runner := buildAgenticRunner(
 		&config.Config{SkillRuntimeURL: "http://localhost:8083"},
-		nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil,
 	)
-	assert.Nil(t, runner)
+	assert.NotNil(t, runner)
 }
 
 func TestBuildAgenticRunner_ReturnsRunnerWhenProviderConfigured(t *testing.T) {
@@ -190,7 +190,7 @@ func TestBuildAgenticRunner_ReturnsRunnerWhenProviderConfigured(t *testing.T) {
 	// the repos are wrapped in adapters but not called at construction time.
 	runner := buildAgenticRunner(
 		&config.Config{SkillRuntimeURL: "http://localhost:8083"},
-		nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil,
 	)
 	assert.NotNil(t, runner)
 }

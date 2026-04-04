@@ -42,6 +42,15 @@ func (m *mockSummaryFinder) GetLatestCompactSummary(_ context.Context, _ uuid.UU
 	return m.msg, m.found, nil
 }
 
+type mockPromptTemplateResolver struct {
+	templates map[string]string
+}
+
+func (m *mockPromptTemplateResolver) ResolvePromptTemplate(_ context.Context, _ uuid.UUID, slug string) (string, bool, error) {
+	content, ok := m.templates[slug]
+	return content, ok, nil
+}
+
 // --- tests ---
 
 func TestPromptBuilder_Build_AllSections(t *testing.T) {
@@ -262,4 +271,50 @@ func TestPromptBuilder_Build_NoDeferredTools(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotContains(t, prompt, "## Deferred Tools")
+}
+
+func TestPromptBuilder_Build_UsesPromptTemplateOverrides(t *testing.T) {
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	).WithPromptTemplateResolver(&mockPromptTemplateResolver{
+		templates: map[string]string{
+			"agentic-user-interaction-policy": "## Custom Input Policy\nAlways collect structured input.",
+			"agentic-tool-usage-instructions": "## Custom Tool Rules\nAlways explain tool choices.",
+		},
+	})
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:      uuid.New(),
+		SessionID:    uuid.New(),
+		SystemPrompt: "You are an assistant.",
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "## Custom Input Policy")
+	assert.Contains(t, prompt, "## Custom Tool Rules")
+	assert.NotContains(t, prompt, "## CRITICAL — User Input Policy")
+	assert.NotContains(t, prompt, "## Tool Usage Instructions")
+}
+
+func TestPromptBuilder_Build_FallsBackWhenPromptTemplateMissing(t *testing.T) {
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	).WithPromptTemplateResolver(&mockPromptTemplateResolver{
+		templates: map[string]string{},
+	})
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:   uuid.New(),
+		SessionID: uuid.New(),
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "## CRITICAL — User Input Policy")
+	assert.Contains(t, prompt, "## Tool Usage Instructions")
 }

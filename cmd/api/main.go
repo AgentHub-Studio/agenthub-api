@@ -51,11 +51,14 @@ func main() {
 	srv := server.New(cfg, pool)
 
 	httpServer := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      srv,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:        ":" + cfg.Port,
+		Handler:     srv,
+		ReadTimeout: 15 * time.Second,
+		// WriteTimeout must be 0 for SSE endpoints — the agentic runner
+		// streams events over long-lived connections. Heartbeats (15s) and
+		// context cancellation handle stale connections instead.
+		WriteTimeout: 0,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	quit := make(chan os.Signal, 1)

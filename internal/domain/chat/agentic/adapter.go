@@ -24,7 +24,13 @@ type AgentConfigLoader interface {
 // and constructing the appropriate client. The context carries the tenant ID,
 // so per-tenant settings can be fetched.
 type ChatModelFactory interface {
-	Build(ctx context.Context, provider string) (ai.ChatModel, error)
+	// Build returns a ChatModel for the given provider. The model parameter
+	// allows the factory to select the correct API variant (e.g. OpenAI Chat
+	// Completions vs Responses API based on the model name).
+	Build(ctx context.Context, provider, model string) (ai.ChatModel, error)
+	// ResolveModel returns the default model name for the given provider
+	// from the tenant's settings. Returns "" if not configured.
+	ResolveModel(ctx context.Context, provider string) string
 }
 
 // SessionRunnerAdapter implements chat.SessionRunner by creating a Runner
@@ -130,12 +136,14 @@ type staticModelFactory struct {
 	model ai.ChatModel
 }
 
-func (f staticModelFactory) Build(_ context.Context, _ string) (ai.ChatModel, error) {
+func (f staticModelFactory) Build(_ context.Context, _, _ string) (ai.ChatModel, error) {
 	if f.model == nil {
 		return nil, fmt.Errorf("no AI provider configured")
 	}
 	return f.model, nil
 }
+
+func (f staticModelFactory) ResolveModel(_ context.Context, _ string) string { return "" }
 
 // adapterRunnerFactory implements RunnerFactory for sub-runner spawning.
 type adapterRunnerFactory struct {
@@ -161,6 +169,7 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	subtaskExec := NewSubtaskExecutor(f)
 	subtaskExec.WithAgentMailbox(f.agentMailbox)
 	runner.WithSubtaskExecutor(subtaskExec)
+	f.adapter.attachAuxiliaryComponents(runner, f, f.chatModel, config)
 
 	// Register memory as turn-end handler (decoupled from runner loop).
 	if f.adapter.memory != nil {
@@ -182,9 +191,17 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 
 	config := RunConfigFromModelConfig(agentCfg.ModelConfig)
 
+	// If the agent doesn't specify a model, resolve it from the tenant's settings.
+	if config.Model == "" || config.Model == DefaultRunConfig().Model {
+		if settingsModel := a.modelFactory.ResolveModel(ctx, config.Provider); settingsModel != "" {
+			config.Model = settingsModel
+		}
+	}
+
 	// Resolve the ChatModel for this agent's provider from the factory.
-	// The context carries the tenant ID so settings can be fetched per-tenant.
-	chatModel, err := a.modelFactory.Build(ctx, config.Provider)
+	// The model name is passed so the factory can select the correct API
+	// variant (e.g. OpenAI Responses API for gpt-5+ models).
+	chatModel, err := a.modelFactory.Build(ctx, config.Provider, config.Model)
 	if err != nil {
 		return nil, fmt.Errorf("session runner: build model for provider %q: %w", config.Provider, err)
 	}
@@ -209,6 +226,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	subtaskExec := NewSubtaskExecutor(factory)
 	subtaskExec.WithAgentMailbox(agentMailbox)
 	runner.WithSubtaskExecutor(subtaskExec)
+	a.attachAuxiliaryComponents(runner, factory, chatModel, config)
 
 	// Register memory as turn-end handler (decoupled from runner loop).
 	if a.memory != nil {
@@ -303,6 +321,30 @@ func (a *SessionRunnerAdapter) RespondElicitation(sessionID, requestID string, r
 		Content: result.Content,
 	}
 	return a.elicitation.Respond(sessionID, requestID, agResult)
+}
+
+func (a *SessionRunnerAdapter) attachAuxiliaryComponents(
+	runner *Runner,
+	factory RunnerFactory,
+	chatModel ai.ChatModel,
+	config RunConfig,
+) {
+	if runner == nil || chatModel == nil {
+		return
+	}
+
+	cacheSnap := &CacheSafeParamsSnapshot{}
+	runner.WithCacheSafeParamsSnapshot(cacheSnap)
+
+	summaryGen := NewToolUseSummaryGenerator(chatModel, config.Model)
+	summaryGen.WithPromptTemplateResolver(a.prompt.tpl)
+	runner.WithToolUseSummaryGenerator(summaryGen)
+
+	memoryExtractor := NewSessionMemoryExtractor(
+		NewForkedAgentRunner(factory, config, chatModel),
+		DefaultSessionMemoryConfig(),
+	).WithPromptTemplateResolver(a.prompt.tpl)
+	runner.WithSessionMemoryExtractor(memoryExtractor)
 }
 
 // repoHistoryLoader adapts chat.Repository to HistoryLoader.

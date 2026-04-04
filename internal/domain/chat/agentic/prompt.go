@@ -29,6 +29,12 @@ type CompactSummaryFinder interface {
 	GetLatestCompactSummary(ctx context.Context, sessionID uuid.UUID) (chat.ChatMessage, bool, error)
 }
 
+// PromptTemplateResolver resolves configurable prompt sections by slug.
+// Agent-specific templates should override global templates when both exist.
+type PromptTemplateResolver interface {
+	ResolvePromptTemplate(ctx context.Context, agentID uuid.UUID, slug string) (content string, found bool, err error)
+}
+
 // PromptConfig holds tuneable parameters for the prompt builder.
 type PromptConfig struct {
 	// MaxEstimatedTokens is the soft limit for the system prompt (chars/4 heuristic).
@@ -46,10 +52,11 @@ func DefaultPromptConfig() PromptConfig {
 // This mirrors Claude Code's systemPromptSection memoization pattern that
 // computes sections once and caches until /clear or /compact.
 type PromptBuilder struct {
-	skills  SkillLister
-	kbs     KBLister
-	summFn  CompactSummaryFinder
-	config  PromptConfig
+	skills SkillLister
+	kbs    KBLister
+	summFn CompactSummaryFinder
+	tpl    PromptTemplateResolver
+	config PromptConfig
 	// sectionCache stores computed prompt sections by name.
 	// Cache is cleared on context compaction or explicit reset.
 	// Inspired by Claude Code's systemPromptSectionCache in state.ts.
@@ -68,6 +75,14 @@ func NewPromptBuilder(skills SkillLister, kbs KBLister, summFn CompactSummaryFin
 		config:       cfg,
 		sectionCache: make(map[string]string),
 	}
+}
+
+// WithPromptTemplateResolver attaches an optional resolver used to load prompt
+// sections from the prompt_template table. Missing templates fall back to the
+// built-in constants.
+func (b *PromptBuilder) WithPromptTemplateResolver(resolver PromptTemplateResolver) *PromptBuilder {
+	b.tpl = resolver
+	return b
 }
 
 // ClearCache resets all cached prompt sections.
@@ -132,7 +147,17 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	// 1b. User interaction policy — injected at the top of every prompt so
 	// the LLM sees it before the tool list. This ensures the model always
 	// uses ask_user for structured input instead of asking in plain text.
-	sections = append(sections, userInteractionPolicy)
+	userInteractionSection, err := b.resolvePromptSection(
+		ctx,
+		in.AgentID,
+		"prompt-section:user_interaction_policy:"+in.AgentID.String(),
+		promptTemplateSlugUserInteractionPolicy,
+		userInteractionPolicy,
+	)
+	if err != nil {
+		return "", err
+	}
+	sections = append(sections, userInteractionSection)
 
 	// 2. Available Tools (cached — only changes on skill config changes)
 	if b.skills != nil {
@@ -155,7 +180,17 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	}
 
 	// 3. Tool Usage Instructions (static — always cached)
-	sections = append(sections, toolUsageInstructions)
+	toolUsageSection, err := b.resolvePromptSection(
+		ctx,
+		in.AgentID,
+		"prompt-section:tool_usage_instructions:"+in.AgentID.String(),
+		promptTemplateSlugToolUsageInstructions,
+		toolUsageInstructions,
+	)
+	if err != nil {
+		return "", err
+	}
+	sections = append(sections, toolUsageSection)
 
 	// 3b. Deferred tools announcement (volatile — changes per BuildWithDeferred result).
 	if len(in.DeferredToolNames) > 0 {
@@ -219,6 +254,26 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	}
 
 	return prompt, nil
+}
+
+func (b *PromptBuilder) resolvePromptSection(
+	ctx context.Context,
+	agentID uuid.UUID,
+	cacheKey, slug, fallback string,
+) (string, error) {
+	return b.getCachedOrCompute(cacheKey, func() (string, error) {
+		if b.tpl == nil {
+			return fallback, nil
+		}
+		content, found, err := b.tpl.ResolvePromptTemplate(ctx, agentID, slug)
+		if err != nil {
+			return "", fmt.Errorf("prompt: resolve template %s: %w", slug, err)
+		}
+		if found && strings.TrimSpace(content) != "" {
+			return content, nil
+		}
+		return fallback, nil
+	})
 }
 
 // formatToolsSection produces a markdown block listing the available skills.
@@ -417,6 +472,9 @@ Rules for building questions:
 - Use "text" only for genuinely free-form input (names, descriptions, custom values).
 - Use "confirm" for yes/no decisions.
 - Make fields required unless truly optional.
+- If an operation needs confirmation, include the confirm question in the SAME ask_user call that collects the other required fields.
+- After the user submits a form that already included a confirm question, DO NOT open another ask_user form just to confirm the same action again.
+- Treat an accepted confirm field in the submitted form as the final authorization to proceed with the write operation.
 
 Platform enum values you MUST use (do not invent new values):
 - **Skill categories:** rag, data, integration, compute, platform, system, productivity, storage, analysis, diagnostic, wizard, orchestration, memory
@@ -435,3 +493,10 @@ const toolUsageInstructions = `## Tool Usage Instructions
 - Do not fabricate data — if you do not have the information, say so.
 - Cite document sources when answering from knowledge base results.
 - ALWAYS call ask_user to collect information — never ask via plain text.`
+
+const (
+	// Prompt template slugs for agentic global sections. When present in the
+	// prompt_template table, they override the built-in fallback constants.
+	promptTemplateSlugUserInteractionPolicy = "agentic-user-interaction-policy"
+	promptTemplateSlugToolUsageInstructions = "agentic-tool-usage-instructions"
+)

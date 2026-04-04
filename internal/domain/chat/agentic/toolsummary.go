@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -17,6 +19,7 @@ import (
 type ToolUseSummaryGenerator struct {
 	chatModel ai.ChatModel
 	model     string
+	tpl       PromptTemplateResolver
 }
 
 // ToolSummaryInfo describes a single tool execution for summary generation.
@@ -47,9 +50,15 @@ func NewToolUseSummaryGenerator(chatModel ai.ChatModel, model string) *ToolUseSu
 	}
 }
 
+// WithPromptTemplateResolver attaches an optional resolver for the summary prompt.
+func (g *ToolUseSummaryGenerator) WithPromptTemplateResolver(resolver PromptTemplateResolver) *ToolUseSummaryGenerator {
+	g.tpl = resolver
+	return g
+}
+
 // Generate produces a brief summary of the given tool executions.
 // Returns empty string on error (non-fatal — summaries are cosmetic).
-func (g *ToolUseSummaryGenerator) Generate(ctx context.Context, tools []ToolSummaryInfo, lastAssistantText string) string {
+func (g *ToolUseSummaryGenerator) Generate(ctx context.Context, agentID uuid.UUID, tools []ToolSummaryInfo, lastAssistantText string) string {
 	if g == nil || g.chatModel == nil || len(tools) == 0 {
 		return ""
 	}
@@ -58,7 +67,7 @@ func (g *ToolUseSummaryGenerator) Generate(ctx context.Context, tools []ToolSumm
 	var sb strings.Builder
 	if lastAssistantText != "" {
 		sb.WriteString(fmt.Sprintf("User's intent (from assistant's last message): %s\n\n",
-			truncateString(lastAssistantText, 200)))
+			truncateToolSummaryString(lastAssistantText, 200)))
 	}
 
 	sb.WriteString("Tools completed:\n\n")
@@ -66,7 +75,7 @@ func (g *ToolUseSummaryGenerator) Generate(ctx context.Context, tools []ToolSumm
 		sb.WriteString(fmt.Sprintf("Tool: %s\n", t.Name))
 		sb.WriteString(fmt.Sprintf("Input: %s\n", truncateJSON(t.Input, 300)))
 		if t.Error != nil {
-			sb.WriteString(fmt.Sprintf("Error: %s\n", truncateString(*t.Error, 200)))
+			sb.WriteString(fmt.Sprintf("Error: %s\n", truncateToolSummaryString(*t.Error, 200)))
 		} else {
 			sb.WriteString(fmt.Sprintf("Output: %s\n", truncateJSON(t.Output, 300)))
 		}
@@ -79,7 +88,13 @@ func (g *ToolUseSummaryGenerator) Generate(ctx context.Context, tools []ToolSumm
 	}, ai.ChatOptions{
 		Model:     g.model,
 		MaxTokens: 50,
-		SystemMsg: toolUseSummarySystemPrompt,
+		SystemMsg: resolvePromptTemplateOrFallback(
+			ctx,
+			g.tpl,
+			agentID,
+			promptTemplateSlugToolUseSummarySystemPrompt,
+			toolUseSummarySystemPrompt,
+		),
 	})
 	if err != nil {
 		return ""
@@ -103,4 +118,9 @@ func truncateJSON(raw json.RawMessage, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// truncateString is defined in subtask.go — reused here.
+func truncateToolSummaryString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}

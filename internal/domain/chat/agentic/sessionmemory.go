@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -49,6 +51,7 @@ func DefaultSessionMemoryConfig() SessionMemoryConfig {
 type SessionMemoryExtractor struct {
 	forkRunner *ForkedAgentRunner
 	config     SessionMemoryConfig
+	tpl        PromptTemplateResolver
 
 	mu                     sync.Mutex
 	lastExtractionTokens   int
@@ -64,6 +67,12 @@ func NewSessionMemoryExtractor(forkRunner *ForkedAgentRunner, config SessionMemo
 		forkRunner: forkRunner,
 		config:     config,
 	}
+}
+
+// WithPromptTemplateResolver attaches an optional resolver for the extraction prompt.
+func (e *SessionMemoryExtractor) WithPromptTemplateResolver(resolver PromptTemplateResolver) *SessionMemoryExtractor {
+	e.tpl = resolver
+	return e
 }
 
 // TrackToolCall increments the tool call counter. Called by the runner after
@@ -120,6 +129,7 @@ func (e *SessionMemoryExtractor) ShouldExtract(currentTokens int, turnHasToolCal
 // Inspired by Claude Code's extractSessionMemory sequential hook.
 func (e *SessionMemoryExtractor) Extract(
 	ctx context.Context,
+	agentID uuid.UUID,
 	cacheSafeParams *CacheSafeParams,
 	currentTokens int,
 	permissionRules *PermissionRules,
@@ -147,7 +157,7 @@ func (e *SessionMemoryExtractor) Extract(
 			PromptMessages: []ai.Message{
 				{
 					Role:    ai.RoleUser,
-					Content: sessionMemoryExtractionPrompt,
+					Content: e.resolveExtractionPrompt(extractCtx, agentID),
 				},
 			},
 			CacheSafeParams: cacheSafeParams,
@@ -175,6 +185,19 @@ func (e *SessionMemoryExtractor) Extract(
 			"duration", result.Duration,
 		)
 	}()
+}
+
+func (e *SessionMemoryExtractor) resolveExtractionPrompt(ctx context.Context, agentID uuid.UUID) string {
+	if e == nil {
+		return sessionMemoryExtractionPrompt
+	}
+	return resolvePromptTemplateOrFallback(
+		ctx,
+		e.tpl,
+		agentID,
+		promptTemplateSlugSessionMemoryExtractionPrompt,
+		sessionMemoryExtractionPrompt,
+	)
 }
 
 // Stats returns the current extraction statistics.

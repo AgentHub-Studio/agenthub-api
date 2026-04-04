@@ -204,7 +204,7 @@ func DefaultRunConfig() RunConfig {
 		MaxBudgetUSD:        0, // no limit by default
 		MaxToolResultChars:         50000,
 		MaxToolResultsPerTurnChars: 200000,
-		RetryMaxAttempts:    3,
+		RetryMaxAttempts:    5,
 		MaxDepth:            3,
 		Provider:            "anthropic",
 		Model:               "claude-sonnet-4-20250514",

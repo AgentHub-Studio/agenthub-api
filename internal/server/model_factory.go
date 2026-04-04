@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/settings"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/anthropic"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/ollama"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/openai"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/openairesponses"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/openrouter"
 )
 
@@ -23,7 +25,9 @@ type settingsChatModelFactory struct {
 
 // Build returns a ChatModel for the given provider by loading its credentials
 // from the tenant's settings. Falls back to the default model when provider is empty.
-func (f *settingsChatModelFactory) Build(ctx context.Context, provider string) (ai.ChatModel, error) {
+// The model parameter allows selecting the correct API variant (e.g. OpenAI
+// Responses API for gpt-5+ models vs Chat Completions for older models).
+func (f *settingsChatModelFactory) Build(ctx context.Context, provider, model string) (ai.ChatModel, error) {
 	if provider == "" {
 		if f.fallback != nil {
 			return f.fallback, nil
@@ -38,6 +42,10 @@ func (f *settingsChatModelFactory) Build(ctx context.Context, provider string) (
 			return nil, fmt.Errorf("chat model: openai.apiKey not configured in settings")
 		}
 		baseURL, _ := readSettingString(ctx, f.settingsRepo, "openai.baseUrl")
+		// Models gpt-5+ use the Responses API instead of Chat Completions.
+		if requiresResponsesAPI(model) {
+			return openairesponses.New(apiKey, baseURL), nil
+		}
 		return openai.New(apiKey, baseURL), nil
 
 	case "anthropic":
@@ -66,6 +74,45 @@ func (f *settingsChatModelFactory) Build(ctx context.Context, provider string) (
 	default:
 		return nil, fmt.Errorf("chat model: unsupported provider %q", provider)
 	}
+}
+
+// ResolveModel returns the default model for the given provider from settings.
+// For example, for "openai" it reads "openai.model". Returns "" if not configured.
+func (f *settingsChatModelFactory) ResolveModel(ctx context.Context, provider string) string {
+	var key string
+	switch provider {
+	case "openai":
+		key = "openai.model"
+	case "anthropic":
+		key = "claude.model"
+	case "ollama":
+		key = "ollama.model"
+	case "openrouter":
+		key = "openrouter.model"
+	default:
+		return ""
+	}
+	model, err := readSettingString(ctx, f.settingsRepo, key)
+	if err != nil || model == "" {
+		return ""
+	}
+	return model
+}
+
+// requiresResponsesAPI returns true for OpenAI models that must use the
+// Responses API (POST /v1/responses) instead of Chat Completions.
+// GPT-5 family models and newer use the Responses API exclusively.
+func requiresResponsesAPI(model string) bool {
+	m := strings.ToLower(model)
+	// gpt-5, gpt-5.2, gpt-5.4, gpt-5.4-pro, etc.
+	if strings.HasPrefix(m, "gpt-5") {
+		return true
+	}
+	// o3, o3-mini, o3-pro, o4-mini, etc. (reasoning models)
+	if strings.HasPrefix(m, "o3") || strings.HasPrefix(m, "o4") {
+		return true
+	}
+	return false
 }
 
 // readSettingString reads a string value from the settings table.

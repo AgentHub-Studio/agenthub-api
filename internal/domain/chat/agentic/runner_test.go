@@ -112,6 +112,35 @@ func makeToolCallStream(tcID, name, args string) <-chan ai.StreamChunk {
 	return ch
 }
 
+func makeFragmentedToolCallStream(tcID, name string, argParts ...string) <-chan ai.StreamChunk {
+	ch := make(chan ai.StreamChunk, len(argParts)+2)
+	go func() {
+		defer close(ch)
+		ch <- ai.StreamChunk{
+			ToolCallDelta: &ai.ToolCall{
+				ID:   tcID,
+				Type: "function",
+				Function: ai.ToolFunction{
+					Name: name,
+				},
+			},
+		}
+		for _, part := range argParts {
+			ch <- ai.StreamChunk{
+				ToolCallDelta: &ai.ToolCall{
+					ID:   tcID,
+					Type: "function",
+					Function: ai.ToolFunction{
+						Arguments: part,
+					},
+				},
+			}
+		}
+		ch <- ai.StreamChunk{FinishReason: "tool_calls"}
+	}()
+	return ch
+}
+
 // collectEvents drains the event channel into a slice.
 func collectEvents(ch <-chan agentic.RunEvent) []agentic.RunEvent {
 	var events []agentic.RunEvent
@@ -272,6 +301,96 @@ func TestRunner_ToolCallThenStop(t *testing.T) {
 	assert.Equal(t, chat.MessageTypeToolUse, msgs[1].MessageType)
 	assert.Equal(t, "tool", msgs[2].Role)
 	assert.Equal(t, chat.MessageTypeToolResult, msgs[2].MessageType)
+}
+
+func TestRunner_EmitsToolUseSummaryWhenGeneratorConfigured(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			switch idx {
+			case 0:
+				return makeToolCallStream("tc_1", "execute-sql", `{"query":"SELECT 1"}`), nil
+			default:
+				return makeTextStream("The result is 1."), nil
+			}
+		},
+	}
+
+	persister := &mockPersister{}
+	history := &mockHistoryLoader{}
+	config := agentic.DefaultRunConfig()
+	config.MaxIterations = 5
+	config.ToolTimeout = 5 * time.Second
+
+	runner := newTestRunner(model, persister, history, config).
+		WithToolUseSummaryGenerator(agentic.NewToolUseSummaryGenerator(
+			&capturingSummaryChatModel{response: "Ran SQL query"},
+			"summary-model",
+		))
+
+	events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "Run SELECT 1",
+		SystemPrompt: "You are a SQL assistant.",
+		TenantID:     "test-tenant",
+	}))
+
+	ev := findEvent(t, events, agentic.EventToolUseSummary)
+	var data agentic.ToolUseSummaryData
+	require.NoError(t, json.Unmarshal(ev.Data, &data))
+	assert.Equal(t, "Ran SQL query", data.Summary)
+}
+
+func TestRunner_FragmentedToolCallDeltasAreMergedByID(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			switch idx {
+			case 0:
+				return makeFragmentedToolCallStream(
+					"call_ask_user_1",
+					"ask_user",
+					`{"message":"`,
+					`Qual skill voce quer criar?`,
+					`","inputSchema":{"type":"object"}}`,
+				), nil
+			default:
+				return makeTextStream("ok"), nil
+			}
+		},
+	}
+
+	persister := &mockPersister{}
+	history := &mockHistoryLoader{}
+	config := agentic.DefaultRunConfig()
+	config.MaxIterations = 5
+
+	runner := newTestRunner(model, persister, history, config)
+
+	events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "Criar uma skill",
+		SystemPrompt: "You are a test assistant.",
+		TenantID:     "test-tenant",
+	}))
+
+	assert.False(t, hasEventType(events, agentic.EventError))
+	assert.True(t, hasEventType(events, agentic.EventToolCallStart))
+	assert.Equal(t, 2, model.CallCount())
+
+	msgs := persister.Messages()
+	require.GreaterOrEqual(t, len(msgs), 4)
+	assert.Equal(t, "user", msgs[0].Role)
+	assert.Equal(t, chat.MessageTypeToolUse, msgs[1].MessageType)
+	assert.Equal(t, "tool", msgs[2].Role)
+	assert.Equal(t, "assistant", msgs[3].Role)
+
+	var toolCalls []ai.ToolCall
+	require.NoError(t, json.Unmarshal(msgs[1].ToolCalls, &toolCalls))
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "call_ask_user_1", toolCalls[0].ID)
+	assert.Equal(t, "ask_user", toolCalls[0].Function.Name)
+	assert.JSONEq(t, `{"message":"Qual skill voce quer criar?","inputSchema":{"type":"object"}}`, toolCalls[0].Function.Arguments)
 }
 
 func TestRunner_MaxIterationsSafetyBrake(t *testing.T) {

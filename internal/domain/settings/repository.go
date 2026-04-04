@@ -35,11 +35,15 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 func scanSetting(row pgx.Row) (Setting, error) {
 	var s Setting
 	var value []byte
-	err := row.Scan(&s.Key, &value, &s.Description, &s.UpdatedAt)
+	var description *string
+	err := row.Scan(&s.Key, &value, &description, &s.UpdatedAt)
 	if err != nil {
 		return Setting{}, err
 	}
 	s.Value = value
+	if description != nil {
+		s.Description = *description
+	}
 	return s, nil
 }
 

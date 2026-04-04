@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -276,8 +277,13 @@ func (r *ToolBuildResult) DeferredToolNames() []string {
 
 // skillToLLMTool converts a single skill (plus its first active tool's config) into an LLMTool.
 func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) (LLMTool, error) {
-	// Use enriched description from catalog if available, otherwise fall back to DB value.
-	description := EnrichDescription(sk.Slug, sk.Description)
+	// Prefer the description stored in the database so skill behaviour can be
+	// adjusted without redeploying. Fall back to the legacy static catalog only
+	// when the DB description is empty.
+	description := strings.TrimSpace(sk.Description)
+	if description == "" {
+		description = EnrichDescription(sk.Slug, sk.Description)
+	}
 	if description == "" {
 		description = sk.Name
 	}
@@ -638,14 +644,14 @@ func toolSearchTool(deferred []LLMTool) LLMTool {
 // readOnlySlugs lists skill slugs that are known to be read-only (no side effects).
 // Used to determine concurrency safety during tool execution.
 var readOnlySlugs = map[string]bool{
-	"document-search":  true,
-	"document_search":  true, // builtin uses underscore
-	"web-scraper":      true,
-	"http-get":         true,
-	"memory-recall":    true,
-	"troubleshoot":     true, // diagnosis only, no side effects
-	"tool_search":      true, // builtin, no side effects
-	"ask_user":         true, // builtin, only collects user input — no side effects
+	"document-search": true,
+	"document_search": true, // builtin uses underscore
+	"web-scraper":     true,
+	"http-get":        true,
+	"memory-recall":   true,
+	"troubleshoot":    true, // diagnosis only, no side effects
+	"tool_search":     true, // builtin, no side effects
+	"ask_user":        true, // builtin, only collects user input — no side effects
 }
 
 // IsReadOnlyTool returns true if the tool name is known to be read-only.
