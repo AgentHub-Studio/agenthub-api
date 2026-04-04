@@ -62,6 +62,7 @@ func (t *TrackedTool) abort() {
 // StreamingToolExecutor runs tool calls with state tracking and progress events.
 type StreamingToolExecutor struct {
 	skillClient    *SkillRuntimeClient
+	mcpBridge      *MCPToolBridge
 	hookExecutor   *HookExecutor
 	cache          *ToolResultCache
 	config         RunConfig
@@ -79,6 +80,12 @@ func NewStreamingToolExecutor(skillClient *SkillRuntimeClient, hookExecutor *Hoo
 		cache:        cache,
 		config:       config,
 	}
+}
+
+// WithMCPBridge attaches an MCP tool bridge for routing mcp__ prefixed tool calls.
+func (e *StreamingToolExecutor) WithMCPBridge(bridge *MCPToolBridge) *StreamingToolExecutor {
+	e.mcpBridge = bridge
+	return e
 }
 
 // Cache returns the tool result cache (may be nil if caching is disabled).
@@ -193,12 +200,20 @@ func (e *StreamingToolExecutor) ExecuteAll(
 				defer cancel()
 			}
 
-			result, err := e.skillClient.Execute(
-				toolCtx,
-				tc.Function.Name,
-				toolInput,
-				in.TenantID, in.AgentID.String(), in.SessionID.String(),
-			)
+			var result *ToolExecResult
+			var err error
+
+			// Route MCP tool calls to the MCPToolBridge.
+			if IsMCPToolCall(tc.Function.Name) && e.mcpBridge != nil {
+				result, err = e.mcpBridge.Execute(toolCtx, tc.Function.Name, toolInput)
+			} else {
+				result, err = e.skillClient.Execute(
+					toolCtx,
+					tc.Function.Name,
+					toolInput,
+					in.TenantID, in.AgentID.String(), in.SessionID.String(),
+				)
+			}
 
 			if err != nil {
 				errMsg := err.Error()
