@@ -178,7 +178,7 @@ func (o *StopHooksOrchestrator) fireBackgroundTasks(ctx context.Context, hookCtx
 				"turn", hookCtx.TurnIndex,
 				"tokens", hookCtx.CurrentTokens,
 			)
-			o.memoryExtractor.Extract(ctx, hookCtx.CacheSafeParams, hookCtx.CurrentTokens, nil)
+			o.memoryExtractor.Extract(ctx, hookCtx.AgentID, hookCtx.CacheSafeParams, hookCtx.CurrentTokens, nil)
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -19,8 +20,9 @@ import (
 
 // mockChatSvc satisfies the private chatService interface in chat.Handler.
 type mockChatSvc struct {
-	sessions map[uuid.UUID]chat.ChatSession
-	messages map[uuid.UUID][]chat.ChatMessage
+	sessions  map[uuid.UUID]chat.ChatSession
+	messages  map[uuid.UUID][]chat.ChatMessage
+	runEvents []chat.RunEvent
 }
 
 func newMockChatSvc() *mockChatSvc {
@@ -113,10 +115,20 @@ func (m *mockChatSvc) RunSession(_ context.Context, sessionID uuid.UUID, userMes
 	ch := make(chan chat.RunEvent, 10)
 	go func() {
 		defer close(ch)
+		if len(m.runEvents) > 0 {
+			for _, ev := range m.runEvents {
+				ch <- ev
+			}
+			return
+		}
 		ch <- chat.RunEvent{Type: "text_delta", Data: json.RawMessage(`{"content":"Hello from agent"}`)}
 		ch <- chat.RunEvent{Type: "run_complete", Data: json.RawMessage(`{"totalTurns":1,"totalTokens":50}`)}
 	}()
 	return ch, nil
+}
+
+func (m *mockChatSvc) RespondElicitation(sessionID, requestID string, result chat.ElicitationResult) bool {
+	return false // no active runs in tests
 }
 
 func setupChat() (*chi.Mux, *mockChatSvc) {
@@ -356,7 +368,9 @@ func TestChatHandler_ResumeSession_ReplayAll(t *testing.T) {
 	require.NotEmpty(t, runID)
 
 	// Resume with no Last-Event-ID — should replay all events.
-	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume", nil)
+	resumeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume", nil).WithContext(resumeCtx)
 	resumeW := httptest.NewRecorder()
 	r.ServeHTTP(resumeW, resumeReq)
 
@@ -422,6 +436,10 @@ func TestChatHandler_ResumeSession_QueryParamLastEventID(t *testing.T) {
 	resumeBody := resumeW.Body.String()
 	assert.NotContains(t, resumeBody, "id: "+runID+":1\n")
 	assert.Contains(t, resumeBody, "id: "+runID+":2\n")
+}
+
+func TestChatHandler_ResumeSession_FiltersResolvedInputRequest(t *testing.T) {
+	t.Skip("covered by internal package test for filterReplayableEvents")
 }
 
 func TestChatHandler_ResumeSession_RunNotFound(t *testing.T) {

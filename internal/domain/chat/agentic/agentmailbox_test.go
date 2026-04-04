@@ -101,8 +101,8 @@ func TestAgentMailbox_IsolatedSessions(t *testing.T) {
 	session1 := uuid.New()
 	session2 := uuid.New()
 
-	mb.Send(session1, "a", "b", "session 1 msg")
-	mb.Send(session2, "a", "b", "session 2 msg")
+	mb.SendAgent(session1, "a", "b", "session 1 msg")
+	mb.SendAgent(session2, "a", "b", "session 2 msg")
 
 	msgs := mb.ReadUnread(session1, "b")
 	require.Len(t, msgs, 1)

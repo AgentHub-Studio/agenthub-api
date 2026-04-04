@@ -156,6 +156,8 @@ var knownSkillDescriptions = []SkillDescription{
 		Description: "Manages skills (abstract capabilities that group tools): list, get, create, update, delete skills and their tool bindings. " +
 			"Use when the user asks about available skills, wants to create or modify a skill, or manage which tools implement a skill. " +
 			"Key parameters: 'name', 'slug' (kebab-case identifier), 'description', 'category', 'input_schema' (JSON Schema), optional 'allowed_tools' array. " +
+			"When creating or updating a skill, collect all missing fields and the final confirmation in a SINGLE ask_user call whenever possible. " +
+			"Do NOT ask for the same confirmation twice or open a second confirmation form after the user already approved the submitted form. " +
 			"ALWAYS confirm changes with the user before executing write operations. " +
 			"Returns skill objects with id, name, slug, description, category, input schema, and bound tools.",
 	},

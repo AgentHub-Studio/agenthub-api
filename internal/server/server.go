@@ -14,23 +14,21 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
-	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/approval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
-	apikc "github.com/AgentHub-Studio/agenthub-api/internal/keycloak"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chatsession"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/experiment"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
 	mkplInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
 	mkplListing "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
 	mkplReview "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/review"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
@@ -48,7 +46,9 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/user"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/vpnresource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
+	apikc "github.com/AgentHub-Studio/agenthub-api/internal/keycloak"
 	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
+	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/anthropic"
@@ -258,8 +258,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		documentHandler.RegisterRoutes(r)
 		knowledgebaseHandler.RegisterRoutes(r)
 		mcpHandler.RegisterRoutes(r)
-			approvalHandler.RegisterRoutes(r)
-			// Marketplace
+		approvalHandler.RegisterRoutes(r)
+		// Marketplace
 		mkplListingHandler.RegisterRoutes(r)
 		mkplReviewHandler.RegisterRoutes(r)
 		mkplInstallationHandler.RegisterRoutes(r)
@@ -332,6 +332,21 @@ func (a *toolDatasourceAdapter) GetDatasourceCreds(ctx context.Context, tenantID
 	}, nil
 }
 
+type promptTemplateAdapter struct {
+	repo *prompttemplate.Repository
+}
+
+func (a *promptTemplateAdapter) ResolvePromptTemplate(ctx context.Context, agentID uuid.UUID, slug string) (string, bool, error) {
+	tpl, err := a.repo.FindEffectiveByAgentAndSlug(ctx, agentID, slug)
+	if err != nil {
+		if err == prompttemplate.ErrNotFound {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return tpl.Content, true, nil
+}
+
 // --- agentic wiring ---
 
 // buildAgenticRunner creates the SessionRunner that powers the agentic chat loop.
@@ -361,7 +376,9 @@ func buildAgenticRunner(
 	}
 
 	skillClient := agentic.NewSkillRuntimeClient(cfg.SkillRuntimeURL)
-	promptBuilder := agentic.NewPromptBuilder(skillRepo, kbRepo, chatRepo, agentic.DefaultPromptConfig())
+	promptTemplateRepo := prompttemplate.NewRepository(pool)
+	promptBuilder := agentic.NewPromptBuilder(skillRepo, kbRepo, chatRepo, agentic.DefaultPromptConfig()).
+		WithPromptTemplateResolver(&promptTemplateAdapter{repo: promptTemplateRepo})
 	toolSchemaBuilder := agentic.NewToolSchemaBuilder(skillRepo, toolRepo, kbRepo)
 	ctxManager := agentic.NewContextManager()
 	hookRepo := agentic.NewHookRepository(pool)

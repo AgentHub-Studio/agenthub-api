@@ -3,6 +3,7 @@ package agentic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -22,6 +23,13 @@ type MessagePersister interface {
 // HistoryLoader loads the conversation history for a session.
 type HistoryLoader interface {
 	FindAllMessages(ctx context.Context, sessionID uuid.UUID) ([]chat.ChatMessage, error)
+}
+
+// ElicitationSubmitter allows the runner to block on structured user input.
+// The implementation (ElicitationHandler) lives in the adapter layer; the runner
+// receives it via RunInput so there is no circular dependency.
+type ElicitationSubmitter interface {
+	Submit(ctx context.Context, serverName, requestID string, params ElicitationParams) ElicitationResult
 }
 
 // RunInput carries everything needed to start an agentic run.
@@ -47,26 +55,33 @@ type RunInput struct {
 	// ParentSessionID is the root session ID used as the mailbox key.
 	// Sub-agents use this to share a mailbox with siblings.
 	ParentSessionID uuid.UUID
+
+	// Elicitation, when set, handles ask_user tool calls by blocking until the
+	// user submits a response via POST /elicitation/{requestId}/respond.
+	Elicitation ElicitationSubmitter
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
 type Runner struct {
-	chatModel        ai.ChatModel
-	skillClient      *SkillRuntimeClient
-	prompt           *PromptBuilder
-	tools            *ToolSchemaBuilder
-	ctxManager       *ContextManager
-	memory           *MemoryBridge
-	persister        MessagePersister
-	history          HistoryLoader
-	toolExec         *StreamingToolExecutor
-	subtaskExec      *SubtaskExecutor
-	agentMailbox     *AgentMailbox
-	denialTracker    *DenialTracker
-	turnEndHandlers  []TurnEndHandler
-	runEndHandlers   []RunEndHandler
-	progress         *RunProgressTracker
-	config           RunConfig
+	chatModel       ai.ChatModel
+	skillClient     *SkillRuntimeClient
+	prompt          *PromptBuilder
+	tools           *ToolSchemaBuilder
+	ctxManager      *ContextManager
+	memory          *MemoryBridge
+	persister       MessagePersister
+	history         HistoryLoader
+	toolExec        *StreamingToolExecutor
+	subtaskExec     *SubtaskExecutor
+	agentMailbox    *AgentMailbox
+	denialTracker   *DenialTracker
+	turnEndHandlers []TurnEndHandler
+	runEndHandlers  []RunEndHandler
+	toolSummary     *ToolUseSummaryGenerator
+	memoryExtractor *SessionMemoryExtractor
+	cacheSafeSnap   *CacheSafeParamsSnapshot
+	progress        *RunProgressTracker
+	config          RunConfig
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -132,6 +147,24 @@ func (r *Runner) WithRunEndHandlers(handlers ...RunEndHandler) *Runner {
 	return r
 }
 
+// WithToolUseSummaryGenerator attaches a generator for cosmetic tool batch summaries.
+func (r *Runner) WithToolUseSummaryGenerator(gen *ToolUseSummaryGenerator) *Runner {
+	r.toolSummary = gen
+	return r
+}
+
+// WithSessionMemoryExtractor attaches the background session memory extractor.
+func (r *Runner) WithSessionMemoryExtractor(extractor *SessionMemoryExtractor) *Runner {
+	r.memoryExtractor = extractor
+	return r
+}
+
+// WithCacheSafeParamsSnapshot attaches the snapshot used by post-turn background forks.
+func (r *Runner) WithCacheSafeParamsSnapshot(snap *CacheSafeParamsSnapshot) *Runner {
+	r.cacheSafeSnap = snap
+	return r
+}
+
 // Run starts the agentic loop in a goroutine and returns a channel of events.
 // The channel is closed when the run completes or an error occurs.
 func (r *Runner) Run(ctx context.Context, in RunInput) <-chan RunEvent {
@@ -154,6 +187,31 @@ func (r *Runner) Run(ctx context.Context, in RunInput) <-chan RunEvent {
 }
 
 func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
+	// Track whether a clean EventRunComplete was emitted. If the loop exits
+	// via an error path (emitError + return) without emitting run_complete,
+	// the deferred guard emits a minimal one so the client always knows the
+	// run finished — inspired by Claude Code's guarantee that every run
+	// ends with a terminal event.
+	runCompleted := false
+	var totalTokens, totalOutputTokens, latestInputTokens int
+	var cumulativeCacheReadTokens, cumulativeCacheCreationTokens int
+	var totalCost float64
+	var turnIndex int
+
+	defer func() {
+		if !runCompleted {
+			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
+				TotalTurns:                    turnIndex,
+				TotalTokens:                   totalTokens,
+				TotalCost:                     totalCost,
+				LatestInputTokens:             latestInputTokens,
+				CumulativeOutputTokens:        totalOutputTokens,
+				CumulativeCacheReadTokens:     cumulativeCacheReadTokens,
+				CumulativeCacheCreationTokens: cumulativeCacheCreationTokens,
+			})
+		}
+	}()
+
 	// Snapshot immutable gates once at run start. These pre-computed flags
 	// prevent re-evaluating conditions on every loop iteration.
 	gates := BuildRunGates(r.config, in.CurrentDepth, r.subtaskExec != nil)
@@ -180,13 +238,18 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		return
 	}
 	aiTools := convertLLMToolsToAI(toolResult.Loaded)
+	toolNames := make([]string, len(toolResult.Loaded))
+	for i, t := range toolResult.Loaded {
+		toolNames[i] = t.Name
+	}
+	slog.Info("agentic: tools loaded for LLM", "count", len(aiTools), "tools", toolNames, "agentID", in.AgentID)
 	readOnlyIndex := BuildReadOnlyIndex(toolResult.All)
 	destructiveIndex := BuildDestructiveIndex(toolResult.All)
 	contextModeIndex := BuildContextModeIndex(toolResult.All)
 	interruptBehaviorIndex := BuildInterruptBehaviorIndex(toolResult.All)
 	searchOrReadIndex := BuildSearchOrReadIndex(toolResult.All)
 	deferredTools := toolResult.Deferred
-	_ = contextModeIndex      // TODO: use for fork-mode skill execution via SubtaskExecutor
+	_ = contextModeIndex       // TODO: use for fork-mode skill execution via SubtaskExecutor
 	_ = interruptBehaviorIndex // TODO: pass to SSE handler for graceful stop
 	_ = searchOrReadIndex      // TODO: pass to SSE handler for result auto-collapse
 
@@ -248,13 +311,6 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	// - latestInputTokens: REPLACED each turn (most recent prompt tokens only)
 	// - cumulativeOutputTokens: ACCUMULATED across all turns (sum of completions)
 	// - cumulativeCacheRead/Creation: ACCUMULATED across all turns
-	totalTokens := 0
-	totalOutputTokens := 0
-	latestInputTokens := 0
-	cumulativeCacheReadTokens := 0
-	cumulativeCacheCreationTokens := 0
-	totalCost := 0.0
-	turnIndex := 0
 	compactFailures := 0
 	maxTokensRecoveryCount := 0
 	const maxCompactFailures = 3
@@ -276,7 +332,9 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	for turnIndex < r.config.MaxIterations {
+		slog.Info("agentic: loop iteration start", "turn", turnIndex, "maxIterations", r.config.MaxIterations, "ctxErr", ctx.Err())
 		if err := ctx.Err(); err != nil {
+			slog.Error("agentic: context cancelled at loop start", "turn", turnIndex, "error", err)
 			emitError(ch, "context_cancelled", err)
 			return
 		}
@@ -333,6 +391,13 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			CacheControl: gates.CacheControl,
 			Effort:       gates.ResolvedEffort,
 		}
+		cacheSafeParams := NewCacheSafeParams(
+			systemPrompt,
+			aiTools,
+			r.chatModel.GetProviderName(),
+			opts.Model,
+			gates.CacheControl,
+		)
 
 		// Determine query source for this turn.
 		turnSource := SourceMainLoop
@@ -409,6 +474,13 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		// Track which model was actually used for cost estimation.
 		effectiveModel := fallbackResult.ModelUsed
+		cacheSafeParams = NewCacheSafeParams(
+			systemPrompt,
+			aiTools,
+			r.chatModel.GetProviderName(),
+			effectiveModel,
+			gates.CacheControl,
+		)
 
 		// 5b. Consume stream, accumulate response.
 		assistantContent, toolCalls, finishReason, usage, streamErr := r.consumeStream(ctx, ch, fallbackResult.Stream)
@@ -509,9 +581,29 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 			// Turn-end hooks (before emitting turn_complete).
 			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
+			stopHookResult := r.handlePostTurnLifecycle(ctx, ch, StopHookContext{
+				Messages:         append([]ai.Message(nil), messages...),
+				SystemPrompt:     systemPrompt,
+				QuerySource:      turnSource,
+				AgentID:          in.AgentID,
+				SessionID:        in.SessionID,
+				TenantID:         in.TenantID,
+				CacheSafeParams:  cacheSafeParams,
+				CurrentDepth:     in.CurrentDepth,
+				TurnIndex:        turnIndex,
+				CurrentTokens:    EstimateTokens(aiMessagesToChatMessages(messages)) + EstimateStringTokens(systemPrompt),
+				TurnHadToolCalls: false,
+			})
+			if stopHookResult.PreventContinuation {
+				emitError(ch, "stop_hook_veto", errors.New(stopHookResult.StopReason))
+				return
+			}
+			for _, blockingErr := range stopHookResult.BlockingErrors {
+				messages = append(messages, ai.Message{Role: ai.RoleUser, Content: blockingErr})
+			}
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
-			TurnIndex:   turnIndex,
+				TurnIndex:   turnIndex,
 				TokenUsage:  tokenUsageWithCost(usage, turnCost, effectiveModel),
 				BudgetUsed:  usage.TotalTokens,
 				BudgetLimit: turnBudget,
@@ -519,6 +611,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				Source:      turnSource,
 			})
 			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
+			runCompleted = true
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:                    turnIndex + 1,
 				TotalTokens:                   totalTokens,
@@ -542,7 +635,13 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		case "tool_calls":
 			// 5e. Apply permission rules and execute tool calls.
+			tcNames := make([]string, len(toolCalls))
+			for ti, tc := range toolCalls {
+				tcNames[ti] = tc.Function.Name
+			}
+			slog.Info("agentic: LLM requested tool_calls", "turn", turnIndex, "tools", tcNames)
 			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools)
+			slog.Info("agentic: tool execution completed", "turn", turnIndex, "resultCount", len(toolResults), "ctxErr", ctx.Err())
 
 			// Check if denial tracking indicates a stuck loop.
 			if r.denialTracker != nil && len(r.denialTracker.EscalationHints()) > 0 {
@@ -602,11 +701,39 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				r.progress.RecordToolCall(toolName)
 			}
 
+			if summary := r.buildToolUseSummary(ctx, in.AgentID, toolCalls, toolResults, assistantContent); summary != "" {
+				ch <- NewRunEvent(EventToolUseSummary, ToolUseSummaryData{
+					TurnIndex: turnIndex,
+					Summary:   summary,
+				})
+			}
+
 			// Turn-end hooks (after tool results, before incrementing turnIndex).
 			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
+			stopHookResult := r.handlePostTurnLifecycle(ctx, ch, StopHookContext{
+				Messages:         append([]ai.Message(nil), messages...),
+				SystemPrompt:     systemPrompt,
+				QuerySource:      turnSource,
+				AgentID:          in.AgentID,
+				SessionID:        in.SessionID,
+				TenantID:         in.TenantID,
+				CacheSafeParams:  cacheSafeParams,
+				CurrentDepth:     in.CurrentDepth,
+				TurnIndex:        turnIndex,
+				CurrentTokens:    EstimateTokens(aiMessagesToChatMessages(messages)) + EstimateStringTokens(systemPrompt),
+				TurnHadToolCalls: true,
+			})
+			if stopHookResult.PreventContinuation {
+				emitError(ch, "stop_hook_veto", errors.New(stopHookResult.StopReason))
+				return
+			}
+			for _, blockingErr := range stopHookResult.BlockingErrors {
+				messages = append(messages, ai.Message{Role: ai.RoleUser, Content: blockingErr})
+			}
 
+			slog.Info("agentic: tool results persisted, emitting turn_complete", "turn", turnIndex, "ctxErr", ctx.Err())
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
-			TurnIndex:   turnIndex,
+				TurnIndex:   turnIndex,
 				TokenUsage:  tokenUsageWithCost(usage, turnCost, effectiveModel),
 				BudgetUsed:  usage.TotalTokens,
 				BudgetLimit: turnBudget,
@@ -706,6 +833,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			}
 
 			turnIndex++
+			slog.Info("agentic: advancing to next turn after tool_calls", "nextTurn", turnIndex, "ctxErr", ctx.Err())
 			continue
 
 		case "length":
@@ -714,8 +842,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			if maxTokensRecoveryCount < maxMaxTokensRecoveries {
 				maxTokensRecoveryCount++
 				newMax := effectiveMaxTokens * 2
-				if newMax > 16384 {
-					newMax = 16384
+				if newMax > 32768 {
+					newMax = 32768
 				}
 				slog.Warn("max_tokens hit, retrying with increased limit",
 					"attempt", maxTokensRecoveryCount,
@@ -732,9 +860,29 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		default:
 			// Unknown finish reason, treat as stop.
 			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
+			stopHookResult := r.handlePostTurnLifecycle(ctx, ch, StopHookContext{
+				Messages:         append([]ai.Message(nil), messages...),
+				SystemPrompt:     systemPrompt,
+				QuerySource:      turnSource,
+				AgentID:          in.AgentID,
+				SessionID:        in.SessionID,
+				TenantID:         in.TenantID,
+				CacheSafeParams:  cacheSafeParams,
+				CurrentDepth:     in.CurrentDepth,
+				TurnIndex:        turnIndex,
+				CurrentTokens:    EstimateTokens(aiMessagesToChatMessages(messages)) + EstimateStringTokens(systemPrompt),
+				TurnHadToolCalls: false,
+			})
+			if stopHookResult.PreventContinuation {
+				emitError(ch, "stop_hook_veto", errors.New(stopHookResult.StopReason))
+				return
+			}
+			for _, blockingErr := range stopHookResult.BlockingErrors {
+				messages = append(messages, ai.Message{Role: ai.RoleUser, Content: blockingErr})
+			}
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
-			TurnIndex:   turnIndex,
+				TurnIndex:   turnIndex,
 				TokenUsage:  tokenUsageWithCost(usage, turnCost, effectiveModel),
 				BudgetUsed:  usage.TotalTokens,
 				BudgetLimit: turnBudget,
@@ -742,6 +890,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				Source:      turnSource,
 			})
 			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
+			runCompleted = true
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:                    turnIndex + 1,
 				TotalTokens:                   totalTokens,
@@ -773,9 +922,11 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <-chan ai.StreamChunk) (
 	content string, toolCalls []ai.ToolCall, finishReason string, usage ai.Usage, err error,
 ) {
-	// Track tool calls being built incrementally.
-	toolCallMap := map[int]*ai.ToolCall{}
-	toolCallIndex := 0
+	// Track tool calls being built incrementally. Some providers emit
+	// repeated deltas for the same tool call ID while arguments stream in.
+	toolCallsByID := map[string]*ai.ToolCall{}
+	toolCallOrder := make([]string, 0)
+	var lastToolCall *ai.ToolCall
 
 	for chunk := range stream {
 		if ctx.Err() != nil {
@@ -815,20 +966,34 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 		if chunk.ToolCallDelta != nil {
 			tc := chunk.ToolCallDelta
 			if tc.ID != "" {
-				// New tool call starting.
-				toolCallMap[toolCallIndex] = &ai.ToolCall{
-					ID:   tc.ID,
-					Type: tc.Type,
-					Function: ai.ToolFunction{
-						Name:      tc.Function.Name,
-						Arguments: tc.Function.Arguments,
-					},
+				existing, ok := toolCallsByID[tc.ID]
+				if !ok {
+					existing = &ai.ToolCall{
+						ID:   tc.ID,
+						Type: tc.Type,
+						Function: ai.ToolFunction{
+							Name:      tc.Function.Name,
+							Arguments: tc.Function.Arguments,
+						},
+					}
+					toolCallsByID[tc.ID] = existing
+					toolCallOrder = append(toolCallOrder, tc.ID)
+				} else {
+					if existing.Type == "" {
+						existing.Type = tc.Type
+					}
+					if existing.Function.Name == "" {
+						existing.Function.Name = tc.Function.Name
+					}
+					existing.Function.Arguments += tc.Function.Arguments
 				}
-				toolCallIndex++
-			} else if toolCallIndex > 0 {
-				// Appending to current tool call's arguments.
-				existing := toolCallMap[toolCallIndex-1]
-				existing.Function.Arguments += tc.Function.Arguments
+				lastToolCall = existing
+			} else if lastToolCall != nil {
+				// Providers without stable IDs append args to the latest tool call.
+				if lastToolCall.Function.Name == "" {
+					lastToolCall.Function.Name = tc.Function.Name
+				}
+				lastToolCall.Function.Arguments += tc.Function.Arguments
 			}
 		}
 
@@ -837,9 +1002,9 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 		}
 	}
 
-	// Collect tool calls from map.
-	for i := 0; i < toolCallIndex; i++ {
-		if tc, ok := toolCallMap[i]; ok {
+	// Collect tool calls in first-seen order.
+	for _, id := range toolCallOrder {
+		if tc, ok := toolCallsByID[id]; ok {
 			toolCalls = append(toolCalls, *tc)
 		}
 	}
@@ -1181,6 +1346,51 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			continue
 		}
 
+		// Route ask_user calls to the ElicitationHandler — block until the user
+		// submits a response via POST /elicitation/{requestId}/respond.
+		if tc.Function.Name == "ask_user" && in.Elicitation != nil {
+			slog.Info("agentic: ask_user intercepted — blocking for user input", "toolCallID", tc.ID, "args", tc.Function.Arguments)
+			var params struct {
+				Message         string            `json:"message"`
+				Schema          json.RawMessage   `json:"schema"`
+				InputSchema     json.RawMessage   `json:"inputSchema"`
+				RequestedSchema json.RawMessage   `json:"requestedSchema"`
+				Questions       []AskUserQuestion `json:"questions"`
+			}
+			_ = json.Unmarshal(json.RawMessage(tc.Function.Arguments), &params)
+			requestedSchema := params.Schema
+			if len(requestedSchema) == 0 {
+				requestedSchema = params.InputSchema
+			}
+			if len(requestedSchema) == 0 {
+				requestedSchema = params.RequestedSchema
+			}
+			elicParams := ElicitationParams{
+				Mode:            ElicitationModeForm,
+				Message:         params.Message,
+				RequestedSchema: requestedSchema,
+				Questions:       params.Questions,
+			}
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+			})
+			result := in.Elicitation.Submit(ctx, "", tc.ID, elicParams)
+			slog.Info("agentic: ask_user Submit returned", "toolCallID", tc.ID, "action", result.Action, "contentKeys", mapKeys(result.Content), "ctxErr", ctx.Err())
+			var output json.RawMessage
+			if result.Action == ElicitationCancel || result.Action == ElicitationDecline {
+				msg := fmt.Sprintf(`{"action": %q}`, result.Action)
+				output = json.RawMessage(msg)
+			} else {
+				out, _ := json.Marshal(result.Content)
+				output = out
+			}
+			results[i] = ToolExecResult{Output: output}
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
+			})
+			continue
+		}
+
 		// Route tool_search calls locally — resolve deferred tool schemas without
 		// hitting the skill-runtime. Inspired by Claude Code's ToolSearchTool.
 		if IsToolSearchCall(tc.Function.Name) && len(deferredTools) > 0 {
@@ -1270,11 +1480,62 @@ func (r *Runner) executeRunEndHooks(ctx context.Context, ch chan<- RunEvent, pay
 	}
 }
 
+func (r *Runner) handlePostTurnLifecycle(ctx context.Context, ch chan<- RunEvent, hookCtx StopHookContext) StopHookResult {
+	var hookExecutor *HookExecutor
+	if r.toolExec != nil {
+		hookExecutor = r.toolExec.hookExecutor
+	}
+	if r.memoryExtractor == nil && r.cacheSafeSnap == nil && hookExecutor == nil {
+		return StopHookResult{}
+	}
+	return NewStopHooksOrchestrator(
+		hookExecutor,
+		r.memoryExtractor,
+		r.cacheSafeSnap,
+		ch,
+	).HandleStopHooks(ctx, hookCtx)
+}
+
+func (r *Runner) buildToolUseSummary(
+	ctx context.Context,
+	agentID uuid.UUID,
+	toolCalls []ai.ToolCall,
+	toolResults []ToolExecResult,
+	lastAssistantText string,
+) string {
+	if r.toolSummary == nil || len(toolCalls) == 0 || len(toolResults) == 0 {
+		return ""
+	}
+
+	infos := make([]ToolSummaryInfo, 0, len(toolCalls))
+	for i, tc := range toolCalls {
+		info := ToolSummaryInfo{
+			Name:  tc.Function.Name,
+			Input: json.RawMessage(tc.Function.Arguments),
+		}
+		if i < len(toolResults) {
+			info.Output = toolResults[i].Output
+			info.Error = toolResults[i].Error
+		}
+		infos = append(infos, info)
+	}
+
+	return r.toolSummary.Generate(ctx, agentID, infos, lastAssistantText)
+}
+
 func emitError(ch chan<- RunEvent, code string, err error) {
 	ch <- NewRunEvent(EventError, ErrorData{
 		Message: err.Error(),
 		Code:    code,
 	})
+}
+
+func mapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func derefString(s *string) string {

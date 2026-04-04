@@ -60,15 +60,16 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// agent + memory_store (builtins) + execute-sql (skill)
-	require.Len(t, tools, 3)
+	// agent + ask_user + memory_store (builtins) + execute-sql (skill)
+	require.Len(t, tools, 4)
 
 	assert.Equal(t, "agent", tools[0].Name)
-	assert.Equal(t, "memory_store", tools[1].Name)
-	assert.Equal(t, "execute-sql", tools[2].Name)
+	assert.Equal(t, "ask_user", tools[1].Name)
+	assert.Equal(t, "memory_store", tools[2].Name)
+	assert.Equal(t, "execute-sql", tools[3].Name)
 	// Description is enriched from the catalog for known slugs.
-	assert.Contains(t, tools[2].Description, "PostgreSQL datasources")
-	assert.Contains(t, string(tools[2].InputSchema), `"query"`)
+	assert.Contains(t, tools[3].Description, "PostgreSQL datasources")
+	assert.Contains(t, string(tools[3].InputSchema), `"query"`)
 }
 
 func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
@@ -82,15 +83,16 @@ func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// document_search + memory_store + agent (sorted by name)
-	require.Len(t, tools, 3)
+	// agent + ask_user + document_search + memory_store (sorted by name)
+	require.Len(t, tools, 4)
 
 	assert.Equal(t, "agent", tools[0].Name)
-	assert.Equal(t, "document_search", tools[1].Name)
-	assert.Contains(t, tools[1].Description, "Technical Docs")
-	assert.Contains(t, tools[1].Description, "FAQ")
-	assert.Contains(t, string(tools[1].InputSchema), `"query"`)
-	assert.Equal(t, "memory_store", tools[2].Name)
+	assert.Equal(t, "ask_user", tools[1].Name)
+	assert.Equal(t, "document_search", tools[2].Name)
+	assert.Contains(t, tools[2].Description, "Technical Docs")
+	assert.Contains(t, tools[2].Description, "FAQ")
+	assert.Contains(t, string(tools[2].InputSchema), `"query"`)
+	assert.Equal(t, "memory_store", tools[3].Name)
 }
 
 func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T) {
@@ -119,13 +121,14 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 3) // agent + memory_store (builtins) + http-call (skill)
+	require.Len(t, tools, 4) // agent + ask_user + memory_store (builtins) + http-call (skill)
 
 	// Builtins first, then skill tools.
 	assert.Equal(t, "agent", tools[0].Name)
-	assert.Equal(t, "memory_store", tools[1].Name)
-	assert.Equal(t, "http-call", tools[2].Name)
-	assert.Contains(t, string(tools[2].InputSchema), `"url"`)
+	assert.Equal(t, "ask_user", tools[1].Name)
+	assert.Equal(t, "memory_store", tools[2].Name)
+	assert.Equal(t, "http-call", tools[3].Name)
+	assert.Contains(t, string(tools[3].InputSchema), `"url"`)
 }
 
 func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
@@ -138,13 +141,14 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 3) // agent + memory_store (builtins) + empty-skill (skill)
+	require.Len(t, tools, 4) // agent + ask_user + memory_store (builtins) + empty-skill (skill)
 
 	assert.Equal(t, "agent", tools[0].Name)
-	assert.Equal(t, "memory_store", tools[1].Name)
-	assert.Equal(t, "empty-skill", tools[2].Name)
-	// Should have a default empty schema.
-	assert.Contains(t, string(tools[2].InputSchema), `"type":"object"`)
+	assert.Equal(t, "ask_user", tools[1].Name)
+	assert.Equal(t, "memory_store", tools[2].Name)
+	assert.Equal(t, "empty-skill", tools[3].Name)
+	// Should have a default empty schema for the skill.
+	assert.Contains(t, string(tools[3].InputSchema), `"type":"object"`)
 }
 
 func TestToolSchemaBuilder_Build_NoSkillsNoKBs(t *testing.T) {
@@ -152,10 +156,11 @@ func TestToolSchemaBuilder_Build_NoSkillsNoKBs(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// memory_store + agent builtins (sorted).
-	require.Len(t, tools, 2)
+	// agent + ask_user + memory_store builtins (sorted).
+	require.Len(t, tools, 3)
 	assert.Equal(t, "agent", tools[0].Name)
-	assert.Equal(t, "memory_store", tools[1].Name)
+	assert.Equal(t, "ask_user", tools[1].Name)
+	assert.Equal(t, "memory_store", tools[2].Name)
 }
 
 func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
@@ -172,12 +177,34 @@ func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 3) // agent + memory_store (builtins) + bad-schema (skill)
+	require.Len(t, tools, 4) // agent + ask_user + memory_store (builtins) + bad-schema (skill)
 	assert.Equal(t, "agent", tools[0].Name)
-	assert.Equal(t, "memory_store", tools[1].Name)
-	assert.Equal(t, "bad-schema", tools[2].Name)
-	// Should fall back to empty schema.
-	assert.Contains(t, string(tools[2].InputSchema), `"type":"object"`)
+	assert.Equal(t, "ask_user", tools[1].Name)
+	assert.Equal(t, "memory_store", tools[2].Name)
+	assert.Equal(t, "bad-schema", tools[3].Name)
+	// Should fall back to empty schema for the skill.
+	assert.Contains(t, string(tools[3].InputSchema), `"type":"object"`)
+}
+
+func TestToolSchemaBuilder_Build_PrefersDatabaseDescriptionOverStaticCatalog(t *testing.T) {
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{
+			ID:          uuid.New(),
+			Name:        "Execute SQL",
+			Slug:        "execute-sql",
+			Description: "Custom DB description for SQL tool.",
+			Category:    "data",
+		},
+	}}
+
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), &mockKBLister{})
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	require.Len(t, tools, 4)
+	assert.Equal(t, "execute-sql", tools[3].Name)
+	assert.Equal(t, "Custom DB description for SQL tool.", tools[3].Description)
+	assert.NotContains(t, tools[3].Description, "PostgreSQL datasources")
 }
 
 func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
@@ -185,11 +212,11 @@ func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 2) // agent + memory_store (sorted)
+	require.Len(t, tools, 3) // agent + ask_user + memory_store (sorted)
 
-	// memory_store is at index 1 after sorting.
+	// memory_store is at index 2 after sorting (agent, ask_user, memory_store).
 	var schema map[string]any
-	require.NoError(t, json.Unmarshal(tools[1].InputSchema, &schema))
+	require.NoError(t, json.Unmarshal(tools[2].InputSchema, &schema))
 	assert.Equal(t, "object", schema["type"])
 	props, ok := schema["properties"].(map[string]any)
 	require.True(t, ok)
@@ -208,10 +235,10 @@ func TestToolSchemaBuilder_Build_SortedByPartition(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// 2 skills + document_search + memory_store + agent = 5 tools
-	require.Len(t, tools, 5)
+	// 2 skills + ask_user + document_search + memory_store + agent = 6 tools
+	require.Len(t, tools, 6)
 
-	// Builtins first (agent, document_search, memory_store), then skills (alpha-tool, zebra-tool).
+	// Builtins first (agent, ask_user, document_search, memory_store), then skills (alpha-tool, zebra-tool).
 	// Within each partition, sorted alphabetically.
 	builtinEnd := 0
 	for i, t := range tools {
@@ -220,7 +247,7 @@ func TestToolSchemaBuilder_Build_SortedByPartition(t *testing.T) {
 			break
 		}
 	}
-	assert.Equal(t, 3, builtinEnd, "should have 3 builtins as prefix")
+	assert.Equal(t, 4, builtinEnd, "should have 4 builtins as prefix")
 
 	// Builtins sorted.
 	for i := 1; i < builtinEnd; i++ {
@@ -269,24 +296,26 @@ func TestToolSchemaBuilder_Build_BuiltinsFormContiguousPrefix(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// 3 skills + document_search + memory_store + agent = 6 tools
-	require.Len(t, tools, 6)
+	// 3 skills + ask_user + document_search + memory_store + agent = 7 tools
+	require.Len(t, tools, 7)
 
-	// Builtins (agent, document_search, memory_store) should be the first 3, sorted alphabetically.
+	// Builtins (agent, ask_user, document_search, memory_store) should be the first 4, sorted alphabetically.
 	assert.True(t, tools[0].Builtin)
 	assert.Equal(t, "agent", tools[0].Name)
 	assert.True(t, tools[1].Builtin)
-	assert.Equal(t, "document_search", tools[1].Name)
+	assert.Equal(t, "ask_user", tools[1].Name)
 	assert.True(t, tools[2].Builtin)
-	assert.Equal(t, "memory_store", tools[2].Name)
+	assert.Equal(t, "document_search", tools[2].Name)
+	assert.True(t, tools[3].Builtin)
+	assert.Equal(t, "memory_store", tools[3].Name)
 
 	// Skill tools should follow, also sorted alphabetically.
-	assert.False(t, tools[3].Builtin)
-	assert.Equal(t, "alpha-tool", tools[3].Name)
 	assert.False(t, tools[4].Builtin)
-	assert.Equal(t, "mid-tool", tools[4].Name)
+	assert.Equal(t, "alpha-tool", tools[4].Name)
 	assert.False(t, tools[5].Builtin)
-	assert.Equal(t, "zebra-tool", tools[5].Name)
+	assert.Equal(t, "mid-tool", tools[5].Name)
+	assert.False(t, tools[6].Builtin)
+	assert.Equal(t, "zebra-tool", tools[6].Name)
 }
 
 func TestToolSchemaBuilder_Build_BuiltinFlagIsSet(t *testing.T) {

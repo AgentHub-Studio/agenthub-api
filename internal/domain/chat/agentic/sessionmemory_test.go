@@ -3,6 +3,7 @@ package agentic_test
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
@@ -163,11 +164,11 @@ func TestDefaultSessionMemoryConfig(t *testing.T) {
 func TestSessionMemoryExtractor_Extract_Nil(t *testing.T) {
 	var e *agentic.SessionMemoryExtractor
 	// Should not panic.
-	e.Extract(nil, nil, 0, nil)
+	e.Extract(nil, uuid.Nil, nil, 0, nil)
 }
 
 func TestSessionMemoryExtractor_Extract_NilRunner(t *testing.T) {
 	e := agentic.NewSessionMemoryExtractor(nil, agentic.DefaultSessionMemoryConfig())
 	// Should not panic.
-	e.Extract(nil, nil, 0, nil)
+	e.Extract(nil, uuid.Nil, nil, 0, nil)
 }

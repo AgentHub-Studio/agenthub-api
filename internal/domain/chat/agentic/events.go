@@ -24,6 +24,13 @@ const (
 	EventSubtaskProgress  RunEventType = "subtask_progress"
 	EventToolUseSummary   RunEventType = "tool_use_summary"
 	EventStopHookSummary  RunEventType = "stop_hook_summary"
+	// EventInputRequest is emitted when the agentic loop needs structured user input
+	// via an elicitation request (form, URL confirmation, etc.).
+	EventInputRequest RunEventType = "input_request"
+	// EventHeartbeat is a keep-alive event emitted periodically while the runner
+	// is blocked waiting for user input (elicitation). This prevents reverse
+	// proxies and browsers from closing the idle SSE connection.
+	EventHeartbeat RunEventType = "heartbeat"
 )
 
 // ToolUseSummaryData carries a human-readable summary of a completed tool batch.
@@ -220,4 +227,37 @@ type AgentMessageData struct {
 	From    string `json:"from"`
 	To      string `json:"to"`
 	Content string `json:"content"`
+}
+
+// InputRequestData is emitted when the agentic loop needs structured user input.
+// The Payload field carries a UiFormPayload-compatible JSON object that the
+// Flutter client uses to render a dynamic form via UiSelectionPanel.
+type InputRequestData struct {
+	RequestID  string          `json:"requestId"`
+	ServerName string          `json:"serverName,omitempty"`
+	Payload    json.RawMessage `json:"payload"` // UiFormPayload JSON
+}
+
+// UiOptionDto mirrors the Flutter UiOptionDto — a single option in a radio/select field.
+type UiOptionDto struct {
+	Value       string `json:"value"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// UiElementDto mirrors the Flutter UiElementDto — a single form field descriptor.
+type UiElementDto struct {
+	Type     string        `json:"type"`               // "text" | "checkbox" | "radio" | "select"
+	ID       string        `json:"id"`                 // field name / key
+	Label    string        `json:"label"`              // display label
+	Required bool          `json:"required,omitempty"` // whether the field is mandatory
+	Options  []UiOptionDto `json:"options,omitempty"`  // for radio/select types
+}
+
+// UiFormPayloadDto mirrors the Flutter UiFormPayloadDto.
+type UiFormPayloadDto struct {
+	Type        string         `json:"type"`
+	Title       string         `json:"title"`
+	Elements    []UiElementDto `json:"elements"`
+	SubmitLabel string         `json:"submitLabel,omitempty"`
 }

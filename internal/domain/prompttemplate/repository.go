@@ -52,6 +52,23 @@ func (r *Repository) FindByAgentAndSlug(ctx context.Context, agentID uuid.UUID, 
 	return scanRow(conn.QueryRow(ctx, query, agentID, slug))
 }
 
+// FindEffectiveByAgentAndSlug returns the best matching template for an agent:
+// first an agent-scoped template, then a global template (agent_id IS NULL).
+func (r *Repository) FindEffectiveByAgentAndSlug(ctx context.Context, agentID uuid.UUID, slug string) (PromptTemplate, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return PromptTemplate{}, err
+	}
+	defer release()
+
+	query := `SELECT ` + columns + ` FROM prompt_template
+		WHERE slug = $2 AND (agent_id = $1 OR agent_id IS NULL)
+		ORDER BY CASE WHEN agent_id = $1 THEN 0 ELSE 1 END, updated_at DESC
+		LIMIT 1`
+	return scanRow(conn.QueryRow(ctx, query, agentID, slug))
+}
+
 // ListByAgent returns paginated templates for an agent (includes global templates where agent_id IS NULL).
 func (r *Repository) ListByAgent(ctx context.Context, agentID uuid.UUID, req pagination.PageRequest) ([]PromptTemplate, int64, error) {
 	tenantID := tenant.FromContext(ctx)

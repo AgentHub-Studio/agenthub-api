@@ -27,6 +27,8 @@ type chatService interface {
 	AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
 	// RunSession starts an agentic run and returns a channel of events for SSE streaming.
 	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error)
+	// RespondElicitation routes a user response to an active elicitation request.
+	RespondElicitation(sessionID, requestID string, result ElicitationResult) bool
 }
 
 // Handler handles HTTP requests for chat sessions and messages.
@@ -59,6 +61,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/chat/sessions/{id}/run/{runId}/status", h.runStatus)
 	r.Post("/api/chat/sessions/{id}/run/{runId}/cancel", h.cancelRun)
 	r.Get("/api/chat/sessions/{id}/run/{runId}/resume", h.resumeSession)
+	r.Post("/api/chat/sessions/{id}/elicitation/{requestId}/respond", h.respondElicitation)
 }
 
 func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +220,12 @@ func (h *Handler) addMessage(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, http.StatusCreated, resp)
 }
 
+// elicitationRespondRequest is the body for POST /api/chat/sessions/{id}/elicitation/{requestId}/respond.
+type elicitationRespondRequest struct {
+	Action  string                 `json:"action"`  // "accept" | "decline" | "cancel"
+	Content map[string]interface{} `json:"content"` // form field values (for accept)
+}
+
 // runSessionRequest is the body for POST /api/chat/sessions/{id}/run.
 type runSessionRequest struct {
 	Message string `json:"message"`
@@ -255,6 +264,11 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	// Register a background run with a context decoupled from the HTTP request.
 	// This ensures the Runner continues even if the SSE client disconnects.
 	runID, runCtx := h.bgRegistry.Register(sessionID)
+
+	// Inject tenant and raw token into the background context so that
+	// repository calls (which use tenant.FromContext) work correctly.
+	rawToken := tenant.TokenFromContext(r.Context())
+	runCtx = tenant.NewContextWithToken(runCtx, tenantID, rawToken)
 
 	ch, err := h.svc.RunSession(runCtx, sessionID, req.Message, tenantID)
 	if err != nil {
@@ -433,6 +447,7 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "event: reconnect_overflow\ndata: %s\n\n", overflowData)
 		flusher.Flush()
 	}
+	events = filterReplayableEvents(events)
 
 	// Send replayed events.
 	for _, ev := range events {
@@ -468,4 +483,103 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// respondElicitation handles POST /api/chat/sessions/{id}/elicitation/{requestId}/respond.
+// It routes the user's form response to the active agentic run so the loop can continue.
+func (h *Handler) respondElicitation(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(sessionID); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+
+	requestID := chi.URLParam(r, "requestId")
+	if requestID == "" {
+		respond.Error(w, http.StatusBadRequest, "requestId is required")
+		return
+	}
+
+	var req elicitationRespondRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Action == "" {
+		req.Action = "accept"
+	}
+
+	result := ElicitationResult{
+		Action:  req.Action,
+		Content: req.Content,
+	}
+
+	if ok := h.svc.RespondElicitation(sessionID, requestID, result); !ok {
+		respond.Error(w, http.StatusNotFound, "elicitation request not found or already resolved")
+		return
+	}
+
+	respond.NoContent(w)
+}
+
+// filterReplayableEvents drops stale input_request events that have already been
+// resolved later in the same buffered event window. This prevents a resumed SSE
+// connection from re-opening an already answered form.
+func filterReplayableEvents(events []BufferedEvent) []BufferedEvent {
+	if len(events) == 0 {
+		return events
+	}
+
+	resolvedAt := make(map[string]uint64)
+	for _, ev := range events {
+		switch ev.Event.Type {
+		case "tool_result":
+			var data struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(ev.Event.Data, &data); err == nil && data.ID != "" {
+				if _, exists := resolvedAt[data.ID]; !exists {
+					resolvedAt[data.ID] = ev.ID
+				}
+			}
+		case "tool_progress":
+			var data struct {
+				ID    string `json:"id"`
+				State string `json:"state"`
+			}
+			if err := json.Unmarshal(ev.Event.Data, &data); err == nil && data.ID != "" && data.State == "completed" {
+				if _, exists := resolvedAt[data.ID]; !exists {
+					resolvedAt[data.ID] = ev.ID
+				}
+			}
+		}
+	}
+
+	if len(resolvedAt) == 0 {
+		return events
+	}
+
+	filtered := make([]BufferedEvent, 0, len(events))
+	for _, ev := range events {
+		if ev.Event.Type != "input_request" {
+			filtered = append(filtered, ev)
+			continue
+		}
+
+		var data struct {
+			RequestID string `json:"requestId"`
+		}
+		if err := json.Unmarshal(ev.Event.Data, &data); err != nil || data.RequestID == "" {
+			filtered = append(filtered, ev)
+			continue
+		}
+
+		if resolvedSeq, resolved := resolvedAt[data.RequestID]; resolved && ev.ID < resolvedSeq {
+			continue
+		}
+
+		filtered = append(filtered, ev)
+	}
+
+	return filtered
 }

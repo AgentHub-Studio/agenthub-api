@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand"
 	"regexp"
 	"strconv"
 	"strings"
@@ -231,10 +232,13 @@ func retryStream(
 			break
 		}
 
-		// Use Retry-After from error if available, otherwise exponential backoff.
+		// Use Retry-After from error if available, otherwise exponential backoff with jitter.
 		backoff := parseRetryAfter(err.Error())
 		if backoff == 0 {
-			backoff = time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
+			base := math.Pow(2, float64(attempt-1))
+			// Add ±25% jitter to prevent thundering herd on shared rate limits.
+			jitter := base * 0.25 * (2*rand.Float64() - 1) // [-25%, +25%]
+			backoff = time.Duration((base+jitter)*1000) * time.Millisecond
 		}
 		slog.Warn("retrying LLM call after transient error",
 			"attempt", attempt,
@@ -254,15 +258,20 @@ func retryStream(
 	return nil, fmt.Errorf("all %d attempts failed: %w", maxAttempts, lastErr)
 }
 
-// retryAfterRe matches "retry-after: N" or "retry_after: N" patterns in error messages.
-var retryAfterRe = regexp.MustCompile(`(?i)retry[_-]after[:\s]+(\d+\.?\d*)`)
+// retryAfterRe matches "retry-after: N", "retry_after: N", or "retry after Ns" patterns.
+var retryAfterRe = regexp.MustCompile(`(?i)retry[\s_-]after[:\s]+(\d+\.?\d*)`)
+
+// tryAgainInRe matches OpenAI's "try again in 24.084s" / "Please try again in Ns" format.
+var tryAgainInRe = regexp.MustCompile(`(?i)try again in\s+(\d+\.?\d*)`)
 
 // parseRetryAfter extracts a Retry-After duration from an error message.
-// API providers often include retry-after headers in error responses; some
-// SDK wrappers embed them in the error string. Returns 0 if not found.
+// Supports both "retry-after: N" (standard header) and "try again in Ns" (OpenAI).
 // Caps at 60s to prevent excessive waits from malformed responses.
 func parseRetryAfter(errMsg string) time.Duration {
 	matches := retryAfterRe.FindStringSubmatch(errMsg)
+	if len(matches) < 2 {
+		matches = tryAgainInRe.FindStringSubmatch(errMsg)
+	}
 	if len(matches) < 2 {
 		return 0
 	}
