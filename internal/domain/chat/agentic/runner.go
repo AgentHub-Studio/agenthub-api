@@ -669,10 +669,38 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			case PermissionDeny:
 				errMsg := FormatDeniedError(tc.Function.Name)
 				results[i] = ToolExecResult{Error: &errMsg}
+
+				// Track denial and emit event.
+				denialCount := 1
+				escalated := false
+				if r.denialTracker != nil {
+					escalated = r.denialTracker.RecordDenial(tc.Function.Name, tc.Function.Arguments)
+					if rec := r.denialTracker.GetRecord(tc.Function.Name); rec != nil {
+						denialCount = rec.Count
+					}
+				}
+				ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
+					ID:          tc.ID,
+					Name:        tc.Function.Name,
+					Reason:      errMsg,
+					DenialCount: denialCount,
+					Escalated:   escalated,
+				})
 				continue
+
 			case PermissionConfirm:
 				errMsg := fmt.Sprintf("Tool '%s' requires confirmation but running in automated mode.", tc.Function.Name)
 				results[i] = ToolExecResult{Error: &errMsg}
+
+				// Track as denial too — confirm in automated mode is effectively a deny.
+				if r.denialTracker != nil {
+					r.denialTracker.RecordDenial(tc.Function.Name, tc.Function.Arguments)
+				}
+				ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
+					ID:     tc.ID,
+					Name:   tc.Function.Name,
+					Reason: errMsg,
+				})
 				continue
 			}
 		}
@@ -693,6 +721,10 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 		for origIdx, regIdx := range regularIdx {
 			if regIdx < len(execResults) {
 				results[origIdx] = execResults[regIdx]
+				// Reset denial counter on successful execution.
+				if r.denialTracker != nil && execResults[regIdx].Error == nil {
+					r.denialTracker.RecordAllow(regularTools[regIdx].Function.Name)
+				}
 			}
 		}
 	}
