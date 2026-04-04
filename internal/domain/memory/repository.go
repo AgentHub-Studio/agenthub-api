@@ -20,6 +20,7 @@ var ErrNotFound = errors.New("memory: not found")
 // MemoryRepository defines the persistence interface for AgentMemory.
 type MemoryRepository interface {
 	ListByAgent(ctx context.Context, agentID uuid.UUID, userID *string) ([]AgentMemory, error)
+	ListByAgentAndType(ctx context.Context, agentID uuid.UUID, userID *string, memoryType MemoryType) ([]AgentMemory, error)
 	Upsert(ctx context.Context, m AgentMemory) (AgentMemory, error)
 	GetByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) (AgentMemory, error)
 	DeleteByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) error
@@ -27,6 +28,10 @@ type MemoryRepository interface {
 	// Recall returns the top-N most semantically similar memories via pgvector cosine distance.
 	// It also updates last_accessed_at for each returned entry.
 	Recall(ctx context.Context, agentID uuid.UUID, userID *string, embedding []float32, limit int) ([]AgentMemory, error)
+	// SearchByText returns memories matching a text pattern in key or value.
+	SearchByText(ctx context.Context, agentID uuid.UUID, query string, limit int) ([]AgentMemory, error)
+	// CountByType returns memory counts grouped by memory_type for the given agent.
+	CountByType(ctx context.Context, agentID uuid.UUID) (map[MemoryType]int, error)
 }
 
 // Repository provides data access for agent_memory.
@@ -202,6 +207,90 @@ func (r *Repository) ClearByAgent(ctx context.Context, agentID uuid.UUID) error 
 		return fmt.Errorf("memory: clear by agent: %w", err)
 	}
 	return nil
+}
+
+// ListByAgentAndType returns memories filtered by type.
+func (r *Repository) ListByAgentAndType(ctx context.Context, agentID uuid.UUID, userID *string, memoryType MemoryType) ([]AgentMemory, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	query := `
+		SELECT ` + memoryColumns + `
+		  FROM agent_memory
+		 WHERE agent_id = $1
+		   AND ($2::VARCHAR IS NULL OR user_id = $2)
+		   AND memory_type = $3
+		 ORDER BY key`
+
+	rows, err := conn.Query(ctx, query, agentID, userID, string(memoryType))
+	if err != nil {
+		return nil, fmt.Errorf("memory: list by type: %w", err)
+	}
+	defer rows.Close()
+
+	return scanRows(rows)
+}
+
+// SearchByText returns memories matching a text pattern in key or value.
+func (r *Repository) SearchByText(ctx context.Context, agentID uuid.UUID, query string, limit int) ([]AgentMemory, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	sql := `
+		SELECT ` + memoryColumns + `
+		  FROM agent_memory
+		 WHERE agent_id = $1
+		   AND (key ILIKE '%' || $2 || '%' OR value::text ILIKE '%' || $2 || '%')
+		 ORDER BY updated_at DESC
+		 LIMIT $3`
+
+	rows, err := conn.Query(ctx, sql, agentID, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("memory: search: %w", err)
+	}
+	defer rows.Close()
+
+	return scanRows(rows)
+}
+
+// CountByType returns memory counts grouped by memory_type.
+func (r *Repository) CountByType(ctx context.Context, agentID uuid.UUID) (map[MemoryType]int, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	sql := `SELECT memory_type, COUNT(*) FROM agent_memory WHERE agent_id = $1 GROUP BY memory_type`
+	rows, err := conn.Query(ctx, sql, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("memory: count by type: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[MemoryType]int)
+	for rows.Next() {
+		var mt string
+		var count int
+		if err := rows.Scan(&mt, &count); err != nil {
+			return nil, fmt.Errorf("memory: count scan: %w", err)
+		}
+		counts[MemoryType(mt)] = count
+	}
+	return counts, rows.Err()
 }
 
 func scanRow(row pgx.Row) (AgentMemory, error) {
