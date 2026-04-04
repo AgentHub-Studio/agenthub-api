@@ -17,6 +17,9 @@ const (
 	EventSubtaskStart     RunEventType = "subtask_start"
 	EventSubtaskComplete  RunEventType = "subtask_complete"
 	EventToolDenied       RunEventType = "tool_denied"
+	EventModelFallback    RunEventType = "model_fallback"
+	EventRunProgress      RunEventType = "run_progress"
+	EventAgentMessage     RunEventType = "agent_message"
 )
 
 // RunEvent is the envelope sent through the Runner's output channel.
@@ -60,6 +63,14 @@ type TokenUsage struct {
 	CompletionTokens int     `json:"completionTokens"`
 	TotalTokens      int     `json:"totalTokens"`
 	CostUSD          float64 `json:"costUsd,omitempty"`
+	Model            string  `json:"model,omitempty"`
+}
+
+// ModelFallbackData is emitted when a fallback model is used.
+type ModelFallbackData struct {
+	FromModel string `json:"fromModel"`
+	ToModel   string `json:"toModel"`
+	Reason    string `json:"reason"`
 }
 
 // TurnCompleteData is emitted at the end of each agentic turn
@@ -118,14 +129,23 @@ type SubtaskCompleteData struct {
 	TotalTurns  int     `json:"totalTurns"`
 	TotalTokens int     `json:"totalTokens"`
 	TotalCost   float64 `json:"totalCostUsd,omitempty"`
+	Summary     string  `json:"summary,omitempty"`
 	Error       *string `json:"error,omitempty"`
 }
 
 // ToolDeniedData is emitted when a tool call is denied by permission rules.
 type ToolDeniedData struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Reason       string `json:"reason"`
-	DenialCount  int    `json:"denialCount"`
-	Escalated    bool   `json:"escalated"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Reason      string `json:"reason"`
+	DenialCount int    `json:"denialCount"`
+	Escalated   bool   `json:"escalated"`
+}
+
+// AgentMessageData is emitted when a sub-agent sends a message via the mailbox.
+type AgentMessageData struct {
+	ID      string `json:"id"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Content string `json:"content"`
 }
