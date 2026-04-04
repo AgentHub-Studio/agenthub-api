@@ -16,6 +16,7 @@ const (
 	EventToolProgress     RunEventType = "tool_progress"
 	EventSubtaskStart     RunEventType = "subtask_start"
 	EventSubtaskComplete  RunEventType = "subtask_complete"
+	EventRunProgress      RunEventType = "run_progress"
 	EventModelFallback    RunEventType = "model_fallback"
 	EventToolDenied       RunEventType = "tool_denied"
 )
@@ -74,8 +75,10 @@ type ModelFallbackData struct {
 // TurnCompleteData is emitted at the end of each agentic turn
 // (one LLM call that may be followed by tool executions).
 type TurnCompleteData struct {
-	TurnIndex  int        `json:"turnIndex"`
-	TokenUsage TokenUsage `json:"tokenUsage"`
+	TurnIndex   int        `json:"turnIndex"`
+	TokenUsage  TokenUsage `json:"tokenUsage"`
+	BudgetUsed  int        `json:"budgetUsed,omitempty"`
+	BudgetLimit int        `json:"budgetLimit,omitempty"`
 }
 
 // RunCompleteData is the final event emitted when the agentic loop finishes.
@@ -104,6 +107,7 @@ const (
 	ToolStateQueued    ToolState = "queued"
 	ToolStateExecuting ToolState = "executing"
 	ToolStateCompleted ToolState = "completed"
+	ToolStateStalled   ToolState = "stalled"
 	ToolStateAborted   ToolState = "aborted"
 )
 
