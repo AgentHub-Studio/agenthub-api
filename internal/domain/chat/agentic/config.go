@@ -88,6 +88,11 @@ type RunConfig struct {
 	// FallbackOnTimeout enables fallback on timeout errors. Default true.
 	FallbackOnTimeout *bool `json:"fallbackOnTimeout,omitempty"`
 
+	// ToolCacheCapacity is the max number of entries in the per-run tool result
+	// LRU cache. Cacheable tools (read-only, idempotent) have their results cached
+	// to avoid redundant re-execution. Default 64. Set to 0 to disable caching.
+	ToolCacheCapacity int `json:"toolCacheCapacity"`
+
 	// DenialEscalationThreshold is the number of consecutive denials of the same
 	// tool before the Runner injects an escalation hint into the LLM context.
 	// Default 3. Set to 0 to disable escalation.
@@ -109,11 +114,12 @@ func DefaultRunConfig() RunConfig {
 		MaxToolResultChars:  50000,
 		RetryMaxAttempts:    3,
 		MaxDepth:            3,
-		Provider:                   "anthropic",
-		Model:                      "claude-sonnet-4-20250514",
-		Temperature:                0.7,
-		StallCheckInterval:         15 * time.Second,
-		StallThreshold:             45 * time.Second,
+		Provider:            "anthropic",
+		Model:               "claude-sonnet-4-20250514",
+		Temperature:         0.7,
+		StallCheckInterval:  15 * time.Second,
+		StallThreshold:      45 * time.Second,
+		ToolCacheCapacity:          64,
 		DenialEscalationThreshold: 3,
 	}
 }
@@ -138,6 +144,7 @@ type modelConfig struct {
 	FallbackOnRateLimit *bool    `json:"fallbackOnRateLimit,omitempty"`
 	FallbackOnOverload  *bool    `json:"fallbackOnOverload,omitempty"`
 	FallbackOnTimeout   *bool    `json:"fallbackOnTimeout,omitempty"`
+	ToolCacheCapacity   *int     `json:"toolCacheCapacity,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -204,6 +211,9 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	}
 	if mc.FallbackOnTimeout != nil {
 		cfg.FallbackOnTimeout = mc.FallbackOnTimeout
+	}
+	if mc.ToolCacheCapacity != nil {
+		cfg.ToolCacheCapacity = *mc.ToolCacheCapacity
 	}
 	return cfg
 }
