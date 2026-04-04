@@ -56,6 +56,22 @@ type RunConfig struct {
 
 	// Temperature for the LLM call (0.0–2.0).
 	Temperature float64 `json:"temperature"`
+
+	// ModelFallbacks is an ordered list of fallback models to try when the
+	// primary model fails with transient errors (rate limit, overload, timeout).
+	ModelFallbacks []string `json:"modelFallbacks,omitempty"`
+
+	// FallbackOnRateLimit enables fallback on 429/529 errors. Default true.
+	FallbackOnRateLimit *bool `json:"fallbackOnRateLimit,omitempty"`
+	// FallbackOnOverload enables fallback on 502/503 errors. Default true.
+	FallbackOnOverload *bool `json:"fallbackOnOverload,omitempty"`
+	// FallbackOnTimeout enables fallback on timeout errors. Default true.
+	FallbackOnTimeout *bool `json:"fallbackOnTimeout,omitempty"`
+
+	// DenialEscalationThreshold is the number of consecutive denials of the same
+	// tool before the Runner injects an escalation hint into the LLM context.
+	// Default 3. Set to 0 to disable escalation.
+	DenialEscalationThreshold int `json:"denialEscalationThreshold"`
 }
 
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
@@ -73,9 +89,10 @@ func DefaultRunConfig() RunConfig {
 		MaxToolResultChars:  50000,
 		RetryMaxAttempts:    3,
 		MaxDepth:            3,
-		Provider:            "anthropic",
-		Model:               "claude-sonnet-4-20250514",
-		Temperature:         0.7,
+		Provider:                  "anthropic",
+		Model:                     "claude-sonnet-4-20250514",
+		Temperature:               0.7,
+		DenialEscalationThreshold: 3,
 	}
 }
 
@@ -92,6 +109,10 @@ type modelConfig struct {
 	MaxToolResultChars *int     `json:"maxToolResultChars"`
 	RetryMaxAttempts   *int     `json:"retryMaxAttempts"`
 	MaxDepth           *int     `json:"maxDepth"`
+	ModelFallbacks     []string `json:"modelFallbacks,omitempty"`
+	FallbackOnRateLimit *bool   `json:"fallbackOnRateLimit,omitempty"`
+	FallbackOnOverload  *bool   `json:"fallbackOnOverload,omitempty"`
+	FallbackOnTimeout   *bool   `json:"fallbackOnTimeout,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -138,5 +159,41 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	if mc.MaxDepth != nil {
 		cfg.MaxDepth = *mc.MaxDepth
 	}
+	if len(mc.ModelFallbacks) > 0 {
+		cfg.ModelFallbacks = mc.ModelFallbacks
+	}
+	if mc.FallbackOnRateLimit != nil {
+		cfg.FallbackOnRateLimit = mc.FallbackOnRateLimit
+	}
+	if mc.FallbackOnOverload != nil {
+		cfg.FallbackOnOverload = mc.FallbackOnOverload
+	}
+	if mc.FallbackOnTimeout != nil {
+		cfg.FallbackOnTimeout = mc.FallbackOnTimeout
+	}
 	return cfg
+}
+
+// IsFallbackOnRateLimit returns whether fallback is enabled for rate limit errors.
+func (c RunConfig) IsFallbackOnRateLimit() bool {
+	if c.FallbackOnRateLimit == nil {
+		return true // default enabled
+	}
+	return *c.FallbackOnRateLimit
+}
+
+// IsFallbackOnOverload returns whether fallback is enabled for overload errors.
+func (c RunConfig) IsFallbackOnOverload() bool {
+	if c.FallbackOnOverload == nil {
+		return true
+	}
+	return *c.FallbackOnOverload
+}
+
+// IsFallbackOnTimeout returns whether fallback is enabled for timeout errors.
+func (c RunConfig) IsFallbackOnTimeout() bool {
+	if c.FallbackOnTimeout == nil {
+		return true
+	}
+	return *c.FallbackOnTimeout
 }
