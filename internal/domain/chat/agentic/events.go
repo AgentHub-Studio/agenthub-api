@@ -103,6 +103,7 @@ const (
 	ToolStateQueued    ToolState = "queued"
 	ToolStateExecuting ToolState = "executing"
 	ToolStateCompleted ToolState = "completed"
+	ToolStateStalled   ToolState = "stalled"
 	ToolStateAborted   ToolState = "aborted"
 )
 
