@@ -64,15 +64,27 @@ type StreamingToolExecutor struct {
 	skillClient    *SkillRuntimeClient
 	mcpBridge      *MCPToolBridge
 	hookExecutor   *HookExecutor
+	cache          *ToolResultCache
+	stallDetector  *StallDetector
 	config         RunConfig
 }
 
 // NewStreamingToolExecutor creates a StreamingToolExecutor.
 func NewStreamingToolExecutor(skillClient *SkillRuntimeClient, hookExecutor *HookExecutor, config RunConfig) *StreamingToolExecutor {
+	var cache *ToolResultCache
+	if config.ToolCacheCapacity > 0 {
+		cache = NewToolResultCache(config.ToolCacheCapacity)
+	}
+	var detector *StallDetector
+	if config.StallThreshold > 0 {
+		detector = NewStallDetector(config.StallCheckInterval, config.StallThreshold)
+	}
 	return &StreamingToolExecutor{
-		skillClient:  skillClient,
-		hookExecutor: hookExecutor,
-		config:       config,
+		skillClient:   skillClient,
+		hookExecutor:  hookExecutor,
+		cache:         cache,
+		stallDetector: detector,
+		config:        config,
 	}
 }
 
@@ -80,6 +92,11 @@ func NewStreamingToolExecutor(skillClient *SkillRuntimeClient, hookExecutor *Hoo
 func (e *StreamingToolExecutor) WithMCPBridge(bridge *MCPToolBridge) *StreamingToolExecutor {
 	e.mcpBridge = bridge
 	return e
+}
+
+// Cache returns the tool result cache (may be nil if caching is disabled).
+func (e *StreamingToolExecutor) Cache() *ToolResultCache {
+	return e.cache
 }
 
 // ExecuteAll runs all tool calls with state tracking, hooks, and abort cascade.
@@ -150,11 +167,43 @@ func (e *StreamingToolExecutor) ExecuteAll(
 				return
 			}
 
+			// Check cache for cacheable tools.
+			toolInput := json.RawMessage(tc.Function.Arguments)
+			if e.cache != nil && IsCacheable(tc.Function.Name) {
+				if cached := e.cache.Get(tc.Function.Name, toolInput); cached != nil {
+					tt.complete(*cached)
+					results[idx] = truncateToolResult(*cached, e.config.MaxToolResultChars)
+
+					ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+						ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
+					})
+					return
+				}
+			}
+
 			// Transition to executing.
 			tt.transition(ToolStateExecuting)
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 				ID: tt.ID, Name: tt.Name, State: ToolStateExecuting,
 			})
+
+			// Start stall detection for this tool.
+			var stallMon *StallMonitor
+			if e.stallDetector != nil {
+				stallMon = e.stallDetector.Monitor(
+					tt.ID, tt.Name,
+					func(toolID, toolName string) {
+						ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+							ID: toolID, Name: toolName, State: ToolStateStalled,
+						})
+					},
+					func(toolID, toolName string) {
+						ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+							ID: toolID, Name: toolName, State: ToolStateExecuting,
+						})
+					},
+				)
+			}
 
 			// Pre-tool hooks.
 			if e.hookExecutor != nil {
@@ -163,7 +212,7 @@ func (e *StreamingToolExecutor) ExecuteAll(
 					AgentID:   in.AgentID.String(),
 					SessionID: in.SessionID.String(),
 					ToolName:  tc.Function.Name,
-					ToolInput: json.RawMessage(tc.Function.Arguments),
+					ToolInput: toolInput,
 				})
 			}
 
@@ -175,7 +224,6 @@ func (e *StreamingToolExecutor) ExecuteAll(
 				defer cancel()
 			}
 
-			toolInput := json.RawMessage(tc.Function.Arguments)
 			var result *ToolExecResult
 			var err error
 
@@ -189,6 +237,11 @@ func (e *StreamingToolExecutor) ExecuteAll(
 					toolInput,
 					in.TenantID, in.AgentID.String(), in.SessionID.String(),
 				)
+			}
+
+			// Stop stall monitoring — tool execution completed.
+			if stallMon != nil {
+				stallMon.Stop()
 			}
 
 			if err != nil {
@@ -207,6 +260,11 @@ func (e *StreamingToolExecutor) ExecuteAll(
 			} else {
 				tt.complete(*result)
 				results[idx] = truncateToolResult(*result, e.config.MaxToolResultChars)
+
+				// Cache successful results for cacheable tools.
+				if e.cache != nil && IsCacheable(tc.Function.Name) && result.Error == nil {
+					e.cache.Put(tc.Function.Name, toolInput, *result)
+				}
 			}
 
 			// Completed state.
@@ -221,7 +279,7 @@ func (e *StreamingToolExecutor) ExecuteAll(
 					AgentID:    in.AgentID.String(),
 					SessionID:  in.SessionID.String(),
 					ToolName:   tc.Function.Name,
-					ToolInput:  json.RawMessage(tc.Function.Arguments),
+					ToolInput:  toolInput,
 					ToolOutput: results[idx].Output,
 					ToolError:  results[idx].Error,
 				})
