@@ -11,7 +11,7 @@ import (
 type CreateRequest struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
-	AgentID     uuid.UUID       `json:"agentId"`
+	AgentID     *uuid.UUID      `json:"agentId"`
 	Config      json.RawMessage `json:"config"`
 }
 
@@ -19,7 +19,7 @@ type CreateRequest struct {
 type UpdateRequest struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
-	Status      string          `json:"status"`
+	Status      string          `json:"status,omitempty"`
 	Config      json.RawMessage `json:"config"`
 }
 

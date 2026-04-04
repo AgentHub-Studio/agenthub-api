@@ -790,3 +790,238 @@ func TestRunner_PermissionAllowList(t *testing.T) {
 	}
 	assert.True(t, foundDenied, "execute-sql should be denied by allow list")
 }
+
+func TestRunner_MaxTokensRecovery(t *testing.T) {
+	// First call returns "length" (truncated), second call succeeds with "stop".
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []ai.Message, opts ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			if idx == 0 {
+				// First call: truncated response.
+				ch := make(chan ai.StreamChunk, 10)
+				go func() {
+					defer close(ch)
+					ch <- ai.StreamChunk{Delta: "partial..."}
+					ch <- ai.StreamChunk{FinishReason: "length"}
+				}()
+				return ch, nil
+			}
+			// Second call: verify max_tokens was increased and return success.
+			assert.Greater(t, opts.MaxTokens, 4096, "max_tokens should have been increased")
+			return makeTextStream("complete response"), nil
+		},
+	}
+
+	persister := &mockPersister{}
+	history := &mockHistoryLoader{}
+	config := agentic.DefaultRunConfig()
+	config.MaxIterations = 10
+	config.MaxTokensPerCall = 4096
+
+	runner := newTestRunner(model, persister, history, config)
+
+	ch := runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "Write something long",
+		SystemPrompt: "You are helpful.",
+		TenantID:     "test-tenant",
+	})
+
+	events := collectEvents(ch)
+
+	// Should recover: no error, has run_complete.
+	assert.False(t, hasEventType(events, agentic.EventError))
+	assert.True(t, hasEventType(events, agentic.EventRunComplete))
+
+	// Model should have been called twice (recovery retry).
+	assert.Equal(t, 2, model.CallCount())
+}
+
+func TestRunner_MaxTokensRecoveryExhausted(t *testing.T) {
+	// All calls return "length" — should error after 3 recovery attempts.
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			ch := make(chan ai.StreamChunk, 10)
+			go func() {
+				defer close(ch)
+				ch <- ai.StreamChunk{Delta: "truncated"}
+				ch <- ai.StreamChunk{FinishReason: "length"}
+			}()
+			return ch, nil
+		},
+	}
+
+	persister := &mockPersister{}
+	history := &mockHistoryLoader{}
+	config := agentic.DefaultRunConfig()
+	config.MaxIterations = 10
+	config.MaxTokensPerCall = 4096
+
+	runner := newTestRunner(model, persister, history, config)
+
+	ch := runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "Write something very long",
+		SystemPrompt: "You are helpful.",
+		TenantID:     "test-tenant",
+	})
+
+	events := collectEvents(ch)
+
+	// Should error after exhausting recovery attempts.
+	assert.True(t, hasEventType(events, agentic.EventError))
+	assert.False(t, hasEventType(events, agentic.EventRunComplete))
+
+	// 1 initial + 3 recovery = 4 total calls.
+	assert.Equal(t, 4, model.CallCount())
+}
+
+// --- SanitizeMessages tests ---
+
+func TestSanitizeMessages_RemovesWhitespaceOnlyAssistant(t *testing.T) {
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: "hello"},
+		{Role: ai.RoleAssistant, Content: "   \n  "},
+		{Role: ai.RoleAssistant, Content: "real response"},
+	}
+	result := agentic.SanitizeMessages(msgs)
+	require.Len(t, result, 2)
+	assert.Equal(t, "hello", result[0].Content)
+	assert.Equal(t, "real response", result[1].Content)
+}
+
+func TestSanitizeMessages_KeepsAssistantWithToolCalls(t *testing.T) {
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: "search for docs"},
+		{Role: ai.RoleAssistant, Content: "", ToolCalls: []ai.ToolCall{{ID: "tc1"}}},
+	}
+	result := agentic.SanitizeMessages(msgs)
+	require.Len(t, result, 2) // whitespace content but has tool_calls → keep
+}
+
+func TestSanitizeMessages_RemovesDuplicateConsecutiveUser(t *testing.T) {
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: "find me the report"},
+		{Role: ai.RoleUser, Content: "find me the report"},
+		{Role: ai.RoleAssistant, Content: "Here it is"},
+	}
+	result := agentic.SanitizeMessages(msgs)
+	require.Len(t, result, 2)
+	assert.Equal(t, ai.RoleUser, result[0].Role)
+	assert.Equal(t, ai.RoleAssistant, result[1].Role)
+}
+
+func TestSanitizeMessages_KeepsDifferentConsecutiveUser(t *testing.T) {
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: "first question"},
+		{Role: ai.RoleUser, Content: "second question"},
+	}
+	result := agentic.SanitizeMessages(msgs)
+	require.Len(t, result, 2)
+}
+
+func TestSanitizeMessages_EmptyInput(t *testing.T) {
+	result := agentic.SanitizeMessages(nil)
+	assert.Nil(t, result)
+}
+
+func TestSanitizeMessages_NoChangesNeeded(t *testing.T) {
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: "hello"},
+		{Role: ai.RoleAssistant, Content: "hi there"},
+	}
+	result := agentic.SanitizeMessages(msgs)
+	require.Len(t, result, 2)
+}
+
+// --- Effort level tests ---
+
+func TestModelSupportsEffort_Opus46(t *testing.T) {
+	assert.True(t, agentic.ModelSupportsEffort("claude-opus-4-6-20250414"))
+	assert.True(t, agentic.ModelSupportsEffort("claude-opus-4-6"))
+}
+
+func TestModelSupportsEffort_Sonnet46(t *testing.T) {
+	assert.True(t, agentic.ModelSupportsEffort("claude-sonnet-4-6-20250514"))
+}
+
+func TestModelSupportsEffort_OlderModels(t *testing.T) {
+	assert.False(t, agentic.ModelSupportsEffort("claude-sonnet-4-20250514"))
+	assert.False(t, agentic.ModelSupportsEffort("claude-haiku-4-5-20251001"))
+	assert.False(t, agentic.ModelSupportsEffort("gpt-4o"))
+}
+
+func TestModelSupportsMaxEffort_OnlyOpus46(t *testing.T) {
+	assert.True(t, agentic.ModelSupportsMaxEffort("claude-opus-4-6-20250414"))
+	assert.False(t, agentic.ModelSupportsMaxEffort("claude-sonnet-4-6-20250514"))
+	assert.False(t, agentic.ModelSupportsMaxEffort("gpt-4o"))
+}
+
+func TestResolveEffortLevel_NilWhenNotSet(t *testing.T) {
+	cfg := agentic.RunConfig{Model: "claude-opus-4-6-20250414"}
+	assert.Nil(t, agentic.ResolveEffortLevel(cfg))
+}
+
+func TestResolveEffortLevel_NilForUnsupportedModel(t *testing.T) {
+	medium := ai.EffortMedium
+	cfg := agentic.RunConfig{Model: "gpt-4o", Effort: &medium}
+	assert.Nil(t, agentic.ResolveEffortLevel(cfg))
+}
+
+func TestResolveEffortLevel_PassesThroughForSupportedModel(t *testing.T) {
+	medium := ai.EffortMedium
+	cfg := agentic.RunConfig{Model: "claude-opus-4-6-20250414", Effort: &medium}
+	result := agentic.ResolveEffortLevel(cfg)
+	require.NotNil(t, result)
+	assert.Equal(t, ai.EffortMedium, *result)
+}
+
+func TestResolveEffortLevel_MaxDowngradedOnNonOpus(t *testing.T) {
+	max := ai.EffortMax
+	cfg := agentic.RunConfig{Model: "claude-sonnet-4-6-20250514", Effort: &max}
+	result := agentic.ResolveEffortLevel(cfg)
+	require.NotNil(t, result)
+	assert.Equal(t, ai.EffortHigh, *result)
+}
+
+func TestResolveEffortLevel_MaxKeptOnOpus46(t *testing.T) {
+	max := ai.EffortMax
+	cfg := agentic.RunConfig{Model: "claude-opus-4-6-20250414", Effort: &max}
+	result := agentic.ResolveEffortLevel(cfg)
+	require.NotNil(t, result)
+	assert.Equal(t, ai.EffortMax, *result)
+}
+
+// --- Empty tool result injection tests ---
+
+func TestFormatToolResult_NormalOutput(t *testing.T) {
+	r := agentic.ToolExecResult{Output: json.RawMessage(`{"key": "value"}`)}
+	assert.Equal(t, `{"key": "value"}`, agentic.FormatToolResult(r))
+}
+
+func TestFormatToolResult_Error(t *testing.T) {
+	errMsg := "connection refused"
+	r := agentic.ToolExecResult{Error: &errMsg}
+	assert.Equal(t, "Error: connection refused", agentic.FormatToolResult(r))
+}
+
+func TestFormatToolResult_EmptyOutputWithToolName(t *testing.T) {
+	r := agentic.ToolExecResult{Output: json.RawMessage(`{}`), ToolName: "document_search"}
+	assert.Equal(t, "(document_search completed with no output)", agentic.FormatToolResult(r))
+}
+
+func TestFormatToolResult_NullOutputWithToolName(t *testing.T) {
+	r := agentic.ToolExecResult{Output: json.RawMessage(`null`), ToolName: "execute_sql"}
+	assert.Equal(t, "(execute_sql completed with no output)", agentic.FormatToolResult(r))
+}
+
+func TestFormatToolResult_EmptyOutputWithoutToolName(t *testing.T) {
+	r := agentic.ToolExecResult{Output: nil}
+	assert.Equal(t, "(tool completed with no output)", agentic.FormatToolResult(r))
+}
+
+func TestFormatToolResult_WhitespaceOnlyOutput(t *testing.T) {
+	r := agentic.ToolExecResult{Output: json.RawMessage(`   `), ToolName: "my_tool"}
+	assert.Equal(t, "(my_tool completed with no output)", agentic.FormatToolResult(r))
+}

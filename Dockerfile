@@ -1,7 +1,7 @@
 FROM golang:1.24-alpine AS builder
 RUN apk add --no-cache git ca-certificates tzdata
-COPY --from=gocommons . /agenthub-go-commons
 WORKDIR /build
+COPY --from=gocommons . /build/agenthub-go-commons
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .

@@ -19,7 +19,18 @@ const (
 	EventRunProgress      RunEventType = "run_progress"
 	EventModelFallback    RunEventType = "model_fallback"
 	EventToolDenied       RunEventType = "tool_denied"
+	EventThinkingDelta    RunEventType = "thinking_delta"
+	EventSubtaskProgress  RunEventType = "subtask_progress"
+	EventToolUseSummary   RunEventType = "tool_use_summary"
+	EventStopHookSummary  RunEventType = "stop_hook_summary"
 )
+
+// ToolUseSummaryData carries a human-readable summary of a completed tool batch.
+// Inspired by Claude Code's ToolUseSummaryMessage.
+type ToolUseSummaryData struct {
+	TurnIndex int    `json:"turnIndex"`
+	Summary   string `json:"summary"`
+}
 
 // RunEvent is the envelope sent through the Runner's output channel.
 type RunEvent struct {
@@ -37,6 +48,11 @@ func NewRunEvent(typ RunEventType, data any) RunEvent {
 
 // TextDeltaData carries a chunk of streamed assistant text.
 type TextDeltaData struct {
+	Content string `json:"content"`
+}
+
+// ThinkingDeltaData carries a chunk of streamed thinking/reasoning content.
+type ThinkingDeltaData struct {
 	Content string `json:"content"`
 }
 
@@ -58,11 +74,13 @@ type ToolResultData struct {
 
 // TokenUsage tracks prompt and completion token counts for a single LLM call.
 type TokenUsage struct {
-	PromptTokens     int     `json:"promptTokens"`
-	CompletionTokens int     `json:"completionTokens"`
-	TotalTokens      int     `json:"totalTokens"`
-	CostUSD          float64 `json:"costUsd,omitempty"`
-	Model            string  `json:"model,omitempty"`
+	PromptTokens        int     `json:"promptTokens"`
+	CompletionTokens    int     `json:"completionTokens"`
+	TotalTokens         int     `json:"totalTokens"`
+	CacheReadTokens     int     `json:"cacheReadTokens,omitempty"`
+	CacheCreationTokens int     `json:"cacheCreationTokens,omitempty"`
+	CostUSD             float64 `json:"costUsd,omitempty"`
+	Model               string  `json:"model,omitempty"`
 }
 
 // ModelFallbackData is emitted when a fallback model is used.
@@ -75,17 +93,31 @@ type ModelFallbackData struct {
 // TurnCompleteData is emitted at the end of each agentic turn
 // (one LLM call that may be followed by tool executions).
 type TurnCompleteData struct {
-	TurnIndex   int        `json:"turnIndex"`
-	TokenUsage  TokenUsage `json:"tokenUsage"`
+	TurnIndex  int        `json:"turnIndex"`
+	TokenUsage TokenUsage `json:"tokenUsage"`
 	BudgetUsed  int        `json:"budgetUsed,omitempty"`
 	BudgetLimit int        `json:"budgetLimit,omitempty"`
+	// Model is the model that actually served this turn (may differ from
+	// config if a fallback was used). Empty means the primary model was used.
+	Model string `json:"model,omitempty"`
+	// Source identifies the origin of this LLM call (main_loop, compact, subtask, etc.)
+	// for differentiated analytics and retry policies.
+	Source QuerySource `json:"source,omitempty"`
 }
 
 // RunCompleteData is the final event emitted when the agentic loop finishes.
+// Token accounting follows Claude Code's cumulative vs incremental pattern:
+// - LatestInputTokens: prompt tokens from the LAST LLM call (replaces, not accumulates)
+// - CumulativeOutputTokens: sum of all output tokens across all turns
+// - CumulativeCacheReadTokens/CacheCreationTokens: sum across all turns
 type RunCompleteData struct {
-	TotalTurns  int     `json:"totalTurns"`
-	TotalTokens int     `json:"totalTokens"`
-	TotalCost   float64 `json:"totalCostUsd,omitempty"`
+	TotalTurns               int     `json:"totalTurns"`
+	TotalTokens              int     `json:"totalTokens"`
+	TotalCost                float64 `json:"totalCostUsd,omitempty"`
+	LatestInputTokens        int     `json:"latestInputTokens,omitempty"`
+	CumulativeOutputTokens   int     `json:"cumulativeOutputTokens,omitempty"`
+	CumulativeCacheReadTokens    int `json:"cumulativeCacheReadTokens,omitempty"`
+	CumulativeCacheCreationTokens int `json:"cumulativeCacheCreationTokens,omitempty"`
 }
 
 // ErrorData carries error information.
@@ -133,6 +165,43 @@ type SubtaskCompleteData struct {
 	TotalCost   float64 `json:"totalCostUsd,omitempty"`
 	Summary     string  `json:"summary,omitempty"`
 	Error       *string `json:"error,omitempty"`
+}
+
+// QuerySource identifies the origin of an LLM call for analytics and retry policies.
+// Foreground sources (user-blocking) retry aggressively on capacity errors;
+// background sources bail early to avoid amplifying cascades.
+type QuerySource string
+
+const (
+	// SourceMainLoop is the primary agentic loop (user-blocking).
+	SourceMainLoop QuerySource = "main_loop"
+	// SourceCompact is context compaction via LLM summarization.
+	SourceCompact QuerySource = "compact"
+	// SourceSubtask is a sub-agent execution.
+	SourceSubtask QuerySource = "subtask"
+	// SourceMemoryEval is memory evaluation/storage.
+	SourceMemoryEval QuerySource = "memory_eval"
+	// SourceBudgetNudge is a budget continuation nudge turn.
+	SourceBudgetNudge QuerySource = "budget_nudge"
+)
+
+// IsForegroundSource returns true if the source is user-blocking and should
+// retry aggressively on transient/capacity errors. Background sources (compact,
+// memory_eval) should fail fast to avoid gateway amplification during cascades.
+func (s QuerySource) IsForegroundSource() bool {
+	switch s {
+	case SourceMainLoop, SourceSubtask, SourceBudgetNudge:
+		return true
+	default:
+		return false
+	}
+}
+
+// SubtaskProgressData is emitted periodically during long-running sub-agents
+// to provide a brief status update. Inspired by Claude Code's agentSummary.ts.
+type SubtaskProgressData struct {
+	ID      string `json:"id"`
+	Summary string `json:"summary"`
 }
 
 // ToolDeniedData is emitted when a tool call is denied by permission rules.

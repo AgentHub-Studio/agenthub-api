@@ -22,6 +22,7 @@ type chatService interface {
 	GetSession(ctx context.Context, id uuid.UUID) (ChatSessionResponse, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	ArchiveSession(ctx context.Context, id uuid.UUID) (ChatSessionResponse, error)
+	RenameSession(ctx context.Context, id uuid.UUID, title string) (ChatSessionResponse, error)
 	ListMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) (pagination.Page[ChatMessageResponse], error)
 	AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
 	// RunSession starts an agentic run and returns a channel of events for SSE streaming.
@@ -49,6 +50,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/chat/sessions", h.listSessions)
 	r.Post("/api/chat/sessions", h.createSession)
 	r.Get("/api/chat/sessions/{id}", h.getSession)
+	r.Patch("/api/chat/sessions/{id}", h.renameSession)
 	r.Delete("/api/chat/sessions/{id}", h.deleteSession)
 	r.Post("/api/chat/sessions/{id}/archive", h.archiveSession)
 	r.Get("/api/chat/sessions/{id}/messages", h.listMessages)
@@ -99,6 +101,38 @@ func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, "failed to get chat session")
+		return
+	}
+
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) renameSession(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	var req struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Title == "" {
+		respond.Error(w, http.StatusBadRequest, "title is required")
+		return
+	}
+
+	resp, err := h.svc.RenameSession(r.Context(), id, req.Title)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to rename chat session")
 		return
 	}
 

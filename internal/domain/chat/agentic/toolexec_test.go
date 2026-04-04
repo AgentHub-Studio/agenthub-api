@@ -3,6 +3,7 @@ package agentic_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,7 +44,7 @@ func TestStreamingToolExecutor_EmitsProgressEvents(t *testing.T) {
 		SessionID: uuid.New(),
 		AgentID:   uuid.New(),
 		TenantID:  "test-tenant",
-	})
+	}, nil)
 	close(ch)
 
 	// Should have 1 result (with error since server is unreachable).
@@ -99,7 +100,7 @@ func TestStreamingToolExecutor_ContextCancelled(t *testing.T) {
 		SessionID: uuid.New(),
 		AgentID:   uuid.New(),
 		TenantID:  "test-tenant",
-	})
+	}, nil)
 	close(ch)
 
 	require.Len(t, results, 1)
@@ -127,7 +128,7 @@ func TestStreamingToolExecutor_MultipleTools(t *testing.T) {
 		SessionID: uuid.New(),
 		AgentID:   uuid.New(),
 		TenantID:  "test-tenant",
-	})
+	}, nil)
 	close(ch)
 
 	// All tools should have results (all failed since server is unreachable).
@@ -136,4 +137,103 @@ func TestStreamingToolExecutor_MultipleTools(t *testing.T) {
 	for _, r := range results {
 		assert.NotNil(t, r.Error, "each result should have an error")
 	}
+}
+
+// --- ValidateToolInput ---
+
+func TestValidateToolInput_ValidJSON(t *testing.T) {
+	result := agentic.ValidateToolInput("some-tool", json.RawMessage(`{"key":"value"}`))
+	assert.Empty(t, result)
+}
+
+func TestValidateToolInput_EmptyInput(t *testing.T) {
+	result := agentic.ValidateToolInput("some-tool", json.RawMessage(nil))
+	assert.Empty(t, result)
+}
+
+func TestValidateToolInput_InvalidJSON(t *testing.T) {
+	result := agentic.ValidateToolInput("some-tool", json.RawMessage(`{not json}`))
+	assert.Contains(t, result, "Invalid JSON input")
+	assert.Contains(t, result, "some-tool")
+}
+
+func TestValidateToolInput_AgentMissingPrompt(t *testing.T) {
+	result := agentic.ValidateToolInput("agent", json.RawMessage(`{"tools":["search"]}`))
+	assert.Contains(t, result, "prompt")
+	assert.Contains(t, result, "missing")
+}
+
+func TestValidateToolInput_AgentWithPrompt(t *testing.T) {
+	result := agentic.ValidateToolInput("agent", json.RawMessage(`{"prompt":"do something"}`))
+	assert.Empty(t, result)
+}
+
+func TestValidateToolInput_DocumentSearchMissingQuery(t *testing.T) {
+	result := agentic.ValidateToolInput("document_search", json.RawMessage(`{"limit":5}`))
+	assert.Contains(t, result, "query")
+}
+
+func TestValidateToolInput_DocumentSearchWithQuery(t *testing.T) {
+	result := agentic.ValidateToolInput("document_search", json.RawMessage(`{"query":"find docs"}`))
+	assert.Empty(t, result)
+}
+
+func TestValidateToolInput_MemoryStoreMissingContent(t *testing.T) {
+	result := agentic.ValidateToolInput("memory_store", json.RawMessage(`{"category":"fact"}`))
+	assert.Contains(t, result, "content")
+}
+
+func TestValidateToolInput_MemoryStoreWithContent(t *testing.T) {
+	result := agentic.ValidateToolInput("memory_store", json.RawMessage(`{"content":"remember this"}`))
+	assert.Empty(t, result)
+}
+
+func TestValidateToolInput_UnknownToolPassesThrough(t *testing.T) {
+	result := agentic.ValidateToolInput("unknown-tool", json.RawMessage(`{"anything":"goes"}`))
+	assert.Empty(t, result)
+}
+
+// --- FormatToolError ---
+
+func TestFormatToolError_ShortError(t *testing.T) {
+	result := agentic.FormatToolError("short error", 1000)
+	assert.Equal(t, "short error", result)
+}
+
+func TestFormatToolError_ZeroMaxChars(t *testing.T) {
+	result := agentic.FormatToolError("any error", 0)
+	assert.Equal(t, "any error", result)
+}
+
+func TestFormatToolError_ExactlyAtLimit(t *testing.T) {
+	msg := "x" + string(make([]byte, 99)) // 100 chars
+	for i := range []byte(msg) {
+		_ = i
+	}
+	msg = strings.Repeat("a", 100)
+	result := agentic.FormatToolError(msg, 100)
+	assert.Equal(t, msg, result)
+}
+
+func TestFormatToolError_LongErrorTruncated(t *testing.T) {
+	msg := strings.Repeat("a", 200)
+	result := agentic.FormatToolError(msg, 100)
+	assert.LessOrEqual(t, len(result), 120) // some overhead for notice
+	assert.Contains(t, result, "truncated")
+	// Should preserve head (starts with 'a')
+	assert.True(t, strings.HasPrefix(result, "a"))
+	// Should preserve tail (ends with 'a')
+	assert.True(t, strings.HasSuffix(result, "a"))
+}
+
+func TestFormatToolError_PreservesHeadAndTail(t *testing.T) {
+	head := "ERROR_TYPE: "
+	tail := " at stack:trace:line:42"
+	middle := strings.Repeat("x", 500)
+	msg := head + middle + tail
+	result := agentic.FormatToolError(msg, 100)
+	// Head should be preserved.
+	assert.True(t, strings.HasPrefix(result, "ERROR"), "head should be preserved")
+	// Tail should be preserved.
+	assert.True(t, strings.HasSuffix(result, "42"), "tail should be preserved")
 }

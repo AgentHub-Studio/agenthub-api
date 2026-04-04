@@ -18,6 +18,7 @@ type documentService interface {
 	Upload(ctx context.Context, req UploadRequest) (DocumentResponse, error)
 	GetByID(ctx context.Context, id uuid.UUID) (DocumentResponse, error)
 	Delete(ctx context.Context, id uuid.UUID) error
+	Reprocess(ctx context.Context, id uuid.UUID) (DocumentResponse, error)
 }
 
 // Handler handles HTTP requests for documents.
@@ -36,6 +37,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/knowledge-bases/{kbId}/documents", h.upload)
 	r.Get("/api/knowledge-bases/{kbId}/documents/{id}", h.getByID)
 	r.Delete("/api/knowledge-bases/{kbId}/documents/{id}", h.delete)
+	r.Post("/api/knowledge-bases/{kbId}/documents/{id}/reprocess", h.reprocess)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -147,4 +149,30 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.NoContent(w)
+}
+
+func (h *Handler) reprocess(w http.ResponseWriter, r *http.Request) {
+	_, err := uuid.Parse(chi.URLParam(r, "kbId"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid knowledge base id")
+		return
+	}
+
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	resp, err := h.svc.Reprocess(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "document not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to reprocess document")
+		return
+	}
+
+	respond.JSON(w, http.StatusOK, resp)
 }

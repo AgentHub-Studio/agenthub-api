@@ -99,7 +99,7 @@ func TestPipelineService_Create_Success(t *testing.T) {
 	svc := pipeline.NewService(newMockRepo())
 	p, err := svc.Create(context.Background(), pipeline.CreateRequest{
 		Name:    "RAG Pipeline",
-		AgentID: uuid.New(),
+		AgentID: func() *uuid.UUID { id := uuid.New(); return &id }(),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "RAG Pipeline", p.Name)
@@ -120,7 +120,7 @@ func TestPipelineService_Delete_NotFound(t *testing.T) {
 
 func TestPipelineService_ReplaceNodes(t *testing.T) {
 	svc := pipeline.NewService(newMockRepo())
-	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: uuid.New()})
+	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: func() *uuid.UUID { id := uuid.New(); return &id }()})
 	require.NoError(t, err)
 	nodes, err := svc.ReplaceNodes(context.Background(), p.ID, []pipeline.NodeRequest{
 		{NodeType: "INPUT", Name: "Start"},
@@ -133,7 +133,7 @@ func TestPipelineService_ReplaceNodes(t *testing.T) {
 
 func TestPipelineService_ReplaceNodes_DuplicateName(t *testing.T) {
 	svc := pipeline.NewService(newMockRepo())
-	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: uuid.New()})
+	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: func() *uuid.UUID { id := uuid.New(); return &id }()})
 	require.NoError(t, err)
 
 	_, err = svc.ReplaceNodes(context.Background(), p.ID, []pipeline.NodeRequest{
@@ -145,7 +145,7 @@ func TestPipelineService_ReplaceNodes_DuplicateName(t *testing.T) {
 
 func TestPipelineService_ReplaceEdges_Cycle(t *testing.T) {
 	svc := pipeline.NewService(newMockRepo())
-	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: uuid.New()})
+	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: func() *uuid.UUID { id := uuid.New(); return &id }()})
 	require.NoError(t, err)
 
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
@@ -159,7 +159,7 @@ func TestPipelineService_ReplaceEdges_Cycle(t *testing.T) {
 
 func TestPipelineService_ReplaceEdges_NoCycle(t *testing.T) {
 	svc := pipeline.NewService(newMockRepo())
-	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: uuid.New()})
+	p, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: func() *uuid.UUID { id := uuid.New(); return &id }()})
 	require.NoError(t, err)
 
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
@@ -174,7 +174,7 @@ func TestPipelineService_ReplaceEdges_NoCycle(t *testing.T) {
 func TestPipelineService_List(t *testing.T) {
 	svc := pipeline.NewService(newMockRepo())
 	for i := 0; i < 3; i++ {
-		_, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: uuid.New()})
+		_, err := svc.Create(context.Background(), pipeline.CreateRequest{Name: "Pipeline", AgentID: func() *uuid.UUID { id := uuid.New(); return &id }()})
 		require.NoError(t, err)
 	}
 	page, err := svc.List(context.Background(), pagination.PageRequest{Page: 0, Size: 20})

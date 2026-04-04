@@ -113,6 +113,15 @@ func (s *Service) ArchiveSession(ctx context.Context, id uuid.UUID) (ChatSession
 	return SessionResponseFrom(session), nil
 }
 
+// RenameSession updates a session's title.
+func (s *Service) RenameSession(ctx context.Context, id uuid.UUID, title string) (ChatSessionResponse, error) {
+	session, err := s.repo.UpdateSessionTitle(ctx, id, title)
+	if err != nil {
+		return ChatSessionResponse{}, err
+	}
+	return SessionResponseFrom(session), nil
+}
+
 // DeleteSession removes a chat session by ID.
 func (s *Service) DeleteSession(ctx context.Context, id uuid.UUID) error {
 	if err := s.repo.DeleteSession(ctx, id); err != nil {
@@ -187,7 +196,17 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		return nil, fmt.Errorf("chat service: get session: %w", err)
 	}
 	if session.AgentID == nil {
-		return nil, fmt.Errorf("chat service: session has no agent")
+		defaultID, err := s.repo.FindDefaultAgentID(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("chat service: find default agent: %w", err)
+		}
+		if defaultID == nil {
+			return nil, fmt.Errorf("chat service: session has no agent and no published agent exists")
+		}
+		if err := s.repo.UpdateSessionAgent(ctx, sessionID, *defaultID); err != nil {
+			return nil, fmt.Errorf("chat service: bind default agent: %w", err)
+		}
+		session.AgentID = defaultID
 	}
 
 	return s.runner.RunSession(ctx, RunInput{

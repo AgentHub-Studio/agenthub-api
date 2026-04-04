@@ -36,6 +36,8 @@ type ToolExecResult struct {
 	Output    json.RawMessage `json:"output,omitempty"`
 	Error     *string         `json:"error,omitempty"`
 	LatencyMs int64           `json:"latencyMs"`
+	// ToolName is set by the executor for descriptive empty-result messages.
+	ToolName string `json:"toolName,omitempty"`
 }
 
 // skillExecRequest is the body sent to the skill-runtime.

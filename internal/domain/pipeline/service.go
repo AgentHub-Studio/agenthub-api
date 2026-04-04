@@ -39,10 +39,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if len(req.Config) > 0 {
 		cfg = req.Config
 	}
+	var agentID uuid.UUID
+	if req.AgentID != nil {
+		agentID = *req.AgentID
+	}
 	p := Pipeline{
 		Name:        req.Name,
 		Description: req.Description,
-		AgentID:     req.AgentID,
+		AgentID:     agentID,
 		Status:      "DRAFT",
 		Config:      cfg,
 	}

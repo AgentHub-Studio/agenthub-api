@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,6 +38,18 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 }
 
 const selectColumns = `id, name, description, status, embedding_model, search_mode, context_window, created_at, updated_at`
+
+// selectColumnsWithPrefix returns selectColumns with each column prefixed by alias.
+// Used in JOIN queries where column names would otherwise be ambiguous.
+func selectColumnsWithPrefix(alias string) string {
+	cols := []string{"id", "name", "description", "status", "embedding_model", "search_mode", "context_window", "created_at", "updated_at"}
+	result := make([]string, len(cols))
+	for i, c := range cols {
+		result[i] = alias + "." + c
+	}
+	return strings.Join(result, ", ")
+}
+
 
 func (r *postgresRepository) List(ctx context.Context, req pagination.PageRequest) ([]KnowledgeBase, int64, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
@@ -202,7 +215,7 @@ func (r *postgresRepository) ListByAgentID(ctx context.Context, agentID uuid.UUI
 	defer release()
 
 	rows, err := conn.Query(ctx,
-		`SELECT kb.`+selectColumns+`,
+		`SELECT `+selectColumnsWithPrefix("kb")+`,
 		        (SELECT COUNT(*) FROM document d WHERE d.knowledge_base_id = kb.id) AS document_count
 		 FROM knowledge_base kb
 		 INNER JOIN agent_knowledge_base akb ON akb.knowledge_base_id = kb.id

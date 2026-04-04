@@ -13,13 +13,13 @@ import (
 type ToolResultCache struct {
 	mu       sync.Mutex
 	capacity int
-	entries  map[string]*cacheEntry
+	entries  map[string]*toolCacheEntry
 	order    []string // LRU order: newest at end
 	hits     int
 	misses   int
 }
 
-type cacheEntry struct {
+type toolCacheEntry struct {
 	key    string
 	result ToolExecResult
 }
@@ -32,7 +32,7 @@ func NewToolResultCache(capacity int) *ToolResultCache {
 	}
 	return &ToolResultCache{
 		capacity: capacity,
-		entries:  make(map[string]*cacheEntry, capacity),
+		entries:  make(map[string]*toolCacheEntry, capacity),
 		order:    make([]string, 0, capacity),
 	}
 }
@@ -86,7 +86,7 @@ func (c *ToolResultCache) Put(toolName string, input json.RawMessage, result Too
 		c.evictOldest()
 	}
 
-	c.entries[key] = &cacheEntry{key: key, result: result}
+	c.entries[key] = &toolCacheEntry{key: key, result: result}
 	c.order = append(c.order, key)
 }
 
