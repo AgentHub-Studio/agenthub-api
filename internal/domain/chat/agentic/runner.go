@@ -59,7 +59,7 @@ type Runner struct {
 	runEndHandlers  []RunEndHandler
 	progress        *RunProgressTracker
 	config          RunConfig
-	denialTracker   DenialTracker
+	denialTracker   *DenialTracker
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -77,17 +77,18 @@ func NewRunner(
 	config RunConfig,
 ) *Runner {
 	return &Runner{
-		chatModel:   chatModel,
-		skillClient: skillClient,
-		prompt:      prompt,
-		tools:       tools,
-		ctxManager:  ctxManager,
-		memory:      memory,
-		persister:   persister,
-		history:     history,
-		toolExec:    NewStreamingToolExecutor(skillClient, hookExecutor, config),
-		progress:    NewRunProgressTracker(10),
-		config:      config,
+		chatModel:     chatModel,
+		skillClient:   skillClient,
+		prompt:        prompt,
+		tools:         tools,
+		ctxManager:    ctxManager,
+		memory:        memory,
+		persister:     persister,
+		history:       history,
+		toolExec:      NewStreamingToolExecutor(skillClient, hookExecutor, config),
+		progress:      NewRunProgressTracker(10),
+		config:        config,
+		denialTracker: NewDenialTracker(config.DenialEscalationThreshold),
 	}
 }
 
@@ -502,10 +503,11 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools)
 
 			// Check if denial tracking indicates a stuck loop.
-			if r.denialTracker.ShouldEscalate() {
+			if r.denialTracker != nil && len(r.denialTracker.EscalationHints()) > 0 {
+				totalDenials := r.denialTracker.TotalDenials()
 				emitError(ch, "denial_escalation", fmt.Errorf(
-					"too many tool denials (%d consecutive, %d total) — LLM appears stuck in a permission loop",
-					r.denialTracker.ConsecutiveDenials, r.denialTracker.TotalDenials))
+					"too many tool denials (%d total) — LLM appears stuck in a permission loop",
+					totalDenials))
 				return
 			}
 
@@ -1080,29 +1082,39 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			case PermissionDeny:
 				errMsg := FormatDeniedError(tc.Function.Name)
 				results[i] = ToolExecResult{Error: &errMsg}
-				r.denialTracker.RecordDenial()
+// Track denial and emit event.
+				denialCount := 1
+				escalated := false
+				if r.denialTracker != nil {
+					escalated = r.denialTracker.RecordDenial(tc.Function.Name, tc.Function.Arguments)
+					if rec := r.denialTracker.GetRecord(tc.Function.Name); rec != nil {
+						denialCount = rec.Count
+					}
+				}
 				ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
 					ID:          tc.ID,
 					Name:        tc.Function.Name,
 					Reason:      errMsg,
-					DenialCount: r.denialTracker.TotalDenials,
-					Escalated:   r.denialTracker.ShouldEscalate(),
+					DenialCount: denialCount,
+					Escalated:   escalated,
 				})
 				continue
+
 			case PermissionConfirm:
 				errMsg := fmt.Sprintf("Tool '%s' requires confirmation but running in automated mode.", tc.Function.Name)
 				results[i] = ToolExecResult{Error: &errMsg}
-				r.denialTracker.RecordDenial()
+
+				// Track as denial too — confirm in automated mode is effectively a deny.
+				if r.denialTracker != nil {
+					r.denialTracker.RecordDenial(tc.Function.Name, tc.Function.Arguments)
+				}
 				ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
-					ID:          tc.ID,
-					Name:        tc.Function.Name,
-					Reason:      errMsg,
-					DenialCount: r.denialTracker.TotalDenials,
-					Escalated:   r.denialTracker.ShouldEscalate(),
+					ID:     tc.ID,
+					Name:   tc.Function.Name,
+					Reason: errMsg,
 				})
 				continue
 			}
-			r.denialTracker.RecordSuccess()
 		}
 
 		// Auto-require confirmation for destructive tools (delete, drop, overwrite)
@@ -1114,11 +1126,15 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 					"Automated execution is blocked — this operation requires explicit user confirmation.",
 				tc.Function.Name)
 			results[i] = ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
+			denialCount := 0
+			if r.denialTracker != nil {
+				denialCount = r.denialTracker.TotalDenials()
+			}
 			ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
 				ID:          tc.ID,
 				Name:        tc.Function.Name,
 				Reason:      "destructive operation requires confirmation",
-				DenialCount: r.denialTracker.TotalDenials,
+				DenialCount: denialCount,
 			})
 			continue
 		}
@@ -1153,6 +1169,10 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 		for origIdx, regIdx := range regularIdx {
 			if regIdx < len(execResults) {
 				results[origIdx] = execResults[regIdx]
+				// Reset denial counter on successful execution.
+				if r.denialTracker != nil && execResults[regIdx].Error == nil {
+					r.denialTracker.RecordAllow(regularTools[regIdx].Function.Name)
+				}
 			}
 		}
 	}

@@ -133,6 +133,16 @@ type RunConfig struct {
 	// Tools not listed here use MaxToolResultChars as default.
 	// Inspired by Claude Code's per-tool maxResultSizeChars.
 	ToolResultLimits map[string]int `json:"toolResultLimits,omitempty"`
+
+	// ToolCacheCapacity is the max number of entries in the per-run tool result
+	// LRU cache. Cacheable tools (read-only, idempotent) have their results cached
+	// to avoid redundant re-execution. Default 64. Set to 0 to disable caching.
+	ToolCacheCapacity int `json:"toolCacheCapacity"`
+
+	// DenialEscalationThreshold is the number of consecutive denials of the same
+	// tool before the Runner injects an escalation hint into the LLM context.
+	// Default 3. Set to 0 to disable escalation.
+	DenialEscalationThreshold int `json:"denialEscalationThreshold"`
 }
 
 // RunGates captures immutable, pre-computed boolean flags and derived values
@@ -201,6 +211,8 @@ func DefaultRunConfig() RunConfig {
 		Temperature:         0.7,
 		StallCheckInterval:  15 * time.Second,
 		StallThreshold:      45 * time.Second,
+		ToolCacheCapacity:          64,
+		DenialEscalationThreshold: 3,
 	}
 }
 
@@ -226,6 +238,7 @@ type modelConfig struct {
 	FallbackOnTimeout   *bool              `json:"fallbackOnTimeout,omitempty"`
 	Thinking            *ai.ThinkingConfig `json:"thinking,omitempty"`
 	Effort              *ai.EffortLevel    `json:"effort,omitempty"`
+	ToolCacheCapacity   *int               `json:"toolCacheCapacity,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -298,6 +311,9 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	}
 	if mc.Effort != nil {
 		cfg.Effort = mc.Effort
+	}
+	if mc.ToolCacheCapacity != nil {
+		cfg.ToolCacheCapacity = *mc.ToolCacheCapacity
 	}
 	return cfg
 }

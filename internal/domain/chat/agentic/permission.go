@@ -181,12 +181,12 @@ const (
 	autoModeLoopThreshold = 3
 )
 
-// DenialTracker tracks consecutive and total tool denials to detect when the LLM
+// PermissionDenialTracker tracks consecutive and total tool denials to detect when the LLM
 // is stuck in a denial loop. Enhanced with per-denial metadata and auto-mode loop
 // detection (detects when the LLM repeatedly attempts the same denied action).
 //
 // Inspired by Claude Code's denialTracking.ts and autoModeDenials.ts.
-type DenialTracker struct {
+type PermissionDenialTracker struct {
 	ConsecutiveDenials int
 	TotalDenials       int
 	// History stores recent denial entries for diagnostics.
@@ -205,13 +205,13 @@ var DenialLimits = struct {
 }
 
 // RecordDenial increments counters and records metadata about the denial.
-func (d *DenialTracker) RecordDenial() {
+func (d *PermissionDenialTracker) RecordDenial() {
 	d.ConsecutiveDenials++
 	d.TotalDenials++
 }
 
 // RecordDenialWithMetadata increments counters and stores a detailed denial entry.
-func (d *DenialTracker) RecordDenialWithMetadata(toolName, reason, toolInput string, turnIndex int) {
+func (d *PermissionDenialTracker) RecordDenialWithMetadata(toolName, reason, toolInput string, turnIndex int) {
 	d.RecordDenial()
 
 	snippet := toolInput
@@ -241,13 +241,13 @@ func (d *DenialTracker) RecordDenialWithMetadata(toolName, reason, toolInput str
 }
 
 // RecordSuccess resets the consecutive counter (total is not affected).
-func (d *DenialTracker) RecordSuccess() {
+func (d *PermissionDenialTracker) RecordSuccess() {
 	d.ConsecutiveDenials = 0
 }
 
 // ShouldEscalate returns true when denials have exceeded safe thresholds,
 // indicating the LLM is stuck and the run should be interrupted.
-func (d *DenialTracker) ShouldEscalate() bool {
+func (d *PermissionDenialTracker) ShouldEscalate() bool {
 	return d.ConsecutiveDenials >= DenialLimits.MaxConsecutive ||
 		d.TotalDenials >= DenialLimits.MaxTotal
 }
@@ -257,7 +257,7 @@ func (d *DenialTracker) ShouldEscalate() bool {
 // approaches. This is distinct from ShouldEscalate which tracks any denials.
 //
 // Inspired by Claude Code's auto-mode denial loop detection in autoModeDenials.ts.
-func (d *DenialTracker) IsAutoModeLoop() bool {
+func (d *PermissionDenialTracker) IsAutoModeLoop() bool {
 	if d.loopCounts == nil {
 		return false
 	}
@@ -270,7 +270,7 @@ func (d *DenialTracker) IsAutoModeLoop() bool {
 }
 
 // LoopingTools returns the tool names that are stuck in a denial loop.
-func (d *DenialTracker) LoopingTools() []string {
+func (d *PermissionDenialTracker) LoopingTools() []string {
 	if d.loopCounts == nil {
 		return nil
 	}
@@ -293,7 +293,7 @@ func (d *DenialTracker) LoopingTools() []string {
 }
 
 // RecentDenials returns the last N denial entries.
-func (d *DenialTracker) RecentDenials(n int) []DenialEntry {
+func (d *PermissionDenialTracker) RecentDenials(n int) []DenialEntry {
 	if n <= 0 || len(d.History) == 0 {
 		return nil
 	}

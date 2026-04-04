@@ -132,7 +132,7 @@ func TestContainsDangerousCommand(t *testing.T) {
 }
 
 func TestDenialTracker_Consecutive(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	assert.False(t, d.ShouldEscalate())
 
 	d.RecordDenial()
@@ -144,7 +144,7 @@ func TestDenialTracker_Consecutive(t *testing.T) {
 }
 
 func TestDenialTracker_SuccessResetsConsecutive(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	d.RecordDenial()
 	d.RecordDenial()
 	d.RecordSuccess() // resets consecutive
@@ -155,7 +155,7 @@ func TestDenialTracker_SuccessResetsConsecutive(t *testing.T) {
 }
 
 func TestDenialTracker_TotalLimit(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	for i := 0; i < 19; i++ {
 		d.RecordDenial()
 		d.RecordSuccess()
@@ -297,7 +297,7 @@ func TestPermissionMode_DefaultWithAllowRules(t *testing.T) {
 // --- Denial metadata tracking ---
 
 func TestDenialTracker_RecordDenialWithMetadata(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	d.RecordDenialWithMetadata("execute_sql", "dangerous_sql", "DROP TABLE users", 3)
 
 	assert.Equal(t, 1, d.ConsecutiveDenials)
@@ -310,7 +310,7 @@ func TestDenialTracker_RecordDenialWithMetadata(t *testing.T) {
 }
 
 func TestDenialTracker_InputSnippetTruncated(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	longInput := strings.Repeat("x", 500)
 	d.RecordDenialWithMetadata("tool", "reason", longInput, 0)
 
@@ -318,7 +318,7 @@ func TestDenialTracker_InputSnippetTruncated(t *testing.T) {
 }
 
 func TestDenialTracker_HistoryTrimmed(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	for i := 0; i < 60; i++ {
 		d.RecordDenialWithMetadata("tool", "reason", fmt.Sprintf("input_%d", i), i)
 	}
@@ -328,7 +328,7 @@ func TestDenialTracker_HistoryTrimmed(t *testing.T) {
 }
 
 func TestDenialTracker_RecentDenials(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	d.RecordDenialWithMetadata("t1", "r1", "i1", 1)
 	d.RecordDenialWithMetadata("t2", "r2", "i2", 2)
 	d.RecordDenialWithMetadata("t3", "r3", "i3", 3)
@@ -340,28 +340,28 @@ func TestDenialTracker_RecentDenials(t *testing.T) {
 }
 
 func TestDenialTracker_RecentDenials_MoreThanAvailable(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	d.RecordDenialWithMetadata("t1", "r", "", 0)
 	recent := d.RecentDenials(10)
 	assert.Len(t, recent, 1)
 }
 
 func TestDenialTracker_RecentDenials_Empty(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	assert.Nil(t, d.RecentDenials(5))
 }
 
 // --- Auto-mode loop detection ---
 
 func TestDenialTracker_IsAutoModeLoop_NoLoop(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	d.RecordDenialWithMetadata("tool1", "reason", "input_a", 1)
 	d.RecordDenialWithMetadata("tool2", "reason", "input_b", 2)
 	assert.False(t, d.IsAutoModeLoop())
 }
 
 func TestDenialTracker_IsAutoModeLoop_SameToolDifferentInput(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	d.RecordDenialWithMetadata("execute_sql", "dangerous", "DROP TABLE a", 1)
 	d.RecordDenialWithMetadata("execute_sql", "dangerous", "DROP TABLE b", 2)
 	d.RecordDenialWithMetadata("execute_sql", "dangerous", "DROP TABLE c", 3)
@@ -370,7 +370,7 @@ func TestDenialTracker_IsAutoModeLoop_SameToolDifferentInput(t *testing.T) {
 }
 
 func TestDenialTracker_IsAutoModeLoop_Detected(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	sameInput := "DELETE FROM users WHERE 1=1"
 	d.RecordDenialWithMetadata("execute_sql", "dangerous", sameInput, 1)
 	d.RecordDenialWithMetadata("execute_sql", "dangerous", sameInput, 2)
@@ -380,7 +380,7 @@ func TestDenialTracker_IsAutoModeLoop_Detected(t *testing.T) {
 }
 
 func TestDenialTracker_LoopingTools(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	input := "rm -rf /"
 	d.RecordDenialWithMetadata("bash", "dangerous", input, 1)
 	d.RecordDenialWithMetadata("bash", "dangerous", input, 2)
@@ -392,12 +392,12 @@ func TestDenialTracker_LoopingTools(t *testing.T) {
 }
 
 func TestDenialTracker_LoopingTools_Empty(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	assert.Nil(t, d.LoopingTools())
 }
 
 func TestDenialTracker_MetadataAndEscalationCombined(t *testing.T) {
-	d := &agentic.DenialTracker{}
+	d := &agentic.PermissionDenialTracker{}
 	// 3 identical denials should trigger both escalation AND loop detection.
 	input := "sudo rm -rf /"
 	d.RecordDenialWithMetadata("bash", "dangerous_command", input, 1)
