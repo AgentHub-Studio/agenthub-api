@@ -42,17 +42,19 @@ type RunInput struct {
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
 type Runner struct {
-	chatModel    ai.ChatModel
-	skillClient  *SkillRuntimeClient
-	prompt       *PromptBuilder
-	tools        *ToolSchemaBuilder
-	ctxManager   *ContextManager
-	memory       *MemoryBridge
-	persister    MessagePersister
-	history      HistoryLoader
-	toolExec     *StreamingToolExecutor
-	subtaskExec  *SubtaskExecutor
-	config       RunConfig
+	chatModel        ai.ChatModel
+	skillClient      *SkillRuntimeClient
+	prompt           *PromptBuilder
+	tools            *ToolSchemaBuilder
+	ctxManager       *ContextManager
+	memory           *MemoryBridge
+	persister        MessagePersister
+	history          HistoryLoader
+	toolExec         *StreamingToolExecutor
+	subtaskExec      *SubtaskExecutor
+	turnEndHandlers  []TurnEndHandler
+	runEndHandlers   []RunEndHandler
+	config           RunConfig
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -86,6 +88,18 @@ func NewRunner(
 // WithSubtaskExecutor attaches a SubtaskExecutor to the Runner.
 func (r *Runner) WithSubtaskExecutor(exec *SubtaskExecutor) *Runner {
 	r.subtaskExec = exec
+	return r
+}
+
+// WithTurnEndHandlers registers handlers executed at the end of each turn.
+func (r *Runner) WithTurnEndHandlers(handlers ...TurnEndHandler) *Runner {
+	r.turnEndHandlers = append(r.turnEndHandlers, handlers...)
+	return r
+}
+
+// WithRunEndHandlers registers handlers executed at the end of the run.
+func (r *Runner) WithRunEndHandlers(handlers ...RunEndHandler) *Runner {
+	r.runEndHandlers = append(r.runEndHandlers, handlers...)
 	return r
 }
 
@@ -235,9 +249,30 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 		messages = append(messages, aiAssistant)
 
+		// Helper to build turn-end payload for hooks.
+		buildTurnEndPayload := func() TurnEndPayload {
+			var tcInfos []ToolCallInfo
+			for _, tc := range toolCalls {
+				tcInfos = append(tcInfos, ToolCallInfo{ID: tc.ID, Name: tc.Function.Name})
+			}
+			usageJSON, _ := json.Marshal(tokenUsageWithCost(usage, turnCost))
+			return TurnEndPayload{
+				Event:            HookTurnEnd,
+				AgentID:          in.AgentID.String(),
+				SessionID:        in.SessionID.String(),
+				TurnIndex:        turnIndex,
+				AssistantContent: assistantContent,
+				ToolCalls:        tcInfos,
+				TokenUsage:       usageJSON,
+			}
+		}
+
 		// 5d. Check finish reason.
 		switch finishReason {
 		case "stop":
+			// Turn-end hooks (before emitting turn_complete).
+			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
+
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
 				TokenUsage: tokenUsageWithCost(usage, turnCost),
@@ -248,11 +283,15 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				TotalCost:   totalCost,
 			})
 
-			// Maybe store memories.
-			if r.memory != nil {
-				turnMsgs := r.collectTurnMessages(assistantContent, toolCalls)
-				_, _ = r.memory.MaybeStore(ctx, in.AgentID, turnIndex, turnMsgs)
-			}
+			// Run-end hooks (after run_complete).
+			r.executeRunEndHooks(ctx, ch, RunEndPayload{
+				Event:       HookRunEnd,
+				AgentID:     in.AgentID.String(),
+				SessionID:   in.SessionID.String(),
+				TotalTurns:  turnIndex + 1,
+				TotalTokens: totalTokens,
+				TotalCost:   totalCost,
+			})
 			return
 
 		case "tool_calls":
@@ -294,6 +333,9 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				})
 			}
 
+			// Turn-end hooks (after tool results, before incrementing turnIndex).
+			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
+
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
 				TokenUsage: tokenUsageWithCost(usage, turnCost),
@@ -323,11 +365,23 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		default:
 			// Unknown finish reason, treat as stop.
+			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
+
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:  turnIndex,
 				TokenUsage: tokenUsageWithCost(usage, turnCost),
 			})
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
+				TotalTurns:  turnIndex + 1,
+				TotalTokens: totalTokens,
+				TotalCost:   totalCost,
+			})
+
+			// Run-end hooks.
+			r.executeRunEndHooks(ctx, ch, RunEndPayload{
+				Event:       HookRunEnd,
+				AgentID:     in.AgentID.String(),
+				SessionID:   in.SessionID.String(),
 				TotalTurns:  turnIndex + 1,
 				TotalTokens: totalTokens,
 				TotalCost:   totalCost,
@@ -488,21 +542,6 @@ func (r *Runner) buildAssistantMessage(
 	return msg
 }
 
-// collectTurnMessages creates TurnMessage entries for the MemoryBridge.
-func (r *Runner) collectTurnMessages(content string, toolCalls []ai.ToolCall) []TurnMessage {
-	var msgs []TurnMessage
-	if content != "" {
-		msgs = append(msgs, TurnMessage{Role: "assistant", Content: content})
-	}
-	for _, tc := range toolCalls {
-		msgs = append(msgs, TurnMessage{
-			Role:    "assistant",
-			Content: fmt.Sprintf("[tool_call: %s(%s)]", tc.Function.Name, tc.Function.Arguments),
-		})
-	}
-	return msgs
-}
-
 // convertLLMToolsToAI converts the internal LLMTool format to the ai.Tool format.
 func convertLLMToolsToAI(tools []LLMTool) []ai.Tool {
 	result := make([]ai.Tool, len(tools))
@@ -619,6 +658,33 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 	}
 
 	return results
+}
+
+// executeTurnEndHooks runs all registered turn-end handlers.
+func (r *Runner) executeTurnEndHooks(ctx context.Context, ch chan<- RunEvent, payload TurnEndPayload) {
+	if r.toolExec != nil && r.toolExec.hookExecutor != nil {
+		r.toolExec.hookExecutor.ExecuteTurnEnd(ctx, payload, r.turnEndHandlers)
+	} else {
+		// No hook executor — run in-memory handlers directly.
+		for _, h := range r.turnEndHandlers {
+			if err := h.HandleTurnEnd(ctx, payload); err != nil {
+				emitError(ch, "turn_end_handler", err)
+			}
+		}
+	}
+}
+
+// executeRunEndHooks runs all registered run-end handlers.
+func (r *Runner) executeRunEndHooks(ctx context.Context, ch chan<- RunEvent, payload RunEndPayload) {
+	if r.toolExec != nil && r.toolExec.hookExecutor != nil {
+		r.toolExec.hookExecutor.ExecuteRunEnd(ctx, payload, r.runEndHandlers)
+	} else {
+		for _, h := range r.runEndHandlers {
+			if err := h.HandleRunEnd(ctx, payload); err != nil {
+				emitError(ch, "run_end_handler", err)
+			}
+		}
+	}
 }
 
 func emitError(ch chan<- RunEvent, code string, err error) {
