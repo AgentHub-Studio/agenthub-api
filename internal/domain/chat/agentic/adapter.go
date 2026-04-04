@@ -15,50 +15,18 @@ type AgentConfigLoader interface {
 	GetAgentForRun(ctx context.Context, id uuid.UUID) (*chat.AgentRunConfig, error)
 }
 
-// ProviderRegistry maps provider names (e.g. "anthropic", "openai") to their
-// ChatModel implementations. The default provider is used when the agent has no
-// provider configured or when the requested provider is not available.
-type ProviderRegistry struct {
-	providers map[string]ai.ChatModel
-	def       ai.ChatModel
-}
-
-// NewProviderRegistry creates a registry with a default model and optional
-// named overrides. The default is used as a fallback when an agent's provider
-// is not present in the map.
-func NewProviderRegistry(defaultModel ai.ChatModel, named map[string]ai.ChatModel) *ProviderRegistry {
-	m := make(map[string]ai.ChatModel, len(named)+1)
-	for k, v := range named {
-		if v != nil {
-			m[k] = v
-		}
-	}
-	if defaultModel != nil {
-		m[defaultModel.GetProviderName()] = defaultModel
-	}
-	return &ProviderRegistry{providers: m, def: defaultModel}
-}
-
-// Default returns the fallback ChatModel (nil when no providers are configured).
-func (r *ProviderRegistry) Default() ai.ChatModel {
-	return r.def
-}
-
-// Select returns the ChatModel for the given provider name.
-// Falls back to the default model when the provider is empty or not registered.
-func (r *ProviderRegistry) Select(provider string) ai.ChatModel {
-	if provider != "" {
-		if m, ok := r.providers[provider]; ok {
-			return m
-		}
-	}
-	return r.def
+// ChatModelFactory builds a ChatModel for a given provider name.
+// Implementations are responsible for loading credentials (e.g. from settings)
+// and constructing the appropriate client. The context carries the tenant ID,
+// so per-tenant settings can be fetched.
+type ChatModelFactory interface {
+	Build(ctx context.Context, provider string) (ai.ChatModel, error)
 }
 
 // SessionRunnerAdapter implements chat.SessionRunner by creating a Runner
 // on-demand and bridging agentic.RunEvent → chat.RunEvent.
 type SessionRunnerAdapter struct {
-	registry     *ProviderRegistry
+	modelFactory ChatModelFactory
 	skillClient  *SkillRuntimeClient
 	prompt       *PromptBuilder
 	tools        *ToolSchemaBuilder
@@ -70,7 +38,9 @@ type SessionRunnerAdapter struct {
 }
 
 // NewSessionRunnerAdapter creates an adapter that wires the chat.Service
-// to the agentic.Runner.
+// to the agentic.Runner. The provided chatModel is used as a static fallback
+// factory (all agents use the same provider). Prefer NewSessionRunnerAdapterWithFactory
+// when per-agent provider selection from settings is needed.
 func NewSessionRunnerAdapter(
 	chatModel ai.ChatModel,
 	skillClient *SkillRuntimeClient,
@@ -82,16 +52,16 @@ func NewSessionRunnerAdapter(
 	repo chat.Repository,
 	agentLoader AgentConfigLoader,
 ) *SessionRunnerAdapter {
-	return NewSessionRunnerAdapterWithRegistry(
-		NewProviderRegistry(chatModel, nil),
+	return NewSessionRunnerAdapterWithFactory(
+		staticModelFactory{model: chatModel},
 		skillClient, prompt, tools, ctxManager, memory, hookExecutor, repo, agentLoader,
 	)
 }
 
-// NewSessionRunnerAdapterWithRegistry creates an adapter that supports
-// per-agent provider selection via the ProviderRegistry.
-func NewSessionRunnerAdapterWithRegistry(
-	registry *ProviderRegistry,
+// NewSessionRunnerAdapterWithFactory creates an adapter that uses the provided
+// ChatModelFactory to select the correct provider per agent at request time.
+func NewSessionRunnerAdapterWithFactory(
+	factory ChatModelFactory,
 	skillClient *SkillRuntimeClient,
 	prompt *PromptBuilder,
 	tools *ToolSchemaBuilder,
@@ -102,7 +72,7 @@ func NewSessionRunnerAdapterWithRegistry(
 	agentLoader AgentConfigLoader,
 ) *SessionRunnerAdapter {
 	return &SessionRunnerAdapter{
-		registry:     registry,
+		modelFactory: factory,
 		skillClient:  skillClient,
 		prompt:       prompt,
 		tools:        tools,
@@ -114,14 +84,25 @@ func NewSessionRunnerAdapterWithRegistry(
 	}
 }
 
-// adapterRunnerFactory implements RunnerFactory using the adapter's dependencies.
+// staticModelFactory always returns the same ChatModel regardless of provider.
+type staticModelFactory struct {
+	model ai.ChatModel
+}
+
+func (f staticModelFactory) Build(_ context.Context, _ string) (ai.ChatModel, error) {
+	if f.model == nil {
+		return nil, fmt.Errorf("no AI provider configured")
+	}
+	return f.model, nil
+}
+
+// adapterRunnerFactory implements RunnerFactory for sub-runner spawning.
 type adapterRunnerFactory struct {
 	adapter   *SessionRunnerAdapter
 	chatModel ai.ChatModel
 }
 
 func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
-	// Sub-runners inherit the same provider selected for the parent session.
 	runner := NewRunner(
 		f.chatModel,
 		f.adapter.skillClient,
@@ -139,10 +120,9 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	return runner
 }
 
-// RunSession implements chat.SessionRunner. It creates a Runner with the
-// agent's model configuration and bridges agentic events to chat events.
+// RunSession implements chat.SessionRunner. It resolves the ChatModel for the
+// agent's configured provider from the settings table, then runs the agentic loop.
 func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput) (<-chan chat.RunEvent, error) {
-	// Load agent config to determine model settings.
 	agentCfg, err := a.agentLoader.GetAgentForRun(ctx, in.AgentID)
 	if err != nil {
 		return nil, fmt.Errorf("session runner: load agent: %w", err)
@@ -150,9 +130,12 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 
 	config := RunConfigFromModelConfig(agentCfg.ModelConfig)
 
-	// Select the ChatModel for this agent's configured provider.
-	// Falls back to the registry default when no provider is set.
-	chatModel := a.registry.Select(config.Provider)
+	// Resolve the ChatModel for this agent's provider from the factory.
+	// The context carries the tenant ID so settings can be fetched per-tenant.
+	chatModel, err := a.modelFactory.Build(ctx, config.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("session runner: build model for provider %q: %w", config.Provider, err)
+	}
 
 	factory := &adapterRunnerFactory{adapter: a, chatModel: chatModel}
 	runner := NewRunner(
@@ -179,7 +162,6 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		PermissionRules: ParsePermissionRules(agentCfg.PermissionRules),
 	})
 
-	// Bridge agentic.RunEvent → chat.RunEvent.
 	chatCh := make(chan chat.RunEvent, config.StreamBufferSize)
 	go func() {
 		defer close(chatCh)
