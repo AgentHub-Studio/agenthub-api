@@ -79,6 +79,11 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	subtaskExec := NewSubtaskExecutor(f)
 	subtaskExec.WithMailbox(f.mailbox)
 	runner.WithSubtaskExecutor(subtaskExec)
+
+	// Register memory as turn-end handler (decoupled from runner loop).
+	if f.adapter.memory != nil {
+		runner.WithTurnEndHandlers(NewMemoryTurnEndHandler(f.adapter.memory))
+	}
 	return runner
 }
 
@@ -113,6 +118,11 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	subtaskExec := NewSubtaskExecutor(factory)
 	subtaskExec.WithMailbox(mailbox)
 	runner.WithSubtaskExecutor(subtaskExec)
+
+	// Register memory as turn-end handler (decoupled from runner loop).
+	if a.memory != nil {
+		runner.WithTurnEndHandlers(NewMemoryTurnEndHandler(a.memory))
+	}
 
 	agenticCh := runner.Run(ctx, RunInput{
 		SessionID:       in.SessionID,

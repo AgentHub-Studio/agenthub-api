@@ -20,10 +20,12 @@ import (
 type HookEvent string
 
 const (
-	HookPreToolUse  HookEvent = "pre_tool_use"
-	HookPostToolUse HookEvent = "post_tool_use"
+	HookPreToolUse   HookEvent = "pre_tool_use"
+	HookPostToolUse  HookEvent = "post_tool_use"
 	HookSessionStart HookEvent = "session_start"
 	HookSessionEnd   HookEvent = "session_end"
+	HookTurnEnd      HookEvent = "turn_end"
+	HookRunEnd       HookEvent = "run_end"
 )
 
 // HookType identifies the kind of action a hook performs.
@@ -244,6 +246,147 @@ func (e *HookExecutor) executePromptHook(hook AgentHook, payload HookPayload) Ho
 	// Simple variable substitution (no full template engine to avoid injection).
 	result := cfg.Template
 	return HookResult{Inject: result}
+}
+
+// --- Turn-End / Run-End Payloads ---
+
+// TurnEndPayload is the data sent to turn-end hooks after all tool executions complete.
+type TurnEndPayload struct {
+	Event            HookEvent       `json:"event"`
+	AgentID          string          `json:"agentId"`
+	SessionID        string          `json:"sessionId"`
+	TurnIndex        int             `json:"turnIndex"`
+	AssistantContent string          `json:"assistantContent,omitempty"`
+	ToolCalls        []ToolCallInfo  `json:"toolCalls,omitempty"`
+	TokenUsage       json.RawMessage `json:"tokenUsage,omitempty"`
+}
+
+// ToolCallInfo is a simplified view of a tool call for hook payloads.
+type ToolCallInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// RunEndPayload is the data sent to run-end hooks after the run completes.
+type RunEndPayload struct {
+	Event       HookEvent `json:"event"`
+	AgentID     string    `json:"agentId"`
+	SessionID   string    `json:"sessionId"`
+	TotalTurns  int       `json:"totalTurns"`
+	TotalTokens int       `json:"totalTokens"`
+	TotalCost   float64   `json:"totalCostUsd,omitempty"`
+}
+
+// --- Turn-End Handler ---
+
+// TurnEndHandler is executed at the end of each agentic turn.
+// Handlers are non-fatal: errors are logged but do not stop the run.
+type TurnEndHandler interface {
+	HandleTurnEnd(ctx context.Context, payload TurnEndPayload) error
+}
+
+// RunEndHandler is executed at the end of an agentic run.
+type RunEndHandler interface {
+	HandleRunEnd(ctx context.Context, payload RunEndPayload) error
+}
+
+// ExecuteTurnEnd runs all turn-end hooks (persisted + in-memory handlers).
+func (e *HookExecutor) ExecuteTurnEnd(ctx context.Context, payload TurnEndPayload, handlers []TurnEndHandler) {
+	// 1. Execute persisted hooks (HTTP/prompt).
+	agentID, err := uuid.Parse(payload.AgentID)
+	if err == nil && e.repo != nil {
+		hooks, err := e.repo.FindByAgentAndEvent(ctx, agentID, HookTurnEnd)
+		if err != nil {
+			slog.Warn("hook executor: failed to load turn-end hooks", "error", err)
+		} else {
+			for _, hook := range hooks {
+				// Turn-end hooks don't use tool matcher — execute all.
+				hookPayload := HookPayload{
+					Event:     HookTurnEnd,
+					AgentID:   payload.AgentID,
+					SessionID: payload.SessionID,
+				}
+				result := e.executeHook(ctx, hook, hookPayload)
+				if result.Error != nil {
+					slog.Warn("turn-end hook failed", "hookId", hook.ID, "error", *result.Error)
+				}
+			}
+		}
+	}
+
+	// 2. Execute in-memory handlers (e.g., memory store).
+	for _, h := range handlers {
+		if err := h.HandleTurnEnd(ctx, payload); err != nil {
+			slog.Warn("turn-end handler failed", "error", err)
+		}
+	}
+}
+
+// ExecuteRunEnd runs all run-end hooks (persisted + in-memory handlers).
+func (e *HookExecutor) ExecuteRunEnd(ctx context.Context, payload RunEndPayload, handlers []RunEndHandler) {
+	agentID, err := uuid.Parse(payload.AgentID)
+	if err == nil && e.repo != nil {
+		hooks, err := e.repo.FindByAgentAndEvent(ctx, agentID, HookRunEnd)
+		if err != nil {
+			slog.Warn("hook executor: failed to load run-end hooks", "error", err)
+		} else {
+			for _, hook := range hooks {
+				hookPayload := HookPayload{
+					Event:     HookRunEnd,
+					AgentID:   payload.AgentID,
+					SessionID: payload.SessionID,
+				}
+				result := e.executeHook(ctx, hook, hookPayload)
+				if result.Error != nil {
+					slog.Warn("run-end hook failed", "hookId", hook.ID, "error", *result.Error)
+				}
+			}
+		}
+	}
+
+	for _, h := range handlers {
+		if err := h.HandleRunEnd(ctx, payload); err != nil {
+			slog.Warn("run-end handler failed", "error", err)
+		}
+	}
+}
+
+// --- Memory Turn-End Handler ---
+
+// MemoryTurnEndHandler wraps MemoryBridge.MaybeStore as a TurnEndHandler.
+type MemoryTurnEndHandler struct {
+	memory *MemoryBridge
+}
+
+// NewMemoryTurnEndHandler creates a handler that evaluates and stores memories at turn end.
+func NewMemoryTurnEndHandler(memory *MemoryBridge) *MemoryTurnEndHandler {
+	return &MemoryTurnEndHandler{memory: memory}
+}
+
+// HandleTurnEnd evaluates the turn's content for memorable information.
+func (h *MemoryTurnEndHandler) HandleTurnEnd(ctx context.Context, payload TurnEndPayload) error {
+	if h.memory == nil {
+		return nil
+	}
+
+	agentID, err := uuid.Parse(payload.AgentID)
+	if err != nil {
+		return fmt.Errorf("memory turn-end: invalid agent ID: %w", err)
+	}
+
+	var turnMsgs []TurnMessage
+	if payload.AssistantContent != "" {
+		turnMsgs = append(turnMsgs, TurnMessage{Role: "assistant", Content: payload.AssistantContent})
+	}
+	for _, tc := range payload.ToolCalls {
+		turnMsgs = append(turnMsgs, TurnMessage{
+			Role:    "assistant",
+			Content: fmt.Sprintf("[tool_call: %s]", tc.Name),
+		})
+	}
+
+	_, err = h.memory.MaybeStore(ctx, agentID, payload.TurnIndex, turnMsgs)
+	return err
 }
 
 // matchesToolName checks if a tool name matches a glob pattern.

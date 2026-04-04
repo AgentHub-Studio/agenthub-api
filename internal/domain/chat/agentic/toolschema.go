@@ -31,6 +31,7 @@ type ToolSchemaBuilder struct {
 	skills       SkillLister
 	tools        ToolsBySkillLister
 	kbs          KBLister
+	mcpBridge    *MCPToolBridge
 	currentDepth int
 	maxDepth     int
 }
@@ -38,6 +39,13 @@ type ToolSchemaBuilder struct {
 // NewToolSchemaBuilder creates a ToolSchemaBuilder.
 func NewToolSchemaBuilder(skills SkillLister, tools ToolsBySkillLister, kbs KBLister) *ToolSchemaBuilder {
 	return &ToolSchemaBuilder{skills: skills, tools: tools, kbs: kbs, maxDepth: 3}
+}
+
+// WithMCPBridge attaches an MCP tool bridge so that MCP tools are included
+// alongside internal skills in the tool definitions sent to the LLM.
+func (b *ToolSchemaBuilder) WithMCPBridge(bridge *MCPToolBridge) *ToolSchemaBuilder {
+	b.mcpBridge = bridge
+	return b
 }
 
 // WithDepthLimits sets the current and max depth for sub-agent tool availability.
@@ -85,6 +93,17 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// Builtin: send_message — available to sub-agents (depth > 0) for inter-agent messaging.
 	if b.currentDepth > 0 {
 		tools = append(tools, sendMessageTool())
+	}
+
+	// MCP tools — fetched from external MCP servers via the bridge.
+	if b.mcpBridge != nil {
+		mcpTools, err := b.mcpBridge.ListTools(ctx)
+		if err != nil {
+			// Non-fatal: log and continue without MCP tools.
+			_ = err
+		} else {
+			tools = append(tools, mcpTools...)
+		}
 	}
 
 	if tools == nil {

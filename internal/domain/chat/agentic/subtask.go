@@ -16,6 +16,46 @@ import (
 // agentToolName is the builtin tool name for sub-agent spawning.
 const agentToolName = "agent"
 
+// SubtaskStatus represents the outcome of a sub-agent run.
+type SubtaskStatus string
+
+const (
+	SubtaskCompleted SubtaskStatus = "completed"
+	SubtaskFailed    SubtaskStatus = "failed"
+	SubtaskKilled    SubtaskStatus = "killed"
+)
+
+// SubtaskResult is the structured envelope for sub-agent results.
+// It is serialised as the tool_result output so the LLM can parse it.
+type SubtaskResult struct {
+	SubtaskID   string        `json:"subtaskId"`
+	Status      SubtaskStatus `json:"status"`
+	Summary     string        `json:"summary"`
+	Result      string        `json:"result"`
+	TotalTurns  int           `json:"totalTurns"`
+	TotalTokens int           `json:"totalTokens"`
+	CostUSD     float64       `json:"costUsd"`
+	DurationMs  int64         `json:"durationMs"`
+}
+
+// summarizeResult generates a concise summary from the result content or error.
+func summarizeResult(content string, err *string) string {
+	if err != nil {
+		msg := *err
+		if len(msg) > 200 {
+			return msg[:197] + "..."
+		}
+		return "Error: " + msg
+	}
+	if content == "" {
+		return "(no output)"
+	}
+	if len(content) > 200 {
+		return content[:197] + "..."
+	}
+	return content
+}
+
 // SubtaskInput is the expected JSON input for the agent builtin tool.
 type SubtaskInput struct {
 	// Prompt is the task description for the sub-agent.
@@ -195,36 +235,49 @@ func (s *SubtaskExecutor) Execute(
 		}
 	}
 
-	// Emit subtask_complete.
+	latency := time.Since(start).Milliseconds()
+
+	// Build structured result.
+	status := SubtaskCompleted
+	if childErr != nil {
+		status = SubtaskFailed
+	}
+
+	if resultContent == "" && childErr == nil {
+		resultContent = "(sub-agent completed with no text output)"
+	}
+
+	subtaskResult := SubtaskResult{
+		SubtaskID:   subtaskID,
+		Status:      status,
+		Summary:     summarizeResult(resultContent, childErr),
+		Result:      resultContent,
+		TotalTurns:  totalTurns,
+		TotalTokens: totalTokens,
+		CostUSD:     childCost,
+		DurationMs:  latency,
+	}
+
+	// Emit subtask_complete with summary.
 	parentCh <- NewRunEvent(EventSubtaskComplete, SubtaskCompleteData{
 		ID:          subtaskID,
 		TotalTurns:  totalTurns,
 		TotalTokens: totalTokens,
 		TotalCost:   childCost,
+		Summary:     subtaskResult.Summary,
 		Error:       childErr,
 	})
 
-	latency := time.Since(start).Milliseconds()
-
 	if childErr != nil {
+		output, _ := json.Marshal(subtaskResult)
 		return ToolExecResult{
+			Output:    output,
 			Error:     childErr,
 			LatencyMs: latency,
 		}
 	}
 
-	if resultContent == "" {
-		resultContent = "(sub-agent completed with no text output)"
-	}
-
-	output, _ := json.Marshal(map[string]any{
-		"result":     resultContent,
-		"turns":      totalTurns,
-		"tokens":     totalTokens,
-		"costUsd":    childCost,
-		"subtaskId":  subtaskID,
-	})
-
+	output, _ := json.Marshal(subtaskResult)
 	return ToolExecResult{
 		Output:    output,
 		LatencyMs: latency,
