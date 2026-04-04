@@ -41,6 +41,12 @@ type RunInput struct {
 	// ParentEventCh, when set, receives forwarded events from sub-agent runs.
 	// This allows the parent SSE stream to include sub-agent activity.
 	ParentEventCh chan<- RunEvent
+	// SubtaskID is the identity of this sub-agent for mailbox messaging.
+	// Empty for the root agent.
+	SubtaskID string
+	// ParentSessionID is the root session ID used as the mailbox key.
+	// Sub-agents use this to share a mailbox with siblings.
+	ParentSessionID uuid.UUID
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
@@ -262,6 +268,20 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		if err := ctx.Err(); err != nil {
 			emitError(ch, "context_cancelled", err)
 			return
+		}
+
+		// Inject escalation hints from denial tracker.
+		if r.denialTracker != nil {
+			if hints := r.denialTracker.EscalationHints(); len(hints) > 0 {
+				hintMsg := "[SYSTEM] The following tools have been repeatedly denied by permission rules:\n"
+				for _, h := range hints {
+					hintMsg += "- " + h + "\n"
+				}
+				messages = append(messages, ai.Message{
+					Role:    ai.RoleUser,
+					Content: hintMsg,
+				})
+			}
 		}
 
 		// Per-turn token budget (may be escalated).
@@ -1082,7 +1102,7 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			case PermissionDeny:
 				errMsg := FormatDeniedError(tc.Function.Name)
 				results[i] = ToolExecResult{Error: &errMsg}
-// Track denial and emit event.
+				// Track denial and emit event.
 				denialCount := 1
 				escalated := false
 				if r.denialTracker != nil {

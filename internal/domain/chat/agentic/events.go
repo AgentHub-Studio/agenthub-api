@@ -19,6 +19,7 @@ const (
 	EventRunProgress      RunEventType = "run_progress"
 	EventModelFallback    RunEventType = "model_fallback"
 	EventToolDenied       RunEventType = "tool_denied"
+	EventAgentMessage     RunEventType = "agent_message"
 	EventThinkingDelta    RunEventType = "thinking_delta"
 	EventSubtaskProgress  RunEventType = "subtask_progress"
 	EventToolUseSummary   RunEventType = "tool_use_summary"
@@ -211,4 +212,12 @@ type ToolDeniedData struct {
 	Reason      string `json:"reason"`
 	DenialCount int    `json:"denialCount"`
 	Escalated   bool   `json:"escalated"`
+}
+
+// AgentMessageData is emitted when a sub-agent sends a message via the mailbox.
+type AgentMessageData struct {
+	ID      string `json:"id"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Content string `json:"content"`
 }
