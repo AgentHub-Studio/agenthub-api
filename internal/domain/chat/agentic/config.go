@@ -87,6 +87,11 @@ type RunConfig struct {
 	FallbackOnOverload *bool `json:"fallbackOnOverload,omitempty"`
 	// FallbackOnTimeout enables fallback on timeout errors. Default true.
 	FallbackOnTimeout *bool `json:"fallbackOnTimeout,omitempty"`
+
+	// ToolCacheCapacity is the max number of entries in the per-run tool result
+	// LRU cache. Cacheable tools (read-only, idempotent) have their results cached
+	// to avoid redundant re-execution. Default 64. Set to 0 to disable caching.
+	ToolCacheCapacity int `json:"toolCacheCapacity"`
 }
 
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
@@ -109,6 +114,7 @@ func DefaultRunConfig() RunConfig {
 		Temperature:         0.7,
 		StallCheckInterval:  15 * time.Second,
 		StallThreshold:      45 * time.Second,
+		ToolCacheCapacity:   64,
 	}
 }
 
@@ -132,6 +138,7 @@ type modelConfig struct {
 	FallbackOnRateLimit *bool    `json:"fallbackOnRateLimit,omitempty"`
 	FallbackOnOverload  *bool    `json:"fallbackOnOverload,omitempty"`
 	FallbackOnTimeout   *bool    `json:"fallbackOnTimeout,omitempty"`
+	ToolCacheCapacity   *int     `json:"toolCacheCapacity,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -198,6 +205,9 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	}
 	if mc.FallbackOnTimeout != nil {
 		cfg.FallbackOnTimeout = mc.FallbackOnTimeout
+	}
+	if mc.ToolCacheCapacity != nil {
+		cfg.ToolCacheCapacity = *mc.ToolCacheCapacity
 	}
 	return cfg
 }
