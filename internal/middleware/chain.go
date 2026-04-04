@@ -115,7 +115,7 @@ func tenantMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			ctx := tenant.NewContext(r.Context(), m[1])
+			ctx := tenant.NewContextWithToken(r.Context(), m[1], tokenStr)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

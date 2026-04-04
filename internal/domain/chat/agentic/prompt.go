@@ -129,6 +129,11 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 		sections = append(sections, in.SystemPrompt)
 	}
 
+	// 1b. User interaction policy — injected at the top of every prompt so
+	// the LLM sees it before the tool list. This ensures the model always
+	// uses ask_user for structured input instead of asking in plain text.
+	sections = append(sections, userInteractionPolicy)
+
 	// 2. Available Tools (cached — only changes on skill config changes)
 	if b.skills != nil {
 		toolsSection, err := b.getCachedOrCompute("tools:"+in.AgentID.String(), func() (string, error) {
@@ -392,13 +397,41 @@ When a sub-agent reports failure (tests failed, build errors, file not found):
 - Tasks with strong sequential dependencies (sub-agent B needs sub-agent A's result)
 - Trivial questions that don't require tool usage`
 
+// userInteractionPolicy is a high-priority section injected near the top of the
+// prompt so the LLM sees it BEFORE the tool list. It establishes the hard rule
+// that all data collection must happen via the ask_user tool, not plain text.
+const userInteractionPolicy = `## CRITICAL — User Input Policy
+
+When you need ANY information from the user, you MUST call the **ask_user** tool. NEVER ask for information in plain text.
+
+**WRONG:**
+> "Please tell me: 1) the skill name, 2) the description, 3) the category"
+
+**CORRECT:**
+> Call ask_user with message and questions array.
+
+Rules for building questions:
+- When a field has known valid values (categories, statuses, types, environments), use type "select" with options — NEVER let the user type a free-text value for enum fields.
+- For each select option include a description so the user understands the choice.
+- Group all related fields in a single ask_user call (1-6 questions).
+- Use "text" only for genuinely free-form input (names, descriptions, custom values).
+- Use "confirm" for yes/no decisions.
+- Make fields required unless truly optional.
+
+Platform enum values you MUST use (do not invent new values):
+- **Skill categories:** rag, data, integration, compute, platform, system, productivity, storage, analysis, diagnostic, wizard, orchestration, memory
+- **Agent states:** DRAFT, PUBLISHED, ARCHIVED
+- **Tool types:** HTTP, SQL, DOCUMENT_SEARCH, CUSTOM
+- **Knowledge base states:** ACTIVE, PAUSED`
+
 // toolUsageInstructions is the static section injected into every agentic prompt.
 const toolUsageInstructions = `## Tool Usage Instructions
 
 - Use available tools to answer questions that require data retrieval or actions.
 - Use document_search when the user asks about topics covered by the knowledge bases.
-- NEVER execute operations that modify data without confirming with the user first.
+- NEVER execute operations that modify data without confirming with the user first via ask_user with a confirm question.
 - When you receive tool results, synthesize them into a clear, concise answer.
 - If a tool call fails, explain the error and suggest an alternative approach.
 - Do not fabricate data — if you do not have the information, say so.
-- Cite document sources when answering from knowledge base results.`
+- Cite document sources when answering from knowledge base results.
+- ALWAYS call ask_user to collect information — never ask via plain text.`

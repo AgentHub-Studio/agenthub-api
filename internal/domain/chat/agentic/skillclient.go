@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // SkillRuntimeClient calls the skill-runtime service to execute tools.
@@ -92,6 +94,9 @@ func (c *SkillRuntimeClient) Execute(ctx context.Context, slug string, input jso
 		return nil, fmt.Errorf("skillclient: new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if tok := tenant.TokenFromContext(ctx); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 
 	start := time.Now()
 	resp, err := c.client.Do(req)

@@ -41,6 +41,18 @@ type RunInput struct {
 	TenantID     string
 }
 
+// ElicitationResponder routes a user's elicitation response to the active run.
+// Implemented by agentic.SessionRunnerAdapter; no-op on other implementations.
+type ElicitationResponder interface {
+	RespondElicitation(sessionID, requestID string, result ElicitationResult) bool
+}
+
+// ElicitationResult mirrors agentic.ElicitationResult to avoid circular imports.
+type ElicitationResult struct {
+	Action  string                 `json:"action"`
+	Content map[string]interface{} `json:"content,omitempty"`
+}
+
 // SessionRunner starts an agentic loop and returns a channel of RunEvents.
 // The chat.Service calls this; the concrete implementation lives in
 // chat/agentic and is injected via the server wiring.
@@ -181,6 +193,15 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 	}
 
 	return MessageResponseFrom(created), nil
+}
+
+// RespondElicitation routes a user response to an active elicitation request.
+// Returns false when the session has no active run or the requestID is not found.
+func (s *Service) RespondElicitation(sessionID, requestID string, result ElicitationResult) bool {
+	if r, ok := s.runner.(ElicitationResponder); ok {
+		return r.RespondElicitation(sessionID, requestID, result)
+	}
+	return false
 }
 
 // RunSession starts an agentic run for the given session.

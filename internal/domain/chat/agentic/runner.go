@@ -24,6 +24,13 @@ type HistoryLoader interface {
 	FindAllMessages(ctx context.Context, sessionID uuid.UUID) ([]chat.ChatMessage, error)
 }
 
+// ElicitationSubmitter allows the runner to block on structured user input.
+// The implementation (ElicitationHandler) lives in the adapter layer; the runner
+// receives it via RunInput so there is no circular dependency.
+type ElicitationSubmitter interface {
+	Submit(ctx context.Context, serverName, requestID string, params ElicitationParams) ElicitationResult
+}
+
 // RunInput carries everything needed to start an agentic run.
 type RunInput struct {
 	SessionID       uuid.UUID
@@ -47,6 +54,10 @@ type RunInput struct {
 	// ParentSessionID is the root session ID used as the mailbox key.
 	// Sub-agents use this to share a mailbox with siblings.
 	ParentSessionID uuid.UUID
+
+	// Elicitation, when set, handles ask_user tool calls by blocking until the
+	// user submits a response via POST /elicitation/{requestId}/respond.
+	Elicitation ElicitationSubmitter
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
@@ -180,6 +191,11 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		return
 	}
 	aiTools := convertLLMToolsToAI(toolResult.Loaded)
+	toolNames := make([]string, len(toolResult.Loaded))
+	for i, t := range toolResult.Loaded {
+		toolNames[i] = t.Name
+	}
+	slog.Info("agentic: tools loaded for LLM", "count", len(aiTools), "tools", toolNames, "agentID", in.AgentID)
 	readOnlyIndex := BuildReadOnlyIndex(toolResult.All)
 	destructiveIndex := BuildDestructiveIndex(toolResult.All)
 	contextModeIndex := BuildContextModeIndex(toolResult.All)
@@ -276,7 +292,9 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	for turnIndex < r.config.MaxIterations {
+		slog.Info("agentic: loop iteration start", "turn", turnIndex, "maxIterations", r.config.MaxIterations, "ctxErr", ctx.Err())
 		if err := ctx.Err(); err != nil {
+			slog.Error("agentic: context cancelled at loop start", "turn", turnIndex, "error", err)
 			emitError(ch, "context_cancelled", err)
 			return
 		}
@@ -542,7 +560,13 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		case "tool_calls":
 			// 5e. Apply permission rules and execute tool calls.
+			tcNames := make([]string, len(toolCalls))
+			for ti, tc := range toolCalls {
+				tcNames[ti] = tc.Function.Name
+			}
+			slog.Info("agentic: LLM requested tool_calls", "turn", turnIndex, "tools", tcNames)
 			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools)
+			slog.Info("agentic: tool execution completed", "turn", turnIndex, "resultCount", len(toolResults), "ctxErr", ctx.Err())
 
 			// Check if denial tracking indicates a stuck loop.
 			if r.denialTracker != nil && len(r.denialTracker.EscalationHints()) > 0 {
@@ -605,6 +629,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			// Turn-end hooks (after tool results, before incrementing turnIndex).
 			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
 
+			slog.Info("agentic: tool results persisted, emitting turn_complete", "turn", turnIndex, "ctxErr", ctx.Err())
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 			TurnIndex:   turnIndex,
 				TokenUsage:  tokenUsageWithCost(usage, turnCost, effectiveModel),
@@ -706,6 +731,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			}
 
 			turnIndex++
+			slog.Info("agentic: advancing to next turn after tool_calls", "nextTurn", turnIndex, "ctxErr", ctx.Err())
 			continue
 
 		case "length":
@@ -1181,6 +1207,42 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			continue
 		}
 
+		// Route ask_user calls to the ElicitationHandler — block until the user
+		// submits a response via POST /elicitation/{requestId}/respond.
+		if tc.Function.Name == "ask_user" && in.Elicitation != nil {
+			slog.Info("agentic: ask_user intercepted — blocking for user input", "toolCallID", tc.ID, "args", tc.Function.Arguments)
+			var params struct {
+				Message   string            `json:"message"`
+				Schema    json.RawMessage   `json:"schema"`
+				Questions []AskUserQuestion `json:"questions"`
+			}
+			_ = json.Unmarshal(json.RawMessage(tc.Function.Arguments), &params)
+			elicParams := ElicitationParams{
+				Mode:            ElicitationModeForm,
+				Message:         params.Message,
+				RequestedSchema: params.Schema,
+				Questions:       params.Questions,
+			}
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+			})
+			result := in.Elicitation.Submit(ctx, "", tc.ID, elicParams)
+			slog.Info("agentic: ask_user Submit returned", "toolCallID", tc.ID, "action", result.Action, "contentKeys", mapKeys(result.Content), "ctxErr", ctx.Err())
+			var output json.RawMessage
+			if result.Action == ElicitationCancel || result.Action == ElicitationDecline {
+				msg := fmt.Sprintf(`{"action": %q}`, result.Action)
+				output = json.RawMessage(msg)
+			} else {
+				out, _ := json.Marshal(result.Content)
+				output = out
+			}
+			results[i] = ToolExecResult{Output: output}
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
+			})
+			continue
+		}
+
 		// Route tool_search calls locally — resolve deferred tool schemas without
 		// hitting the skill-runtime. Inspired by Claude Code's ToolSearchTool.
 		if IsToolSearchCall(tc.Function.Name) && len(deferredTools) > 0 {
@@ -1275,6 +1337,14 @@ func emitError(ch chan<- RunEvent, code string, err error) {
 		Message: err.Error(),
 		Code:    code,
 	})
+}
+
+func mapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func derefString(s *string) string {

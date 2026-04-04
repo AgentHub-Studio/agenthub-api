@@ -22,13 +22,30 @@ const (
 	ElicitationModeURL  ElicitationMode = "url"
 )
 
+// AskUserQuestion represents a single question in the ask_user tool call.
+// Follows Claude Code's AskUserQuestion pattern.
+type AskUserQuestion struct {
+	ID       string              `json:"id"`
+	Question string              `json:"question"`
+	Type     string              `json:"type,omitempty"`     // "text", "select", "confirm"
+	Required *bool               `json:"required,omitempty"` // nil = default true
+	Options  []AskUserOption     `json:"options,omitempty"`
+}
+
+// AskUserOption represents a choice for a select question.
+type AskUserOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
 // ElicitationParams describes what the server is asking the user.
 type ElicitationParams struct {
-	Mode            ElicitationMode `json:"mode"`
-	Message         string          `json:"message"`
-	RequestedSchema json.RawMessage `json:"requestedSchema,omitempty"`
-	URL             string          `json:"url,omitempty"`
-	ElicitationID   string          `json:"elicitationId,omitempty"`
+	Mode            ElicitationMode  `json:"mode"`
+	Message         string           `json:"message"`
+	RequestedSchema json.RawMessage  `json:"requestedSchema,omitempty"`
+	Questions       []AskUserQuestion `json:"questions,omitempty"`
+	URL             string           `json:"url,omitempty"`
+	ElicitationID   string           `json:"elicitationId,omitempty"`
 }
 
 // ElicitationAction is the user's decision.

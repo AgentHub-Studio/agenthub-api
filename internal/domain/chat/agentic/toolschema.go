@@ -181,6 +181,9 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// Builtin: memory_store — always available.
 	tools = append(tools, memoryStoreTool())
 
+	// Builtin: ask_user — always available; lets the LLM request structured input from the user.
+	tools = append(tools, askUserTool())
+
 	// Builtin: agent — available when depth < maxDepth (enables sub-agent spawning).
 	if b.currentDepth < b.maxDepth {
 		tools = append(tools, agentTool(b.maxDepth-b.currentDepth))
@@ -465,6 +468,101 @@ func memoryStoreTool() LLMTool {
 	}
 }
 
+// askUserTool returns the builtin ask_user tool definition.
+// This tool lets the LLM request structured input from the user at any point
+// during a run. The runner intercepts calls to this tool and routes them through
+// the ElicitationHandler, which blocks until the user submits the form.
+func askUserTool() LLMTool {
+	return LLMTool{
+		Name:     "ask_user",
+		Builtin:  true,
+		ReadOnly: true,
+		Description: `Present a structured form to collect user input. You MUST use this tool whenever you need ANY information — never ask via plain text.
+
+Parameters:
+- message: Brief instruction shown above the form.
+- questions: Array of question objects, each rendered as a form field.
+
+Each question object:
+- id: Field identifier (snake_case).
+- question: Label displayed to the user.
+- type: "text" (default), "select", or "confirm".
+- required: Whether the field is mandatory (default true).
+- options: Array of {label, description} for "select" type. 2-6 options. User can always type a custom value.
+
+RULES:
+- When the field has a known set of valid values (categories, statuses, types, environments), ALWAYS use type "select" with options.
+- For each option, include a short description explaining when to choose it.
+- Group related fields in a single ask_user call (1-6 questions).
+- Use concise labels — the description carries the detail.
+
+Example — creating a skill:
+ask_user(
+  message="Skill details",
+  questions=[
+    {id:"name", question:"Skill name", type:"text"},
+    {id:"description", question:"Description", type:"text"},
+    {id:"category", question:"Category", type:"select", options:[
+      {label:"rag", description:"Document search and retrieval"},
+      {label:"data", description:"SQL queries and data analysis"},
+      {label:"integration", description:"HTTP APIs and external services"},
+      {label:"platform", description:"AgentHub management operations"},
+      {label:"compute", description:"Code execution and calculations"}
+    ]}
+  ]
+)`,
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"message": {
+					"type": "string",
+					"description": "Brief instruction shown above the form"
+				},
+				"questions": {
+					"type": "array",
+					"description": "Form fields to present to the user",
+					"items": {
+						"type": "object",
+						"properties": {
+							"id": {
+								"type": "string",
+								"description": "Field identifier (snake_case)"
+							},
+							"question": {
+								"type": "string",
+								"description": "Label displayed to the user"
+							},
+							"type": {
+								"type": "string",
+								"enum": ["text", "select", "confirm"],
+								"description": "Field type: text for free input, select for choices, confirm for yes/no"
+							},
+							"required": {
+								"type": "boolean",
+								"description": "Whether the field is mandatory (default true)"
+							},
+							"options": {
+								"type": "array",
+								"description": "Choices for select type. 2-6 options.",
+								"items": {
+									"type": "object",
+									"properties": {
+										"label": {"type": "string", "description": "Option value shown to user"},
+										"description": {"type": "string", "description": "Brief explanation of this option"}
+									},
+									"required": ["label"]
+								}
+							}
+						},
+						"required": ["id", "question"]
+					}
+				}
+			},
+			"required": ["message", "questions"]
+		}`),
+	}
+}
+
 // agentTool returns the builtin agent tool for sub-agent spawning.
 func agentTool(remainingLevels int) LLMTool {
 	desc := fmt.Sprintf(
@@ -547,6 +645,7 @@ var readOnlySlugs = map[string]bool{
 	"memory-recall":    true,
 	"troubleshoot":     true, // diagnosis only, no side effects
 	"tool_search":      true, // builtin, no side effects
+	"ask_user":         true, // builtin, only collects user input — no side effects
 }
 
 // IsReadOnlyTool returns true if the tool name is known to be read-only.

@@ -2,7 +2,11 @@ package agentic
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -35,6 +39,43 @@ type SessionRunnerAdapter struct {
 	hookExecutor *HookExecutor
 	repo         chat.Repository
 	agentLoader  AgentConfigLoader
+
+	// elicitation manages a registry of active ElicitationHandlers keyed by
+	// session ID so that HTTP respond calls can be routed to the correct run.
+	elicitation elicitationRegistry
+}
+
+// elicitationRegistry maps active session runs to their ElicitationHandlers.
+type elicitationRegistry struct {
+	mu      sync.Mutex
+	byRunID map[string]*ElicitationHandler // runKey → handler
+}
+
+func (r *elicitationRegistry) register(runKey string, h *ElicitationHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.byRunID == nil {
+		r.byRunID = make(map[string]*ElicitationHandler)
+	}
+	r.byRunID[runKey] = h
+}
+
+func (r *elicitationRegistry) unregister(runKey string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.byRunID, runKey)
+}
+
+// Respond routes a user response to the correct handler.
+// Returns false when no active run is found for the given run key.
+func (r *elicitationRegistry) Respond(runKey, requestID string, result ElicitationResult) bool {
+	r.mu.Lock()
+	h, ok := r.byRunID[runKey]
+	r.mu.Unlock()
+	if !ok {
+		return false
+	}
+	return h.Respond(requestID, result)
 }
 
 // NewSessionRunnerAdapter creates an adapter that wires the chat.Service
@@ -130,6 +171,9 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 
 // RunSession implements chat.SessionRunner. It resolves the ChatModel for the
 // agent's configured provider from the settings table, then runs the agentic loop.
+// If an ElicitationHandler is enqueued during the run, the adapter emits
+// EventInputRequest events into the SSE stream and registers the handler so that
+// HTTP respond calls (POST /elicitation/{requestId}/respond) can unblock the loop.
 func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput) (<-chan chat.RunEvent, error) {
 	agentCfg, err := a.agentLoader.GetAgentForRun(ctx, in.AgentID)
 	if err != nil {
@@ -171,6 +215,32 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		runner.WithTurnEndHandlers(NewMemoryTurnEndHandler(a.memory))
 	}
 
+	// Create an ElicitationHandler for this run and wire the OnEnqueue callback
+	// so that each new elicitation request is forwarded to the SSE stream as an
+	// EventInputRequest event. The handler is registered in the adapter registry
+	// so that HTTP respond calls can be routed back.
+	elicHandler := NewElicitationHandler()
+	runKey := in.SessionID.String()
+	a.elicitation.register(runKey, elicHandler)
+
+	// The bridgeCh receives elicitation events from OnEnqueue before agenticCh
+	// is created. We use a buffered channel so the callback never blocks.
+	elicEventCh := make(chan RunEvent, 8)
+	elicHandler.OnEnqueue(func(req *ElicitationRequest) {
+		payload := buildUiFormPayload(req.Params)
+		data, _ := json.Marshal(InputRequestData{
+			RequestID:  req.RequestID,
+			ServerName: req.ServerName,
+			Payload:    payload,
+		})
+		slog.Info("agentic: emitting input_request SSE event",
+			"requestID", req.RequestID,
+			"payloadSize", len(payload),
+			"sessionID", in.SessionID,
+		)
+		elicEventCh <- NewRunEvent(EventInputRequest, json.RawMessage(data))
+	})
+
 	agenticCh := runner.Run(ctx, RunInput{
 		SessionID:       in.SessionID,
 		AgentID:         in.AgentID,
@@ -178,20 +248,61 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		SystemPrompt:    agentCfg.SystemPrompt,
 		TenantID:        in.TenantID,
 		PermissionRules: ParsePermissionRules(agentCfg.PermissionRules),
+		Elicitation:     elicHandler,
 	})
 
 	chatCh := make(chan chat.RunEvent, config.StreamBufferSize)
 	go func() {
-		defer close(chatCh)
-		for ev := range agenticCh {
-			chatCh <- chat.RunEvent{
-				Type: string(ev.Type),
-				Data: ev.Data,
+		defer func() {
+			a.elicitation.unregister(runKey)
+			close(chatCh)
+		}()
+
+		// Heartbeat ticker keeps the SSE connection alive while the runner is
+		// blocked waiting for user input (elicitation). Without this, reverse
+		// proxies (Traefik, nginx) or browsers may close the idle connection.
+		heartbeat := time.NewTicker(15 * time.Second)
+		defer heartbeat.Stop()
+
+		for {
+			select {
+			case ev, ok := <-agenticCh:
+				if !ok {
+					// Drain any remaining elicitation events before closing.
+					for {
+						select {
+						case elicEv := <-elicEventCh:
+							chatCh <- chat.RunEvent{Type: string(elicEv.Type), Data: elicEv.Data}
+						default:
+							return
+						}
+					}
+				}
+				chatCh <- chat.RunEvent{Type: string(ev.Type), Data: ev.Data}
+			case elicEv := <-elicEventCh:
+				chatCh <- chat.RunEvent{Type: string(elicEv.Type), Data: elicEv.Data}
+			case t := <-heartbeat.C:
+				hb, _ := json.Marshal(map[string]int64{"ts": t.Unix()})
+				chatCh <- chat.RunEvent{Type: string(EventHeartbeat), Data: json.RawMessage(hb)}
 			}
 		}
 	}()
 
 	return chatCh, nil
+}
+
+// RespondElicitation routes a user's elicitation response to the active run
+// for the given session. It accepts a chat.ElicitationResult (to satisfy the
+// chat.ElicitationResponder interface without circular imports) and converts it
+// to the agentic.ElicitationResult used by the handler queue.
+// Returns false when no active run is found (session has already completed or
+// the requestId does not exist).
+func (a *SessionRunnerAdapter) RespondElicitation(sessionID, requestID string, result chat.ElicitationResult) bool {
+	agResult := ElicitationResult{
+		Action:  ElicitationAction(result.Action),
+		Content: result.Content,
+	}
+	return a.elicitation.Respond(sessionID, requestID, agResult)
 }
 
 // repoHistoryLoader adapts chat.Repository to HistoryLoader.

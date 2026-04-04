@@ -119,6 +119,10 @@ func (m *mockChatSvc) RunSession(_ context.Context, sessionID uuid.UUID, userMes
 	return ch, nil
 }
 
+func (m *mockChatSvc) RespondElicitation(sessionID, requestID string, result chat.ElicitationResult) bool {
+	return false // no active runs in tests
+}
+
 func setupChat() (*chi.Mux, *mockChatSvc) {
 	svc := newMockChatSvc()
 	h := chat.NewHandler(svc)

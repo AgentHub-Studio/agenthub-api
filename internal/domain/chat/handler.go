@@ -27,6 +27,8 @@ type chatService interface {
 	AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
 	// RunSession starts an agentic run and returns a channel of events for SSE streaming.
 	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error)
+	// RespondElicitation routes a user response to an active elicitation request.
+	RespondElicitation(sessionID, requestID string, result ElicitationResult) bool
 }
 
 // Handler handles HTTP requests for chat sessions and messages.
@@ -59,6 +61,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/chat/sessions/{id}/run/{runId}/status", h.runStatus)
 	r.Post("/api/chat/sessions/{id}/run/{runId}/cancel", h.cancelRun)
 	r.Get("/api/chat/sessions/{id}/run/{runId}/resume", h.resumeSession)
+	r.Post("/api/chat/sessions/{id}/elicitation/{requestId}/respond", h.respondElicitation)
 }
 
 func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +218,12 @@ func (h *Handler) addMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.JSON(w, http.StatusCreated, resp)
+}
+
+// elicitationRespondRequest is the body for POST /api/chat/sessions/{id}/elicitation/{requestId}/respond.
+type elicitationRespondRequest struct {
+	Action  string                 `json:"action"`  // "accept" | "decline" | "cancel"
+	Content map[string]interface{} `json:"content"` // form field values (for accept)
 }
 
 // runSessionRequest is the body for POST /api/chat/sessions/{id}/run.
@@ -468,4 +477,41 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// respondElicitation handles POST /api/chat/sessions/{id}/elicitation/{requestId}/respond.
+// It routes the user's form response to the active agentic run so the loop can continue.
+func (h *Handler) respondElicitation(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(sessionID); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+
+	requestID := chi.URLParam(r, "requestId")
+	if requestID == "" {
+		respond.Error(w, http.StatusBadRequest, "requestId is required")
+		return
+	}
+
+	var req elicitationRespondRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Action == "" {
+		req.Action = "accept"
+	}
+
+	result := ElicitationResult{
+		Action:  req.Action,
+		Content: req.Content,
+	}
+
+	if ok := h.svc.RespondElicitation(sessionID, requestID, result); !ok {
+		respond.Error(w, http.StatusNotFound, "elicitation request not found or already resolved")
+		return
+	}
+
+	respond.NoContent(w)
 }
