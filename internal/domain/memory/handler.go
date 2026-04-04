@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -15,11 +16,15 @@ import (
 // memoryService defines the methods used by Handler.
 type memoryService interface {
 	List(ctx context.Context, agentID uuid.UUID, userID *string) ([]AgentMemory, error)
+	ListByType(ctx context.Context, agentID uuid.UUID, userID *string, memoryType MemoryType) ([]AgentMemory, error)
 	Upsert(ctx context.Context, agentID uuid.UUID, key string, req UpsertMemoryRequest) (AgentMemory, error)
 	GetByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) (AgentMemory, error)
 	DeleteByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) error
 	ClearByAgent(ctx context.Context, agentID uuid.UUID) error
 	Recall(ctx context.Context, agentID uuid.UUID, req RecallRequest) ([]MemoryRecallResult, error)
+	SearchByText(ctx context.Context, agentID uuid.UUID, query string, limit int) ([]AgentMemory, error)
+	Stats(ctx context.Context, agentID uuid.UUID) (MemoryStats, error)
+	BulkUpsert(ctx context.Context, agentID uuid.UUID, entries []BulkMemoryEntry) (int, error)
 }
 
 // Handler exposes the HTTP interface for agent memory.
@@ -40,6 +45,9 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Delete("/api/agents/{agentId}/memory/{key}", h.deleteByKey)
 	r.Delete("/api/agents/{agentId}/memory", h.clear)
 	r.Post("/api/agents/{agentId}/memory/recall", h.recall)
+	r.Get("/api/agents/{agentId}/memory/search", h.search)
+	r.Get("/api/agents/{agentId}/memory/stats", h.stats)
+	r.Post("/api/agents/{agentId}/memory/bulk", h.bulkUpsert)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -52,7 +60,14 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("userId"); v != "" {
 		userID = &v
 	}
-	items, err := h.svc.List(r.Context(), agentID, userID)
+
+	// Optional filter by memory type.
+	var items []AgentMemory
+	if mt := r.URL.Query().Get("memoryType"); mt != "" {
+		items, err = h.svc.ListByType(r.Context(), agentID, userID, MemoryType(mt))
+	} else {
+		items, err = h.svc.List(r.Context(), agentID, userID)
+	}
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "failed to list memory")
 		return
@@ -157,4 +172,75 @@ func (h *Handler) recall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, results)
+}
+
+// search handles GET /api/agents/{agentId}/memory/search?q=text&limit=20.
+func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
+	agentID, err := uuid.Parse(chi.URLParam(r, "agentId"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		respond.Error(w, http.StatusBadRequest, "query parameter 'q' is required")
+		return
+	}
+
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &limit); err != nil || limit <= 0 {
+			limit = 20
+		}
+	}
+
+	items, err := h.svc.SearchByText(r.Context(), agentID, q, limit)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, items)
+}
+
+// stats handles GET /api/agents/{agentId}/memory/stats.
+func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
+	agentID, err := uuid.Parse(chi.URLParam(r, "agentId"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	s, err := h.svc.Stats(r.Context(), agentID)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "failed to get memory stats")
+		return
+	}
+	respond.JSON(w, http.StatusOK, s)
+}
+
+// bulkUpsert handles POST /api/agents/{agentId}/memory/bulk.
+func (h *Handler) bulkUpsert(w http.ResponseWriter, r *http.Request) {
+	agentID, err := uuid.Parse(chi.URLParam(r, "agentId"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	var entries []BulkMemoryEntry
+	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(entries) == 0 {
+		respond.Error(w, http.StatusBadRequest, "at least one entry is required")
+		return
+	}
+	if len(entries) > 100 {
+		respond.Error(w, http.StatusBadRequest, "maximum 100 entries per bulk import")
+		return
+	}
+	stored, err := h.svc.BulkUpsert(r.Context(), agentID, entries)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "failed to bulk upsert")
+		return
+	}
+	respond.JSON(w, http.StatusOK, map[string]int{"stored": stored, "total": len(entries)})
 }

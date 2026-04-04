@@ -81,9 +81,16 @@ type RunConfig struct {
 	// Temperature for the LLM call (0.0–2.0).
 	Temperature float64 `json:"temperature"`
 
-	// FallbackModels is an ordered list of models to try when the primary model
-	// fails with non-transient errors. Empty means no fallback.
-	FallbackModels []string `json:"fallbackModels,omitempty"`
+	// ModelFallbacks is an ordered list of fallback models to try when the
+	// primary model fails with transient errors (rate limit, overload, timeout).
+	ModelFallbacks []string `json:"modelFallbacks,omitempty"`
+
+	// FallbackOnRateLimit enables fallback on 429/529 errors. Default true.
+	FallbackOnRateLimit *bool `json:"fallbackOnRateLimit,omitempty"`
+	// FallbackOnOverload enables fallback on 502/503 errors. Default true.
+	FallbackOnOverload *bool `json:"fallbackOnOverload,omitempty"`
+	// FallbackOnTimeout enables fallback on timeout errors. Default true.
+	FallbackOnTimeout *bool `json:"fallbackOnTimeout,omitempty"`
 
 	// Thinking configures extended thinking / chain-of-thought for the LLM.
 	// Nil means disabled. Inspired by Claude Code's ThinkingConfig.
@@ -187,10 +194,13 @@ type modelConfig struct {
 	MaxBudgetUSD       *float64 `json:"maxBudgetUsd"`
 	MaxToolResultChars *int     `json:"maxToolResultChars"`
 	RetryMaxAttempts   *int     `json:"retryMaxAttempts"`
-	MaxDepth           *int              `json:"maxDepth"`
-	FallbackModels     []string          `json:"fallbackModels"`
-	Thinking           *ai.ThinkingConfig `json:"thinking"`
-	Effort             *ai.EffortLevel    `json:"effort"`
+	MaxDepth            *int               `json:"maxDepth"`
+	ModelFallbacks      []string           `json:"modelFallbacks,omitempty"`
+	FallbackOnRateLimit *bool              `json:"fallbackOnRateLimit,omitempty"`
+	FallbackOnOverload  *bool              `json:"fallbackOnOverload,omitempty"`
+	FallbackOnTimeout   *bool              `json:"fallbackOnTimeout,omitempty"`
+	Thinking            *ai.ThinkingConfig `json:"thinking,omitempty"`
+	Effort              *ai.EffortLevel    `json:"effort,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -237,8 +247,17 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	if mc.MaxDepth != nil {
 		cfg.MaxDepth = *mc.MaxDepth
 	}
-	if len(mc.FallbackModels) > 0 {
-		cfg.FallbackModels = mc.FallbackModels
+	if len(mc.ModelFallbacks) > 0 {
+		cfg.ModelFallbacks = mc.ModelFallbacks
+	}
+	if mc.FallbackOnRateLimit != nil {
+		cfg.FallbackOnRateLimit = mc.FallbackOnRateLimit
+	}
+	if mc.FallbackOnOverload != nil {
+		cfg.FallbackOnOverload = mc.FallbackOnOverload
+	}
+	if mc.FallbackOnTimeout != nil {
+		cfg.FallbackOnTimeout = mc.FallbackOnTimeout
 	}
 	if mc.Thinking != nil {
 		cfg.Thinking = mc.Thinking
@@ -247,4 +266,28 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 		cfg.Effort = mc.Effort
 	}
 	return cfg
+}
+
+// IsFallbackOnRateLimit returns whether fallback is enabled for rate limit errors.
+func (c RunConfig) IsFallbackOnRateLimit() bool {
+	if c.FallbackOnRateLimit == nil {
+		return true // default enabled
+	}
+	return *c.FallbackOnRateLimit
+}
+
+// IsFallbackOnOverload returns whether fallback is enabled for overload errors.
+func (c RunConfig) IsFallbackOnOverload() bool {
+	if c.FallbackOnOverload == nil {
+		return true
+	}
+	return *c.FallbackOnOverload
+}
+
+// IsFallbackOnTimeout returns whether fallback is enabled for timeout errors.
+func (c RunConfig) IsFallbackOnTimeout() bool {
+	if c.FallbackOnTimeout == nil {
+		return true
+	}
+	return *c.FallbackOnTimeout
 }

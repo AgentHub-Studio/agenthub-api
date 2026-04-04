@@ -11,8 +11,8 @@ import "strings"
 //
 // Depends on NormalizeMCPName from mcpnormalization.go.
 
-// MCPToolInfo holds parsed information from an MCP tool name string.
-type MCPToolInfo struct {
+// ParsedMCPToolName holds parsed information from an MCP tool name string.
+type ParsedMCPToolName struct {
 	ServerName string
 	ToolName   string // may be empty if only server prefix was matched
 }
@@ -23,13 +23,13 @@ type MCPToolInfo struct {
 //
 // Known limitation: if a server name contains "__", parsing will be
 // incorrect (e.g., "mcp__my__server__tool" parses as server="my").
-func MCPInfoFromString(toolString string) *MCPToolInfo {
+func MCPInfoFromString(toolString string) *ParsedMCPToolName {
 	parts := strings.SplitN(toolString, "__", 3)
 	if len(parts) < 2 || parts[0] != "mcp" || parts[1] == "" {
 		return nil
 	}
 
-	info := &MCPToolInfo{
+	info := &ParsedMCPToolName{
 		ServerName: parts[1],
 	}
 	if len(parts) == 3 && parts[2] != "" {

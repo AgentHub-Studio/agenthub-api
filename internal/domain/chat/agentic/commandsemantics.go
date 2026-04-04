@@ -10,73 +10,73 @@ import "strings"
 // 1 for "files differ". This module interprets exit codes based on
 // which command was run.
 
-// CommandResult holds the semantic interpretation of a command's exit.
-type CommandResult struct {
+// CommandSemanticResult holds the semantic interpretation of a command's exit.
+type CommandSemanticResult struct {
 	IsError bool
 	Message string
 }
 
 // commandSemantic is a function that interprets an exit code.
-type commandSemantic func(exitCode int, stdout, stderr string) CommandResult
+type commandSemantic func(exitCode int, stdout, stderr string) CommandSemanticResult
 
 // commandSemantics maps command names to their exit code interpreters.
 var commandSemantics = map[string]commandSemantic{
 	// grep: 0=matches found, 1=no matches, 2+=error
-	"grep": func(exitCode int, _, _ string) CommandResult {
+	"grep": func(exitCode int, _, _ string) CommandSemanticResult {
 		if exitCode == 1 {
-			return CommandResult{IsError: false, Message: "No matches found"}
+			return CommandSemanticResult{IsError: false, Message: "No matches found"}
 		}
-		return CommandResult{IsError: exitCode >= 2}
+		return CommandSemanticResult{IsError: exitCode >= 2}
 	},
 	// ripgrep: same semantics as grep
-	"rg": func(exitCode int, _, _ string) CommandResult {
+	"rg": func(exitCode int, _, _ string) CommandSemanticResult {
 		if exitCode == 1 {
-			return CommandResult{IsError: false, Message: "No matches found"}
+			return CommandSemanticResult{IsError: false, Message: "No matches found"}
 		}
-		return CommandResult{IsError: exitCode >= 2}
+		return CommandSemanticResult{IsError: exitCode >= 2}
 	},
 	// find: 0=success, 1=some dirs inaccessible, 2+=error
-	"find": func(exitCode int, _, _ string) CommandResult {
+	"find": func(exitCode int, _, _ string) CommandSemanticResult {
 		if exitCode == 1 {
-			return CommandResult{IsError: false, Message: "Some directories were inaccessible"}
+			return CommandSemanticResult{IsError: false, Message: "Some directories were inaccessible"}
 		}
-		return CommandResult{IsError: exitCode >= 2}
+		return CommandSemanticResult{IsError: exitCode >= 2}
 	},
 	// diff: 0=no differences, 1=differences found, 2+=error
-	"diff": func(exitCode int, _, _ string) CommandResult {
+	"diff": func(exitCode int, _, _ string) CommandSemanticResult {
 		if exitCode == 1 {
-			return CommandResult{IsError: false, Message: "Files differ"}
+			return CommandSemanticResult{IsError: false, Message: "Files differ"}
 		}
-		return CommandResult{IsError: exitCode >= 2}
+		return CommandSemanticResult{IsError: exitCode >= 2}
 	},
 	// test/[: 0=condition true, 1=condition false, 2+=error
-	"test": func(exitCode int, _, _ string) CommandResult {
+	"test": func(exitCode int, _, _ string) CommandSemanticResult {
 		if exitCode == 1 {
-			return CommandResult{IsError: false, Message: "Condition is false"}
+			return CommandSemanticResult{IsError: false, Message: "Condition is false"}
 		}
-		return CommandResult{IsError: exitCode >= 2}
+		return CommandSemanticResult{IsError: exitCode >= 2}
 	},
-	"[": func(exitCode int, _, _ string) CommandResult {
+	"[": func(exitCode int, _, _ string) CommandSemanticResult {
 		if exitCode == 1 {
-			return CommandResult{IsError: false, Message: "Condition is false"}
+			return CommandSemanticResult{IsError: false, Message: "Condition is false"}
 		}
-		return CommandResult{IsError: exitCode >= 2}
+		return CommandSemanticResult{IsError: exitCode >= 2}
 	},
 }
 
-// InterpretCommandResult interprets a command's exit code using
+// InterpretCommandSemanticResult interprets a command's exit code using
 // command-specific semantics. Commands like grep, diff, test use
 // exit code 1 for non-error conditions.
-func InterpretCommandResult(command string, exitCode int, stdout, stderr string) CommandResult {
+func InterpretCommandSemanticResult(command string, exitCode int, stdout, stderr string) CommandSemanticResult {
 	base := heuristicallyExtractBaseCommand(command)
 	if sem, ok := commandSemantics[base]; ok {
 		return sem(exitCode, stdout, stderr)
 	}
 	// Default: only 0 is success.
 	if exitCode != 0 {
-		return CommandResult{IsError: true, Message: "Command failed with exit code " + itoa(exitCode)}
+		return CommandSemanticResult{IsError: true, Message: "Command failed with exit code " + itoa(exitCode)}
 	}
-	return CommandResult{}
+	return CommandSemanticResult{}
 }
 
 // heuristicallyExtractBaseCommand extracts the base command name

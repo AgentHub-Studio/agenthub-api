@@ -63,6 +63,7 @@ func (t *TrackedTool) abort() {
 // StreamingToolExecutor runs tool calls with state tracking and progress events.
 type StreamingToolExecutor struct {
 	skillClient    *SkillRuntimeClient
+	mcpBridge      *MCPToolBridge
 	hookExecutor   *HookExecutor
 	config         RunConfig
 }
@@ -74,6 +75,12 @@ func NewStreamingToolExecutor(skillClient *SkillRuntimeClient, hookExecutor *Hoo
 		hookExecutor: hookExecutor,
 		config:       config,
 	}
+}
+
+// WithMCPBridge attaches an MCP tool bridge for routing mcp__ prefixed tool calls.
+func (e *StreamingToolExecutor) WithMCPBridge(bridge *MCPToolBridge) *StreamingToolExecutor {
+	e.mcpBridge = bridge
+	return e
 }
 
 // ToolBatch represents a group of tool calls that share the same concurrency policy.
