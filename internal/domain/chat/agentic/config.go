@@ -70,6 +70,13 @@ type RunConfig struct {
 	// Default 1.5.
 	EscalationFactor float64 `json:"escalationFactor,omitempty"`
 
+	// StallCheckInterval is how often the stall detector checks each tool (default 15s).
+	StallCheckInterval time.Duration `json:"stallCheckInterval"`
+
+	// StallThreshold is the duration without output after which a tool is considered
+	// stalled (default 45s). Set to 0 to disable stall detection.
+	StallThreshold time.Duration `json:"stallThreshold"`
+
 	// ModelFallbacks is an ordered list of fallback models to try when the
 	// primary model fails with transient errors (rate limit, overload, timeout).
 	ModelFallbacks []string `json:"modelFallbacks,omitempty"`
@@ -100,6 +107,8 @@ func DefaultRunConfig() RunConfig {
 		Provider:            "anthropic",
 		Model:               "claude-sonnet-4-20250514",
 		Temperature:         0.7,
+		StallCheckInterval:  15 * time.Second,
+		StallThreshold:      45 * time.Second,
 	}
 }
 

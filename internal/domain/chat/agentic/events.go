@@ -16,6 +16,7 @@ const (
 	EventToolProgress     RunEventType = "tool_progress"
 	EventSubtaskStart     RunEventType = "subtask_start"
 	EventSubtaskComplete  RunEventType = "subtask_complete"
+	EventRunProgress      RunEventType = "run_progress"
 	EventModelFallback    RunEventType = "model_fallback"
 )
 
@@ -105,6 +106,7 @@ const (
 	ToolStateQueued    ToolState = "queued"
 	ToolStateExecuting ToolState = "executing"
 	ToolStateCompleted ToolState = "completed"
+	ToolStateStalled   ToolState = "stalled"
 	ToolStateAborted   ToolState = "aborted"
 )
 
