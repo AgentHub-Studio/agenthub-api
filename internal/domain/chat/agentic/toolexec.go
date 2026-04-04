@@ -65,6 +65,7 @@ type StreamingToolExecutor struct {
 	mcpBridge      *MCPToolBridge
 	hookExecutor   *HookExecutor
 	cache          *ToolResultCache
+	stallDetector  *StallDetector
 	config         RunConfig
 }
 
@@ -74,11 +75,16 @@ func NewStreamingToolExecutor(skillClient *SkillRuntimeClient, hookExecutor *Hoo
 	if config.ToolCacheCapacity > 0 {
 		cache = NewToolResultCache(config.ToolCacheCapacity)
 	}
+	var detector *StallDetector
+	if config.StallThreshold > 0 {
+		detector = NewStallDetector(config.StallCheckInterval, config.StallThreshold)
+	}
 	return &StreamingToolExecutor{
-		skillClient:  skillClient,
-		hookExecutor: hookExecutor,
-		cache:        cache,
-		config:       config,
+		skillClient:   skillClient,
+		hookExecutor:  hookExecutor,
+		cache:         cache,
+		stallDetector: detector,
+		config:        config,
 	}
 }
 
@@ -181,6 +187,24 @@ func (e *StreamingToolExecutor) ExecuteAll(
 				ID: tt.ID, Name: tt.Name, State: ToolStateExecuting,
 			})
 
+			// Start stall detection for this tool.
+			var stallMon *StallMonitor
+			if e.stallDetector != nil {
+				stallMon = e.stallDetector.Monitor(
+					tt.ID, tt.Name,
+					func(toolID, toolName string) {
+						ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+							ID: toolID, Name: toolName, State: ToolStateStalled,
+						})
+					},
+					func(toolID, toolName string) {
+						ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+							ID: toolID, Name: toolName, State: ToolStateExecuting,
+						})
+					},
+				)
+			}
+
 			// Pre-tool hooks.
 			if e.hookExecutor != nil {
 				e.hookExecutor.Execute(ctx, HookPayload{
@@ -213,6 +237,11 @@ func (e *StreamingToolExecutor) ExecuteAll(
 					toolInput,
 					in.TenantID, in.AgentID.String(), in.SessionID.String(),
 				)
+			}
+
+			// Stop stall monitoring — tool execution completed.
+			if stallMon != nil {
+				stallMon.Stop()
 			}
 
 			if err != nil {

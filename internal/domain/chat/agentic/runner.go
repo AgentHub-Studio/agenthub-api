@@ -54,6 +54,7 @@ type Runner struct {
 	subtaskExec      *SubtaskExecutor
 	turnEndHandlers  []TurnEndHandler
 	runEndHandlers   []RunEndHandler
+	progress         *RunProgressTracker
 	config           RunConfig
 }
 
@@ -81,8 +82,14 @@ func NewRunner(
 		persister:   persister,
 		history:     history,
 		toolExec:    NewStreamingToolExecutor(skillClient, hookExecutor, config),
+		progress:    NewRunProgressTracker(10),
 		config:      config,
 	}
+}
+
+// Progress returns the Runner's progress tracker for external monitoring.
+func (r *Runner) Progress() *RunProgressTracker {
+	return r.progress
 }
 
 // WithSubtaskExecutor attaches a SubtaskExecutor to the Runner.
@@ -239,6 +246,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		turnCost := EstimateCostUSD(effectiveModel, usage)
 		totalCost += turnCost
 
+		// Update progress tracker.
+		r.progress.SetTurnIndex(turnIndex)
+		r.progress.RecordLLMCall(usage.TotalTokens, turnCost, r.config.Model)
+
 		// Budget check.
 		if effectiveBudget > 0 && totalCost > effectiveBudget {
 			emitError(ch, "budget_exceeded", fmt.Errorf("run cost $%.4f exceeded budget $%.4f", totalCost, effectiveBudget))
@@ -266,7 +277,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			for _, tc := range toolCalls {
 				tcInfos = append(tcInfos, ToolCallInfo{ID: tc.ID, Name: tc.Function.Name})
 			}
-			usageJSON, _ := json.Marshal(tokenUsageWithCost(usage, turnCost))
+			usageJSON, _ := json.Marshal(tokenUsageWithCost(usage, turnCost, effectiveModel))
 			return TurnEndPayload{
 				Event:            HookTurnEnd,
 				AgentID:          in.AgentID.String(),
@@ -288,6 +299,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				TurnIndex:  turnIndex,
 				TokenUsage: tokenUsageWithCost(usage, turnCost, effectiveModel),
 			})
+			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,
 				TotalTokens: totalTokens,
@@ -342,6 +354,9 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					DurationMs: result.LatencyMs,
 					Error:      result.Error,
 				})
+
+				// Track tool execution in progress.
+				r.progress.RecordToolCall(toolName)
 			}
 
 			// Turn-end hooks (after tool results, before incrementing turnIndex).
@@ -351,6 +366,9 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				TurnIndex:  turnIndex,
 				TokenUsage: tokenUsageWithCost(usage, turnCost, effectiveModel),
 			})
+
+			// Emit consolidated progress.
+			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
 
 			// Check context compaction using progressive stages.
 			if r.ctxManager != nil {
@@ -382,6 +400,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				TurnIndex:  turnIndex,
 				TokenUsage: tokenUsageWithCost(usage, turnCost, effectiveModel),
 			})
+			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  turnIndex + 1,
 				TotalTokens: totalTokens,
