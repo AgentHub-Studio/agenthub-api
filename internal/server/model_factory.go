@@ -68,16 +68,26 @@ func (f *settingsChatModelFactory) Build(ctx context.Context, provider string) (
 	}
 }
 
-// readSettingString reads a JSON-encoded string value from the settings table.
-// Returns ("", nil) when the key is not found.
+// readSettingString reads a string value from the settings table.
+// The frontend stores values as JSON.stringify(originalValue), so a string "foo"
+// arrives as the JSON literal `"foo"` (value field), which the backend stores as-is.
+// Some clients double-encode, producing `"\"foo\""`. We handle both cases.
 func readSettingString(ctx context.Context, repo settings.Repository, key string) (string, error) {
 	s, err := repo.FindByKey(ctx, key)
 	if err != nil {
 		return "", err // includes ErrNotFound
 	}
+	// First unmarshal: `"foo"` → `foo`, or `"\"foo\""` → `"foo"` (still has quotes)
 	var v string
 	if err := json.Unmarshal(s.Value, &v); err != nil {
 		return "", fmt.Errorf("settings: unmarshal %q: %w", key, err)
+	}
+	// Second unmarshal: handle double-encoded values like `"\"foo\""` → `foo`
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		var inner string
+		if err := json.Unmarshal([]byte(v), &inner); err == nil {
+			return inner, nil
+		}
 	}
 	return v, nil
 }
