@@ -77,6 +77,14 @@ func (m *mockApprovalRepo) PendingCount(_ context.Context) (int64, error) {
 	return count, nil
 }
 
+func (m *mockApprovalRepo) Delete(_ context.Context, id uuid.UUID) error {
+	if _, ok := m.data[id]; !ok {
+		return approval.ErrNotFound
+	}
+	delete(m.data, id)
+	return nil
+}
+
 func (m *mockApprovalRepo) Respond(_ context.Context, id uuid.UUID, respondedBy string, req approval.RespondRequest) (approval.PendingApproval, error) {
 	a, ok := m.data[id]
 	if !ok {

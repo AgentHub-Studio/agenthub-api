@@ -14,7 +14,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 )
 
-replace github.com/AgentHub-Studio/agenthub-go-commons => /agenthub-go-commons
+replace github.com/AgentHub-Studio/agenthub-go-commons => ./agenthub-go-commons
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect

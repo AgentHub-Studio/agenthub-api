@@ -21,6 +21,7 @@ type Repository interface {
 	List(ctx context.Context, offset, limit int) ([]PendingApproval, int64, error)
 	PendingCount(ctx context.Context) (int64, error)
 	Respond(ctx context.Context, id uuid.UUID, respondedBy string, req RespondRequest) (PendingApproval, error)
+	Delete(ctx context.Context, id uuid.UUID) error
 }
 
 type pgRepository struct {
@@ -177,6 +178,23 @@ func (r *pgRepository) PendingCount(ctx context.Context) (int64, error) {
 		`SELECT COUNT(*) FROM pending_approval WHERE status = $1`, StatusPending,
 	).Scan(&count)
 	return count, err
+}
+
+func (r *pgRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	conn, err := r.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+
+	tag, err := conn.Exec(ctx, `DELETE FROM pending_approval WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("approval: delete: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (r *pgRepository) Respond(ctx context.Context, id uuid.UUID, respondedBy string, req RespondRequest) (PendingApproval, error) {

@@ -3,6 +3,25 @@ package agentic
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
+)
+
+// Post-compact re-injection budget constants. After compaction, tools, skills,
+// and file context are re-announced to the LLM within a token budget to prevent
+// the model from losing awareness of its capabilities.
+// Inspired by Claude Code's POST_COMPACT_* constants in services/compact/compact.ts.
+const (
+	// PostCompactTokenBudget is the total token budget for all re-injected content.
+	PostCompactTokenBudget = 50_000
+	// PostCompactMaxTokensPerSkill caps the re-injected content per skill description.
+	PostCompactMaxTokensPerSkill = 5_000
+	// PostCompactSkillsTokenBudget is the aggregate budget for all re-injected skills.
+	PostCompactSkillsTokenBudget = 25_000
+	// PostCompactMaxFilesToRestore is the max number of recently-read files re-injected.
+	PostCompactMaxFilesToRestore = 5
+	// PostCompactMaxTokensPerFile caps the re-injected content per file.
+	PostCompactMaxTokensPerFile = 5_000
 )
 
 // RunConfig holds tuneable parameters for the agentic Runner loop.
@@ -41,6 +60,11 @@ type RunConfig struct {
 	// Results exceeding this are truncated with a note. Zero means no truncation.
 	MaxToolResultChars int `json:"maxToolResultChars"`
 
+	// MaxToolResultsPerTurnChars is the aggregate character budget for all tool results
+	// in a single turn. Subsequent results are truncated to "[budget exceeded]" once
+	// the aggregate exceeds this limit. Zero means no aggregate limit.
+	MaxToolResultsPerTurnChars int `json:"maxToolResultsPerTurnChars,omitempty"`
+
 	// RetryMaxAttempts is the maximum number of retries for transient LLM errors.
 	RetryMaxAttempts int `json:"retryMaxAttempts"`
 
@@ -56,6 +80,77 @@ type RunConfig struct {
 
 	// Temperature for the LLM call (0.0–2.0).
 	Temperature float64 `json:"temperature"`
+
+	// FallbackModels is an ordered list of models to try when the primary model
+	// fails with non-transient errors. Empty means no fallback.
+	FallbackModels []string `json:"fallbackModels,omitempty"`
+
+	// Thinking configures extended thinking / chain-of-thought for the LLM.
+	// Nil means disabled. Inspired by Claude Code's ThinkingConfig.
+	Thinking *ai.ThinkingConfig `json:"thinking,omitempty"`
+
+	// Effort controls reasoning effort level for the LLM.
+	// Nil means no effort parameter is sent (API defaults to "high").
+	// "max" is only valid for Opus 4.6; it's downgraded to "high" for other models.
+	// Inspired by Claude Code's effort.ts.
+	Effort *ai.EffortLevel `json:"effort,omitempty"`
+
+	// OutputTokenBudget is the target number of output tokens for budget-based
+	// continuation. When set, the runner nudges the LLM to keep working until
+	// the budget is reached or diminishing returns are detected.
+	// Zero means no output budget (normal stop behavior).
+	// Inspired by Claude Code's tokenBudget.ts.
+	OutputTokenBudget int `json:"outputTokenBudget,omitempty"`
+
+	// ToolResultLimits maps tool names to per-tool max result char limits.
+	// Tools not listed here use MaxToolResultChars as default.
+	// Inspired by Claude Code's per-tool maxResultSizeChars.
+	ToolResultLimits map[string]int `json:"toolResultLimits,omitempty"`
+}
+
+// RunGates captures immutable, pre-computed boolean flags and derived values
+// snapshotted once at the start of a run. This prevents re-evaluating conditions
+// on every loop iteration and ensures consistent behavior throughout a single run
+// even if external state (feature flags, config) changes.
+//
+// Inspired by Claude Code's QueryConfig (query/config.ts):
+// "Immutable values snapshotted once at query() entry. Separating these from
+// the per-iteration State struct makes future step() extraction tractable."
+type RunGates struct {
+	// Model contains the detected capabilities for the selected model.
+	Model ModelCapabilities
+	// ResolvedEffort is the pre-resolved effort level for this run (nil if unsupported).
+	ResolvedEffort *ai.EffortLevel
+	// CacheControl indicates whether to send cache_control markers to the provider.
+	CacheControl bool
+	// HasBudgetLimit indicates whether a cost budget is in effect.
+	HasBudgetLimit bool
+	// HasOutputTokenBudget indicates whether output token budget tracking is enabled.
+	HasOutputTokenBudget bool
+	// CoordinatorMode indicates whether sub-agent coordination is enabled for this run.
+	CoordinatorMode bool
+	// HasToolResultLimits indicates whether per-tool result limits are configured.
+	HasToolResultLimits bool
+	// HasAggregateResultLimit indicates whether per-turn aggregate result limit is set.
+	HasAggregateResultLimit bool
+	// ContextWindowTokens is the resolved context window size in tokens.
+	ContextWindowTokens int
+}
+
+// BuildRunGates creates an immutable RunGates snapshot from the RunConfig and run input.
+func BuildRunGates(cfg RunConfig, currentDepth int, hasSubtaskExec bool) RunGates {
+	caps := DetectModelCapabilities(cfg.Model, cfg.Provider)
+	return RunGates{
+		Model:                   caps,
+		ResolvedEffort:          ResolveEffortLevel(cfg),
+		CacheControl:            caps.SupportsCacheControl,
+		HasBudgetLimit:          cfg.MaxBudgetUSD > 0,
+		HasOutputTokenBudget:    cfg.OutputTokenBudget > 0,
+		CoordinatorMode:         hasSubtaskExec && currentDepth < cfg.MaxDepth,
+		HasToolResultLimits:     len(cfg.ToolResultLimits) > 0,
+		HasAggregateResultLimit: cfg.MaxToolResultsPerTurnChars > 0,
+		ContextWindowTokens:     caps.ContextWindowSize,
+	}
 }
 
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
@@ -70,7 +165,8 @@ func DefaultRunConfig() RunConfig {
 		ConcurrentReadTools: 3,
 		StreamBufferSize:    64,
 		MaxBudgetUSD:        0, // no limit by default
-		MaxToolResultChars:  50000,
+		MaxToolResultChars:         50000,
+		MaxToolResultsPerTurnChars: 200000,
 		RetryMaxAttempts:    3,
 		MaxDepth:            3,
 		Provider:            "anthropic",
@@ -91,7 +187,10 @@ type modelConfig struct {
 	MaxBudgetUSD       *float64 `json:"maxBudgetUsd"`
 	MaxToolResultChars *int     `json:"maxToolResultChars"`
 	RetryMaxAttempts   *int     `json:"retryMaxAttempts"`
-	MaxDepth           *int     `json:"maxDepth"`
+	MaxDepth           *int              `json:"maxDepth"`
+	FallbackModels     []string          `json:"fallbackModels"`
+	Thinking           *ai.ThinkingConfig `json:"thinking"`
+	Effort             *ai.EffortLevel    `json:"effort"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -137,6 +236,15 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	}
 	if mc.MaxDepth != nil {
 		cfg.MaxDepth = *mc.MaxDepth
+	}
+	if len(mc.FallbackModels) > 0 {
+		cfg.FallbackModels = mc.FallbackModels
+	}
+	if mc.Thinking != nil {
+		cfg.Thinking = mc.Thinking
+	}
+	if mc.Effort != nil {
+		cfg.Effort = mc.Effort
 	}
 	return cfg
 }

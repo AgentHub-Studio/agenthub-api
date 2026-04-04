@@ -105,6 +105,35 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// Reprocess resets a document to PENDING status and re-publishes the upload event
+// so the extractor pipeline picks it up again.
+func (s *Service) Reprocess(ctx context.Context, id uuid.UUID) (DocumentResponse, error) {
+	d, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return DocumentResponse{}, err
+	}
+
+	updated, err := s.repo.UpdateStatus(ctx, id, StatusPending)
+	if err != nil {
+		return DocumentResponse{}, fmt.Errorf("document service: reprocess: %w", err)
+	}
+
+	event := DocumentUploadedEvent{
+		DocumentID:      updated.ID,
+		KnowledgeBaseID: updated.KnowledgeBaseID,
+		StoragePath:     updated.StoragePath,
+		ContentType:     updated.ContentType,
+		FileName:        updated.FileName,
+		TenantID:        tenant.FromContext(ctx),
+	}
+	if pubErr := s.publisher.PublishUploaded(ctx, event); pubErr != nil {
+		slog.Warn("document service: failed to publish reprocess event",
+			"documentId", d.ID, "err", pubErr)
+	}
+
+	return ResponseFrom(updated), nil
+}
+
 // UpdateStatus updates a document's processing status (internal use).
 func (s *Service) UpdateStatus(ctx context.Context, id uuid.UUID, status DocumentStatus) (DocumentResponse, error) {
 	d, err := s.repo.UpdateStatus(ctx, id, status)

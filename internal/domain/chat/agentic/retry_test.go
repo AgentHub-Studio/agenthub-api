@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,7 +41,7 @@ func (s *stubChatModel) GetProviderName() string { return "stub" }
 
 func TestRetryStream_SuccessFirstAttempt(t *testing.T) {
 	model := &stubChatModel{}
-	stream, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3)
+	stream, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3, SourceMainLoop)
 	require.NoError(t, err)
 	require.NotNil(t, stream)
 	assert.Equal(t, 1, model.calls)
@@ -53,7 +54,7 @@ func TestRetryStream_TransientThenSuccess(t *testing.T) {
 			{err: nil}, // success
 		},
 	}
-	stream, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3)
+	stream, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3, SourceMainLoop)
 	require.NoError(t, err)
 	require.NotNil(t, stream)
 	assert.Equal(t, 2, model.calls)
@@ -65,7 +66,7 @@ func TestRetryStream_NonTransientError(t *testing.T) {
 			{err: fmt.Errorf("invalid API key")},
 		},
 	}
-	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3)
+	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3, SourceMainLoop)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid API key")
 	assert.Equal(t, 1, model.calls) // no retry
@@ -79,7 +80,7 @@ func TestRetryStream_AllAttemptsExhausted(t *testing.T) {
 			{err: fmt.Errorf("503 service unavailable")},
 		},
 	}
-	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3)
+	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3, SourceMainLoop)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "all 3 attempts failed")
 	assert.Equal(t, 3, model.calls)
@@ -91,9 +92,45 @@ func TestRetryStream_NoRetryWhenMaxAttemptsOne(t *testing.T) {
 			{err: fmt.Errorf("429 rate limit")},
 		},
 	}
-	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 1)
+	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 1, SourceMainLoop)
 	require.Error(t, err)
 	assert.Equal(t, 1, model.calls)
+}
+
+func TestRetryStream_AbortErrorNoRetry(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("context canceled")},
+		},
+	}
+	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3, SourceMainLoop)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context canceled")
+	assert.Equal(t, 1, model.calls) // no retry
+}
+
+func TestRetryStream_MediaSizeErrorNoRetry(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("image exceeds maximum size limit")},
+		},
+	}
+	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3, SourceMainLoop)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "image exceeds")
+	assert.Equal(t, 1, model.calls) // no retry
+}
+
+func TestRetryStream_PromptTooLongNoRetry(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("prompt_too_long: 200000 tokens > 180000")},
+		},
+	}
+	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3, SourceMainLoop)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prompt_too_long")
+	assert.Equal(t, 1, model.calls) // no retry
 }
 
 func TestRetryStream_ContextCancelled(t *testing.T) {
@@ -105,10 +142,459 @@ func TestRetryStream_ContextCancelled(t *testing.T) {
 			{err: fmt.Errorf("429 rate limit")},
 		},
 	}
-	_, err := retryStream(ctx, model, nil, ai.ChatOptions{}, 3)
+	_, err := retryStream(ctx, model, nil, ai.ChatOptions{}, 3, SourceMainLoop)
 	require.Error(t, err)
 	// Should fail with context error, not retry
 	assert.Equal(t, 1, model.calls)
+}
+
+func TestIsPromptTooLong(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"nil", nil, false},
+		{"prompt_too_long", fmt.Errorf("error: prompt_too_long"), true},
+		{"prompt is too long", fmt.Errorf("Prompt is too long for this model"), true},
+		{"context_length_exceeded", fmt.Errorf("context_length_exceeded"), true},
+		{"maximum context length", fmt.Errorf("maximum context length exceeded"), true},
+		{"unrelated error", fmt.Errorf("invalid API key"), false},
+		{"transient error", fmt.Errorf("429 rate limit"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isPromptTooLong(tt.err))
+		})
+	}
+}
+
+func TestParsePromptTooLongTokenCounts(t *testing.T) {
+	tests := []struct {
+		name   string
+		errMsg string
+		actual int
+		limit  int
+	}{
+		{"standard format", "Prompt is too long: 210000 tokens > 200000", 210000, 200000},
+		{"lowercase", "prompt is too long: 150000 tokens > 128000", 150000, 128000},
+		{"singular token", "Prompt is too long: 50000 token > 32000", 50000, 32000},
+		{"extra text around", "error: Prompt is too long — 300000 tokens > 200000 tokens limit", 300000, 200000},
+		{"no match", "invalid API key", 0, 0},
+		{"rate limit", "429 rate limited", 0, 0},
+		{"empty", "", 0, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			counts := parsePromptTooLongTokenCounts(tt.errMsg)
+			assert.Equal(t, tt.actual, counts.ActualTokens)
+			assert.Equal(t, tt.limit, counts.LimitTokens)
+		})
+	}
+}
+
+func TestGetPromptTooLongTokenGap(t *testing.T) {
+	tests := []struct {
+		name   string
+		errMsg string
+		gap    int
+	}{
+		{"10k over", "Prompt is too long: 210000 tokens > 200000", 10000},
+		{"22k over", "prompt is too long: 150000 tokens > 128000", 22000},
+		{"no match", "invalid API key", 0},
+		{"equal (no gap)", "Prompt is too long: 200000 tokens > 200000", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.gap, getPromptTooLongTokenGap(tt.errMsg))
+		})
+	}
+}
+
+func TestRetryStreamWithFallback_PrimarySuccess(t *testing.T) {
+	model := &stubChatModel{}
+	result, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{Model: "primary"}, 3, []string{"fallback1"}, SourceMainLoop)
+	require.NoError(t, err)
+	require.NotNil(t, result.Stream)
+	assert.Empty(t, result.Model) // primary model used, Model is empty
+	assert.Equal(t, 1, model.calls)
+}
+
+func TestRetryStreamWithFallback_FallbackOnNonTransient(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("invalid API key")}, // primary fails (non-transient, no retry)
+			{err: nil},                            // fallback1 succeeds
+		},
+	}
+	result, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{Model: "primary"}, 1, []string{"fallback1"}, SourceMainLoop)
+	require.NoError(t, err)
+	require.NotNil(t, result.Stream)
+	assert.Equal(t, "fallback1", result.Model) // reports which fallback was used
+	assert.Equal(t, 2, model.calls)
+}
+
+func TestRetryStreamWithFallback_NoFallbackOnPromptTooLong(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("prompt_too_long")},
+		},
+	}
+	_, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{Model: "primary"}, 1, []string{"fallback1"}, SourceMainLoop)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prompt_too_long")
+	assert.Equal(t, 1, model.calls) // no fallback attempted
+}
+
+func TestRetryStreamWithFallback_NoFallbackModels(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("invalid API key")},
+		},
+	}
+	_, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{}, 1, nil, SourceMainLoop)
+	require.Error(t, err)
+	assert.Equal(t, 1, model.calls)
+}
+
+func TestRetryStreamWithFallback_AllFallbacksFail(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("model error")},
+			{err: fmt.Errorf("model error")},
+			{err: fmt.Errorf("model error")},
+		},
+	}
+	_, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{}, 1, []string{"fb1", "fb2"}, SourceMainLoop)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "all models failed")
+	assert.Equal(t, 3, model.calls)
+}
+
+func TestRetryStream_BackgroundSourceNoRetryOnOverload(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("529 overloaded")},
+		},
+	}
+	// Background source (compact) should NOT retry on 529.
+	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3, SourceCompact)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "529")
+	assert.Equal(t, 1, model.calls) // no retry for background source
+}
+
+func TestRetryStream_Consecutive529Limit(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("529 overloaded")},
+			{err: fmt.Errorf("529 overloaded")},
+			{err: fmt.Errorf("529 overloaded")},
+			{err: fmt.Errorf("529 overloaded")}, // won't reach this
+		},
+	}
+	// With maxAttempts=5 and max529Retries=3, should give up after 3 consecutive 529s.
+	_, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 5, SourceMainLoop)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "consecutive 529")
+	assert.Equal(t, 3, model.calls) // stopped at 3, not 5
+}
+
+func TestRetryStream_Consecutive529ResetsOnNon529(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("529 overloaded")},
+			{err: fmt.Errorf("503 service unavailable")}, // resets consecutive counter
+			{err: fmt.Errorf("529 overloaded")},
+			{err: nil}, // success
+		},
+	}
+	stream, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 5, SourceMainLoop)
+	require.NoError(t, err)
+	require.NotNil(t, stream)
+	assert.Equal(t, 4, model.calls)
+}
+
+func TestRetryStream_ForegroundSourceRetriesOnOverload(t *testing.T) {
+	model := &stubChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("529 overloaded")},
+			{err: nil}, // second attempt succeeds
+		},
+	}
+	// Foreground source (main_loop) SHOULD retry on 529.
+	stream, err := retryStream(context.Background(), model, nil, ai.ChatOptions{}, 3, SourceMainLoop)
+	require.NoError(t, err)
+	require.NotNil(t, stream)
+	assert.Equal(t, 2, model.calls)
+}
+
+func TestQuerySource_IsForeground(t *testing.T) {
+	assert.True(t, SourceMainLoop.IsForegroundSource())
+	assert.True(t, SourceSubtask.IsForegroundSource())
+	assert.True(t, SourceBudgetNudge.IsForegroundSource())
+	assert.False(t, SourceCompact.IsForegroundSource())
+	assert.False(t, SourceMemoryEval.IsForegroundSource())
+	assert.False(t, QuerySource("unknown").IsForegroundSource())
+}
+
+func TestIsOverloadError(t *testing.T) {
+	assert.True(t, isOverloadError(fmt.Errorf("529 overloaded")))
+	assert.True(t, isOverloadError(fmt.Errorf("service overloaded, try again")))
+	assert.False(t, isOverloadError(fmt.Errorf("429 rate limit")))
+	assert.False(t, isOverloadError(fmt.Errorf("invalid API key")))
+	assert.False(t, isOverloadError(nil))
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		name     string
+		errMsg   string
+		expected time.Duration
+	}{
+		{"no match", "invalid API key", 0},
+		{"retry-after integer", "retry-after: 5", 5 * time.Second},
+		{"retry_after underscore", "retry_after: 3", 3 * time.Second},
+		{"Retry-After capitalized", "Retry-After: 10", 10 * time.Second},
+		{"fractional seconds", "retry-after: 2.5", time.Duration(2.5 * float64(time.Second))},
+		{"capped at 60s", "retry-after: 120", 60 * time.Second},
+		{"zero value", "retry-after: 0", 0},
+		{"negative value", "retry-after: -5", 0},
+		{"embedded in message", "status 429: rate limited, retry-after: 8 seconds", 8 * time.Second},
+		{"retry_after with space", "retry_after:  15", 15 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, parseRetryAfter(tt.errMsg))
+		})
+	}
+}
+
+func TestResolveToolResultLimit(t *testing.T) {
+	limits := map[string]int{
+		"document_search": 100000,
+		"execute_sql":     10000,
+	}
+	globalMax := 50000
+
+	// Tool with explicit override.
+	assert.Equal(t, 100000, resolveToolResultLimit("document_search", limits, globalMax))
+	assert.Equal(t, 10000, resolveToolResultLimit("execute_sql", limits, globalMax))
+
+	// Tool without override — falls back to global.
+	assert.Equal(t, 50000, resolveToolResultLimit("unknown_tool", limits, globalMax))
+
+	// Nil map — falls back to global.
+	assert.Equal(t, 50000, resolveToolResultLimit("any_tool", nil, globalMax))
+}
+
+func TestFilterUnresolvedToolUses_NoOrphans(t *testing.T) {
+	messages := []ai.Message{
+		{Role: ai.RoleUser, Content: "hello"},
+		{Role: ai.RoleAssistant, Content: "I'll search", ToolCalls: []ai.ToolCall{{ID: "tc1"}}},
+		{Role: ai.RoleTool, ToolCallID: "tc1", Content: "result"},
+		{Role: ai.RoleAssistant, Content: "done"},
+	}
+	filtered := filterUnresolvedToolUses(messages)
+	assert.Equal(t, len(messages), len(filtered))
+}
+
+func TestFilterUnresolvedToolUses_OrphanRemoved(t *testing.T) {
+	messages := []ai.Message{
+		{Role: ai.RoleUser, Content: "hello"},
+		{Role: ai.RoleAssistant, Content: "I'll search", ToolCalls: []ai.ToolCall{{ID: "tc1"}}},
+		// No tool_result for tc1 — orphaned.
+		{Role: ai.RoleUser, Content: "try again"},
+		{Role: ai.RoleAssistant, Content: "ok"},
+	}
+	filtered := filterUnresolvedToolUses(messages)
+	// The orphaned assistant message should be removed.
+	assert.Equal(t, 3, len(filtered))
+	for _, m := range filtered {
+		if m.Role == ai.RoleAssistant {
+			assert.Empty(t, m.ToolCalls)
+		}
+	}
+}
+
+func TestFilterUnresolvedToolUses_MixedResolvedUnresolved(t *testing.T) {
+	// An assistant message with 2 tool_calls, one resolved one not.
+	// Since not ALL are unresolved, the message should be kept.
+	messages := []ai.Message{
+		{Role: ai.RoleUser, Content: "hello"},
+		{Role: ai.RoleAssistant, Content: "searching", ToolCalls: []ai.ToolCall{
+			{ID: "tc1"},
+			{ID: "tc2"},
+		}},
+		{Role: ai.RoleTool, ToolCallID: "tc1", Content: "result1"},
+		// tc2 has no result — but the assistant message has tc1 resolved.
+		{Role: ai.RoleAssistant, Content: "done"},
+	}
+	filtered := filterUnresolvedToolUses(messages)
+	// Message kept because tc1 is resolved (not ALL unresolved).
+	assert.Equal(t, 4, len(filtered))
+}
+
+func TestFilterUnresolvedToolUses_EmptyMessages(t *testing.T) {
+	var messages []ai.Message
+	filtered := filterUnresolvedToolUses(messages)
+	assert.Nil(t, filtered)
+}
+
+func TestFilterUnresolvedToolUses_NoToolCalls(t *testing.T) {
+	messages := []ai.Message{
+		{Role: ai.RoleUser, Content: "hello"},
+		{Role: ai.RoleAssistant, Content: "hi there"},
+	}
+	filtered := filterUnresolvedToolUses(messages)
+	assert.Equal(t, 2, len(filtered))
+}
+
+func TestModelSupportsThinking(t *testing.T) {
+	assert.True(t, modelSupportsThinking("claude-opus-4-6"))
+	assert.True(t, modelSupportsThinking("claude-sonnet-4-6"))
+	assert.True(t, modelSupportsThinking("claude-haiku-4-5-20251001"))
+	assert.True(t, modelSupportsThinking("claude-opus-4-1"))
+	assert.False(t, modelSupportsThinking("gpt-4o"))
+	assert.False(t, modelSupportsThinking("claude-3-opus"))
+}
+
+func TestModelSupportsAdaptiveThinking(t *testing.T) {
+	assert.True(t, modelSupportsAdaptiveThinking("claude-opus-4-6"))
+	assert.True(t, modelSupportsAdaptiveThinking("claude-sonnet-4-6"))
+	assert.False(t, modelSupportsAdaptiveThinking("claude-opus-4-1"))
+	assert.False(t, modelSupportsAdaptiveThinking("claude-sonnet-4-5"))
+	assert.False(t, modelSupportsAdaptiveThinking("gpt-4o"))
+}
+
+func TestResolveThinkingConfig(t *testing.T) {
+	// Nil config → nil.
+	cfg := RunConfig{Model: "claude-opus-4-6", MaxTokensPerCall: 4096}
+	assert.Nil(t, resolveThinkingConfig(cfg))
+
+	// Disabled → nil.
+	cfg.Thinking = &ai.ThinkingConfig{Type: ai.ThinkingDisabled}
+	assert.Nil(t, resolveThinkingConfig(cfg))
+
+	// Unsupported model → nil.
+	cfg.Model = "gpt-4o"
+	cfg.Thinking = &ai.ThinkingConfig{Type: ai.ThinkingAdaptive}
+	assert.Nil(t, resolveThinkingConfig(cfg))
+
+	// Adaptive on Opus 4.6 → adaptive.
+	cfg.Model = "claude-opus-4-6"
+	cfg.Thinking = &ai.ThinkingConfig{Type: ai.ThinkingAdaptive}
+	result := resolveThinkingConfig(cfg)
+	require.NotNil(t, result)
+	assert.Equal(t, ai.ThinkingAdaptive, result.Type)
+
+	// Adaptive on Opus 4.1 (no adaptive support) → fallback to enabled.
+	cfg.Model = "claude-opus-4-1"
+	result = resolveThinkingConfig(cfg)
+	require.NotNil(t, result)
+	assert.Equal(t, ai.ThinkingEnabled, result.Type)
+	assert.Greater(t, result.BudgetTokens, 0)
+
+	// Enabled with explicit budget.
+	cfg.Model = "claude-sonnet-4-6"
+	cfg.Thinking = &ai.ThinkingConfig{Type: ai.ThinkingEnabled, BudgetTokens: 2000}
+	result = resolveThinkingConfig(cfg)
+	require.NotNil(t, result)
+	assert.Equal(t, ai.ThinkingEnabled, result.Type)
+	assert.Equal(t, 2000, result.BudgetTokens)
+
+	// Budget exceeds max_tokens → capped.
+	cfg.Thinking = &ai.ThinkingConfig{Type: ai.ThinkingEnabled, BudgetTokens: 10000}
+	result = resolveThinkingConfig(cfg)
+	require.NotNil(t, result)
+	assert.Equal(t, cfg.MaxTokensPerCall-1, result.BudgetTokens)
+}
+
+func TestIsMediaSizeError(t *testing.T) {
+	assert.True(t, isMediaSizeError(fmt.Errorf("image exceeds maximum size")))
+	assert.True(t, isMediaSizeError(fmt.Errorf("image dimensions exceed limit")))
+	assert.True(t, isMediaSizeError(fmt.Errorf("maximum of 100 PDF pages allowed")))
+	assert.False(t, isMediaSizeError(fmt.Errorf("invalid API key")))
+	assert.False(t, isMediaSizeError(nil))
+}
+
+func TestIsAbortError(t *testing.T) {
+	assert.True(t, isAbortError(fmt.Errorf("context canceled")))
+	assert.True(t, isAbortError(fmt.Errorf("context deadline exceeded")))
+	assert.True(t, isAbortError(fmt.Errorf("operation was aborted")))
+	assert.False(t, isAbortError(fmt.Errorf("429 rate limit")))
+	assert.False(t, isAbortError(nil))
+}
+
+func TestIsConnectionError(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		connection bool
+	}{
+		{"nil", nil, false},
+		{"econnreset", fmt.Errorf("ECONNRESET"), true},
+		{"connection reset", fmt.Errorf("connection reset by peer"), true},
+		{"econnrefused", fmt.Errorf("ECONNREFUSED"), true},
+		{"connection refused", fmt.Errorf("connection refused"), true},
+		{"epipe", fmt.Errorf("EPIPE: broken pipe"), true},
+		{"broken pipe", fmt.Errorf("broken pipe"), true},
+		{"etimedout", fmt.Errorf("ETIMEDOUT"), true},
+		{"no such host", fmt.Errorf("no such host"), true},
+		{"rate limit", fmt.Errorf("429 rate limit"), false},
+		{"auth error", fmt.Errorf("invalid API key"), false},
+		{"server error", fmt.Errorf("500 internal"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.connection, isConnectionError(tt.err))
+		})
+	}
+}
+
+func TestIsStaleConnectionError(t *testing.T) {
+	assert.True(t, isStaleConnectionError(fmt.Errorf("ECONNRESET")))
+	assert.True(t, isStaleConnectionError(fmt.Errorf("connection reset by peer")))
+	assert.True(t, isStaleConnectionError(fmt.Errorf("EPIPE")))
+	assert.True(t, isStaleConnectionError(fmt.Errorf("broken pipe")))
+	assert.False(t, isStaleConnectionError(fmt.Errorf("ECONNREFUSED")))
+	assert.False(t, isStaleConnectionError(fmt.Errorf("ETIMEDOUT")))
+	assert.False(t, isStaleConnectionError(fmt.Errorf("429 rate limit")))
+	assert.False(t, isStaleConnectionError(nil))
+}
+
+func TestClassifyAPIError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected APIErrorClass
+	}{
+		{"nil", nil, ErrorClassNone},
+		{"rate limit", fmt.Errorf("status 429: rate limited"), ErrorClassRateLimit},
+		{"overload", fmt.Errorf("529 overloaded"), ErrorClassServerOverload},
+		{"timeout", fmt.Errorf("connection timeout"), ErrorClassTimeout},
+		{"econnreset", fmt.Errorf("ECONNRESET"), ErrorClassStaleConnection},
+		{"epipe", fmt.Errorf("broken pipe"), ErrorClassStaleConnection},
+		{"connection refused", fmt.Errorf("ECONNREFUSED"), ErrorClassConnection},
+		{"auth 401", fmt.Errorf("status 401: unauthorized"), ErrorClassAuth},
+		{"invalid key", fmt.Errorf("invalid API key"), ErrorClassAuth},
+		{"prompt too long", fmt.Errorf("prompt_too_long"), ErrorClassPromptTooLong},
+		{"server 500", fmt.Errorf("500 internal server error"), ErrorClassServerError},
+		{"media size", fmt.Errorf("image exceeds maximum size"), ErrorClassMediaSize},
+		{"aborted", fmt.Errorf("context canceled"), ErrorClassAborted},
+		{"unknown", fmt.Errorf("something weird happened"), ErrorClassUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, classifyAPIError(tt.err))
+		})
+	}
 }
 
 func TestIsTransientError(t *testing.T) {
@@ -136,4 +622,44 @@ func TestIsTransientError(t *testing.T) {
 			assert.Equal(t, tt.transient, isTransientError(tt.err))
 		})
 	}
+}
+
+// --- Context overflow tests ---
+
+func TestParseContextOverflow_MatchesAnthropicFormat(t *testing.T) {
+	err := "input length and max_tokens exceed context limit: 180000 + 16384 > 200000"
+	counts := parseContextOverflow(err)
+	assert.Equal(t, 180000, counts.InputTokens)
+	assert.Equal(t, 16384, counts.MaxTokens)
+	assert.Equal(t, 200000, counts.ContextLimit)
+}
+
+func TestParseContextOverflow_NoMatch(t *testing.T) {
+	counts := parseContextOverflow("prompt is too long: 300000 tokens > 200000")
+	assert.Equal(t, ContextOverflowCounts{}, counts)
+}
+
+func TestComputeAdjustedMaxTokens_Normal(t *testing.T) {
+	err := "input length and max_tokens exceed context limit: 180000 + 16384 > 200000"
+	adjusted := computeAdjustedMaxTokens(err)
+	// 200000 - 180000 - 1000 = 19000
+	assert.Equal(t, 19000, adjusted)
+}
+
+func TestComputeAdjustedMaxTokens_ClampsToMinimum(t *testing.T) {
+	err := "input length and max_tokens exceed context limit: 198000 + 4096 > 200000"
+	adjusted := computeAdjustedMaxTokens(err)
+	// 200000 - 198000 - 1000 = 1000 < 3000 → clamped to 3000
+	assert.Equal(t, 3000, adjusted)
+}
+
+func TestComputeAdjustedMaxTokens_NoMatch(t *testing.T) {
+	adjusted := computeAdjustedMaxTokens("some other error")
+	assert.Equal(t, 0, adjusted)
+}
+
+func TestIsContextOverflow(t *testing.T) {
+	assert.True(t, isContextOverflow(fmt.Errorf("input length and max_tokens exceed context limit: 180000 + 16384 > 200000")))
+	assert.False(t, isContextOverflow(fmt.Errorf("prompt is too long")))
+	assert.False(t, isContextOverflow(nil))
 }

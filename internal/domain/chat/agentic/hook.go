@@ -20,10 +20,12 @@ import (
 type HookEvent string
 
 const (
-	HookPreToolUse  HookEvent = "pre_tool_use"
-	HookPostToolUse HookEvent = "post_tool_use"
-	HookSessionStart HookEvent = "session_start"
-	HookSessionEnd   HookEvent = "session_end"
+	HookPreToolUse      HookEvent = "pre_tool_use"
+	HookPostToolUse     HookEvent = "post_tool_use"
+	HookPostToolFailure HookEvent = "post_tool_failure"
+	HookSessionStart    HookEvent = "session_start"
+	HookSessionEnd      HookEvent = "session_end"
+	HookNotification    HookEvent = "notification"
 )
 
 // HookType identifies the kind of action a hook performs.
@@ -36,16 +38,27 @@ const (
 
 // AgentHook is the domain entity for a hook attached to an agent.
 type AgentHook struct {
-	ID        uuid.UUID       `json:"id"`
-	AgentID   uuid.UUID       `json:"agentId"`
-	Event     HookEvent       `json:"event"`
-	Matcher   string          `json:"matcher,omitempty"`
-	HookType  HookType        `json:"hookType"`
-	Config    json.RawMessage `json:"config"`
-	Enabled   bool            `json:"enabled"`
-	Priority  int             `json:"priority"`
-	CreatedAt time.Time       `json:"createdAt"`
-	UpdatedAt time.Time       `json:"updatedAt"`
+	ID             uuid.UUID       `json:"id"`
+	AgentID        uuid.UUID       `json:"agentId"`
+	Event          HookEvent       `json:"event"`
+	Matcher        string          `json:"matcher,omitempty"`
+	HookType       HookType        `json:"hookType"`
+	Config         json.RawMessage `json:"config"`
+	Enabled        bool            `json:"enabled"`
+	Priority       int             `json:"priority"`
+	// TimeoutSeconds overrides the global hook timeout for this specific hook.
+	// Inspired by Claude Code's per-hook timeout field.
+	TimeoutSeconds *int            `json:"timeoutSeconds,omitempty"`
+	// IsAsync runs the hook in background without blocking the agentic loop.
+	// Inspired by Claude Code's async hook flag.
+	IsAsync        bool            `json:"isAsync"`
+	// RunOnce causes the hook to fire once then auto-disable.
+	// Inspired by Claude Code's once flag for one-shot hooks.
+	RunOnce        bool            `json:"runOnce"`
+	// StatusMessage is a custom spinner message shown while the hook runs.
+	StatusMessage  string          `json:"statusMessage,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
 }
 
 // HTTPHookConfig is the config shape for hook_type = "http".
@@ -80,9 +93,10 @@ type HookResult struct {
 
 // --- Hook Repository ---
 
-// HookRepository loads hooks for an agent.
+// HookRepository loads and manages hooks for an agent.
 type HookRepository interface {
 	FindByAgentAndEvent(ctx context.Context, agentID uuid.UUID, event HookEvent) ([]AgentHook, error)
+	DisableHook(ctx context.Context, hookID uuid.UUID) error
 }
 
 type pgHookRepository struct {
@@ -95,7 +109,9 @@ func NewHookRepository(pool *pgxpool.Pool) HookRepository {
 }
 
 func (r *pgHookRepository) FindByAgentAndEvent(ctx context.Context, agentID uuid.UUID, event HookEvent) ([]AgentHook, error) {
-	query := `SELECT id, agent_id, event, matcher, hook_type, config, enabled, priority, created_at, updated_at
+	query := `SELECT id, agent_id, event, matcher, hook_type, config, enabled, priority,
+		       timeout_seconds, is_async, run_once, status_message,
+		       created_at, updated_at
 		FROM agent_hook
 		WHERE agent_id = $1 AND event = $2 AND enabled = TRUE
 		ORDER BY priority ASC, created_at ASC`
@@ -117,15 +133,32 @@ func (r *pgHookRepository) FindByAgentAndEvent(ctx context.Context, agentID uuid
 	return hooks, rows.Err()
 }
 
+func (r *pgHookRepository) DisableHook(ctx context.Context, hookID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `UPDATE agent_hook SET enabled = FALSE, updated_at = NOW() WHERE id = $1`, hookID)
+	if err != nil {
+		return fmt.Errorf("hook repo: disable: %w", err)
+	}
+	return nil
+}
+
 func scanHook(row pgx.Row) (AgentHook, error) {
 	var h AgentHook
 	var event, hookType string
-	err := row.Scan(&h.ID, &h.AgentID, &event, &h.Matcher, &hookType, &h.Config, &h.Enabled, &h.Priority, &h.CreatedAt, &h.UpdatedAt)
+	var statusMsg *string
+	err := row.Scan(
+		&h.ID, &h.AgentID, &event, &h.Matcher, &hookType, &h.Config,
+		&h.Enabled, &h.Priority,
+		&h.TimeoutSeconds, &h.IsAsync, &h.RunOnce, &statusMsg,
+		&h.CreatedAt, &h.UpdatedAt,
+	)
 	if err != nil {
 		return AgentHook{}, err
 	}
 	h.Event = HookEvent(event)
 	h.HookType = HookType(hookType)
+	if statusMsg != nil {
+		h.StatusMessage = *statusMsg
+	}
 	return h, nil
 }
 
@@ -149,6 +182,9 @@ func NewHookExecutor(repo HookRepository) *HookExecutor {
 
 // Execute runs all matching hooks for the given event and returns combined results.
 // Errors in individual hooks are logged but do not stop execution.
+// Async hooks (IsAsync=true) run in background goroutines and do not produce results.
+// RunOnce hooks are auto-disabled after the first execution.
+// Per-hook TimeoutSeconds overrides the global hook timeout.
 func (e *HookExecutor) Execute(ctx context.Context, payload HookPayload) []HookResult {
 	agentID, err := uuid.Parse(payload.AgentID)
 	if err != nil {
@@ -167,10 +203,49 @@ func (e *HookExecutor) Execute(ctx context.Context, payload HookPayload) []HookR
 			continue
 		}
 
-		result := e.executeHook(ctx, hook, payload)
+		// Apply per-hook timeout if set.
+		hookCtx := ctx
+		var cancel context.CancelFunc
+		if hook.TimeoutSeconds != nil && *hook.TimeoutSeconds > 0 {
+			hookCtx, cancel = context.WithTimeout(ctx, time.Duration(*hook.TimeoutSeconds)*time.Second)
+		}
+
+		// Async hooks run in background without blocking the agentic loop.
+		if hook.IsAsync {
+			go func(h AgentHook, hctx context.Context, cfn context.CancelFunc) {
+				if cfn != nil {
+					defer cfn()
+				}
+				result := e.executeHook(hctx, h, payload)
+				if result.Error != nil {
+					slog.Warn("async hook failed", "hookID", h.ID, "error", *result.Error)
+				}
+				if h.RunOnce {
+					e.disableHook(ctx, h.ID)
+				}
+			}(hook, hookCtx, cancel)
+			continue
+		}
+
+		result := e.executeHook(hookCtx, hook, payload)
+		if cancel != nil {
+			cancel()
+		}
 		results = append(results, result)
+
+		// RunOnce hooks are disabled after the first synchronous execution.
+		if hook.RunOnce {
+			e.disableHook(ctx, hook.ID)
+		}
 	}
 	return results
+}
+
+// disableHook marks a hook as disabled (used for RunOnce hooks).
+func (e *HookExecutor) disableHook(ctx context.Context, hookID uuid.UUID) {
+	if err := e.repo.DisableHook(ctx, hookID); err != nil {
+		slog.Warn("hook executor: failed to disable run_once hook", "hookID", hookID, "error", err)
+	}
 }
 
 func (e *HookExecutor) executeHook(ctx context.Context, hook AgentHook, payload HookPayload) HookResult {

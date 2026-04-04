@@ -70,6 +70,14 @@ func (m *mockApprovalSvc) PendingCount(_ context.Context) (approval.PendingCount
 	return approval.PendingCountResponse{Count: count}, nil
 }
 
+func (m *mockApprovalSvc) Delete(_ context.Context, id uuid.UUID) error {
+	if _, ok := m.data[id]; !ok {
+		return approval.ErrNotFound
+	}
+	delete(m.data, id)
+	return nil
+}
+
 func (m *mockApprovalSvc) Respond(_ context.Context, id uuid.UUID, respondedBy string, req approval.RespondRequest) (approval.PendingApproval, error) {
 	a, ok := m.data[id]
 	if !ok {
@@ -264,4 +272,49 @@ func TestApprovalHandler_Respond_InvalidID(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestApprovalHandler_Delete_Success(t *testing.T) {
+	r, svc := setupApprovalRouter()
+	a := seedApproval(svc)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/approvals/"+a.ID.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Empty(t, svc.data)
+}
+
+func TestApprovalHandler_Delete_NotFound(t *testing.T) {
+	r, _ := setupApprovalRouter()
+	req := httptest.NewRequest(http.MethodDelete, "/api/approvals/"+uuid.New().String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestApprovalHandler_Delete_InvalidID(t *testing.T) {
+	r, _ := setupApprovalRouter()
+	req := httptest.NewRequest(http.MethodDelete, "/api/approvals/not-a-uuid", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestApprovalHandler_Stream_SSEHeaders(t *testing.T) {
+	r, _ := setupApprovalRouter()
+
+	// Cancel the context quickly so the handler exits without hanging the test.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/approvals/stream", nil).WithContext(ctx)
+	req.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
+	assert.Equal(t, "no-cache", w.Header().Get("Cache-Control"))
 }

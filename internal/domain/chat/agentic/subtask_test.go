@@ -415,6 +415,9 @@ func TestPromptBuilder_CoordinatorMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "Coordinator Mode")
 	assert.Contains(t, prompt, "sub-agents")
+	assert.Contains(t, prompt, "Parallelism is your superpower")
+	assert.Contains(t, prompt, "Always synthesize")
+	assert.Contains(t, prompt, "Real Verification")
 
 	// Without coordinator mode.
 	prompt2, err := builder.Build(context.Background(), agentic.PromptInput{

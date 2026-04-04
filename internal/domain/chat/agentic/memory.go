@@ -36,10 +36,27 @@ type MemoryEvaluator interface {
 }
 
 // ExtractedMemory represents a single memory item extracted by the LLM evaluator.
+// Supports both the new four-type taxonomy format (type/key/value) and the
+// legacy format (memoryType/key/value). When both are set, Type takes precedence.
+// Inspired by Claude Code's four-type taxonomy: user|feedback|project|reference.
 type ExtractedMemory struct {
 	Key        string `json:"key"`
 	Value      string `json:"value"`
-	MemoryType string `json:"memoryType,omitempty"` // user|feedback|project|reference|general
+	// Type is the canonical field name matching the memory_eval_prompt template output.
+	Type string `json:"type,omitempty"` // user|feedback|project|reference
+	// MemoryType is the legacy field name kept for backwards compatibility.
+	MemoryType string `json:"memoryType,omitempty"` // deprecated: use Type
+}
+
+// resolvedType returns the effective memory type, preferring Type over MemoryType.
+func (e ExtractedMemory) resolvedType() string {
+	if e.Type != "" {
+		return e.Type
+	}
+	if e.MemoryType != "" {
+		return e.MemoryType
+	}
+	return "general"
 }
 
 // --- MemoryBridge ---
@@ -243,10 +260,7 @@ func (mb *MemoryBridge) MaybeStore(ctx context.Context, agentID uuid.UUID, turnI
 			continue
 		}
 
-		memType := m.MemoryType
-		if memType == "" {
-			memType = "general"
-		}
+		memType := m.resolvedType()
 
 		_, err = mb.upserter.Upsert(ctx, agentID, m.Key, memory.UpsertMemoryRequest{
 			Value:      valueJSON,
@@ -268,30 +282,30 @@ type TurnMessage struct {
 	Content string `json:"content"`
 }
 
-// buildEvaluationPrompt creates the prompt sent to the LLM for memory extraction.
+// buildEvaluationPrompt creates the prompt for memory extraction by injecting
+// the conversation into the memory_eval_prompt template's {{conversation}} slot.
+// The template uses CC's four-type taxonomy (user|feedback|project|reference).
 func buildEvaluationPrompt(messages []TurnMessage) string {
-	var sb strings.Builder
-	sb.WriteString("Analyze the following conversation turn. Extract any information worth remembering.\n\n")
-	sb.WriteString("For each memory, respond with a JSON array of objects with \"key\", \"value\", and \"memoryType\" fields.\n")
-	sb.WriteString("The key should be a short snake_case identifier (e.g., \"preferred_language\", \"project_stack\").\n")
-	sb.WriteString("The value should be a concise description.\n")
-	sb.WriteString("The memoryType must be one of:\n")
-	sb.WriteString("  - \"user\": information about the user (role, preferences, expertise)\n")
-	sb.WriteString("  - \"feedback\": guidance on how to approach work (corrections, confirmations)\n")
-	sb.WriteString("  - \"project\": ongoing work context (deadlines, decisions, initiatives)\n")
-	sb.WriteString("  - \"reference\": pointers to external resources (URLs, docs, dashboards)\n")
-	sb.WriteString("  - \"general\": anything else worth remembering\n\n")
-	sb.WriteString("If there is nothing worth remembering, respond with an empty array: []\n\n")
-	sb.WriteString("---\n")
-
+	var conv strings.Builder
 	for _, m := range messages {
 		content := m.Content
 		if len(content) > 500 {
 			content = content[:500] + "..."
 		}
-		fmt.Fprintf(&sb, "[%s] %s\n", m.Role, content)
+		fmt.Fprintf(&conv, "[%s] %s\n", m.Role, content)
+	}
+	// The template store is embedded; load it lazily via the package-level store.
+	// Fall back to inline prompt if the store is unavailable (e.g. in unit tests).
+	if tmpl, ok := loadMemoryEvalTemplate(); ok {
+		return strings.ReplaceAll(tmpl, "{{conversation}}", conv.String())
 	}
 
+	// Fallback: minimal inline prompt (used only when embedded FS is unavailable).
+	var sb strings.Builder
+	sb.WriteString("Extract memorable information from this conversation. ")
+	sb.WriteString("Respond with a JSON array of {\"type\",\"key\",\"value\"} objects ")
+	sb.WriteString("(type: user|feedback|project|reference). Return [] if nothing is memorable.\n\n---\n")
+	sb.WriteString(conv.String())
 	sb.WriteString("---\n\nMemories (JSON array):")
 	return sb.String()
 }
@@ -307,4 +321,14 @@ func (mb *MemoryBridge) ShouldEvaluateMemories(turnIndex int) bool {
 // FormatRecallTimestamp formats a time for display in the memory section.
 func FormatRecallTimestamp(t time.Time) string {
 	return t.Format("2006-01-02")
+}
+
+// loadMemoryEvalTemplate returns the embedded memory_eval_prompt template content.
+// Returns (content, true) on success, ("", false) if the embedded FS is unavailable.
+func loadMemoryEvalTemplate() (string, bool) {
+	data, err := templateFS.ReadFile("templates/memory_eval_prompt.txt")
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
 }

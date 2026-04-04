@@ -76,6 +76,16 @@ func (m *mockChatSvc) ArchiveSession(_ context.Context, id uuid.UUID) (chat.Chat
 	return chat.SessionResponseFrom(s), nil
 }
 
+func (m *mockChatSvc) RenameSession(_ context.Context, id uuid.UUID, title string) (chat.ChatSessionResponse, error) {
+	s, ok := m.sessions[id]
+	if !ok {
+		return chat.ChatSessionResponse{}, chat.ErrNotFound
+	}
+	s.Title = title
+	m.sessions[id] = s
+	return chat.SessionResponseFrom(s), nil
+}
+
 func (m *mockChatSvc) ListMessages(_ context.Context, sessionID uuid.UUID, req pagination.PageRequest) (pagination.Page[chat.ChatMessageResponse], error) {
 	msgs := m.messages[sessionID]
 	items := make([]chat.ChatMessageResponse, len(msgs))

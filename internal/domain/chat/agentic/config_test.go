@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
 func TestDefaultRunConfig(t *testing.T) {
@@ -98,4 +99,141 @@ func TestRunConfigFromModelConfig_NewFieldsDefaults(t *testing.T) {
 	assert.Equal(t, 0.0, cfg.MaxBudgetUSD, "should keep default")
 	assert.Equal(t, 50000, cfg.MaxToolResultChars, "should keep default")
 	assert.Equal(t, 3, cfg.RetryMaxAttempts, "should keep default")
+}
+
+func TestRunConfigFromModelConfig_EffortOverride(t *testing.T) {
+	raw := json.RawMessage(`{"effort": "medium"}`)
+	cfg := agentic.RunConfigFromModelConfig(raw)
+	assert.NotNil(t, cfg.Effort)
+	assert.Equal(t, ai.EffortMedium, *cfg.Effort)
+}
+
+func TestRunConfigFromModelConfig_EffortDefault(t *testing.T) {
+	raw := json.RawMessage(`{"model": "gpt-4o"}`)
+	cfg := agentic.RunConfigFromModelConfig(raw)
+	assert.Nil(t, cfg.Effort, "effort should be nil by default")
+}
+
+// --- BuildRunGates ---
+
+func TestBuildRunGates_AnthropicOpus(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	cfg.Model = "claude-opus-4-6-20250514"
+	cfg.MaxBudgetUSD = 10.0
+	cfg.OutputTokenBudget = 5000
+	cfg.MaxToolResultsPerTurnChars = 100000
+	cfg.ToolResultLimits = map[string]int{"search": 5000}
+
+	gates := agentic.BuildRunGates(cfg, 0, true)
+
+	assert.True(t, gates.Model.SupportsEffort)
+	assert.True(t, gates.Model.SupportsMaxEffort)
+	assert.True(t, gates.Model.SupportsThinking)
+	assert.True(t, gates.Model.SupportsCacheControl)
+	assert.True(t, gates.Model.SupportsVision)
+	assert.True(t, gates.Model.SupportsToolUse)
+	assert.True(t, gates.CacheControl) // anthropic provider
+	assert.True(t, gates.HasBudgetLimit)
+	assert.True(t, gates.HasOutputTokenBudget)
+	assert.True(t, gates.CoordinatorMode) // depth 0 < maxDepth 3, has subtask exec
+	assert.True(t, gates.HasToolResultLimits)
+	assert.True(t, gates.HasAggregateResultLimit)
+	assert.Equal(t, 200000, gates.ContextWindowTokens)
+}
+
+func TestBuildRunGates_OpenAI(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	cfg.Provider = "openai"
+	cfg.Model = "gpt-4o"
+
+	gates := agentic.BuildRunGates(cfg, 0, false)
+
+	assert.False(t, gates.Model.SupportsEffort)
+	assert.False(t, gates.Model.SupportsMaxEffort)
+	assert.False(t, gates.Model.SupportsThinking)
+	assert.False(t, gates.Model.SupportsCacheControl) // not anthropic
+	assert.True(t, gates.Model.SupportsVision)       // gpt-4o supports vision
+	assert.True(t, gates.Model.SupportsToolUse)
+	assert.Nil(t, gates.ResolvedEffort)
+	assert.False(t, gates.CacheControl)
+	assert.False(t, gates.HasBudgetLimit) // MaxBudgetUSD = 0
+	assert.False(t, gates.HasOutputTokenBudget)
+	assert.False(t, gates.CoordinatorMode) // no subtask exec
+	assert.False(t, gates.HasToolResultLimits)
+	assert.True(t, gates.HasAggregateResultLimit) // default 200000 > 0
+	assert.Equal(t, 128000, gates.ContextWindowTokens)
+}
+
+func TestBuildRunGates_CoordinatorDisabledAtMaxDepth(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	cfg.MaxDepth = 3
+
+	gates := agentic.BuildRunGates(cfg, 3, true)
+	assert.False(t, gates.CoordinatorMode, "should be disabled when depth >= maxDepth")
+
+	gates = agentic.BuildRunGates(cfg, 2, true)
+	assert.True(t, gates.CoordinatorMode, "should be enabled when depth < maxDepth")
+}
+
+func TestBuildRunGates_NoSubtaskExec(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	gates := agentic.BuildRunGates(cfg, 0, false)
+	assert.False(t, gates.CoordinatorMode, "should be disabled without subtask executor")
+}
+
+// --- DetectModelCapabilities ---
+
+func TestDetectModelCapabilities_ClaudeOpus(t *testing.T) {
+	caps := agentic.DetectModelCapabilities("claude-opus-4-6-20250514", "anthropic")
+	assert.True(t, caps.SupportsEffort)
+	assert.True(t, caps.SupportsMaxEffort)
+	assert.True(t, caps.SupportsThinking)
+	assert.True(t, caps.SupportsCacheControl)
+	assert.True(t, caps.SupportsVision)
+	assert.True(t, caps.SupportsToolUse)
+	assert.True(t, caps.Supports1MContext) // Opus 4.x
+	assert.True(t, caps.SupportsStreaming)
+	assert.Equal(t, 200000, caps.ContextWindowSize)
+}
+
+func TestDetectModelCapabilities_ClaudeSonnet(t *testing.T) {
+	caps := agentic.DetectModelCapabilities("claude-sonnet-4-6-20250514", "anthropic")
+	assert.True(t, caps.SupportsEffort)
+	assert.False(t, caps.SupportsMaxEffort)
+	assert.True(t, caps.SupportsThinking)
+	assert.True(t, caps.SupportsCacheControl)
+	assert.False(t, caps.Supports1MContext) // only Opus
+}
+
+func TestDetectModelCapabilities_GPT4o(t *testing.T) {
+	caps := agentic.DetectModelCapabilities("gpt-4o", "openai")
+	assert.False(t, caps.SupportsEffort)
+	assert.False(t, caps.SupportsThinking)
+	assert.False(t, caps.SupportsCacheControl)
+	assert.True(t, caps.SupportsVision)
+	assert.True(t, caps.SupportsToolUse)
+	assert.Equal(t, 128000, caps.ContextWindowSize)
+}
+
+func TestDetectModelCapabilities_Ollama(t *testing.T) {
+	caps := agentic.DetectModelCapabilities("llama3.1:70b", "ollama")
+	assert.False(t, caps.SupportsEffort)
+	assert.False(t, caps.SupportsThinking)
+	assert.False(t, caps.SupportsCacheControl)
+	assert.False(t, caps.SupportsVision)
+	assert.False(t, caps.SupportsToolUse)
+}
+
+func TestBuildRunGates_SonnetEffort(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	cfg.Model = "claude-sonnet-4-6-20250514"
+	high := ai.EffortHigh
+	cfg.Effort = &high
+
+	gates := agentic.BuildRunGates(cfg, 0, false)
+
+	assert.True(t, gates.Model.SupportsEffort)
+	assert.False(t, gates.Model.SupportsMaxEffort) // only Opus supports max
+	assert.NotNil(t, gates.ResolvedEffort)
+	assert.Equal(t, ai.EffortHigh, *gates.ResolvedEffort)
 }

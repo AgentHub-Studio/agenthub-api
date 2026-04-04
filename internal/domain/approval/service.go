@@ -17,6 +17,7 @@ type Service interface {
 	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[PendingApproval], error)
 	PendingCount(ctx context.Context) (PendingCountResponse, error)
 	Respond(ctx context.Context, id uuid.UUID, respondedBy string, req RespondRequest) (PendingApproval, error)
+	Delete(ctx context.Context, id uuid.UUID) error
 }
 
 type service struct {
@@ -59,6 +60,10 @@ func (s *service) PendingCount(ctx context.Context) (PendingCountResponse, error
 		return PendingCountResponse{}, err
 	}
 	return PendingCountResponse{Count: count}, nil
+}
+
+func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
+	return s.repo.Delete(ctx, id)
 }
 
 func (s *service) Respond(ctx context.Context, id uuid.UUID, respondedBy string, req RespondRequest) (PendingApproval, error) {

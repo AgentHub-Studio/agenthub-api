@@ -210,3 +210,13 @@ func (r *stubHookRepo) FindByAgentAndEvent(_ context.Context, agentID uuid.UUID,
 	}
 	return result, nil
 }
+
+func (r *stubHookRepo) DisableHook(_ context.Context, hookID uuid.UUID) error {
+	for i, h := range r.hooks {
+		if h.ID == hookID {
+			r.hooks[i].Enabled = false
+			return nil
+		}
+	}
+	return nil
+}

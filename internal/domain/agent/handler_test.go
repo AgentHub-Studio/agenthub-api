@@ -285,3 +285,57 @@ func TestAgentHandler_Patch_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
+
+func TestAgentHandler_Update_Success(t *testing.T) {
+	r, svc := setupAgent()
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Original", Status: string(agent.StatusDraft)}
+
+	newName := "Updated"
+	body, _ := json.Marshal(agent.UpdateAgentRequest{Name: &newName})
+	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp agent.AgentResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Updated", resp.Name)
+}
+
+func TestAgentHandler_Update_NotFound(t *testing.T) {
+	r, _ := setupAgent()
+	name := "x"
+	body, _ := json.Marshal(agent.UpdateAgentRequest{Name: &name})
+	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+uuid.New().String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestAgentHandler_Archive_Success(t *testing.T) {
+	r, svc := setupAgent()
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Published Agent", Status: string(agent.StatusPublished)}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/"+id.String()+"/archive", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp agent.AgentResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, string(agent.StatusArchived), resp.Status)
+}
+
+func TestAgentHandler_Archive_NotFound(t *testing.T) {
+	r, _ := setupAgent()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/"+uuid.New().String()+"/archive", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
