@@ -3,6 +3,7 @@ package memory_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +87,41 @@ func (m *mockRepo) Recall(_ context.Context, agentID uuid.UUID, _ *string, _ []f
 		}
 	}
 	return out, nil
+}
+
+func (m *mockRepo) ListByAgentAndType(_ context.Context, agentID uuid.UUID, _ *string, memType memory.MemoryType) ([]memory.AgentMemory, error) {
+	var out []memory.AgentMemory
+	for _, e := range m.entries {
+		if e.AgentID == agentID && e.MemoryType == memType {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (m *mockRepo) SearchByText(_ context.Context, agentID uuid.UUID, query string, limit int) ([]memory.AgentMemory, error) {
+	var out []memory.AgentMemory
+	for _, e := range m.entries {
+		if e.AgentID == agentID {
+			if strings.Contains(e.Key, query) || strings.Contains(string(e.Value), query) {
+				out = append(out, e)
+			}
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *mockRepo) CountByType(_ context.Context, agentID uuid.UUID) (map[memory.MemoryType]int, error) {
+	counts := make(map[memory.MemoryType]int)
+	for _, e := range m.entries {
+		if e.AgentID == agentID {
+			counts[e.MemoryType]++
+		}
+	}
+	return counts, nil
 }
 
 // --- tests ---
