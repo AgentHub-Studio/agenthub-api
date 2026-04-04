@@ -345,13 +345,13 @@ func buildAgenticRunner(
 	kbRepo knowledgebase.Repository,
 	toolRepo *tool.Repository,
 ) chat.SessionRunner {
-	chatModel := buildDefaultChatModel()
-	if chatModel == nil {
+	registry := buildProviderRegistry()
+	if registry.Default() == nil {
 		slog.Warn("agentic: no AI provider configured (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OLLAMA_BASE_URL), agentic features disabled")
 		return nil
 	}
 
-	slog.Info("agentic: wired AI provider", "provider", chatModel.GetProviderName())
+	slog.Info("agentic: wired AI provider", "default_provider", registry.Default().GetProviderName())
 
 	skillClient := agentic.NewSkillRuntimeClient(cfg.SkillRuntimeURL)
 	promptBuilder := agentic.NewPromptBuilder(skillRepo, kbRepo, chatRepo, agentic.DefaultPromptConfig())
@@ -360,8 +360,8 @@ func buildAgenticRunner(
 	hookRepo := agentic.NewHookRepository(pool)
 	hookExecutor := agentic.NewHookExecutor(hookRepo)
 
-	return agentic.NewSessionRunnerAdapter(
-		chatModel,
+	return agentic.NewSessionRunnerAdapterWithRegistry(
+		registry,
 		skillClient,
 		promptBuilder,
 		toolSchemaBuilder,
@@ -373,26 +373,36 @@ func buildAgenticRunner(
 	)
 }
 
-// buildDefaultChatModel creates a ChatModel from environment variables.
-// Tries providers in order: Anthropic, OpenAI, Ollama, OpenRouter.
-// Returns nil if no provider is configured.
-func buildDefaultChatModel() ai.ChatModel {
+// buildProviderRegistry creates a ProviderRegistry from environment variables,
+// registering every configured provider so agents can select any of them.
+// The first one found (Anthropic → OpenAI → Ollama → OpenRouter) becomes the default.
+func buildProviderRegistry() *agentic.ProviderRegistry {
 	envCfg := ai.EnvConfigFromEnvironment()
+	named := make(map[string]ai.ChatModel)
 
 	if envCfg.AnthropicAPIKey != "" {
-		return anthropic.New(envCfg.AnthropicAPIKey, envCfg.AnthropicBaseURL)
+		named["anthropic"] = anthropic.New(envCfg.AnthropicAPIKey, envCfg.AnthropicBaseURL)
 	}
 	if envCfg.OpenAIAPIKey != "" {
-		return openai.New(envCfg.OpenAIAPIKey, envCfg.OpenAIBaseURL)
+		named["openai"] = openai.New(envCfg.OpenAIAPIKey, envCfg.OpenAIBaseURL)
 	}
 	if envCfg.OllamaBaseURL != "" && envCfg.OllamaBaseURL != "http://localhost:11434" {
-		return ollama.New(envCfg.OllamaBaseURL)
+		named["ollama"] = ollama.New(envCfg.OllamaBaseURL)
 	}
 	if envCfg.OpenRouterAPIKey != "" {
-		return openrouter.New(envCfg.OpenRouterAPIKey, envCfg.OpenRouterBaseURL, "agenthub")
+		named["openrouter"] = openrouter.New(envCfg.OpenRouterAPIKey, envCfg.OpenRouterBaseURL, "agenthub")
 	}
 
-	return nil
+	// Pick default in priority order.
+	var def ai.ChatModel
+	for _, name := range []string{"anthropic", "openai", "ollama", "openrouter"} {
+		if m, ok := named[name]; ok {
+			def = m
+			break
+		}
+	}
+
+	return agentic.NewProviderRegistry(def, named)
 }
 
 // agentConfigAdapter adapts agent.Repository to agentic.AgentConfigLoader.
