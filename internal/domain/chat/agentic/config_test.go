@@ -99,3 +99,76 @@ func TestRunConfigFromModelConfig_NewFieldsDefaults(t *testing.T) {
 	assert.Equal(t, 50000, cfg.MaxToolResultChars, "should keep default")
 	assert.Equal(t, 3, cfg.RetryMaxAttempts, "should keep default")
 }
+
+// --- Token Budget Per-Turn tests ---
+
+func TestEffectiveTurnBudget_NoLimit(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	assert.Equal(t, 0, cfg.EffectiveTurnBudget(0))
+	assert.Equal(t, 0, cfg.EffectiveTurnBudget(5))
+}
+
+func TestEffectiveTurnBudget_FixedBudget(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	cfg.MaxTokensPerTurn = 8000
+	assert.Equal(t, 8000, cfg.EffectiveTurnBudget(0))
+	assert.Equal(t, 8000, cfg.EffectiveTurnBudget(1))
+	assert.Equal(t, 8000, cfg.EffectiveTurnBudget(5))
+}
+
+func TestEffectiveTurnBudget_Escalation(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	cfg.MaxTokensPerTurn = 4000
+	cfg.BudgetEscalation = true
+	cfg.EscalationFactor = 1.5
+
+	// Turn 0: 4000 (no escalation on first turn).
+	assert.Equal(t, 4000, cfg.EffectiveTurnBudget(0))
+	// Turn 1: 4000 * 1.5^1 = 6000.
+	assert.Equal(t, 6000, cfg.EffectiveTurnBudget(1))
+	// Turn 2: 4000 * 1.5^2 = 9000.
+	assert.Equal(t, 9000, cfg.EffectiveTurnBudget(2))
+	// Turn 3: 4000 * 1.5^3 = 13500.
+	assert.Equal(t, 13500, cfg.EffectiveTurnBudget(3))
+}
+
+func TestEffectiveTurnBudget_EscalationDefaultFactor(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	cfg.MaxTokensPerTurn = 4000
+	cfg.BudgetEscalation = true
+	// EscalationFactor is 0 → default 1.5.
+
+	assert.Equal(t, 4000, cfg.EffectiveTurnBudget(0))
+	assert.Equal(t, 6000, cfg.EffectiveTurnBudget(1))
+}
+
+func TestEffectiveTurnBudget_EscalationDisabled(t *testing.T) {
+	cfg := agentic.DefaultRunConfig()
+	cfg.MaxTokensPerTurn = 4000
+	cfg.BudgetEscalation = false
+	cfg.EscalationFactor = 2.0
+
+	// Factor ignored when escalation is disabled.
+	assert.Equal(t, 4000, cfg.EffectiveTurnBudget(0))
+	assert.Equal(t, 4000, cfg.EffectiveTurnBudget(5))
+}
+
+func TestRunConfigFromModelConfig_TokenBudgetPerTurn(t *testing.T) {
+	raw := json.RawMessage(`{
+		"maxTokensPerTurn": 10000,
+		"budgetEscalation": true,
+		"escalationFactor": 2.0
+	}`)
+	cfg := agentic.RunConfigFromModelConfig(raw)
+	assert.Equal(t, 10000, cfg.MaxTokensPerTurn)
+	assert.True(t, cfg.BudgetEscalation)
+	assert.Equal(t, 2.0, cfg.EscalationFactor)
+}
+
+func TestRunConfigFromModelConfig_TokenBudgetDefaults(t *testing.T) {
+	raw := json.RawMessage(`{"model": "gpt-4o"}`)
+	cfg := agentic.RunConfigFromModelConfig(raw)
+	assert.Equal(t, 0, cfg.MaxTokensPerTurn)
+	assert.False(t, cfg.BudgetEscalation)
+	assert.Equal(t, 0.0, cfg.EscalationFactor)
+}
