@@ -243,24 +243,27 @@ func TestGetPromptTooLongTokenGap(t *testing.T) {
 
 func TestRetryStreamWithFallback_PrimarySuccess(t *testing.T) {
 	model := &stubChatModel{}
-	result, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{Model: "primary"}, 3, []string{"fallback1"}, SourceMainLoop)
+	cfg := RunConfig{ModelFallbacks: []string{"fallback1"}, RetryMaxAttempts: 3}
+	result, err := retryStreamWithFallbackSource(context.Background(), model, nil, ai.ChatOptions{Model: "primary"}, cfg, SourceMainLoop, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result.Stream)
-	assert.Empty(t, result.Model) // primary model used, Model is empty
+	assert.False(t, result.WasFallback) // primary model used
 	assert.Equal(t, 1, model.calls)
 }
 
-func TestRetryStreamWithFallback_FallbackOnNonTransient(t *testing.T) {
+func TestRetryStreamWithFallback_FallbackOnRateLimit(t *testing.T) {
 	model := &stubChatModel{
 		results: []stubResult{
-			{err: fmt.Errorf("invalid API key")}, // primary fails (non-transient, no retry)
-			{err: nil},                            // fallback1 succeeds
+			{err: fmt.Errorf("429 rate limit exceeded")}, // primary fails with rate limit
+			{err: nil},                                    // fallback1 succeeds
 		},
 	}
-	result, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{Model: "primary"}, 1, []string{"fallback1"}, SourceMainLoop)
+	cfg := RunConfig{ModelFallbacks: []string{"fallback1"}, RetryMaxAttempts: 1}
+	result, err := retryStreamWithFallbackSource(context.Background(), model, nil, ai.ChatOptions{Model: "primary"}, cfg, SourceMainLoop, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result.Stream)
-	assert.Equal(t, "fallback1", result.Model) // reports which fallback was used
+	assert.True(t, result.WasFallback)
+	assert.Equal(t, "fallback1", result.ModelUsed) // reports which fallback was used
 	assert.Equal(t, 2, model.calls)
 }
 
@@ -270,7 +273,8 @@ func TestRetryStreamWithFallback_NoFallbackOnPromptTooLong(t *testing.T) {
 			{err: fmt.Errorf("prompt_too_long")},
 		},
 	}
-	_, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{Model: "primary"}, 1, []string{"fallback1"}, SourceMainLoop)
+	cfg := RunConfig{ModelFallbacks: []string{"fallback1"}, RetryMaxAttempts: 1}
+	_, err := retryStreamWithFallbackSource(context.Background(), model, nil, ai.ChatOptions{Model: "primary"}, cfg, SourceMainLoop, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prompt_too_long")
 	assert.Equal(t, 1, model.calls) // no fallback attempted
@@ -282,7 +286,8 @@ func TestRetryStreamWithFallback_NoFallbackModels(t *testing.T) {
 			{err: fmt.Errorf("invalid API key")},
 		},
 	}
-	_, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{}, 1, nil, SourceMainLoop)
+	cfg := RunConfig{RetryMaxAttempts: 1}
+	_, err := retryStreamWithFallbackSource(context.Background(), model, nil, ai.ChatOptions{}, cfg, SourceMainLoop, nil)
 	require.Error(t, err)
 	assert.Equal(t, 1, model.calls)
 }
@@ -290,12 +295,13 @@ func TestRetryStreamWithFallback_NoFallbackModels(t *testing.T) {
 func TestRetryStreamWithFallback_AllFallbacksFail(t *testing.T) {
 	model := &stubChatModel{
 		results: []stubResult{
-			{err: fmt.Errorf("model error")},
-			{err: fmt.Errorf("model error")},
-			{err: fmt.Errorf("model error")},
+			{err: fmt.Errorf("529 overloaded")},
+			{err: fmt.Errorf("529 overloaded")},
+			{err: fmt.Errorf("529 overloaded")},
 		},
 	}
-	_, err := retryStreamWithFallback(context.Background(), model, nil, ai.ChatOptions{}, 1, []string{"fb1", "fb2"}, SourceMainLoop)
+	cfg := RunConfig{ModelFallbacks: []string{"fb1", "fb2"}, RetryMaxAttempts: 1}
+	_, err := retryStreamWithFallbackSource(context.Background(), model, nil, ai.ChatOptions{}, cfg, SourceMainLoop, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "all models failed")
 	assert.Equal(t, 3, model.calls)

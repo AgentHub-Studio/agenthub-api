@@ -16,6 +16,7 @@ const (
 	EventToolProgress     RunEventType = "tool_progress"
 	EventSubtaskStart     RunEventType = "subtask_start"
 	EventSubtaskComplete  RunEventType = "subtask_complete"
+	EventRunProgress      RunEventType = "run_progress"
 	EventModelFallback    RunEventType = "model_fallback"
 	EventToolDenied       RunEventType = "tool_denied"
 	EventThinkingDelta    RunEventType = "thinking_delta"
@@ -94,6 +95,8 @@ type ModelFallbackData struct {
 type TurnCompleteData struct {
 	TurnIndex  int        `json:"turnIndex"`
 	TokenUsage TokenUsage `json:"tokenUsage"`
+	BudgetUsed  int        `json:"budgetUsed,omitempty"`
+	BudgetLimit int        `json:"budgetLimit,omitempty"`
 	// Model is the model that actually served this turn (may differ from
 	// config if a fallback was used). Empty means the primary model was used.
 	Model string `json:"model,omitempty"`
@@ -136,6 +139,7 @@ const (
 	ToolStateQueued    ToolState = "queued"
 	ToolStateExecuting ToolState = "executing"
 	ToolStateCompleted ToolState = "completed"
+	ToolStateStalled   ToolState = "stalled"
 	ToolStateAborted   ToolState = "aborted"
 )
 

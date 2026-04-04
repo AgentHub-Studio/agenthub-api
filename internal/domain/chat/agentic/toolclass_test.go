@@ -101,7 +101,7 @@ func TestPartitionToolCalls_Mixed(t *testing.T) {
 	assert.Equal(t, "send-email", sideEffect[0].Function.Name)
 }
 
-func TestPartitionToolCalls_AllReadOnly(t *testing.T) {
+func TestSplitToolCallsByEffect_AllReadOnly(t *testing.T) {
 	calls := []ai.ToolCall{
 		{ID: "1", Function: ai.ToolFunction{Name: "document_search"}},
 		{ID: "2", Function: ai.ToolFunction{Name: "memory_recall"}},
@@ -112,7 +112,7 @@ func TestPartitionToolCalls_AllReadOnly(t *testing.T) {
 	assert.Empty(t, sideEffect)
 }
 
-func TestPartitionToolCalls_Empty(t *testing.T) {
+func TestSplitToolCallsByEffect_Empty(t *testing.T) {
 	readOnly, sideEffect := agentic.SplitToolCallsByEffect(nil, nil)
 	assert.Empty(t, readOnly)
 	assert.Empty(t, sideEffect)

@@ -57,6 +57,7 @@ type Runner struct {
 	subtaskExec     *SubtaskExecutor
 	turnEndHandlers []TurnEndHandler
 	runEndHandlers  []RunEndHandler
+	progress        *RunProgressTracker
 	config          RunConfig
 	denialTracker   DenialTracker
 }
@@ -85,8 +86,14 @@ func NewRunner(
 		persister:   persister,
 		history:     history,
 		toolExec:    NewStreamingToolExecutor(skillClient, hookExecutor, config),
+		progress:    NewRunProgressTracker(10),
 		config:      config,
 	}
+}
+
+// Progress returns the Runner's progress tracker for external monitoring.
+func (r *Runner) Progress() *RunProgressTracker {
+	return r.progress
 }
 
 // WithSubtaskExecutor attaches a SubtaskExecutor to the Runner.
@@ -256,9 +263,25 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			return
 		}
 
+		// Per-turn token budget (may be escalated).
+		turnBudget := r.config.EffectiveTurnBudget(turnIndex)
+		maxTokensForCall := r.config.MaxTokensPerCall
+		if turnBudget > 0 && (maxTokensForCall == 0 || turnBudget < maxTokensForCall) {
+			maxTokensForCall = turnBudget
+		}
+
+		// Apply per-turn budget on top of the recovery-adjusted max tokens.
+		// Recovery (finish_reason="length") increases effectiveMaxTokens above MaxTokensPerCall;
+		// in that case we honour the recovery value and don't cap it back down.
+		callMaxTokens := effectiveMaxTokens
+		if maxTokensForCall > 0 && (callMaxTokens == 0 || maxTokensForCall < callMaxTokens) &&
+			effectiveMaxTokens <= r.config.MaxTokensPerCall {
+			callMaxTokens = maxTokensForCall
+		}
+
 		opts := ai.ChatOptions{
 			Model:        r.config.Model,
-			MaxTokens:    effectiveMaxTokens,
+			MaxTokens:    callMaxTokens,
 			Temperature:  r.config.Temperature,
 			Tools:        aiTools,
 			Stream:       true,
@@ -365,9 +388,19 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		cumulativeCacheReadTokens += usage.CacheReadTokens
 		cumulativeCacheCreationTokens += usage.CacheCreationTokens
 
+		// Check per-turn budget after consuming the stream.
+		if turnBudget > 0 && usage.TotalTokens > turnBudget {
+			emitError(ch, "turn_budget_exceeded",
+				fmt.Errorf("turn %d used %d tokens, exceeding budget of %d", turnIndex, usage.TotalTokens, turnBudget))
+		}
+
 		// Accumulate cost using the effective model (may be a fallback).
 		turnCost := EstimateCostUSD(effectiveModel, usage)
 		totalCost += turnCost
+
+		// Update progress tracker.
+		r.progress.SetTurnIndex(turnIndex)
+		r.progress.RecordLLMCall(usage.TotalTokens, turnCost, r.config.Model)
 
 		// Budget check.
 		if gates.HasBudgetLimit && totalCost > effectiveBudget {
@@ -435,11 +468,14 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
-				TurnIndex:  turnIndex,
-				TokenUsage: tokenUsageWithCost(usage, turnCost, effectiveModel),
-				Model:      effectiveModel,
-				Source:     turnSource,
+			TurnIndex:   turnIndex,
+				TokenUsage:  tokenUsageWithCost(usage, turnCost, effectiveModel),
+				BudgetUsed:  usage.TotalTokens,
+				BudgetLimit: turnBudget,
+				Model:       effectiveModel,
+				Source:      turnSource,
 			})
+			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:                    turnIndex + 1,
 				TotalTokens:                   totalTokens,
@@ -517,17 +553,25 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					DurationMs: result.LatencyMs,
 					Error:      result.Error,
 				})
+
+				// Track tool execution in progress.
+				r.progress.RecordToolCall(toolName)
 			}
 
 			// Turn-end hooks (after tool results, before incrementing turnIndex).
 			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
-				TurnIndex:  turnIndex,
-				TokenUsage: tokenUsageWithCost(usage, turnCost, effectiveModel),
-				Model:      effectiveModel,
-				Source:     turnSource,
+			TurnIndex:   turnIndex,
+				TokenUsage:  tokenUsageWithCost(usage, turnCost, effectiveModel),
+				BudgetUsed:  usage.TotalTokens,
+				BudgetLimit: turnBudget,
+				Model:       effectiveModel,
+				Source:      turnSource,
 			})
+
+			// Emit consolidated progress.
+			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
 
 			// Check context compaction using progressive stages.
 			if r.ctxManager != nil && compactFailures < maxCompactFailures {
@@ -646,11 +690,14 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
-				TurnIndex:  turnIndex,
-				TokenUsage: tokenUsageWithCost(usage, turnCost, effectiveModel),
-				Model:      effectiveModel,
-				Source:     turnSource,
+			TurnIndex:   turnIndex,
+				TokenUsage:  tokenUsageWithCost(usage, turnCost, effectiveModel),
+				BudgetUsed:  usage.TotalTokens,
+				BudgetLimit: turnBudget,
+				Model:       effectiveModel,
+				Source:      turnSource,
 			})
+			ch <- NewRunEvent(EventRunProgress, r.progress.Snapshot())
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:                    turnIndex + 1,
 				TotalTokens:                   totalTokens,

@@ -65,15 +65,21 @@ type StreamingToolExecutor struct {
 	skillClient    *SkillRuntimeClient
 	mcpBridge      *MCPToolBridge
 	hookExecutor   *HookExecutor
+	stallDetector  *StallDetector
 	config         RunConfig
 }
 
 // NewStreamingToolExecutor creates a StreamingToolExecutor.
 func NewStreamingToolExecutor(skillClient *SkillRuntimeClient, hookExecutor *HookExecutor, config RunConfig) *StreamingToolExecutor {
+	var detector *StallDetector
+	if config.StallThreshold > 0 {
+		detector = NewStallDetector(config.StallCheckInterval, config.StallThreshold)
+	}
 	return &StreamingToolExecutor{
-		skillClient:  skillClient,
-		hookExecutor: hookExecutor,
-		config:       config,
+		skillClient:   skillClient,
+		hookExecutor:  hookExecutor,
+		stallDetector: detector,
+		config:        config,
 	}
 }
 
