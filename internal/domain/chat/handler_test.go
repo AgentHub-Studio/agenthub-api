@@ -267,11 +267,19 @@ func TestChatHandler_RunSession_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "text/event-stream", w.Header().Get("Content-Type"))
 
+	// X-Run-ID header must be present for reconnection.
+	runID := w.Header().Get("X-Run-ID")
+	assert.NotEmpty(t, runID, "X-Run-ID header must be set")
+
 	// Parse SSE events from response body.
 	responseBody := w.Body.String()
 	assert.Contains(t, responseBody, "event: text_delta\n")
 	assert.Contains(t, responseBody, "event: run_complete\n")
 	assert.Contains(t, responseBody, `"content":"Hello from agent"`)
+
+	// SSE events must include id fields.
+	assert.Contains(t, responseBody, "id: "+runID+":1\n")
+	assert.Contains(t, responseBody, "id: "+runID+":2\n")
 }
 
 func TestChatHandler_RunSession_SessionNotFound(t *testing.T) {
@@ -315,4 +323,112 @@ func TestChatHandler_RunSession_InvalidSessionID(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- GET /api/chat/sessions/{id}/run/{runId}/resume (SSE reconnection) ---
+
+func TestChatHandler_ResumeSession_ReplayAll(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	// First, run a session to populate the buffer.
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	require.Equal(t, http.StatusOK, runW.Code)
+	runID := runW.Header().Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	// Resume with no Last-Event-ID — should replay all events.
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume", nil)
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	assert.Equal(t, http.StatusOK, resumeW.Code)
+	assert.Equal(t, "text/event-stream", resumeW.Header().Get("Content-Type"))
+
+	resumeBody := resumeW.Body.String()
+	assert.Contains(t, resumeBody, "event: text_delta\n")
+	assert.Contains(t, resumeBody, "event: run_complete\n")
+	assert.Contains(t, resumeBody, "id: "+runID+":1\n")
+	assert.Contains(t, resumeBody, "id: "+runID+":2\n")
+}
+
+func TestChatHandler_ResumeSession_ReplayPartial(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	require.Equal(t, http.StatusOK, runW.Code)
+	runID := runW.Header().Get("X-Run-ID")
+
+	// Resume with Last-Event-ID = 1 — should only get event 2.
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume", nil)
+	resumeReq.Header.Set("Last-Event-ID", runID+":1")
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	assert.Equal(t, http.StatusOK, resumeW.Code)
+	resumeBody := resumeW.Body.String()
+	assert.NotContains(t, resumeBody, "id: "+runID+":1\n")
+	assert.Contains(t, resumeBody, "id: "+runID+":2\n")
+}
+
+func TestChatHandler_ResumeSession_QueryParamLastEventID(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	runID := runW.Header().Get("X-Run-ID")
+
+	// Use query param instead of header.
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume?lastEventId="+runID+":1", nil)
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	assert.Equal(t, http.StatusOK, resumeW.Code)
+	resumeBody := resumeW.Body.String()
+	assert.NotContains(t, resumeBody, "id: "+runID+":1\n")
+	assert.Contains(t, resumeBody, "id: "+runID+":2\n")
+}
+
+func TestChatHandler_ResumeSession_RunNotFound(t *testing.T) {
+	r, _ := setupChat()
+	sessionID := uuid.New()
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/nonexistent-run/resume", nil)
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	assert.Equal(t, http.StatusNotFound, resumeW.Code)
+}
+
+func TestChatHandler_ResumeSession_InvalidSessionID(t *testing.T) {
+	r, _ := setupChat()
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/not-a-uuid/run/some-run/resume", nil)
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	assert.Equal(t, http.StatusBadRequest, resumeW.Code)
 }

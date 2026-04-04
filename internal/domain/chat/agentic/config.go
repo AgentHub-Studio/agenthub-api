@@ -69,6 +69,17 @@ type RunConfig struct {
 	// EscalationFactor is the multiplier applied per turn when BudgetEscalation is true.
 	// Default 1.5.
 	EscalationFactor float64 `json:"escalationFactor,omitempty"`
+
+	// ModelFallbacks is an ordered list of fallback models to try when the
+	// primary model fails with transient errors (rate limit, overload, timeout).
+	ModelFallbacks []string `json:"modelFallbacks,omitempty"`
+
+	// FallbackOnRateLimit enables fallback on 429/529 errors. Default true.
+	FallbackOnRateLimit *bool `json:"fallbackOnRateLimit,omitempty"`
+	// FallbackOnOverload enables fallback on 502/503 errors. Default true.
+	FallbackOnOverload *bool `json:"fallbackOnOverload,omitempty"`
+	// FallbackOnTimeout enables fallback on timeout errors. Default true.
+	FallbackOnTimeout *bool `json:"fallbackOnTimeout,omitempty"`
 }
 
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
@@ -94,20 +105,24 @@ func DefaultRunConfig() RunConfig {
 
 // modelConfig mirrors the JSON shape stored in agent.model_config.
 type modelConfig struct {
-	Provider           string   `json:"provider"`
-	Model              string   `json:"model"`
-	Temperature        *float64 `json:"temperature"`
-	MaxTokens          *int     `json:"maxTokens"`
-	ContextWindow      *int     `json:"contextWindow"`
-	MaxIterations      *int     `json:"maxIterations"`
-	CompactThreshold   *float64 `json:"compactThreshold"`
-	MaxBudgetUSD       *float64 `json:"maxBudgetUsd"`
-	MaxToolResultChars *int     `json:"maxToolResultChars"`
-	RetryMaxAttempts   *int     `json:"retryMaxAttempts"`
-	MaxDepth           *int     `json:"maxDepth"`
-	MaxTokensPerTurn   *int     `json:"maxTokensPerTurn,omitempty"`
-	BudgetEscalation   *bool    `json:"budgetEscalation,omitempty"`
-	EscalationFactor   *float64 `json:"escalationFactor,omitempty"`
+	Provider            string   `json:"provider"`
+	Model               string   `json:"model"`
+	Temperature         *float64 `json:"temperature"`
+	MaxTokens           *int     `json:"maxTokens"`
+	ContextWindow       *int     `json:"contextWindow"`
+	MaxIterations       *int     `json:"maxIterations"`
+	CompactThreshold    *float64 `json:"compactThreshold"`
+	MaxBudgetUSD        *float64 `json:"maxBudgetUsd"`
+	MaxToolResultChars  *int     `json:"maxToolResultChars"`
+	RetryMaxAttempts    *int     `json:"retryMaxAttempts"`
+	MaxDepth            *int     `json:"maxDepth"`
+	MaxTokensPerTurn    *int     `json:"maxTokensPerTurn,omitempty"`
+	BudgetEscalation    *bool    `json:"budgetEscalation,omitempty"`
+	EscalationFactor    *float64 `json:"escalationFactor,omitempty"`
+	ModelFallbacks      []string `json:"modelFallbacks,omitempty"`
+	FallbackOnRateLimit *bool    `json:"fallbackOnRateLimit,omitempty"`
+	FallbackOnOverload  *bool    `json:"fallbackOnOverload,omitempty"`
+	FallbackOnTimeout   *bool    `json:"fallbackOnTimeout,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -163,6 +178,18 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	if mc.EscalationFactor != nil {
 		cfg.EscalationFactor = *mc.EscalationFactor
 	}
+	if len(mc.ModelFallbacks) > 0 {
+		cfg.ModelFallbacks = mc.ModelFallbacks
+	}
+	if mc.FallbackOnRateLimit != nil {
+		cfg.FallbackOnRateLimit = mc.FallbackOnRateLimit
+	}
+	if mc.FallbackOnOverload != nil {
+		cfg.FallbackOnOverload = mc.FallbackOnOverload
+	}
+	if mc.FallbackOnTimeout != nil {
+		cfg.FallbackOnTimeout = mc.FallbackOnTimeout
+	}
 	return cfg
 }
 
@@ -183,4 +210,28 @@ func (c RunConfig) EffectiveTurnBudget(turnIndex int) int {
 	// base * factor^turnIndex
 	escalated := float64(c.MaxTokensPerTurn) * math.Pow(factor, float64(turnIndex))
 	return int(escalated)
+}
+
+// IsFallbackOnRateLimit returns whether fallback is enabled for rate limit errors.
+func (c RunConfig) IsFallbackOnRateLimit() bool {
+	if c.FallbackOnRateLimit == nil {
+		return true // default enabled
+	}
+	return *c.FallbackOnRateLimit
+}
+
+// IsFallbackOnOverload returns whether fallback is enabled for overload errors.
+func (c RunConfig) IsFallbackOnOverload() bool {
+	if c.FallbackOnOverload == nil {
+		return true
+	}
+	return *c.FallbackOnOverload
+}
+
+// IsFallbackOnTimeout returns whether fallback is enabled for timeout errors.
+func (c RunConfig) IsFallbackOnTimeout() bool {
+	if c.FallbackOnTimeout == nil {
+		return true
+	}
+	return *c.FallbackOnTimeout
 }
