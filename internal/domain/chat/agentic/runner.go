@@ -51,21 +51,22 @@ type RunInput struct {
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
 type Runner struct {
-	chatModel       ai.ChatModel
-	skillClient     *SkillRuntimeClient
-	prompt          *PromptBuilder
-	tools           *ToolSchemaBuilder
-	ctxManager      *ContextManager
-	memory          *MemoryBridge
-	persister       MessagePersister
-	history         HistoryLoader
-	toolExec        *StreamingToolExecutor
-	subtaskExec     *SubtaskExecutor
-	turnEndHandlers []TurnEndHandler
-	runEndHandlers  []RunEndHandler
-	progress        *RunProgressTracker
-	config          RunConfig
-	denialTracker   *DenialTracker
+	chatModel        ai.ChatModel
+	skillClient      *SkillRuntimeClient
+	prompt           *PromptBuilder
+	tools            *ToolSchemaBuilder
+	ctxManager       *ContextManager
+	memory           *MemoryBridge
+	persister        MessagePersister
+	history          HistoryLoader
+	toolExec         *StreamingToolExecutor
+	subtaskExec      *SubtaskExecutor
+	agentMailbox     *AgentMailbox
+	denialTracker    *DenialTracker
+	turnEndHandlers  []TurnEndHandler
+	runEndHandlers   []RunEndHandler
+	progress         *RunProgressTracker
+	config           RunConfig
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -82,6 +83,10 @@ func NewRunner(
 	hookExecutor *HookExecutor,
 	config RunConfig,
 ) *Runner {
+	var dt *DenialTracker
+	if config.DenialEscalationThreshold > 0 {
+		dt = NewDenialTracker(config.DenialEscalationThreshold)
+	}
 	return &Runner{
 		chatModel:     chatModel,
 		skillClient:   skillClient,
@@ -94,7 +99,7 @@ func NewRunner(
 		toolExec:      NewStreamingToolExecutor(skillClient, hookExecutor, config),
 		progress:      NewRunProgressTracker(10),
 		config:        config,
-		denialTracker: NewDenialTracker(config.DenialEscalationThreshold),
+		denialTracker: dt,
 	}
 }
 
@@ -106,6 +111,12 @@ func (r *Runner) Progress() *RunProgressTracker {
 // WithSubtaskExecutor attaches a SubtaskExecutor to the Runner.
 func (r *Runner) WithSubtaskExecutor(exec *SubtaskExecutor) *Runner {
 	r.subtaskExec = exec
+	return r
+}
+
+// WithMailbox attaches a Mailbox to the Runner for inter-agent messaging.
+func (r *Runner) WithAgentMailbox(m *AgentMailbox) *Runner {
+	r.agentMailbox = m
 	return r
 }
 
@@ -268,6 +279,17 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		if err := ctx.Err(); err != nil {
 			emitError(ch, "context_cancelled", err)
 			return
+		}
+
+		// Drain mailbox messages for sub-agents before each LLM call.
+		if r.agentMailbox != nil && in.SubtaskID != "" && in.ParentSessionID != uuid.Nil {
+			mailboxContent := DrainAgentMailbox(r.agentMailbox, in.ParentSessionID, in.SubtaskID)
+			if mailboxContent != "" {
+				messages = append(messages, ai.Message{
+					Role:    ai.RoleUser,
+					Content: mailboxContent,
+				})
+			}
 		}
 
 		// Inject escalation hints from denial tracker.
@@ -1177,10 +1199,21 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 		if IsAgentToolCall(tc) && r.subtaskExec != nil {
 			agentIdx[i] = len(agentTools)
 			agentTools = append(agentTools, tc)
-		} else {
-			regularIdx[i] = len(regularTools)
-			regularTools = append(regularTools, tc)
+			continue
 		}
+
+		// Route send_message tool calls to the mailbox handler.
+		if IsSendMessageToolCall(tc.Function.Name) && r.agentMailbox != nil {
+			sessionID := in.ParentSessionID
+			if sessionID == uuid.Nil {
+				sessionID = in.SessionID
+			}
+			results[i] = HandleSendMessage(r.agentMailbox, sessionID, in.SubtaskID, json.RawMessage(tc.Function.Arguments), ch)
+			continue
+		}
+
+		regularIdx[i] = len(regularTools)
+		regularTools = append(regularTools, tc)
 	}
 
 	// Execute regular tools.

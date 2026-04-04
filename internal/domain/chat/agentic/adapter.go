@@ -98,8 +98,9 @@ func (f staticModelFactory) Build(_ context.Context, _ string) (ai.ChatModel, er
 
 // adapterRunnerFactory implements RunnerFactory for sub-runner spawning.
 type adapterRunnerFactory struct {
-	adapter   *SessionRunnerAdapter
-	chatModel ai.ChatModel
+	adapter      *SessionRunnerAdapter
+	chatModel    ai.ChatModel
+	agentMailbox *AgentMailbox
 }
 
 func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
@@ -115,7 +116,9 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 		f.adapter.hookExecutor,
 		config,
 	)
+	runner.WithAgentMailbox(f.agentMailbox)
 	subtaskExec := NewSubtaskExecutor(f)
+	subtaskExec.WithAgentMailbox(f.agentMailbox)
 	runner.WithSubtaskExecutor(subtaskExec)
 
 	// Register memory as turn-end handler (decoupled from runner loop).
@@ -142,7 +145,10 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		return nil, fmt.Errorf("session runner: build model for provider %q: %w", config.Provider, err)
 	}
 
-	factory := &adapterRunnerFactory{adapter: a, chatModel: chatModel}
+	// Create a shared mailbox for inter-agent messaging within this run.
+	agentMailbox := NewAgentMailbox()
+
+	factory := &adapterRunnerFactory{adapter: a, chatModel: chatModel, agentMailbox: agentMailbox}
 	runner := NewRunner(
 		chatModel,
 		a.skillClient,
@@ -155,7 +161,9 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		a.hookExecutor,
 		config,
 	)
+	runner.WithAgentMailbox(agentMailbox)
 	subtaskExec := NewSubtaskExecutor(factory)
+	subtaskExec.WithAgentMailbox(agentMailbox)
 	runner.WithSubtaskExecutor(subtaskExec)
 
 	// Register memory as turn-end handler (decoupled from runner loop).
