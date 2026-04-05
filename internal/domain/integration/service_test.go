@@ -37,6 +37,64 @@ func (s *stubDatasourceCatalog) ListAll(_ context.Context, _ string, _ paginatio
 	return s.items, len(s.items), nil
 }
 
+func (s *stubDatasourceCatalog) GetByID(_ context.Context, _ string, id uuid.UUID) (datasource.DataSource, error) {
+	for _, item := range s.items {
+		if item.ID == id {
+			return item, nil
+		}
+	}
+	return datasource.DataSource{}, datasource.ErrNotFound
+}
+
+func (s *stubDatasourceCatalog) Create(_ context.Context, _ string, req datasource.CreateRequest) (datasource.DataSource, error) {
+	item := datasource.DataSource{
+		ID:            uuid.New(),
+		Name:          req.Name,
+		Type:          req.Type,
+		Host:          req.Host,
+		Port:          req.Port,
+		Database:      req.Database,
+		DBUser:        req.DBUser,
+		DBPassword:    req.DBPassword,
+		VpnResourceID: req.VpnResourceID,
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
+	}
+	s.items = append(s.items, item)
+	return item, nil
+}
+
+func (s *stubDatasourceCatalog) Update(_ context.Context, _ string, id uuid.UUID, req datasource.CreateRequest) (datasource.DataSource, error) {
+	for i, item := range s.items {
+		if item.ID != id {
+			continue
+		}
+		item.Name = req.Name
+		item.Type = req.Type
+		item.Host = req.Host
+		item.Port = req.Port
+		item.Database = req.Database
+		item.DBUser = req.DBUser
+		item.DBPassword = req.DBPassword
+		item.VpnResourceID = req.VpnResourceID
+		item.UpdatedAt = time.Now().UTC()
+		s.items[i] = item
+		return item, nil
+	}
+	return datasource.DataSource{}, datasource.ErrNotFound
+}
+
+func (s *stubDatasourceCatalog) Delete(_ context.Context, _ string, id uuid.UUID) error {
+	for i, item := range s.items {
+		if item.ID != id {
+			continue
+		}
+		s.items = append(s.items[:i], s.items[i+1:]...)
+		return nil
+	}
+	return datasource.ErrNotFound
+}
+
 type stubMCPCatalog struct {
 	items   []mcp.McpServerConfigResponse
 	created mcp.CreateRequest
@@ -451,4 +509,101 @@ func TestService_CreateMCP_DelegatesToUnderlyingService(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "filesystem", resp.Name)
 	assert.Equal(t, "filesystem", mcpCatalog.created.Name)
+}
+
+func TestService_CreateDatabase_GeneratesDatasourceSkillAndTool(t *testing.T) {
+	datasources := &stubDatasourceCatalog{}
+	skillCreator := &stubSkillCreator{resp: skill.Response{ID: uuid.New()}}
+	toolManager := &stubHTTPToolManager{}
+	repo := &stubManagementRepo{}
+	svc := integration.NewService(&stubToolCatalog{}, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(skillCreator, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	resp, err := svc.CreateDatabase(ctx, integration.DatabaseCreateRequest{
+		Name:        "Orders DB",
+		Description: "Query orders",
+		Type:        datasource.DataSourceTypePostgreSQL,
+		Host:        "pg.internal",
+		Port:        5432,
+		Database:    "orders",
+		DBUser:      "orders_user",
+		DBPassword:  "secret",
+		Query:       "SELECT * FROM orders LIMIT 10",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Orders DB", resp.Name)
+	assert.Len(t, datasources.items, 1)
+	assert.Len(t, toolManager.created, 1)
+	assert.Equal(t, tool.ToolTypeSQL, toolManager.created[0].Type)
+	assert.Len(t, skillCreator.created, 1)
+	assert.Equal(t, "INTEGRATION_DATABASE", skillCreator.created[0].Category)
+}
+
+func TestService_UpdateDatabase_UpdatesGeneratedSkillMetadata(t *testing.T) {
+	datasourceID := uuid.New()
+	toolID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+		ID:        datasourceID,
+		Name:      "Orders DB",
+		Type:      datasource.DataSourceTypePostgreSQL,
+		Host:      "pg.internal",
+		Port:      5432,
+		Database:  "orders",
+		DBUser:    "orders_user",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}}}
+	toolManager := &stubHTTPToolManager{item: tool.Response{
+		ID:          toolID,
+		Name:        "Orders Query",
+		Type:        tool.ToolTypeSQL,
+		Config:      map[string]any{"dataSourceId": datasourceID.String(), "query": "SELECT 1"},
+		Description: "old",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{id: uuid.New(), category: "INTEGRATION_DATABASE"}}}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{toolManager.item}, 1, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	resp, err := svc.UpdateDatabase(ctx, datasourceID, integration.DatabaseCreateRequest{
+		Name:        "Orders DB Updated",
+		Description: "new",
+		Type:        datasource.DataSourceTypePostgreSQL,
+		Host:        "pg2.internal",
+		Port:        5432,
+		Database:    "orders",
+		DBUser:      "orders_user",
+		Query:       "UPDATE orders SET synced = true",
+		AllowWrite:  true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Orders DB Updated", resp.Name)
+	assert.Len(t, toolManager.updated, 1)
+	assert.NotEmpty(t, repo.updated)
+}
+
+func TestService_DeleteDatabase_RemovesGeneratedArtifacts(t *testing.T) {
+	datasourceID := uuid.New()
+	toolID := uuid.New()
+	skillID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{ID: datasourceID, Name: "Orders DB", Type: datasource.DataSourceTypePostgreSQL}}}
+	toolManager := &stubHTTPToolManager{item: tool.Response{ID: toolID, Type: tool.ToolTypeSQL, Config: map[string]any{"dataSourceId": datasourceID.String()}}}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{id: skillID, category: "INTEGRATION_DATABASE"}}, counts: map[uuid.UUID]int{skillID: 0}}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{toolManager.item}, 1, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	err := svc.DeleteDatabase(ctx, datasourceID)
+	require.NoError(t, err)
+	assert.Equal(t, []uuid.UUID{toolID}, toolManager.deleted)
+	assert.Equal(t, []uuid.UUID{skillID}, repo.deleted)
 }

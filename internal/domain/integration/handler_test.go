@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
@@ -20,14 +22,16 @@ import (
 )
 
 type mockIntegrationSvc struct {
-	page    pagination.Page[integration.Response]
-	filters integration.ListFilters
-	called  bool
-	http    integration.HTTPResponse
-	lastReq integration.HTTPCreateRequest
-	deleted uuid.UUID
-	mcp     mcp.McpServerConfigResponse
-	mcpReq  mcp.CreateRequest
+	page     pagination.Page[integration.Response]
+	filters  integration.ListFilters
+	called   bool
+	http     integration.HTTPResponse
+	lastReq  integration.HTTPCreateRequest
+	deleted  uuid.UUID
+	database integration.DatabaseResponse
+	dbReq    integration.DatabaseCreateRequest
+	mcp      mcp.McpServerConfigResponse
+	mcpReq   mcp.CreateRequest
 }
 
 func (m *mockIntegrationSvc) List(_ context.Context, _ pagination.PageRequest, filters integration.ListFilters) (pagination.Page[integration.Response], error) {
@@ -65,6 +69,41 @@ func (m *mockIntegrationSvc) UpdateHTTP(_ context.Context, id uuid.UUID, req int
 func (m *mockIntegrationSvc) DeleteHTTP(_ context.Context, id uuid.UUID) error {
 	if m.http.ID == uuid.Nil || m.http.ID != id {
 		return tool.ErrNotFound
+	}
+	m.deleted = id
+	return nil
+}
+
+func (m *mockIntegrationSvc) CreateDatabase(_ context.Context, req integration.DatabaseCreateRequest) (integration.DatabaseResponse, error) {
+	m.dbReq = req
+	if m.database.ID == uuid.Nil {
+		m.database = integration.DatabaseResponse{ID: uuid.New(), Name: req.Name, Type: req.Type, Host: req.Host, Query: req.Query}
+	}
+	return m.database, nil
+}
+
+func (m *mockIntegrationSvc) GetDatabase(_ context.Context, id uuid.UUID) (integration.DatabaseResponse, error) {
+	if m.database.ID == uuid.Nil || m.database.ID != id {
+		return integration.DatabaseResponse{}, datasource.ErrNotFound
+	}
+	return m.database, nil
+}
+
+func (m *mockIntegrationSvc) UpdateDatabase(_ context.Context, id uuid.UUID, req integration.DatabaseCreateRequest) (integration.DatabaseResponse, error) {
+	if m.database.ID == uuid.Nil || m.database.ID != id {
+		return integration.DatabaseResponse{}, datasource.ErrNotFound
+	}
+	m.dbReq = req
+	m.database.Name = req.Name
+	m.database.Host = req.Host
+	m.database.Query = req.Query
+	m.database.AllowWrite = req.AllowWrite
+	return m.database, nil
+}
+
+func (m *mockIntegrationSvc) DeleteDatabase(_ context.Context, id uuid.UUID) error {
+	if m.database.ID == uuid.Nil || m.database.ID != id {
+		return datasource.ErrNotFound
 	}
 	m.deleted = id
 	return nil
@@ -118,6 +157,15 @@ func setupIntegrationHandler() (*chi.Mux, *mockIntegrationSvc) {
 			Name:   "ERP API",
 			Method: "POST",
 			URL:    "https://api.example.com/customers",
+		},
+		database: integration.DatabaseResponse{
+			ID:        uuid.New(),
+			Name:      "Orders DB",
+			Type:      datasource.DataSourceTypePostgreSQL,
+			Host:      "pg.internal",
+			Query:     "SELECT * FROM orders",
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
 		},
 		mcp: mcp.McpServerConfigResponse{
 			ID:            uuid.New(),
@@ -219,6 +267,30 @@ func TestIntegrationHandler_DeleteHTTP_Success(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, w.Code)
 	assert.Equal(t, svc.http.ID, svc.deleted)
+}
+
+func TestIntegrationHandler_CreateDatabaseSuccess(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	body, _ := json.Marshal(integration.DatabaseCreateRequest{Name: "Orders DB", Type: datasource.DataSourceTypePostgreSQL, Host: "pg.internal", Query: "SELECT 1"})
+	req := httptest.NewRequest(http.MethodPost, "/api/integrations/database", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.Equal(t, "Orders DB", svc.dbReq.Name)
+}
+
+func TestIntegrationHandler_GetDatabaseSuccess(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations/database/"+svc.database.ID.String(), nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Orders DB")
 }
 
 func TestIntegrationHandler_CreateMCPSuccess(t *testing.T) {

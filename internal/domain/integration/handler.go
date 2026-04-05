@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
@@ -22,6 +23,10 @@ type integrationService interface {
 	GetHTTP(ctx context.Context, id uuid.UUID) (HTTPResponse, error)
 	UpdateHTTP(ctx context.Context, id uuid.UUID, req HTTPCreateRequest) (HTTPResponse, error)
 	DeleteHTTP(ctx context.Context, id uuid.UUID) error
+	CreateDatabase(ctx context.Context, req DatabaseCreateRequest) (DatabaseResponse, error)
+	GetDatabase(ctx context.Context, id uuid.UUID) (DatabaseResponse, error)
+	UpdateDatabase(ctx context.Context, id uuid.UUID, req DatabaseCreateRequest) (DatabaseResponse, error)
+	DeleteDatabase(ctx context.Context, id uuid.UUID) error
 	CreateMCP(ctx context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error)
 	GetMCP(ctx context.Context, id uuid.UUID) (mcp.McpServerConfigResponse, error)
 	UpdateMCP(ctx context.Context, id uuid.UUID, req mcp.UpdateRequest) (mcp.McpServerConfigResponse, error)
@@ -46,6 +51,11 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Put("/api/integrations/http/{id}", h.updateHTTP)
 	r.Patch("/api/integrations/http/{id}", h.updateHTTP)
 	r.Delete("/api/integrations/http/{id}", h.deleteHTTP)
+	r.Post("/api/integrations/database", h.createDatabase)
+	r.Get("/api/integrations/database/{id}", h.getDatabase)
+	r.Put("/api/integrations/database/{id}", h.updateDatabase)
+	r.Patch("/api/integrations/database/{id}", h.updateDatabase)
+	r.Delete("/api/integrations/database/{id}", h.deleteDatabase)
 	r.Post("/api/integrations/mcp", h.createMCP)
 	r.Get("/api/integrations/mcp/{id}", h.getMCP)
 	r.Put("/api/integrations/mcp/{id}", h.updateMCP)
@@ -175,6 +185,78 @@ func (h *Handler) deleteHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.svc.DeleteHTTP(r.Context(), id); err != nil {
 		if errors.Is(err, tool.ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "integration not found")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	respond.NoContent(w)
+}
+
+func (h *Handler) createDatabase(w http.ResponseWriter, r *http.Request) {
+	var req DatabaseCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	resp, err := h.svc.CreateDatabase(r.Context(), req)
+	if err != nil {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) getDatabase(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	resp, err := h.svc.GetDatabase(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, datasource.ErrNotFound) || errors.Is(err, tool.ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "integration not found")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) updateDatabase(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var req DatabaseCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	resp, err := h.svc.UpdateDatabase(r.Context(), id, req)
+	if err != nil {
+		if errors.Is(err, datasource.ErrNotFound) || errors.Is(err, tool.ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "integration not found")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) deleteDatabase(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := h.svc.DeleteDatabase(r.Context(), id); err != nil {
+		if errors.Is(err, datasource.ErrNotFound) || errors.Is(err, tool.ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "integration not found")
 			return
 		}

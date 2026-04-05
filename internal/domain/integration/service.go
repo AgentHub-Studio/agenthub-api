@@ -23,6 +23,7 @@ import (
 
 const catalogScanSize = 1000
 const generatedHTTPSkillCategory = "INTEGRATION_HTTP"
+const generatedDatabaseSkillCategory = "INTEGRATION_DATABASE"
 
 type toolCatalog interface {
 	List(ctx context.Context, req pagination.PageRequest, toolType string) (pagination.Page[tool.Response], error)
@@ -30,6 +31,10 @@ type toolCatalog interface {
 
 type datasourceCatalog interface {
 	ListAll(ctx context.Context, tenantID string, pr pagination.PageRequest) ([]datasource.DataSource, int, error)
+	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (datasource.DataSource, error)
+	Create(ctx context.Context, tenantID string, req datasource.CreateRequest) (datasource.DataSource, error)
+	Update(ctx context.Context, tenantID string, id uuid.UUID, req datasource.CreateRequest) (datasource.DataSource, error)
+	Delete(ctx context.Context, tenantID string, id uuid.UUID) error
 }
 
 type mcpCatalog interface {
@@ -202,6 +207,167 @@ func filterItems(items []Integration, filters ListFilters) []Integration {
 		filtered = append(filtered, item)
 	}
 	return filtered
+}
+
+// CreateDatabase creates a simplified database integration backed by datasource + generated skill + SQL tool.
+func (s *Service) CreateDatabase(ctx context.Context, req DatabaseCreateRequest) (DatabaseResponse, error) {
+	if err := validateDatabaseRequest(req); err != nil {
+		return DatabaseResponse{}, err
+	}
+	if s.skillMgmt == nil || s.httpTools == nil || s.repo == nil {
+		return DatabaseResponse{}, errors.New("integration service: database management not configured")
+	}
+	tenantID := tenant.FromContext(ctx)
+
+	ds, err := s.datasources.Create(ctx, tenantID, datasource.CreateRequest{
+		Name:          req.Name,
+		Type:          req.Type,
+		Host:          req.Host,
+		Port:          req.Port,
+		Database:      req.Database,
+		DBUser:        req.DBUser,
+		DBPassword:    req.DBPassword,
+		VpnResourceID: req.VpnResourceID,
+	})
+	if err != nil {
+		return DatabaseResponse{}, fmt.Errorf("integration service: create datasource: %w", err)
+	}
+
+	skillResp, err := s.skillMgmt.Create(ctx, skill.CreateRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		Category:    generatedDatabaseSkillCategory,
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+	})
+	if err != nil {
+		_ = s.datasources.Delete(ctx, tenantID, ds.ID)
+		return DatabaseResponse{}, fmt.Errorf("integration service: create database skill: %w", err)
+	}
+
+	toolResp, err := s.httpTools.Create(ctx, tool.CreateRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		Type:        tool.ToolTypeSQL,
+		Config:      buildDatabaseConfig(ds.ID, req),
+		ReadOnly:    !req.AllowWrite,
+	})
+	if err != nil {
+		_ = s.repo.DeleteSkill(ctx, skillResp.ID)
+		_ = s.datasources.Delete(ctx, tenantID, ds.ID)
+		return DatabaseResponse{}, fmt.Errorf("integration service: create database tool: %w", err)
+	}
+
+	_, err = s.httpTools.BindToSkill(ctx, skillResp.ID, tool.BindRequest{ToolID: toolResp.ID, Priority: 0})
+	if err != nil {
+		_ = s.httpTools.Delete(ctx, toolResp.ID)
+		_ = s.repo.DeleteSkill(ctx, skillResp.ID)
+		_ = s.datasources.Delete(ctx, tenantID, ds.ID)
+		return DatabaseResponse{}, fmt.Errorf("integration service: bind database tool to skill: %w", err)
+	}
+
+	return databaseResponseFromDatasource(ds, toolResp, req.Description), nil
+}
+
+// GetDatabase returns a simplified database integration by datasource ID.
+func (s *Service) GetDatabase(ctx context.Context, id uuid.UUID) (DatabaseResponse, error) {
+	tenantID := tenant.FromContext(ctx)
+	ds, err := s.datasources.GetByID(ctx, tenantID, id)
+	if err != nil {
+		return DatabaseResponse{}, err
+	}
+	linkedTool, description, err := s.findDatabaseToolForDatasource(ctx, id)
+	if err != nil {
+		return DatabaseResponse{}, err
+	}
+	return databaseResponseFromDatasource(ds, linkedTool, description), nil
+}
+
+// UpdateDatabase updates a simplified database integration and its generated SQL tool/skill.
+func (s *Service) UpdateDatabase(ctx context.Context, id uuid.UUID, req DatabaseCreateRequest) (DatabaseResponse, error) {
+	if err := validateDatabaseRequest(req); err != nil {
+		return DatabaseResponse{}, err
+	}
+	tenantID := tenant.FromContext(ctx)
+	ds, err := s.datasources.Update(ctx, tenantID, id, datasource.CreateRequest{
+		Name:          req.Name,
+		Type:          req.Type,
+		Host:          req.Host,
+		Port:          req.Port,
+		Database:      req.Database,
+		DBUser:        req.DBUser,
+		DBPassword:    req.DBPassword,
+		VpnResourceID: req.VpnResourceID,
+	})
+	if err != nil {
+		return DatabaseResponse{}, fmt.Errorf("integration service: update datasource: %w", err)
+	}
+	linkedTool, _, err := s.findDatabaseToolForDatasource(ctx, id)
+	if err != nil {
+		return DatabaseResponse{}, err
+	}
+	updatedTool, err := s.httpTools.Update(ctx, linkedTool.ID, tool.UpdateRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		Type:        tool.ToolTypeSQL,
+		Config:      buildDatabaseConfig(id, req),
+		ReadOnly:    !req.AllowWrite,
+	})
+	if err != nil {
+		return DatabaseResponse{}, fmt.Errorf("integration service: update database tool: %w", err)
+	}
+	linkedSkills, err := s.repo.ListSkillsByToolID(ctx, linkedTool.ID)
+	if err != nil {
+		return DatabaseResponse{}, fmt.Errorf("integration service: load linked skills: %w", err)
+	}
+	for _, sk := range linkedSkills {
+		if sk.Category != generatedDatabaseSkillCategory {
+			continue
+		}
+		if err := s.repo.UpdateSkillMetadata(ctx, sk.ID, req.Name, req.Description); err != nil {
+			return DatabaseResponse{}, fmt.Errorf("integration service: update generated database skill: %w", err)
+		}
+	}
+	return databaseResponseFromDatasource(ds, updatedTool, req.Description), nil
+}
+
+// DeleteDatabase removes the datasource and generated SQL tool/skill backing the integration.
+func (s *Service) DeleteDatabase(ctx context.Context, id uuid.UUID) error {
+	tenantID := tenant.FromContext(ctx)
+	linkedTool, _, err := s.findDatabaseToolForDatasource(ctx, id)
+	if err == nil {
+		linkedSkills, listErr := s.repo.ListSkillsByToolID(ctx, linkedTool.ID)
+		if listErr != nil {
+			return fmt.Errorf("integration service: load linked skills: %w", listErr)
+		}
+		for _, sk := range linkedSkills {
+			if err := s.httpTools.UnbindFromSkill(ctx, sk.ID, linkedTool.ID); err != nil && !errors.Is(err, tool.ErrNotFound) {
+				return fmt.Errorf("integration service: unbind database tool from skill: %w", err)
+			}
+		}
+		if err := s.httpTools.Delete(ctx, linkedTool.ID); err != nil {
+			return fmt.Errorf("integration service: delete database tool: %w", err)
+		}
+		for _, sk := range linkedSkills {
+			if sk.Category != generatedDatabaseSkillCategory {
+				continue
+			}
+			count, countErr := s.repo.CountToolBindings(ctx, sk.ID)
+			if countErr != nil {
+				return fmt.Errorf("integration service: count generated database skill bindings: %w", countErr)
+			}
+			if count == 0 {
+				if err := s.repo.DeleteSkill(ctx, sk.ID); err != nil {
+					return fmt.Errorf("integration service: delete generated database skill: %w", err)
+				}
+			}
+		}
+	} else if !errors.Is(err, tool.ErrNotFound) {
+		return err
+	}
+	if err := s.datasources.Delete(ctx, tenantID, id); err != nil {
+		return fmt.Errorf("integration service: delete datasource: %w", err)
+	}
+	return nil
 }
 
 // CreateMCP proxies the simplified MCP integration flow to the existing MCP service.
@@ -589,6 +755,9 @@ func extractDataSourceID(config any) (uuid.UUID, bool) {
 	configMap := asMap(config)
 	raw := asString(configMap["dataSourceId"])
 	if raw == "" {
+		raw = asString(configMap["datasource_id"])
+	}
+	if raw == "" {
 		return uuid.UUID{}, false
 	}
 	id, err := uuid.Parse(raw)
@@ -613,6 +782,82 @@ func asString(value any) string {
 		return typed
 	}
 	return ""
+}
+
+func buildDatabaseConfig(datasourceID uuid.UUID, req DatabaseCreateRequest) json.RawMessage {
+	operation := "SELECT"
+	if req.AllowWrite {
+		operation = "EXEC"
+	}
+	payload := map[string]any{
+		"dataSourceId":  datasourceID.String(),
+		"datasource_id": datasourceID.String(),
+		"sql":           req.Query,
+		"query":         req.Query,
+		"operation":     operation,
+		"max_rows":      100,
+	}
+	raw, _ := json.Marshal(payload)
+	return raw
+}
+
+func validateDatabaseRequest(req DatabaseCreateRequest) error {
+	if strings.TrimSpace(req.Name) == "" {
+		return fmt.Errorf("integration service: name is required")
+	}
+	if strings.TrimSpace(req.Host) == "" {
+		return fmt.Errorf("integration service: host is required")
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		return fmt.Errorf("integration service: query is required")
+	}
+	return nil
+}
+
+func databaseResponseFromDatasource(ds datasource.DataSource, sqlTool tool.Response, description string) DatabaseResponse {
+	config := asMap(sqlTool.Config)
+	query := asString(config["query"])
+	if query == "" {
+		query = asString(config["sql"])
+	}
+	operation := strings.ToUpper(asString(config["operation"]))
+	allowWrite := operation != "" && operation != "SELECT"
+	return DatabaseResponse{
+		ID:            ds.ID,
+		Name:          ds.Name,
+		Description:   description,
+		Type:          ds.Type,
+		Host:          ds.Host,
+		Port:          ds.Port,
+		Database:      ds.Database,
+		DBUser:        ds.DBUser,
+		VpnResourceID: ds.VpnResourceID,
+		Query:         query,
+		AllowWrite:    allowWrite,
+		CreatedAt:     ds.CreatedAt,
+		UpdatedAt:     ds.UpdatedAt,
+		LegacyPath:    legacyEditPath(SourceKindDatasource, ds.ID),
+	}
+}
+
+func (s *Service) findDatabaseToolForDatasource(ctx context.Context, datasourceID uuid.UUID) (tool.Response, string, error) {
+	maxReq := pagination.PageRequest{Page: 0, Size: catalogScanSize}
+	sqlTools, err := s.tools.List(ctx, maxReq, string(tool.ToolTypeSQL))
+	if err != nil {
+		return tool.Response{}, "", fmt.Errorf("integration service: list SQL tools: %w", err)
+	}
+	databaseTools, err := s.tools.List(ctx, maxReq, string(tool.ToolTypeDatabase))
+	if err != nil {
+		return tool.Response{}, "", fmt.Errorf("integration service: list DATABASE tools: %w", err)
+	}
+	for _, item := range append(sqlTools.Content, databaseTools.Content...) {
+		id, ok := extractDataSourceID(item.Config)
+		if !ok || id != datasourceID {
+			continue
+		}
+		return item, item.Description, nil
+	}
+	return tool.Response{}, "", tool.ErrNotFound
 }
 
 func buildSlug(name string, id uuid.UUID) string {

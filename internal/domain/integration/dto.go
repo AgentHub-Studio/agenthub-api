@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 )
 
 // Response is the public API representation of an integration catalog entry.
@@ -73,4 +75,37 @@ type HTTPResponse struct {
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
 	LegacyPath      string    `json:"legacyPath"`
+}
+
+// DatabaseCreateRequest is the simplified payload for database query integrations.
+type DatabaseCreateRequest struct {
+	Name          string                    `json:"name"`
+	Description   string                    `json:"description"`
+	Type          datasource.DataSourceType `json:"type"`
+	Host          string                    `json:"host"`
+	Port          int                       `json:"port"`
+	Database      string                    `json:"database"`
+	DBUser        string                    `json:"dbUser"`
+	DBPassword    string                    `json:"dbPassword"`
+	VpnResourceID *uuid.UUID                `json:"vpnResourceId"`
+	Query         string                    `json:"query"`
+	AllowWrite    bool                      `json:"allowWrite"`
+}
+
+// DatabaseResponse is the editable representation used by the simplified database form.
+type DatabaseResponse struct {
+	ID            uuid.UUID                 `json:"id"`
+	Name          string                    `json:"name"`
+	Description   string                    `json:"description"`
+	Type          datasource.DataSourceType `json:"type"`
+	Host          string                    `json:"host"`
+	Port          int                       `json:"port"`
+	Database      string                    `json:"database"`
+	DBUser        string                    `json:"dbUser"`
+	VpnResourceID *uuid.UUID                `json:"vpnResourceId,omitempty"`
+	Query         string                    `json:"query"`
+	AllowWrite    bool                      `json:"allowWrite"`
+	CreatedAt     time.Time                 `json:"createdAt"`
+	UpdatedAt     time.Time                 `json:"updatedAt"`
+	LegacyPath    string                    `json:"legacyPath"`
 }
