@@ -34,6 +34,10 @@ type datasourceCatalog interface {
 
 type mcpCatalog interface {
 	List(ctx context.Context) ([]mcp.McpServerConfigResponse, error)
+	Create(ctx context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error)
+	GetByID(ctx context.Context, id uuid.UUID) (mcp.McpServerConfigResponse, error)
+	Update(ctx context.Context, id uuid.UUID, req mcp.UpdateRequest) (mcp.McpServerConfigResponse, error)
+	Delete(ctx context.Context, id uuid.UUID) error
 }
 
 type vpnCatalog interface {
@@ -198,6 +202,26 @@ func filterItems(items []Integration, filters ListFilters) []Integration {
 		filtered = append(filtered, item)
 	}
 	return filtered
+}
+
+// CreateMCP proxies the simplified MCP integration flow to the existing MCP service.
+func (s *Service) CreateMCP(ctx context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error) {
+	return s.mcps.Create(ctx, req)
+}
+
+// GetMCP returns a single MCP integration by ID.
+func (s *Service) GetMCP(ctx context.Context, id uuid.UUID) (mcp.McpServerConfigResponse, error) {
+	return s.mcps.GetByID(ctx, id)
+}
+
+// UpdateMCP updates an MCP integration by ID.
+func (s *Service) UpdateMCP(ctx context.Context, id uuid.UUID, req mcp.UpdateRequest) (mcp.McpServerConfigResponse, error) {
+	return s.mcps.Update(ctx, id, req)
+}
+
+// DeleteMCP removes an MCP integration by ID.
+func (s *Service) DeleteMCP(ctx context.Context, id uuid.UUID) error {
+	return s.mcps.Delete(ctx, id)
 }
 
 // CreateHTTP creates a simplified HTTP integration backed by a generated skill + tool pair.

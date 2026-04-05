@@ -37,10 +37,51 @@ func (s *stubDatasourceCatalog) ListAll(_ context.Context, _ string, _ paginatio
 	return s.items, len(s.items), nil
 }
 
-type stubMCPCatalog struct{ items []mcp.McpServerConfigResponse }
+type stubMCPCatalog struct {
+	items   []mcp.McpServerConfigResponse
+	created mcp.CreateRequest
+	updated mcp.UpdateRequest
+	deleted uuid.UUID
+}
 
 func (s *stubMCPCatalog) List(_ context.Context) ([]mcp.McpServerConfigResponse, error) {
 	return s.items, nil
+}
+
+func (s *stubMCPCatalog) Create(_ context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error) {
+	s.created = req
+	item := mcp.McpServerConfigResponse{ID: uuid.New(), Name: req.Name, TransportType: req.TransportType, Enabled: req.Enabled}
+	s.items = append(s.items, item)
+	return item, nil
+}
+
+func (s *stubMCPCatalog) GetByID(_ context.Context, id uuid.UUID) (mcp.McpServerConfigResponse, error) {
+	for _, item := range s.items {
+		if item.ID == id {
+			return item, nil
+		}
+	}
+	return mcp.McpServerConfigResponse{}, mcp.ErrNotFound
+}
+
+func (s *stubMCPCatalog) Update(_ context.Context, id uuid.UUID, req mcp.UpdateRequest) (mcp.McpServerConfigResponse, error) {
+	s.updated = req
+	for i, item := range s.items {
+		if item.ID != id {
+			continue
+		}
+		if req.Name != nil {
+			item.Name = *req.Name
+		}
+		s.items[i] = item
+		return item, nil
+	}
+	return mcp.McpServerConfigResponse{}, mcp.ErrNotFound
+}
+
+func (s *stubMCPCatalog) Delete(_ context.Context, id uuid.UUID) error {
+	s.deleted = id
+	return nil
 }
 
 type stubVPNCatalog struct{ items []vpnresource.VpnResource }
@@ -400,4 +441,14 @@ func TestService_DeleteHTTP_RemovesGeneratedOrphanSkills(t *testing.T) {
 	assert.Equal(t, []uuid.UUID{skillID}, toolManager.unbound)
 	assert.Equal(t, []uuid.UUID{toolID}, toolManager.deleted)
 	assert.Equal(t, []uuid.UUID{skillID}, repo.deleted)
+}
+
+func TestService_CreateMCP_DelegatesToUnderlyingService(t *testing.T) {
+	mcpCatalog := &stubMCPCatalog{}
+	svc := integration.NewService(&stubToolCatalog{}, &stubDatasourceCatalog{}, mcpCatalog, &stubVPNCatalog{})
+
+	resp, err := svc.CreateMCP(context.Background(), mcp.CreateRequest{Name: "filesystem", TransportType: "stdio", Enabled: true})
+	require.NoError(t, err)
+	assert.Equal(t, "filesystem", resp.Name)
+	assert.Equal(t, "filesystem", mcpCatalog.created.Name)
 }

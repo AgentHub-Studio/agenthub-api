@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
@@ -25,6 +26,8 @@ type mockIntegrationSvc struct {
 	http    integration.HTTPResponse
 	lastReq integration.HTTPCreateRequest
 	deleted uuid.UUID
+	mcp     mcp.McpServerConfigResponse
+	mcpReq  mcp.CreateRequest
 }
 
 func (m *mockIntegrationSvc) List(_ context.Context, _ pagination.PageRequest, filters integration.ListFilters) (pagination.Page[integration.Response], error) {
@@ -67,6 +70,39 @@ func (m *mockIntegrationSvc) DeleteHTTP(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (m *mockIntegrationSvc) CreateMCP(_ context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error) {
+	m.mcpReq = req
+	if m.mcp.ID == uuid.Nil {
+		m.mcp = mcp.McpServerConfigResponse{ID: uuid.New(), Name: req.Name, TransportType: req.TransportType}
+	}
+	return m.mcp, nil
+}
+
+func (m *mockIntegrationSvc) GetMCP(_ context.Context, id uuid.UUID) (mcp.McpServerConfigResponse, error) {
+	if m.mcp.ID == uuid.Nil || m.mcp.ID != id {
+		return mcp.McpServerConfigResponse{}, mcp.ErrNotFound
+	}
+	return m.mcp, nil
+}
+
+func (m *mockIntegrationSvc) UpdateMCP(_ context.Context, id uuid.UUID, req mcp.UpdateRequest) (mcp.McpServerConfigResponse, error) {
+	if m.mcp.ID == uuid.Nil || m.mcp.ID != id {
+		return mcp.McpServerConfigResponse{}, mcp.ErrNotFound
+	}
+	if req.Name != nil {
+		m.mcp.Name = *req.Name
+	}
+	return m.mcp, nil
+}
+
+func (m *mockIntegrationSvc) DeleteMCP(_ context.Context, id uuid.UUID) error {
+	if m.mcp.ID == uuid.Nil || m.mcp.ID != id {
+		return mcp.ErrNotFound
+	}
+	m.deleted = id
+	return nil
+}
+
 func setupIntegrationHandler() (*chi.Mux, *mockIntegrationSvc) {
 	svc := &mockIntegrationSvc{
 		page: pagination.NewPage([]integration.Response{{
@@ -82,6 +118,11 @@ func setupIntegrationHandler() (*chi.Mux, *mockIntegrationSvc) {
 			Name:   "ERP API",
 			Method: "POST",
 			URL:    "https://api.example.com/customers",
+		},
+		mcp: mcp.McpServerConfigResponse{
+			ID:            uuid.New(),
+			Name:          "filesystem",
+			TransportType: "stdio",
 		},
 	}
 	h := integration.NewHandler(svc)
@@ -178,4 +219,28 @@ func TestIntegrationHandler_DeleteHTTP_Success(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, w.Code)
 	assert.Equal(t, svc.http.ID, svc.deleted)
+}
+
+func TestIntegrationHandler_CreateMCPSuccess(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	body, _ := json.Marshal(mcp.CreateRequest{Name: "filesystem", TransportType: "stdio"})
+	req := httptest.NewRequest(http.MethodPost, "/api/integrations/mcp", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.Equal(t, "filesystem", svc.mcpReq.Name)
+}
+
+func TestIntegrationHandler_GetMCPSuccess(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations/mcp/"+svc.mcp.ID.String(), nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "filesystem")
 }
