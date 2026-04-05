@@ -89,6 +89,21 @@ func NewStreamingToolExecutor(skillClient *SkillRuntimeClient, hookExecutor *Hoo
 	}
 }
 
+func (e *StreamingToolExecutor) emitToolResult(ch chan<- RunEvent, tt *TrackedTool, result ToolExecResult) {
+	duration := int64(0)
+	if !tt.StartedAt.IsZero() && !tt.DoneAt.IsZero() {
+		duration = tt.DoneAt.Sub(tt.StartedAt).Milliseconds()
+	}
+
+	ch <- NewRunEvent(EventToolResult, ToolResultData{
+		ID:         tt.ID,
+		Name:       tt.Name,
+		Output:     result.Output,
+		DurationMs: duration,
+		Error:      result.Error,
+	})
+}
+
 // WithMCPBridge attaches an MCP tool bridge for routing mcp__ prefixed tool calls.
 func (e *StreamingToolExecutor) WithMCPBridge(bridge *MCPToolBridge) *StreamingToolExecutor {
 	e.mcpBridge = bridge
@@ -362,6 +377,7 @@ func (e *StreamingToolExecutor) executeParallel(
 				ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 					ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
 				})
+				e.emitToolResult(ch, tt, validationResult)
 				return
 			}
 
@@ -373,6 +389,7 @@ func (e *StreamingToolExecutor) executeParallel(
 					ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 						ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
 					})
+					e.emitToolResult(ch, tt, results[i])
 					return
 				}
 			}
@@ -467,6 +484,7 @@ func (e *StreamingToolExecutor) executeParallel(
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 				ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
 			})
+			e.emitToolResult(ch, tt, results[i])
 
 			// Post-tool hooks.
 			if e.hookExecutor != nil {
@@ -520,6 +538,7 @@ func (e *StreamingToolExecutor) executeToolCall(
 		ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 			ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
 		})
+		e.emitToolResult(ch, tt, validationResult)
 		return true
 	}
 
@@ -570,6 +589,7 @@ func (e *StreamingToolExecutor) executeToolCall(
 	ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 		ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
 	})
+	e.emitToolResult(ch, tt, *result)
 
 	// Post-tool hooks.
 	if e.hookExecutor != nil {

@@ -78,7 +78,7 @@ func TestDefaultRunConfig_NewFields(t *testing.T) {
 	cfg := agentic.DefaultRunConfig()
 	assert.Equal(t, 0.0, cfg.MaxBudgetUSD, "default budget should be 0 (no limit)")
 	assert.Equal(t, 50000, cfg.MaxToolResultChars)
-	assert.Equal(t, 3, cfg.RetryMaxAttempts)
+	assert.Equal(t, 5, cfg.RetryMaxAttempts)
 }
 
 func TestRunConfigFromModelConfig_NewFieldsOverride(t *testing.T) {
@@ -98,7 +98,7 @@ func TestRunConfigFromModelConfig_NewFieldsDefaults(t *testing.T) {
 	cfg := agentic.RunConfigFromModelConfig(raw)
 	assert.Equal(t, 0.0, cfg.MaxBudgetUSD, "should keep default")
 	assert.Equal(t, 50000, cfg.MaxToolResultChars, "should keep default")
-	assert.Equal(t, 3, cfg.RetryMaxAttempts, "should keep default")
+	assert.Equal(t, 5, cfg.RetryMaxAttempts, "should keep default")
 }
 
 func TestRunConfigFromModelConfig_EffortOverride(t *testing.T) {

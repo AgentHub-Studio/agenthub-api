@@ -50,7 +50,7 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 			ID:          skillID,
 			Name:        "Execute SQL",
 			Slug:        "execute-sql",
-			Description: "Run SQL queries against configured datasources",
+			Description: "",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 		},
 	}}
@@ -68,7 +68,7 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	assert.Equal(t, "memory_store", tools[2].Name)
 	assert.Equal(t, "execute-sql", tools[3].Name)
 	// Description is enriched from the catalog for known slugs.
-	assert.Contains(t, tools[3].Description, "PostgreSQL datasources")
+	assert.Contains(t, tools[3].Description, "Executes SQL queries against configured PostgreSQL datasources")
 	assert.Contains(t, string(tools[3].InputSchema), `"query"`)
 }
 

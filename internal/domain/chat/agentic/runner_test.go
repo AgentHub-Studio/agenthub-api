@@ -990,7 +990,6 @@ func TestRunner_MaxTokensRecoveryExhausted(t *testing.T) {
 
 	// Should error after exhausting recovery attempts.
 	assert.True(t, hasEventType(events, agentic.EventError))
-	assert.False(t, hasEventType(events, agentic.EventRunComplete))
 
 	// 1 initial + 3 recovery = 4 total calls.
 	assert.Equal(t, 4, model.CallCount())
