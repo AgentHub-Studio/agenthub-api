@@ -23,6 +23,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/experiment"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
 	mkplInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
@@ -119,6 +120,12 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	vpnHandler := vpnresource.NewHandler(vpnresource.NewService(vpnresource.NewRepository(pool)))
 	datasourceHandler := datasource.NewHandler(datasourceSvc)
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
+	integrationHandler := integration.NewHandler(integration.NewService(
+		toolSvc,
+		datasourceSvc,
+		mcp.NewService(mcp.NewRepository(pool)),
+		vpnresource.NewService(vpnresource.NewRepository(pool)),
+	))
 	kbRepo := knowledgebase.NewRepository(pool)
 
 	// Build agentic runner and wire it into the chat service.
@@ -257,6 +264,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		chatHandler.RegisterRoutes(r)
 		documentHandler.RegisterRoutes(r)
 		knowledgebaseHandler.RegisterRoutes(r)
+		integrationHandler.RegisterRoutes(r)
 		mcpHandler.RegisterRoutes(r)
 		approvalHandler.RegisterRoutes(r)
 		// Marketplace
