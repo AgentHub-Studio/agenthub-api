@@ -12,6 +12,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 // ToolsBySkillLister returns the tools bound to a skill.
@@ -144,9 +145,42 @@ const DeferredToolThreshold = 15
 
 // Build returns the tool definitions for the given agent.
 func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLMTool, error) {
+	// 1. Load explicitly linked skills (legacy)
 	skills, err := b.skills.ListByAgentID(ctx, agentID)
 	if err != nil {
 		return nil, fmt.Errorf("toolschema: list skills: %w", err)
+	}
+
+	// 2. Load integration-based skills automatically (simplification)
+	// We include all skills from 'INTEGRATION_HTTP' and 'INTEGRATION_DATABASE'
+	// as they are managed via the Integrations tab and should be globally available.
+	integrationCategories := []string{"INTEGRATION_HTTP", "INTEGRATION_DATABASE"}
+	for _, cat := range integrationCategories {
+		page, err := b.skills.List(ctx, &cat, pagination.PageRequest{Page: 0, Size: 100})
+		if err == nil {
+			for _, resp := range page.Content {
+				// Avoid duplicates if already explicitly linked
+				exists := false
+				for _, sk := range skills {
+					if sk.ID == resp.ID {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					skills = append(skills, skill.Skill{
+						ID:                     resp.ID,
+						Name:                   resp.Name,
+						Slug:                   resp.Slug,
+						Description:            resp.Description,
+						Category:               resp.Category,
+						InputSchema:            resp.InputSchema,
+						OutputSchema:           resp.OutputSchema,
+						DisableModelInvocation: resp.DisableModelInvocation,
+					})
+				}
+			}
+		}
 	}
 
 	var tools []LLMTool
@@ -168,12 +202,43 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// Store user-only skills for prompt announcement (accessible via lastUserOnlySkills).
 	b.lastUserOnlySkills = userOnlySkills
 
-	// Builtin: document_search — added when the agent has linked knowledge bases.
+		// Builtin: document_search — added when the agent has linked knowledge bases
+	// or if we decide to include all tenant KBs automatically.
 	if b.kbs != nil {
-		kbs, err := b.kbs.ListByAgentID(ctx, agentID)
+		kbsResp, err := b.kbs.ListByAgentID(ctx, agentID)
 		if err != nil {
 			return nil, fmt.Errorf("toolschema: list knowledge bases: %w", err)
 		}
+
+		// Convert legacy knowledgebase.KnowledgeBase to the internal type if needed
+		// or use the response format.
+		var kbs []knowledgebase.KnowledgeBase = kbsResp
+
+		// Auto-include tenant-wide KBs that are not explicitly linked
+		allKbsPage, err := b.kbs.List(ctx, pagination.PageRequest{Page: 0, Size: 100})
+		if err == nil {
+			for _, resp := range allKbsPage.Content {
+				exists := false
+				for _, existing := range kbs {
+					if existing.ID == resp.ID {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					kbs = append(kbs, knowledgebase.KnowledgeBase{
+						ID:             resp.ID,
+						Name:           resp.Name,
+						Description:    resp.Description,
+						Status:         resp.Status,
+						EmbeddingModel: resp.EmbeddingModel,
+						SearchMode:     resp.SearchMode,
+						ContextWindow:  resp.ContextWindow,
+					})
+				}
+			}
+		}
+
 		if len(kbs) > 0 {
 			tools = append(tools, documentSearchTool(kbs))
 		}

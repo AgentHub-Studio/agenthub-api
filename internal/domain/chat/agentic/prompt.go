@@ -14,15 +14,17 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 )
 
-// SkillLister returns skills linked to an agent.
-type SkillLister interface {
-	ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]skill.Skill, error)
-}
-
-// KBLister returns knowledge bases linked to an agent.
-type KBLister interface {
-	ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]knowledgebase.KnowledgeBase, error)
-}
+	// SkillLister returns skills.
+	type SkillLister interface {
+		ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]skill.Skill, error)
+		List(ctx context.Context, category *string, req pagination.PageRequest) (pagination.Page[skill.Response], error)
+	}
+	
+	// KBLister returns knowledge bases.
+	type KBLister interface {
+		ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]knowledgebase.KnowledgeBase, error)
+		List(ctx context.Context, req pagination.PageRequest) (pagination.Page[knowledgebase.KnowledgeBaseResponse], error)
+	}
 
 // CompactSummaryFinder returns the latest compact summary for a session.
 type CompactSummaryFinder interface {
