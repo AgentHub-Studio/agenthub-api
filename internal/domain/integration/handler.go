@@ -2,17 +2,25 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
 type integrationService interface {
 	List(ctx context.Context, req pagination.PageRequest, filters ListFilters) (pagination.Page[Response], error)
+	CreateHTTP(ctx context.Context, req HTTPCreateRequest) (HTTPResponse, error)
+	GetHTTP(ctx context.Context, id uuid.UUID) (HTTPResponse, error)
+	UpdateHTTP(ctx context.Context, id uuid.UUID, req HTTPCreateRequest) (HTTPResponse, error)
+	DeleteHTTP(ctx context.Context, id uuid.UUID) error
 }
 
 // Handler exposes integration catalog endpoints.
@@ -28,6 +36,11 @@ func NewHandler(svc integrationService) *Handler {
 // RegisterRoutes mounts integration routes on the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/integrations", h.list)
+	r.Post("/api/integrations/http", h.createHTTP)
+	r.Get("/api/integrations/http/{id}", h.getHTTP)
+	r.Put("/api/integrations/http/{id}", h.updateHTTP)
+	r.Patch("/api/integrations/http/{id}", h.updateHTTP)
+	r.Delete("/api/integrations/http/{id}", h.deleteHTTP)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -88,3 +101,75 @@ func errInvalidFilter(name string) error {
 type filterError struct{ name string }
 
 func (e *filterError) Error() string { return "invalid " + e.name + " filter" }
+
+func (h *Handler) createHTTP(w http.ResponseWriter, r *http.Request) {
+	var req HTTPCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	resp, err := h.svc.CreateHTTP(r.Context(), req)
+	if err != nil {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) getHTTP(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	resp, err := h.svc.GetHTTP(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, tool.ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "integration not found")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) updateHTTP(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var req HTTPCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	resp, err := h.svc.UpdateHTTP(r.Context(), id, req)
+	if err != nil {
+		if errors.Is(err, tool.ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "integration not found")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) deleteHTTP(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := h.svc.DeleteHTTP(r.Context(), id); err != nil {
+		if errors.Is(err, tool.ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "integration not found")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	respond.NoContent(w)
+}

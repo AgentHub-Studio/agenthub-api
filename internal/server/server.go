@@ -117,15 +117,17 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	auditHandler := audit.NewHandler(audit.NewService(audit.NewRepository(pool)))
 	metricsHandler := metrics.NewHandler(metrics.NewService(metrics.NewRepository(pool)))
 	experimentHandler := experiment.NewHandler(experiment.NewService(experiment.NewRepository(pool)))
-	vpnHandler := vpnresource.NewHandler(vpnresource.NewService(vpnresource.NewRepository(pool)))
+	vpnSvc := vpnresource.NewService(vpnresource.NewRepository(pool))
+	vpnHandler := vpnresource.NewHandler(vpnSvc)
 	datasourceHandler := datasource.NewHandler(datasourceSvc)
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
+	mcpSvc := mcp.NewService(mcp.NewRepository(pool))
 	integrationHandler := integration.NewHandler(integration.NewService(
 		toolSvc,
 		datasourceSvc,
-		mcp.NewService(mcp.NewRepository(pool)),
-		vpnresource.NewService(vpnresource.NewRepository(pool)),
-	))
+		mcpSvc,
+		vpnSvc,
+	).WithHTTPManagement(skill.NewService(skillRepo), toolSvc, integration.NewRepository(pool)))
 	kbRepo := knowledgebase.NewRepository(pool)
 
 	// Build agentic runner and wire it into the chat service.
@@ -166,7 +168,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	}
 	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher))
 	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(kbRepo))
-	mcpHandler := mcp.NewHandler(mcp.NewService(mcp.NewRepository(pool)))
+	mcpHandler := mcp.NewHandler(mcpSvc)
 	approvalHandler := approval.NewHandler(approval.NewService(approval.NewRepository(pool)))
 
 	// Marketplace handlers.

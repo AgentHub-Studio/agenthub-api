@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/vpnresource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
@@ -46,6 +48,125 @@ type stubVPNCatalog struct{ items []vpnresource.VpnResource }
 func (s *stubVPNCatalog) ListAll(_ context.Context, _ string, _ pagination.PageRequest) ([]vpnresource.VpnResource, int, error) {
 	return s.items, len(s.items), nil
 }
+
+type stubSkillCreator struct {
+	created []skill.CreateRequest
+	resp    skill.Response
+}
+
+func (s *stubSkillCreator) Create(_ context.Context, req skill.CreateRequest) (skill.Response, error) {
+	s.created = append(s.created, req)
+	if s.resp.ID == uuid.Nil {
+		s.resp = skill.Response{ID: uuid.New(), Name: req.Name, Description: req.Description, Category: req.Category}
+	}
+	return s.resp, nil
+}
+
+type stubHTTPToolManager struct {
+	created []tool.CreateRequest
+	updated []tool.UpdateRequest
+	deleted []uuid.UUID
+	bound   []uuid.UUID
+	unbound []uuid.UUID
+	item    tool.Response
+}
+
+func (s *stubHTTPToolManager) Create(_ context.Context, req tool.CreateRequest) (tool.Response, error) {
+	s.created = append(s.created, req)
+	if s.item.ID == uuid.Nil {
+		s.item = tool.Response{
+			ID:          uuid.New(),
+			Name:        req.Name,
+			Type:        req.Type,
+			Config:      map[string]any{"url": "https://api.example.com", "method": "POST"},
+			Description: req.Description,
+			ReadOnly:    req.ReadOnly,
+			CreatedAt:   time.Now().UTC(),
+			UpdatedAt:   time.Now().UTC(),
+		}
+	}
+	return s.item, nil
+}
+
+func (s *stubHTTPToolManager) GetByID(_ context.Context, _ uuid.UUID) (tool.Response, error) {
+	if s.item.ID == uuid.Nil {
+		return tool.Response{}, tool.ErrNotFound
+	}
+	return s.item, nil
+}
+
+func (s *stubHTTPToolManager) Update(_ context.Context, _ uuid.UUID, req tool.UpdateRequest) (tool.Response, error) {
+	s.updated = append(s.updated, req)
+	var cfg map[string]any
+	_ = json.Unmarshal(req.Config, &cfg)
+	s.item = tool.Response{
+		ID:          s.item.ID,
+		Name:        req.Name,
+		Type:        req.Type,
+		Config:      cfg,
+		Description: req.Description,
+		ReadOnly:    req.ReadOnly,
+		CreatedAt:   s.item.CreatedAt,
+		UpdatedAt:   time.Now().UTC(),
+	}
+	return s.item, nil
+}
+
+func (s *stubHTTPToolManager) Delete(_ context.Context, id uuid.UUID) error {
+	s.deleted = append(s.deleted, id)
+	return nil
+}
+
+func (s *stubHTTPToolManager) BindToSkill(_ context.Context, skillID uuid.UUID, req tool.BindRequest) (tool.SkillToolResponse, error) {
+	s.bound = append(s.bound, skillID)
+	return tool.SkillToolResponse{SkillID: skillID, Tool: s.item}, nil
+}
+
+func (s *stubHTTPToolManager) UnbindFromSkill(_ context.Context, skillID, toolID uuid.UUID) error {
+	s.unbound = append(s.unbound, skillID)
+	return nil
+}
+
+type stubManagementRepo struct {
+	skills  []generatedSkillFixture
+	deleted []uuid.UUID
+	updated []uuid.UUID
+	counts  map[uuid.UUID]int
+}
+
+type generatedSkillFixture struct {
+	id          uuid.UUID
+	name        string
+	description string
+	category    string
+}
+
+func (s *stubManagementRepo) ListSkillsByToolID(_ context.Context, _ uuid.UUID) ([]integrationGeneratedSkill, error) {
+	out := make([]integrationGeneratedSkill, 0, len(s.skills))
+	for _, item := range s.skills {
+		out = append(out, integrationGeneratedSkill{ID: item.id, Name: item.name, Description: item.description, Category: item.category})
+	}
+	return out, nil
+}
+
+func (s *stubManagementRepo) UpdateSkillMetadata(_ context.Context, skillID uuid.UUID, _, _ string) error {
+	s.updated = append(s.updated, skillID)
+	return nil
+}
+
+func (s *stubManagementRepo) CountToolBindings(_ context.Context, skillID uuid.UUID) (int, error) {
+	if s.counts == nil {
+		return 0, nil
+	}
+	return s.counts[skillID], nil
+}
+
+func (s *stubManagementRepo) DeleteSkill(_ context.Context, skillID uuid.UUID) error {
+	s.deleted = append(s.deleted, skillID)
+	return nil
+}
+
+type integrationGeneratedSkill = integration.GeneratedSkill
 
 func TestService_List_AggregatesLegacySources(t *testing.T) {
 	now := time.Now().UTC()
@@ -210,4 +331,73 @@ func TestService_List_AppliesFilters(t *testing.T) {
 	assert.Equal(t, integration.IntegrationTypeMCP, page.Content[0].Type)
 	assert.False(t, page.Content[0].Enabled)
 	assert.Equal(t, integration.IntegrationOriginLegacy, page.Content[0].Origin)
+}
+
+func TestService_CreateHTTP_GeneratesSkillAndTool(t *testing.T) {
+	skillCreator := &stubSkillCreator{resp: skill.Response{ID: uuid.New()}}
+	toolManager := &stubHTTPToolManager{}
+	repo := &stubManagementRepo{}
+	svc := integration.NewService(&stubToolCatalog{}, &stubDatasourceCatalog{}, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(skillCreator, toolManager, repo)
+
+	resp, err := svc.CreateHTTP(context.Background(), integration.HTTPCreateRequest{
+		Name:        "ERP API",
+		Description: "Sync customers",
+		Method:      "post",
+		URL:         "https://api.example.com/customers",
+		ReadOnly:    false,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ERP API", resp.Name)
+	assert.Len(t, skillCreator.created, 1)
+	assert.Equal(t, "INTEGRATION_HTTP", skillCreator.created[0].Category)
+	assert.Len(t, toolManager.created, 1)
+	assert.Equal(t, tool.ToolTypeHTTP, toolManager.created[0].Type)
+	assert.Len(t, toolManager.bound, 1)
+}
+
+func TestService_UpdateHTTP_UpdatesGeneratedSkillMetadata(t *testing.T) {
+	skillID := uuid.New()
+	toolID := uuid.New()
+	toolManager := &stubHTTPToolManager{item: tool.Response{
+		ID:          toolID,
+		Name:        "Old ERP API",
+		Type:        tool.ToolTypeHTTP,
+		Config:      map[string]any{"url": "https://old.example.com", "method": "GET"},
+		Description: "old",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{id: skillID, category: "INTEGRATION_HTTP"}}}
+	svc := integration.NewService(&stubToolCatalog{}, &stubDatasourceCatalog{}, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+
+	resp, err := svc.UpdateHTTP(context.Background(), toolID, integration.HTTPCreateRequest{
+		Name:        "ERP API Updated",
+		Description: "new",
+		Method:      "PATCH",
+		URL:         "https://api.example.com/customers",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ERP API Updated", resp.Name)
+	assert.Len(t, toolManager.updated, 1)
+	assert.Equal(t, []uuid.UUID{skillID}, repo.updated)
+}
+
+func TestService_DeleteHTTP_RemovesGeneratedOrphanSkills(t *testing.T) {
+	skillID := uuid.New()
+	toolID := uuid.New()
+	toolManager := &stubHTTPToolManager{item: tool.Response{ID: toolID, Type: tool.ToolTypeHTTP}}
+	repo := &stubManagementRepo{
+		skills: []generatedSkillFixture{{id: skillID, category: "INTEGRATION_HTTP"}},
+		counts: map[uuid.UUID]int{skillID: 0},
+	}
+	svc := integration.NewService(&stubToolCatalog{}, &stubDatasourceCatalog{}, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+
+	err := svc.DeleteHTTP(context.Background(), toolID)
+	require.NoError(t, err)
+	assert.Equal(t, []uuid.UUID{skillID}, toolManager.unbound)
+	assert.Equal(t, []uuid.UUID{toolID}, toolManager.deleted)
+	assert.Equal(t, []uuid.UUID{skillID}, repo.deleted)
 }

@@ -2,6 +2,8 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/vpnresource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
@@ -19,6 +22,7 @@ import (
 )
 
 const catalogScanSize = 1000
+const generatedHTTPSkillCategory = "INTEGRATION_HTTP"
 
 type toolCatalog interface {
 	List(ctx context.Context, req pagination.PageRequest, toolType string) (pagination.Page[tool.Response], error)
@@ -36,12 +40,28 @@ type vpnCatalog interface {
 	ListAll(ctx context.Context, tenantID string, pr pagination.PageRequest) ([]vpnresource.VpnResource, int, error)
 }
 
+type skillCreator interface {
+	Create(ctx context.Context, req skill.CreateRequest) (skill.Response, error)
+}
+
+type httpToolManager interface {
+	Create(ctx context.Context, req tool.CreateRequest) (tool.Response, error)
+	GetByID(ctx context.Context, id uuid.UUID) (tool.Response, error)
+	Update(ctx context.Context, id uuid.UUID, req tool.UpdateRequest) (tool.Response, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+	BindToSkill(ctx context.Context, skillID uuid.UUID, req tool.BindRequest) (tool.SkillToolResponse, error)
+	UnbindFromSkill(ctx context.Context, skillID, toolID uuid.UUID) error
+}
+
 // Service aggregates legacy admin entities into a simplified integration catalog.
 type Service struct {
 	tools       toolCatalog
 	datasources datasourceCatalog
 	mcps        mcpCatalog
 	vpns        vpnCatalog
+	skillMgmt   skillCreator
+	httpTools   httpToolManager
+	repo        managementRepository
 }
 
 // NewService creates a new integration catalog service.
@@ -52,6 +72,14 @@ func NewService(tools toolCatalog, datasources datasourceCatalog, mcps mcpCatalo
 		mcps:        mcps,
 		vpns:        vpns,
 	}
+}
+
+// WithHTTPManagement wires the dependencies required by the simplified HTTP integration CRUD.
+func (s *Service) WithHTTPManagement(skills skillCreator, tools httpToolManager, repo managementRepository) *Service {
+	s.skillMgmt = skills
+	s.httpTools = tools
+	s.repo = repo
+	return s
 }
 
 // List returns a paginated, filtered view of the unified integration catalog.
@@ -170,6 +198,225 @@ func filterItems(items []Integration, filters ListFilters) []Integration {
 		filtered = append(filtered, item)
 	}
 	return filtered
+}
+
+// CreateHTTP creates a simplified HTTP integration backed by a generated skill + tool pair.
+func (s *Service) CreateHTTP(ctx context.Context, req HTTPCreateRequest) (HTTPResponse, error) {
+	if err := validateHTTPRequest(req); err != nil {
+		return HTTPResponse{}, err
+	}
+	if s.skillMgmt == nil || s.httpTools == nil || s.repo == nil {
+		return HTTPResponse{}, errors.New("integration service: HTTP management not configured")
+	}
+
+	skillResp, err := s.skillMgmt.Create(ctx, skill.CreateRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		Category:    generatedHTTPSkillCategory,
+		InputSchema: req.InputSchema,
+	})
+	if err != nil {
+		return HTTPResponse{}, fmt.Errorf("integration service: create HTTP skill: %w", err)
+	}
+
+	toolResp, err := s.httpTools.Create(ctx, tool.CreateRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		Type:        tool.ToolTypeHTTP,
+		Config:      buildHTTPConfig(req),
+		ReadOnly:    req.ReadOnly,
+	})
+	if err != nil {
+		_ = s.repo.DeleteSkill(ctx, skillResp.ID)
+		return HTTPResponse{}, fmt.Errorf("integration service: create HTTP tool: %w", err)
+	}
+
+	_, err = s.httpTools.BindToSkill(ctx, skillResp.ID, tool.BindRequest{ToolID: toolResp.ID, Priority: 0})
+	if err != nil {
+		_ = s.httpTools.Delete(ctx, toolResp.ID)
+		_ = s.repo.DeleteSkill(ctx, skillResp.ID)
+		return HTTPResponse{}, fmt.Errorf("integration service: bind HTTP tool to skill: %w", err)
+	}
+
+	return httpResponseFromTool(toolResp)
+}
+
+// GetHTTP returns a simplified HTTP integration by its backing tool ID.
+func (s *Service) GetHTTP(ctx context.Context, id uuid.UUID) (HTTPResponse, error) {
+	if s.httpTools == nil {
+		return HTTPResponse{}, errors.New("integration service: HTTP management not configured")
+	}
+	item, err := s.httpTools.GetByID(ctx, id)
+	if err != nil {
+		return HTTPResponse{}, err
+	}
+	if item.Type != tool.ToolTypeHTTP {
+		return HTTPResponse{}, fmt.Errorf("integration service: tool %s is not an HTTP integration", id)
+	}
+	return httpResponseFromTool(item)
+}
+
+// UpdateHTTP updates the generated HTTP integration and its companion generated skill metadata when present.
+func (s *Service) UpdateHTTP(ctx context.Context, id uuid.UUID, req HTTPCreateRequest) (HTTPResponse, error) {
+	if err := validateHTTPRequest(req); err != nil {
+		return HTTPResponse{}, err
+	}
+	if s.httpTools == nil || s.repo == nil {
+		return HTTPResponse{}, errors.New("integration service: HTTP management not configured")
+	}
+
+	current, err := s.httpTools.GetByID(ctx, id)
+	if err != nil {
+		return HTTPResponse{}, err
+	}
+	if current.Type != tool.ToolTypeHTTP {
+		return HTTPResponse{}, fmt.Errorf("integration service: tool %s is not an HTTP integration", id)
+	}
+
+	updated, err := s.httpTools.Update(ctx, id, tool.UpdateRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		Type:        tool.ToolTypeHTTP,
+		Config:      buildHTTPConfig(req),
+		ReadOnly:    req.ReadOnly,
+	})
+	if err != nil {
+		return HTTPResponse{}, fmt.Errorf("integration service: update HTTP tool: %w", err)
+	}
+
+	linkedSkills, err := s.repo.ListSkillsByToolID(ctx, id)
+	if err != nil {
+		return HTTPResponse{}, fmt.Errorf("integration service: load linked skills: %w", err)
+	}
+	for _, sk := range linkedSkills {
+		if sk.Category != generatedHTTPSkillCategory {
+			continue
+		}
+		if err := s.repo.UpdateSkillMetadata(ctx, sk.ID, req.Name, req.Description); err != nil {
+			return HTTPResponse{}, fmt.Errorf("integration service: update generated skill: %w", err)
+		}
+	}
+
+	return httpResponseFromTool(updated)
+}
+
+// DeleteHTTP removes the HTTP tool and deletes generated skills that become orphaned after the unbind.
+func (s *Service) DeleteHTTP(ctx context.Context, id uuid.UUID) error {
+	if s.httpTools == nil || s.repo == nil {
+		return errors.New("integration service: HTTP management not configured")
+	}
+
+	linkedSkills, err := s.repo.ListSkillsByToolID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("integration service: load linked skills: %w", err)
+	}
+
+	for _, sk := range linkedSkills {
+		if err := s.httpTools.UnbindFromSkill(ctx, sk.ID, id); err != nil && !errors.Is(err, tool.ErrNotFound) {
+			return fmt.Errorf("integration service: unbind HTTP tool from skill: %w", err)
+		}
+	}
+	if err := s.httpTools.Delete(ctx, id); err != nil {
+		return fmt.Errorf("integration service: delete HTTP tool: %w", err)
+	}
+
+	for _, sk := range linkedSkills {
+		if sk.Category != generatedHTTPSkillCategory {
+			continue
+		}
+		bindings, err := s.repo.CountToolBindings(ctx, sk.ID)
+		if err != nil {
+			return fmt.Errorf("integration service: count generated skill bindings: %w", err)
+		}
+		if bindings == 0 {
+			if err := s.repo.DeleteSkill(ctx, sk.ID); err != nil {
+				return fmt.Errorf("integration service: delete generated skill: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func validateHTTPRequest(req HTTPCreateRequest) error {
+	if strings.TrimSpace(req.Name) == "" {
+		return fmt.Errorf("integration service: name is required")
+	}
+	if strings.TrimSpace(req.URL) == "" {
+		return fmt.Errorf("integration service: url is required")
+	}
+	return nil
+}
+
+func buildHTTPConfig(req HTTPCreateRequest) json.RawMessage {
+	payload := map[string]any{
+		"url":          strings.TrimSpace(req.URL),
+		"method":       normaliseHTTPMethod(req.Method),
+		"bodyTemplate": req.BodyTemplate,
+		"inputSchema":  decodeJSONOrNil(req.InputSchema),
+	}
+	if headers := decodeJSONOrNil(req.Headers); headers != nil {
+		payload["headers"] = headers
+	}
+	if req.CredentialID != nil && strings.TrimSpace(*req.CredentialID) != "" {
+		payload["credentialId"] = strings.TrimSpace(*req.CredentialID)
+	}
+	if responseMapping := decodeJSONOrNil(req.ResponseMapping); responseMapping != nil {
+		payload["responseMapping"] = responseMapping
+	}
+	raw, _ := json.Marshal(payload)
+	return raw
+}
+
+func httpResponseFromTool(item tool.Response) (HTTPResponse, error) {
+	config := asMap(item.Config)
+	var inputSchema any
+	if raw := config["inputSchema"]; raw != nil {
+		inputSchema = raw
+	}
+	return HTTPResponse{
+		ID:              item.ID,
+		Name:            item.Name,
+		Description:     item.Description,
+		Method:          normaliseHTTPMethod(asString(config["method"])),
+		URL:             asString(config["url"]),
+		Headers:         config["headers"],
+		BodyTemplate:    asString(config["bodyTemplate"]),
+		CredentialID:    stringPtr(asString(config["credentialId"])),
+		ResponseMapping: config["responseMapping"],
+		InputSchema:     inputSchema,
+		ReadOnly:        item.ReadOnly,
+		CreatedAt:       item.CreatedAt,
+		UpdatedAt:       item.UpdatedAt,
+		LegacyPath:      legacyEditPath(SourceKindTool, item.ID),
+	}, nil
+}
+
+func decodeJSONOrNil(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func normaliseHTTPMethod(method string) string {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		return httpMethodDefault
+	}
+	return method
+}
+
+func stringPtr(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	trimmed := strings.TrimSpace(value)
+	return &trimmed
 }
 
 func buildHTTPIntegration(item tool.Response) Integration {

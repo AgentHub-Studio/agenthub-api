@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,4 +41,36 @@ func ResponseFrom(item Integration) Response {
 		CreatedAt:   item.CreatedAt,
 		UpdatedAt:   item.UpdatedAt,
 	}
+}
+
+// HTTPCreateRequest is the simplified payload for HTTP/API integrations.
+type HTTPCreateRequest struct {
+	Name            string          `json:"name"`
+	Description     string          `json:"description"`
+	Method          string          `json:"method"`
+	URL             string          `json:"url"`
+	Headers         json.RawMessage `json:"headers"`
+	BodyTemplate    string          `json:"bodyTemplate"`
+	CredentialID    *string         `json:"credentialId"`
+	ResponseMapping json.RawMessage `json:"responseMapping"`
+	InputSchema     json.RawMessage `json:"inputSchema"`
+	ReadOnly        bool            `json:"readOnly"`
+}
+
+// HTTPResponse is the editable representation used by the simplified HTTP form.
+type HTTPResponse struct {
+	ID              uuid.UUID `json:"id"`
+	Name            string    `json:"name"`
+	Description     string    `json:"description"`
+	Method          string    `json:"method"`
+	URL             string    `json:"url"`
+	Headers         any       `json:"headers"`
+	BodyTemplate    string    `json:"bodyTemplate"`
+	CredentialID    *string   `json:"credentialId,omitempty"`
+	ResponseMapping any       `json:"responseMapping"`
+	InputSchema     any       `json:"inputSchema"`
+	ReadOnly        bool      `json:"readOnly"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+	LegacyPath      string    `json:"legacyPath"`
 }
