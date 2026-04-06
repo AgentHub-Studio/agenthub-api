@@ -451,7 +451,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 
 	// 1. Check if registered
 	statusURL := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 5; i++ {
 		resp, err := http.Get(statusURL)
 		if err == nil {
 			defer resp.Body.Close()
@@ -464,11 +464,17 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 					if status.Status == "running" {
 						return nil
 					}
-					log.Printf("mcp service: server %s registered but status is %s, waiting...", config.Name, status.Status)
+					log.Printf("mcp service: server %s registered but status is %s, starting...", config.Name, status.Status)
+					
+					// Try to start explicitly
+					startURL := fmt.Sprintf("%s/servers/%s/start", s.mcpRuntimeURL, config.Name)
+					if startResp, startErr := http.Post(startURL, "application/json", nil); startErr == nil {
+						startResp.Body.Close()
+					}
 				}
 			}
 		}
-		time.Sleep(1 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 
 	// 2. Not registered or not running, register/start it
