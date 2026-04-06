@@ -109,3 +109,10 @@ type AuthMetadata struct {
 type ConnectURLResponse struct {
 	URL string `json:"url"`
 }
+
+// ToolResponse represents a tool exposed by an MCP server.
+type ToolResponse struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	InputSchema map[string]interface{} `json:"inputSchema"`
+}

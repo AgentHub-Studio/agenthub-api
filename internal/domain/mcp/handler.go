@@ -23,6 +23,7 @@ type mcpService interface {
 	GetAuthStatus(ctx context.Context, id uuid.UUID) (AuthStatusResponse, error)
 	GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL string) (ConnectURLResponse, error)
 	HandleOAuthCallback(ctx context.Context, mcpServerID uuid.UUID, code string) error
+	ListTools(ctx context.Context, id uuid.UUID) ([]ToolResponse, error)
 }
 
 // listResponse wraps the flat slice in the Page envelope expected by the frontend.
@@ -51,6 +52,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/mcp-server-configs/{id}/auth-status", h.getAuthStatus)
 	r.Get("/api/mcp-server-configs/{id}/connect", h.getConnectURL)
 	r.Post("/api/mcp-server-configs/{id}/callback", h.handleCallback)
+	r.Get("/api/mcp-server-configs/{id}/tools", h.listTools)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +191,22 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.JSON(w, http.StatusOK, map[string]string{"status": "connected"})
+}
+
+func (h *Handler) listTools(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	resp, err := h.svc.ListTools(r.Context(), id)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respond.JSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) getConnectURL(w http.ResponseWriter, r *http.Request) {

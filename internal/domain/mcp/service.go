@@ -400,6 +400,44 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, mcpServerID uuid.UUID
 	return nil
 }
 
+// ListTools fetches the tools exposed by an MCP server from the runtime.
+func (s *Service) ListTools(ctx context.Context, id uuid.UUID) ([]ToolResponse, error) {
+	config, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("mcp service: tools: %w", err)
+	}
+
+	if s.mcpRuntimeURL == "" {
+		return nil, fmt.Errorf("mcp service: tools: MCP runtime URL not configured")
+	}
+
+	url := fmt.Sprintf("%s/servers/%s/tools", s.mcpRuntimeURL, config.Name)
+	log.Printf("mcp service: fetching tools from %s", url)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("mcp service: tools: failed to contact runtime: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		return nil, fmt.Errorf("mcp service: tools: runtime error: %s", errResp.Error)
+	}
+
+	var result struct {
+		Tools []ToolResponse `json:"tools"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("mcp service: tools: failed to decode response: %w", err)
+	}
+
+	return result.Tools, nil
+}
+
 // discoverAuthServerMetadata implements the MCP spec discovery flow (mirrors mcp-go oauth.go getServerMetadata):
 // 1. Try /.well-known/oauth-protected-resource on the MCP server (RFC 9728)
 // 2. If that returns authorization_servers, fetch metadata from the first one
