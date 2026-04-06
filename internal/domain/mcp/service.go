@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -275,7 +276,7 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		// DCR logic
 		dcrReq := map[string]interface{}{
 			"client_name":   "AgentHub MCP Client",
-			"redirect_uris": []string{"https://api.cezar.dev/api/mcp/callback"},
+			"redirect_uris": []string{redirectURL}, // Use the actual redirectURL passed from frontend
 			"grant_types":   []string{"authorization_code", "refresh_token"},
 		}
 		body, _ := json.Marshal(dcrReq)
@@ -283,11 +284,17 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		hReq, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(body)))
 		hReq.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(hReq)
-		if err == nil && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated) {
+		if err != nil {
+			fmt.Printf("mcp service: DCR failed for %s: %v\n", config.Name, err)
+		} else if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			respBody, _ := io.ReadAll(resp.Body)
+			fmt.Printf("mcp service: DCR failed for %s (Status: %d): %s\n", config.Name, resp.StatusCode, string(respBody))
+			resp.Body.Close()
+		} else {
 			var dcrResp DCRResponse
 			if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err == nil {
 				clientID = dcrResp.ClientID
-				// If we got a secret, we'll need to handle it. For PKCE it might not be required.
+				fmt.Printf("mcp service: DCR successful for %s, ClientID: %s\n", config.Name, clientID)
 			}
 			resp.Body.Close()
 		}
@@ -345,13 +352,8 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		return ConnectURLResponse{}, fmt.Errorf("mcp service: authURL is empty for MCP %s (URL: %s). Server discovery failed and no fallback available.", id.String(), url)
 	}
 
-	// For Authorization Code flow, we generally need a clientID.
-	// If it's missing, and we're not using dynamic registration, we might fail later.
-	// But let's allow the flow to proceed if discovery found everything else.
 	if clientID == "" {
-		// Atlassian and others might support dynamic client registration (RFC 7591)
-		// which the MCP spec allows. In that case, the clientID is obtained on the fly.
-		// For now, we just warn or use a placeholder if we have one.
+		return ConnectURLResponse{}, fmt.Errorf("mcp service: clientID is empty for MCP %s. Ensure dynamic registration (DCR) is supported or linked OAuth credential has ClientID", id)
 	}
 
 	// PKCE is REQUIRED by OAuth 2.1 (and thus the MCP draft)
