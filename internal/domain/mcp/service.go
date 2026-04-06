@@ -242,6 +242,8 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	// 1. Ensure server is registered in runtime
 	if s.mcpRuntimeURL != "" {
 		_ = s.ensureServerRegistered(ctx, config)
+		// Wait a bit for discovery to occur if it just registered
+		time.Sleep(2 * time.Second)
 	}
 
 	// 2. Check if we have local discovery metadata from runtime
@@ -278,12 +280,13 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	scopes := discoveredScopes
 
 	// 2. Perform Dynamic Client Registration if we have a registrationURL and no clientID
-	if registrationURL != "" && clientID == "" {
+	if registrationURL != "" && clientID == "" && s.mcpRuntimeURL != "" {
 		// DCR logic
 		dcrReq := map[string]interface{}{
 			"client_name":   "AgentHub MCP Client",
 			"redirect_uris": []string{redirectURL}, // Use the actual redirectURL passed from frontend
 			"grant_types":   []string{"authorization_code", "refresh_token"},
+			"response_types": []string{"code"},
 		}
 		body, _ := json.Marshal(dcrReq)
 		url := fmt.Sprintf("%s/servers/%s/register-client", s.mcpRuntimeURL, config.Name)
@@ -292,17 +295,18 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		resp, err := http.DefaultClient.Do(hReq)
 		if err != nil {
 			fmt.Printf("mcp service: DCR failed for %s: %v\n", config.Name, err)
-		} else if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-			respBody, _ := io.ReadAll(resp.Body)
-			fmt.Printf("mcp service: DCR failed for %s (Status: %d): %s\n", config.Name, resp.StatusCode, string(respBody))
-			resp.Body.Close()
 		} else {
-			var dcrResp DCRResponse
-			if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err == nil {
-				clientID = dcrResp.ClientID
-				fmt.Printf("mcp service: DCR successful for %s, ClientID: %s\n", config.Name, clientID)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+				respBody, _ := io.ReadAll(resp.Body)
+				fmt.Printf("mcp service: DCR failed for %s (Status: %d): %s\n", config.Name, resp.StatusCode, string(respBody))
+			} else {
+				var dcrResp DCRResponse
+				if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err == nil {
+					clientID = dcrResp.ClientID
+					fmt.Printf("mcp service: DCR successful for %s, ClientID: %s\n", config.Name, clientID)
+				}
 			}
-			resp.Body.Close()
 		}
 	}
 
