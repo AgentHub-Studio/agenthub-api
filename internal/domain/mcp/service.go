@@ -23,8 +23,9 @@ type oauthService interface {
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (oauth.OAuthCredential, error)
 	Create(ctx context.Context, tenantID string, req oauth.CreateRequest) (oauth.OAuthCredential, error)
 	Update(ctx context.Context, tenantID string, id uuid.UUID, req oauth.CreateRequest) (oauth.OAuthCredential, error)
-	GeneratePKCE() (verifier string, challenge string)
 	ExchangeCode(ctx context.Context, tenantID string, id uuid.UUID, code string) error
+	DecryptSecret(ciphertext *string) (*string, error)
+	GeneratePKCE() (string, string)
 }
 
 // Service provides business logic for McpServerConfig operations.
@@ -396,6 +397,18 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, mcpServerID uuid.UUID
 		return fmt.Errorf("mcp service: callback: token exchange failed: %w", err)
 	}
 
+	// Unregister the server from the runtime so that the next request forces a reload of the new tokens
+	if s.mcpRuntimeURL != "" {
+		req, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/servers/%s", s.mcpRuntimeURL, config.Name), nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			log.Printf("mcp service: unregistered server %s from runtime to force token reload", config.Name)
+		} else {
+			log.Printf("mcp service: failed to unregister server %s: %v", config.Name, err)
+		}
+	}
+
 	log.Printf("mcp service: OAuth token exchange successful for MCP %s", mcpServerID)
 	return nil
 }
@@ -519,6 +532,16 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 			}
 			if cred.Scopes != nil {
 				regReq["oauthScopes"] = strings.Split(*cred.Scopes, " ")
+			}
+			if cred.BearerToken != nil {
+				if dec, err := s.oauthSvc.DecryptSecret(cred.BearerToken); err == nil && dec != nil {
+					regReq["oauthBearerToken"] = *dec
+				}
+			}
+			if cred.RefreshToken != nil {
+				if dec, err := s.oauthSvc.DecryptSecret(cred.RefreshToken); err == nil && dec != nil {
+					regReq["oauthRefreshToken"] = *dec
+				}
 			}
 		}
 	}
