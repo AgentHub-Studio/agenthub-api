@@ -175,7 +175,7 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	}
 
 	// 2. Execute the run
-	events, err := e.runner.RunSession(ctx, RunInput{
+	runEvents, err := e.runner.RunSession(ctx, RunInput{
 		RunID:       task.RunID,
 		SessionID:   task.SessionID,
 		AgentID:     *session.AgentID,
@@ -190,21 +190,13 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	}
 
 	// Drain events to allow the runner to finish and persist messages.
-	// Events are also buffered in memory (RunEventBufferRegistry) for SSE Resume.
-	for event := range events {
-		// Persist assistant messages and tool calls to the database.
-		// In background mode, we must ensure messages are recorded since there's no HTTP handler.
-		if event.Type == "message" {
-			var msg ChatMessage
-			if err := json.Unmarshal(event.Data, &msg); err == nil {
-				msg.SessionID = task.SessionID
-				msg.RunID = &task.RunID
-				e.repo.CreateMessage(ctx, msg)
-			}
+	// The Runner itself handles persistence of messages (CreateMessage)
+	// so we just need to wait for the events channel to close.
+	for event := range runEvents {
+		// We could optionally log events here for background monitoring
+		if event.Type == "error" {
+			slog.Error("chat: background run error event", "runId", task.RunID, "data", string(event.Data))
 		}
-		// We could publish events back to RabbitMQ for real-time notifications
-		// or just let them be buffered for polling/resume.
-		_ = event
 	}
 
 	e.repo.MarkRunCompleted(ctx, task.RunID)
