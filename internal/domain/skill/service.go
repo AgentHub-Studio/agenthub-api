@@ -55,11 +55,16 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	}
 
 	sk := Skill{
-		Name:         req.Name,
-		Slug:         slug,
-		Description:  req.Description,
-		Instructions: req.Instructions,
-		Category:     req.Category,
+		Name:                   req.Name,
+		Slug:                   slug,
+		Description:            req.Description,
+		Instructions:           req.Instructions,
+		Category:               req.Category,
+		AllowedTools:           req.AllowedTools,
+		DisableModelInvocation: req.DisableModelInvocation,
+		ContextMode:            req.ContextMode,
+		WhenToUse:              req.WhenToUse,
+		ArgumentHint:           req.ArgumentHint,
 	}
 	created, err := s.repo.Create(ctx, sk)
 	if err != nil {

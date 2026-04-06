@@ -8,19 +8,29 @@ import (
 
 // CreateRequest is the payload for creating a skill.
 type CreateRequest struct {
-	Name         string `json:"name"`
-	Slug         string `json:"slug"`
-	Description  string `json:"description"`
-	Instructions string `json:"instructions"`
-	Category     string `json:"category"`
+	Name                   string   `json:"name"`
+	Slug                   string   `json:"slug"`
+	Description            string   `json:"description"`
+	Instructions           string   `json:"instructions"`
+	Category               string   `json:"category"`
+	AllowedTools           []string `json:"allowedTools"`
+	DisableModelInvocation bool     `json:"disableModelInvocation"`
+	ContextMode            string   `json:"contextMode"`
+	WhenToUse              *string  `json:"whenToUse"`
+	ArgumentHint           *string  `json:"argumentHint"`
 }
 
 // UpdateRequest is the payload for updating a skill.
 type UpdateRequest struct {
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Instructions string `json:"instructions"`
-	Category     string `json:"category"`
+	Name                   string   `json:"name"`
+	Description            string   `json:"description"`
+	Instructions           string   `json:"instructions"`
+	Category               string   `json:"category"`
+	AllowedTools           []string `json:"allowedTools"`
+	DisableModelInvocation bool     `json:"disableModelInvocation"`
+	ContextMode            string   `json:"contextMode"`
+	WhenToUse              *string  `json:"whenToUse"`
+	ArgumentHint           *string  `json:"argumentHint"`
 }
 
 // Response is the JSON representation of a Skill.
@@ -31,7 +41,11 @@ type Response struct {
 	Description            string    `json:"description"`
 	Instructions           string    `json:"instructions"`
 	Category               string    `json:"category"`
+	AllowedTools           []string  `json:"allowedTools"`
 	DisableModelInvocation bool      `json:"disableModelInvocation"`
+	ContextMode            string    `json:"contextMode"`
+	WhenToUse              *string   `json:"whenToUse"`
+	ArgumentHint           *string   `json:"argumentHint"`
 	CreatedAt              time.Time `json:"createdAt"`
 	UpdatedAt              time.Time `json:"updatedAt"`
 }
@@ -45,7 +59,11 @@ func ResponseFrom(s Skill) Response {
 		Description:            s.Description,
 		Instructions:           s.Instructions,
 		Category:               s.Category,
+		AllowedTools:           s.AllowedTools,
 		DisableModelInvocation: s.DisableModelInvocation,
+		ContextMode:            s.ContextMode,
+		WhenToUse:              s.WhenToUse,
+		ArgumentHint:           s.ArgumentHint,
 		CreatedAt:              s.CreatedAt,
 		UpdatedAt:              s.UpdatedAt,
 	}
