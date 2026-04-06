@@ -14,8 +14,6 @@ type Skill struct {
 	Description  string    `db:"description"`
 	Instructions string    `db:"instructions"`
 	Category     string    `db:"category"`
-	InputSchema  []byte    `db:"input_schema"`
-	OutputSchema []byte    `db:"output_schema"`
 	// AllowedTools restricts which tools this skill can use when invoked.
 	// Empty means all tools are allowed. Inspired by Claude Code's
 	// BundledSkillDefinition.allowedTools for fine-grained security.

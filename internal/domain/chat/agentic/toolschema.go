@@ -156,28 +156,19 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// as they are managed via the Integrations tab and should be globally available.
 	integrationCategories := []string{"INTEGRATION_HTTP", "INTEGRATION_DATABASE"}
 	for _, cat := range integrationCategories {
-		page, err := b.skills.List(ctx, &cat, pagination.PageRequest{Page: 0, Size: 100})
+		content, _, err := b.skills.List(ctx, &cat, pagination.PageRequest{Page: 0, Size: 100})
 		if err == nil {
-			for _, resp := range page.Content {
+			for _, skItem := range content {
 				// Avoid duplicates if already explicitly linked
 				exists := false
 				for _, sk := range skills {
-					if sk.ID == resp.ID {
+					if sk.ID == skItem.ID {
 						exists = true
 						break
 					}
 				}
 				if !exists {
-					skills = append(skills, skill.Skill{
-						ID:                     resp.ID,
-						Name:                   resp.Name,
-						Slug:                   resp.Slug,
-						Description:            resp.Description,
-						Category:               resp.Category,
-						InputSchema:            resp.InputSchema,
-						OutputSchema:           resp.OutputSchema,
-						DisableModelInvocation: resp.DisableModelInvocation,
-					})
+					skills = append(skills, skItem)
 				}
 			}
 		}
@@ -215,26 +206,18 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 		var kbs []knowledgebase.KnowledgeBase = kbsResp
 
 		// Auto-include tenant-wide KBs that are not explicitly linked
-		allKbsPage, err := b.kbs.List(ctx, pagination.PageRequest{Page: 0, Size: 100})
+		allKbs, _, err := b.kbs.List(ctx, pagination.PageRequest{Page: 0, Size: 100})
 		if err == nil {
-			for _, resp := range allKbsPage.Content {
+			for _, kbItem := range allKbs {
 				exists := false
 				for _, existing := range kbs {
-					if existing.ID == resp.ID {
+					if existing.ID == kbItem.ID {
 						exists = true
 						break
 					}
 				}
 				if !exists {
-					kbs = append(kbs, knowledgebase.KnowledgeBase{
-						ID:             resp.ID,
-						Name:           resp.Name,
-						Description:    resp.Description,
-						Status:         resp.Status,
-						EmbeddingModel: resp.EmbeddingModel,
-						SearchMode:     resp.SearchMode,
-						ContextWindow:  resp.ContextWindow,
-					})
+					kbs = append(kbs, kbItem)
 				}
 			}
 		}
@@ -353,7 +336,12 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		description = sk.Name
 	}
 
-	inputSchema := normaliseSchema(sk.InputSchema)
+	// 4. Use instructions as part of the description if available.
+	if sk.Instructions != "" {
+		description = fmt.Sprintf("%s\n\nInstructions:\n%s", description, sk.Instructions)
+	}
+
+	inputSchema := json.RawMessage(`{"type":"object","properties":{}}`)
 	readOnly := IsReadOnlyTool(sk.Slug)
 	shouldDefer := false
 	isDestructive := false
@@ -372,12 +360,10 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		}
 		for i, bt := range bindings {
 			if bt.IsActive && i < len(boundTools) {
-				// Derive schema from tool config if skill has none.
-				if len(inputSchema) == 0 {
-					derived := deriveSchemaFromToolConfig(boundTools[i])
-					if len(derived) > 0 {
-						inputSchema = derived
-					}
+				// Derive schema from tool config.
+				derived := deriveSchemaFromToolConfig(boundTools[i])
+				if len(derived) > 0 {
+					inputSchema = derived
 				}
 				// Use DB flags from bound tool.
 				if boundTools[i].ReadOnly {
@@ -416,11 +402,6 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		inputSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 	}
 
-	whenToUse := ""
-	if sk.WhenToUse != nil {
-		whenToUse = *sk.WhenToUse
-	}
-
 	return LLMTool{
 		Name:                   sk.Slug,
 		Description:            description,
@@ -434,8 +415,6 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		AlwaysLoad:             alwaysLoad,
 		DisableModelInvocation: sk.DisableModelInvocation,
 		ConcurrencySafe:        concurrencySafe,
-		ContextMode:            sk.ContextMode,
-		WhenToUse:              whenToUse,
 		InterruptBehavior:      interruptBehavior,
 		IsSearchOrRead:         isSearchOrRead,
 	}, nil

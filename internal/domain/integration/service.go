@@ -234,10 +234,10 @@ func (s *Service) CreateDatabase(ctx context.Context, req DatabaseCreateRequest)
 	}
 
 	skillResp, err := s.skillMgmt.Create(ctx, skill.CreateRequest{
-		Name:        req.Name,
-		Description: req.Description,
-		Category:    generatedDatabaseSkillCategory,
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+		Name:         req.Name,
+		Description:  req.Description,
+		Instructions: fmt.Sprintf("Use this skill to execute SQL queries against the %s database. Ensure the queries are valid and respect the schema.", req.Name),
+		Category:     generatedDatabaseSkillCategory,
 	})
 	if err != nil {
 		_ = s.datasources.Delete(ctx, tenantID, ds.ID)
@@ -400,10 +400,10 @@ func (s *Service) CreateHTTP(ctx context.Context, req HTTPCreateRequest) (HTTPRe
 	}
 
 	skillResp, err := s.skillMgmt.Create(ctx, skill.CreateRequest{
-		Name:        req.Name,
-		Description: req.Description,
-		Category:    generatedHTTPSkillCategory,
-		InputSchema: req.InputSchema,
+		Name:         req.Name,
+		Description:  req.Description,
+		Instructions: fmt.Sprintf("Use this skill to interact with the %s API. Describe the endpoint purpose and parameters here.", req.Name),
+		Category:     generatedHTTPSkillCategory,
 	})
 	if err != nil {
 		return HTTPResponse{}, fmt.Errorf("integration service: create HTTP skill: %w", err)

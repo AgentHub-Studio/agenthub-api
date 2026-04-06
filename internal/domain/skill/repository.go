@@ -62,7 +62,7 @@ func (r *Repository) List(ctx context.Context, category *string, req pagination.
 	}
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, name, slug, description, category, input_schema, output_schema, created_at, updated_at, instructions
+		`SELECT id, name, slug, description, category, created_at, updated_at, instructions
 		 FROM skill
 		 WHERE ($1::text IS NULL OR category = $1)
 		 ORDER BY name
@@ -94,20 +94,11 @@ func (r *Repository) Create(ctx context.Context, s Skill) (Skill, error) {
 	}
 	defer release()
 
-	inSchema := s.InputSchema
-	if len(inSchema) == 0 {
-		inSchema = []byte("{}")
-	}
-	outSchema := s.OutputSchema
-	if len(outSchema) == 0 {
-		outSchema = []byte("{}")
-	}
-
 	row := conn.QueryRow(ctx,
-		`INSERT INTO skill (name, slug, description, category, input_schema, output_schema, instructions)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 RETURNING id, name, slug, description, category, input_schema, output_schema, created_at, updated_at, instructions`,
-		s.Name, s.Slug, s.Description, s.Category, inSchema, outSchema, s.Instructions,
+		`INSERT INTO skill (name, slug, description, category, instructions)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, name, slug, description, category, created_at, updated_at, instructions`,
+		s.Name, s.Slug, s.Description, s.Category, s.Instructions,
 	)
 	return scanSkill(row)
 }
@@ -122,7 +113,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (Skill, error) {
 	defer release()
 
 	row := conn.QueryRow(ctx,
-		`SELECT id, name, slug, description, category, input_schema, output_schema, created_at, updated_at, instructions
+		`SELECT id, name, slug, description, category, created_at, updated_at, instructions
 		 FROM skill WHERE id=$1`, id,
 	)
 	s, err := scanSkill(row)
@@ -144,20 +135,11 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, req UpdateRequest
 	}
 	defer release()
 
-	inSchema := []byte("{}")
-	if len(req.InputSchema) > 0 {
-		inSchema = req.InputSchema
-	}
-	outSchema := []byte("{}")
-	if len(req.OutputSchema) > 0 {
-		outSchema = req.OutputSchema
-	}
-
 	row := conn.QueryRow(ctx,
-		`UPDATE skill SET name=$1, description=$2, category=$3, input_schema=$4, output_schema=$5, instructions=$6, updated_at=NOW()
-		 WHERE id=$7
-		 RETURNING id, name, slug, description, category, input_schema, output_schema, created_at, updated_at, instructions`,
-		req.Name, req.Description, req.Category, inSchema, outSchema, req.Instructions, id,
+		`UPDATE skill SET name=$1, description=$2, category=$3, instructions=$4, updated_at=NOW()
+		 WHERE id=$5
+		 RETURNING id, name, slug, description, category, created_at, updated_at, instructions`,
+		req.Name, req.Description, req.Category, req.Instructions, id,
 	)
 	s, err := scanSkill(row)
 	if err != nil {
@@ -206,13 +188,10 @@ func (r *Repository) SlugExists(ctx context.Context, slug string) (bool, error) 
 
 func scanSkill(row pgx.Row) (Skill, error) {
 	var s Skill
-	var in, out []byte
 	var instructions *string
-	if err := row.Scan(&s.ID, &s.Name, &s.Slug, &s.Description, &s.Category, &in, &out, &s.CreatedAt, &s.UpdatedAt, &instructions); err != nil {
+	if err := row.Scan(&s.ID, &s.Name, &s.Slug, &s.Description, &s.Category, &s.CreatedAt, &s.UpdatedAt, &instructions); err != nil {
 		return Skill{}, fmt.Errorf("skill: scan: %w", err)
 	}
-	s.InputSchema = in
-	s.OutputSchema = out
 	if instructions != nil {
 		s.Instructions = *instructions
 	}
@@ -221,13 +200,10 @@ func scanSkill(row pgx.Row) (Skill, error) {
 
 func scanSkillFromRows(rows pgx.Rows) (Skill, error) {
 	var s Skill
-	var in, out []byte
 	var instructions *string
-	if err := rows.Scan(&s.ID, &s.Name, &s.Slug, &s.Description, &s.Category, &in, &out, &s.CreatedAt, &s.UpdatedAt, &instructions); err != nil {
+	if err := rows.Scan(&s.ID, &s.Name, &s.Slug, &s.Description, &s.Category, &s.CreatedAt, &s.UpdatedAt, &instructions); err != nil {
 		return Skill{}, fmt.Errorf("skill: scan: %w", err)
 	}
-	s.InputSchema = in
-	s.OutputSchema = out
 	if instructions != nil {
 		s.Instructions = *instructions
 	}
@@ -244,7 +220,7 @@ func (r *Repository) ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]Sk
 	defer release()
 
 	rows, err := conn.Query(ctx,
-		`SELECT s.id, s.name, s.slug, s.description, s.category, s.input_schema, s.output_schema, s.created_at, s.updated_at, s.instructions
+		`SELECT s.id, s.name, s.slug, s.description, s.category, s.created_at, s.updated_at, s.instructions
 		 FROM skill s
 		 INNER JOIN agent_skill ags ON ags.skill_id = s.id
 		 WHERE ags.agent_id = $1

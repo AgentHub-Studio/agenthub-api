@@ -2,7 +2,6 @@ package skill
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode"
@@ -55,16 +54,12 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		slug = fmt.Sprintf("%s_%d", base, i)
 	}
 
-	inputSchema := normaliseInputSchema(req.InputSchema)
-
 	sk := Skill{
 		Name:         req.Name,
 		Slug:         slug,
 		Description:  req.Description,
 		Instructions: req.Instructions,
 		Category:     req.Category,
-		InputSchema:  inputSchema,
-		OutputSchema: req.OutputSchema,
 	}
 	created, err := s.repo.Create(ctx, sk)
 	if err != nil {
@@ -94,42 +89,6 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 // Delete deletes a skill.
 func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repo.Delete(ctx, id)
-}
-
-// normaliseInputSchema converts array shorthand (["field1","field2"]) to a
-// full JSON Schema object, and passes through existing object schemas unchanged.
-// nil / empty input returns nil.
-func normaliseInputSchema(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 {
-		return raw
-	}
-	var parsed any
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return raw // not valid JSON — return as-is
-	}
-	arr, ok := parsed.([]any)
-	if !ok {
-		return raw // already an object (or string) — pass through
-	}
-	// Convert ["field1","field2"] → JSON Schema object with string properties
-	properties := make(map[string]any, len(arr))
-	required := make([]string, 0, len(arr))
-	for _, item := range arr {
-		if name, ok := item.(string); ok {
-			properties[name] = map[string]any{"type": "string"}
-			required = append(required, name)
-		}
-	}
-	schema := map[string]any{
-		"type":       "object",
-		"properties": properties,
-		"required":   required,
-	}
-	out, err := json.Marshal(schema)
-	if err != nil {
-		return raw
-	}
-	return out
 }
 
 // toSlug converts a name to a kebab-case slug.

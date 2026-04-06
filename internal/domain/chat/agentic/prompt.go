@@ -12,18 +12,19 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 	// SkillLister returns skills.
 	type SkillLister interface {
 		ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]skill.Skill, error)
-		List(ctx context.Context, category *string, req pagination.PageRequest) (pagination.Page[skill.Response], error)
+		List(ctx context.Context, category *string, req pagination.PageRequest) ([]skill.Skill, int64, error)
 	}
 	
 	// KBLister returns knowledge bases.
 	type KBLister interface {
 		ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]knowledgebase.KnowledgeBase, error)
-		List(ctx context.Context, req pagination.PageRequest) (pagination.Page[knowledgebase.KnowledgeBaseResponse], error)
+		List(ctx context.Context, req pagination.PageRequest) ([]knowledgebase.KnowledgeBase, int64, error)
 	}
 
 // CompactSummaryFinder returns the latest compact summary for a session.
