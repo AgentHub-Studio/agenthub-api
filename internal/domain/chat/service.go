@@ -34,6 +34,7 @@ type RunEvent struct {
 
 // RunInput carries everything needed to start an agentic run.
 type RunInput struct {
+	RunID        uuid.UUID // ID of the persisted run
 	SessionID    uuid.UUID
 	AgentID      uuid.UUID
 	UserMessage  string
@@ -70,6 +71,18 @@ type Service struct {
 // runner may be nil (disables agentic features).
 func NewService(repo Repository, runner SessionRunner) *Service {
 	return &Service{repo: repo, runner: runner}
+}
+
+// GetActiveRun returns the active run for a session if any.
+func (s *Service) GetActiveRun(ctx context.Context, sessionID uuid.UUID) (ChatRunResponse, bool, error) {
+	run, found, err := s.repo.GetActiveRunBySession(ctx, sessionID)
+	if err != nil {
+		return ChatRunResponse{}, false, fmt.Errorf("chat service: get active run: %w", err)
+	}
+	if !found {
+		return ChatRunResponse{}, false, nil
+	}
+	return RunResponseFrom(run), true, nil
 }
 
 // ListSessions returns a paginated list of chat sessions.

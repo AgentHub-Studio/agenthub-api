@@ -34,6 +34,7 @@ type ElicitationSubmitter interface {
 
 // RunInput carries everything needed to start an agentic run.
 type RunInput struct {
+	RunID           uuid.UUID
 	SessionID       uuid.UUID
 	AgentID         uuid.UUID
 	UserMessage     string
@@ -83,6 +84,7 @@ type Runner struct {
 	cacheSafeSnap   *CacheSafeParamsSnapshot
 	progress        *RunProgressTracker
 	config          RunConfig
+	runID           uuid.UUID
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -175,6 +177,7 @@ func (r *Runner) WithCacheSafeParamsSnapshot(snap *CacheSafeParamsSnapshot) *Run
 // Run starts the agentic loop in a goroutine and returns a channel of events.
 // The channel is closed when the run completes or an error occurs.
 func (r *Runner) Run(ctx context.Context, in RunInput) <-chan RunEvent {
+	r.runID = in.RunID
 	ch := make(chan RunEvent, r.config.StreamBufferSize)
 
 	go func() {
@@ -1179,6 +1182,11 @@ func (r *Runner) buildAssistantMessage(
 		MessageType:  chat.MessageTypeText,
 		FinishReason: &finishReason,
 		TurnIndex:    turnIndex,
+		RunID:        &r.runID,
+	}
+
+	if r.runID == uuid.Nil {
+		msg.RunID = nil
 	}
 
 	if len(toolCalls) > 0 {

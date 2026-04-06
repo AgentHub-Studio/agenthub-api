@@ -40,6 +40,13 @@ type Repository interface {
 	// GetLatestCompactSummary returns the most recent compact_summary message for the session,
 	// or (ChatMessage{}, false, nil) if none exists.
 	GetLatestCompactSummary(ctx context.Context, sessionID uuid.UUID) (ChatMessage, bool, error)
+
+	// ChatRun persistence
+	CreateRun(ctx context.Context, r ChatRun) (ChatRun, error)
+	GetRunByID(ctx context.Context, id uuid.UUID) (ChatRun, error)
+	GetActiveRunBySession(ctx context.Context, sessionID uuid.UUID) (ChatRun, bool, error)
+	UpdateRunStatus(ctx context.Context, id uuid.UUID, status ChatRunStatus, lastEventID string) error
+	MarkRunCompleted(ctx context.Context, id uuid.UUID) error
 }
 
 type postgresRepository struct {
@@ -265,7 +272,7 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 	rows, err := conn.Query(ctx,
 		`SELECT id, session_id, role, content,
 		        message_type, tool_calls, tool_call_id,
-		        metadata, token_usage, finish_reason, turn_index,
+		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1
@@ -284,7 +291,7 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 		if err := rows.Scan(
 			&m.ID, &m.SessionID, &m.Role, &m.Content,
 			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
-			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex,
+			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 			&m.CreatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("chat: scan message: %w", err)
@@ -315,12 +322,12 @@ func (r *postgresRepository) CreateMessage(ctx context.Context, m ChatMessage) (
 		`INSERT INTO chat_message
 		 (id, session_id, role, content,
 		  message_type, tool_calls, tool_call_id,
-		  metadata, token_usage, finish_reason, turn_index,
+		  metadata, token_usage, finish_reason, turn_index, run_id,
 		  created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		m.ID, m.SessionID, m.Role, m.Content,
 		m.MessageType, m.ToolCalls, m.ToolCallID,
-		m.Metadata, m.TokenUsage, m.FinishReason, m.TurnIndex,
+		m.Metadata, m.TokenUsage, m.FinishReason, m.TurnIndex, m.RunID,
 		m.CreatedAt,
 	)
 	if err != nil {
@@ -351,7 +358,7 @@ func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sess
 	).Scan(
 		&m.ID, &m.SessionID, &m.Role, &m.Content,
 		&m.MessageType, &m.ToolCalls, &m.ToolCallID,
-		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex,
+		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 		&m.CreatedAt,
 	)
 	if err != nil {
@@ -374,7 +381,7 @@ func (r *postgresRepository) FindAllMessages(ctx context.Context, sessionID uuid
 	rows, err := conn.Query(ctx,
 		`SELECT id, session_id, role, content,
 		        message_type, tool_calls, tool_call_id,
-		        metadata, token_usage, finish_reason, turn_index,
+		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1
@@ -392,7 +399,7 @@ func (r *postgresRepository) FindAllMessages(ctx context.Context, sessionID uuid
 		if err := rows.Scan(
 			&m.ID, &m.SessionID, &m.Role, &m.Content,
 			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
-			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex,
+			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 			&m.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("chat: scan message: %w", err)
@@ -427,7 +434,7 @@ func (r *postgresRepository) GetLatestCompactSummary(ctx context.Context, sessio
 	).Scan(
 		&m.ID, &m.SessionID, &m.Role, &m.Content,
 		&m.MessageType, &m.ToolCalls, &m.ToolCallID,
-		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex,
+		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 		&m.CreatedAt,
 	)
 	if err != nil {
@@ -438,4 +445,113 @@ func (r *postgresRepository) GetLatestCompactSummary(ctx context.Context, sessio
 	}
 
 	return m, true, nil
+}
+
+func (r *postgresRepository) CreateRun(ctx context.Context, run ChatRun) (ChatRun, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return ChatRun{}, err
+	}
+	defer release()
+
+	run.ID = uuid.New()
+	run.StartedAt = time.Now().UTC()
+	if run.Status == "" {
+		run.Status = ChatRunStatusActive
+	}
+
+	_, err = conn.Exec(ctx,
+		`INSERT INTO chat_run (id, session_id, tenant_id, status, last_event_id, metadata, started_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		run.ID, run.SessionID, run.TenantID, run.Status, run.LastEventID, run.Metadata, run.StartedAt,
+	)
+	if err != nil {
+		return ChatRun{}, fmt.Errorf("chat: create run: %w", err)
+	}
+
+	return run, nil
+}
+
+func (r *postgresRepository) GetRunByID(ctx context.Context, id uuid.UUID) (ChatRun, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return ChatRun{}, err
+	}
+	defer release()
+
+	var run ChatRun
+	err = conn.QueryRow(ctx,
+		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at
+		 FROM chat_run WHERE id = $1`,
+		id,
+	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ChatRun{}, ErrNotFound
+		}
+		return ChatRun{}, fmt.Errorf("chat: get run by id: %w", err)
+	}
+
+	return run, nil
+}
+
+func (r *postgresRepository) GetActiveRunBySession(ctx context.Context, sessionID uuid.UUID) (ChatRun, bool, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return ChatRun{}, false, err
+	}
+	defer release()
+
+	var run ChatRun
+	err = conn.QueryRow(ctx,
+		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at
+		 FROM chat_run WHERE session_id = $1 AND status = 'active'
+		 ORDER BY started_at DESC LIMIT 1`,
+		sessionID,
+	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ChatRun{}, false, nil
+		}
+		return ChatRun{}, false, fmt.Errorf("chat: get active run by session: %w", err)
+	}
+
+	return run, true, nil
+}
+
+func (r *postgresRepository) UpdateRunStatus(ctx context.Context, id uuid.UUID, status ChatRunStatus, lastEventID string) error {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	_, err = conn.Exec(ctx,
+		`UPDATE chat_run SET status = $1, last_event_id = $2 WHERE id = $3`,
+		status, lastEventID, id,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: update run status: %w", err)
+	}
+
+	return nil
+}
+
+func (r *postgresRepository) MarkRunCompleted(ctx context.Context, id uuid.UUID) error {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	now := time.Now().UTC()
+	_, err = conn.Exec(ctx,
+		`UPDATE chat_run SET status = $1, completed_at = $2 WHERE id = $3`,
+		ChatRunStatusCompleted, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: mark run completed: %w", err)
+	}
+
+	return nil
 }

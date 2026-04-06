@@ -19,6 +19,16 @@ const (
 	StatusArchived ChatStatus = "ARCHIVED"
 )
 
+// ChatRunStatus represents the current state of a ChatRun.
+type ChatRunStatus string
+
+const (
+	ChatRunStatusActive    ChatRunStatus = "active"
+	ChatRunStatusCompleted ChatRunStatus = "completed"
+	ChatRunStatusFailed    ChatRunStatus = "failed"
+	ChatRunStatusCancelled ChatRunStatus = "cancelled"
+)
+
 // ChatSession is the domain entity for a chat session.
 type ChatSession struct {
 	ID        uuid.UUID  `db:"id"`
@@ -53,7 +63,20 @@ type ChatMessage struct {
 	TokenUsage   json.RawMessage `db:"token_usage"`
 	FinishReason *string         `db:"finish_reason"`
 	TurnIndex    int             `db:"turn_index"`
+	RunID        *uuid.UUID      `db:"run_id"`
 	CreatedAt    time.Time       `db:"created_at"`
+}
+
+// ChatRun represents a background agentic run.
+type ChatRun struct {
+	ID          uuid.UUID       `db:"id"`
+	SessionID   uuid.UUID       `db:"session_id"`
+	TenantID    string          `db:"tenant_id"`
+	Status      ChatRunStatus   `db:"status"`
+	LastEventID string          `db:"last_event_id"`
+	Metadata    json.RawMessage `db:"metadata"`
+	StartedAt   time.Time       `db:"started_at"`
+	CompletedAt *time.Time      `db:"completed_at"`
 }
 
 // ChatSessionResponse is the DTO for a chat session.
@@ -79,7 +102,19 @@ type ChatMessageResponse struct {
 	TokenUsage   json.RawMessage `json:"tokenUsage,omitempty"`
 	FinishReason *string         `json:"finishReason,omitempty"`
 	TurnIndex    int             `json:"turnIndex"`
+	RunID        *uuid.UUID      `json:"runId,omitempty"`
 	CreatedAt    time.Time       `json:"createdAt"`
+}
+
+// ChatRunResponse is the DTO for a chat run.
+type ChatRunResponse struct {
+	ID          uuid.UUID       `json:"id"`
+	SessionID   uuid.UUID       `json:"sessionId"`
+	Status      ChatRunStatus   `json:"status"`
+	LastEventID string          `json:"lastEventId,omitempty"`
+	Metadata    json.RawMessage `json:"metadata,omitempty"`
+	StartedAt   time.Time       `json:"startedAt"`
+	CompletedAt *time.Time      `json:"completedAt,omitempty"`
 }
 
 // SessionResponseFrom maps a ChatSession entity to a ChatSessionResponse DTO.
@@ -90,6 +125,19 @@ func SessionResponseFrom(s ChatSession) ChatSessionResponse {
 // MessageResponseFrom maps a ChatMessage entity to a ChatMessageResponse DTO.
 func MessageResponseFrom(m ChatMessage) ChatMessageResponse {
 	return ChatMessageResponse(m)
+}
+
+// RunResponseFrom maps a ChatRun entity to a ChatRunResponse DTO.
+func RunResponseFrom(r ChatRun) ChatRunResponse {
+	return ChatRunResponse{
+		ID:          r.ID,
+		SessionID:   r.SessionID,
+		Status:      r.Status,
+		LastEventID: r.LastEventID,
+		Metadata:    r.Metadata,
+		StartedAt:   r.StartedAt,
+		CompletedAt: r.CompletedAt,
+	}
 }
 
 // CreateSessionRequest is the payload for creating a chat session.
@@ -109,4 +157,5 @@ type CreateMessageRequest struct {
 	TokenUsage   json.RawMessage `json:"tokenUsage,omitempty"`
 	FinishReason *string         `json:"finishReason,omitempty"`
 	TurnIndex    int             `json:"turnIndex,omitempty"`
+	RunID        *uuid.UUID      `json:"runId,omitempty"`
 }

@@ -129,7 +129,18 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
 	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc))
-	chatHandler := chat.NewHandler(chat.NewService(chatRepo, sessionRunner))
+
+	var chatExecutor *chat.AsyncExecutor
+	if cfg.RabbitMQURL != "" {
+		chatExecutor = chat.NewAsyncExecutor(chatRepo, sessionRunner, cfg.RabbitMQURL)
+		go func() {
+			if err := chatExecutor.StartWorker(context.Background()); err != nil {
+				slog.Error("rabbitmq: chat worker failed", "err", err)
+			}
+		}()
+	}
+
+	chatHandler := chat.NewHandler(chat.NewService(chatRepo, sessionRunner), chatExecutor)
 	var docStorage document.StorageClient
 	if cfg.MinIO.IsConfigured() {
 		ds, err := document.NewMinIOStorageClient(

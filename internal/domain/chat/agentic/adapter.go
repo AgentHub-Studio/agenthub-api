@@ -294,6 +294,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	})
 
 	agenticCh := runner.Run(ctx, RunInput{
+		RunID:           in.RunID,
 		SessionID:       in.SessionID,
 		AgentID:         in.AgentID,
 		UserMessage:     in.UserMessage,

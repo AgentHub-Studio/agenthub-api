@@ -25,6 +25,7 @@ type chatService interface {
 	RenameSession(ctx context.Context, id uuid.UUID, title string) (ChatSessionResponse, error)
 	ListMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) (pagination.Page[ChatMessageResponse], error)
 	AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
+	GetActiveRun(ctx context.Context, sessionID uuid.UUID) (ChatRunResponse, bool, error)
 	// RunSession starts an agentic run and returns a channel of events for SSE streaming.
 	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error)
 	// RespondElicitation routes a user response to an active elicitation request.
@@ -34,14 +35,16 @@ type chatService interface {
 // Handler handles HTTP requests for chat sessions and messages.
 type Handler struct {
 	svc            chatService
+	executor       *AsyncExecutor
 	bgRegistry     *BackgroundRunRegistry
 	bufferRegistry *RunEventBufferRegistry
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(svc chatService) *Handler {
+func NewHandler(svc chatService, executor *AsyncExecutor) *Handler {
 	return &Handler{
 		svc:            svc,
+		executor:       executor,
 		bgRegistry:     NewBackgroundRunRegistry(0),
 		bufferRegistry: NewRunEventBufferRegistry(),
 	}
@@ -104,6 +107,18 @@ func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, "failed to get chat session")
+		return
+	}
+
+	// Check for active runs
+	if run, found, _ := h.svc.GetActiveRun(r.Context(), id); found {
+		// Include active run in session metadata or just as a separate field if we update DTO.
+		// For now, we can add it to a map if we want to extend the response without breaking DTO.
+		data, _ := json.Marshal(resp)
+		var m map[string]interface{}
+		json.Unmarshal(data, &m)
+		m["activeRun"] = run
+		respond.JSON(w, http.StatusOK, m)
 		return
 	}
 
@@ -261,6 +276,22 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 
 	tenantID := tenant.FromContext(r.Context())
 
+	// If AsyncExecutor is available, use it to start the run in background.
+	if h.executor != nil {
+		runID, err := h.executor.EnqueueRun(r.Context(), sessionID, tenantID, req.Message)
+		if err != nil {
+			respond.Error(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue run: %v", err))
+			return
+		}
+		respond.JSON(w, http.StatusAccepted, map[string]interface{}{
+			"runId":     runID,
+			"status":    "accepted",
+			"sessionId": sessionID,
+		})
+		return
+	}
+
+	// Legacy synchronous-background flow (for environments without RabbitMQ)
 	// Register a background run with a context decoupled from the HTTP request.
 	// This ensures the Runner continues even if the SSE client disconnects.
 	runID, runCtx := h.bgRegistry.Register(sessionID)
