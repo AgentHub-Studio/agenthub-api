@@ -22,6 +22,7 @@ type mcpService interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 	GetAuthStatus(ctx context.Context, id uuid.UUID) (AuthStatusResponse, error)
 	GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL string) (ConnectURLResponse, error)
+	HandleOAuthCallback(ctx context.Context, mcpServerID uuid.UUID, code string) error
 }
 
 // listResponse wraps the flat slice in the Page envelope expected by the frontend.
@@ -49,6 +50,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Delete("/api/mcp-server-configs/{id}", h.delete)
 	r.Get("/api/mcp-server-configs/{id}/auth-status", h.getAuthStatus)
 	r.Get("/api/mcp-server-configs/{id}/connect", h.getConnectURL)
+	r.Post("/api/mcp-server-configs/{id}/callback", h.handleCallback)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +162,33 @@ func (h *Handler) getAuthStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" {
+		respond.Error(w, http.StatusBadRequest, "code is required")
+		return
+	}
+
+	if err := h.svc.HandleOAuthCallback(r.Context(), id, body.Code); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "MCP server not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respond.JSON(w, http.StatusOK, map[string]string{"status": "connected"})
 }
 
 func (h *Handler) getConnectURL(w http.ResponseWriter, r *http.Request) {

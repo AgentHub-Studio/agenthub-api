@@ -23,6 +23,7 @@ type oauthService interface {
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (oauth.OAuthCredential, error)
 	Update(ctx context.Context, tenantID string, id uuid.UUID, req oauth.CreateRequest) (oauth.OAuthCredential, error)
 	GeneratePKCE() (verifier string, challenge string)
+	ExchangeCode(ctx context.Context, tenantID string, id uuid.UUID, code string) error
 }
 
 // Service provides business logic for McpServerConfig operations.
@@ -321,6 +322,9 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	params.Set("client_id", clientID)
 	params.Set("redirect_uri", redirectURL)
 	params.Set("state", config.ID.String())
+
+	// Store the redirect_uri used so the callback can send the same value during token exchange
+	redirectURLCopy := redirectURL
 	if scopes != "" {
 		params.Set("scope", scopes)
 	}
@@ -331,7 +335,7 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 
 	finalURL := metadata.AuthorizationEndpoint + "?" + params.Encode()
 
-	// Persist PKCE verifier for the callback
+	// Persist PKCE verifier and redirect_uri for the callback token exchange
 	if s.oauthSvc != nil && config.OAuthCredentialID != nil {
 		cred, credErr := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
 		if credErr == nil {
@@ -350,7 +354,7 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 				BearerToken:  cred.BearerToken,
 				Username:     cred.Username,
 				Password:     cred.Password,
-				RedirectURL:  cred.RedirectURL,
+				RedirectURL:  &redirectURLCopy,
 				CodeVerifier: &verifier,
 			}
 			_, _ = s.oauthSvc.Update(ctx, tenantID, *config.OAuthCredentialID, updateReq)
@@ -358,6 +362,38 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	}
 
 	return ConnectURLResponse{URL: finalURL}, nil
+}
+
+// HandleOAuthCallback processes the authorization code returned by the OAuth provider.
+// The MCP server ID is used as the OAuth state parameter. This method looks up the
+// linked OAuthCredential and delegates the code-for-token exchange to the oauth service.
+func (s *Service) HandleOAuthCallback(ctx context.Context, mcpServerID uuid.UUID, code string) error {
+	tenantID := tenant.FromContext(ctx)
+	if tenantID == "" {
+		return fmt.Errorf("mcp service: tenant context is required")
+	}
+
+	config, err := s.repo.GetByID(ctx, mcpServerID)
+	if err != nil {
+		return fmt.Errorf("mcp service: callback: %w", err)
+	}
+
+	if config.OAuthCredentialID == nil {
+		return fmt.Errorf("mcp service: callback: MCP server %s has no linked OAuth credential", mcpServerID)
+	}
+
+	if s.oauthSvc == nil {
+		return fmt.Errorf("mcp service: callback: oauth service not available")
+	}
+
+	log.Printf("mcp service: exchanging authorization code for MCP %s (credential %s)", mcpServerID, *config.OAuthCredentialID)
+
+	if err := s.oauthSvc.ExchangeCode(ctx, tenantID, *config.OAuthCredentialID, code); err != nil {
+		return fmt.Errorf("mcp service: callback: token exchange failed: %w", err)
+	}
+
+	log.Printf("mcp service: OAuth token exchange successful for MCP %s", mcpServerID)
+	return nil
 }
 
 // discoverAuthServerMetadata implements the MCP spec discovery flow (mirrors mcp-go oauth.go getServerMetadata):
