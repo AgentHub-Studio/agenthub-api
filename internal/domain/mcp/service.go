@@ -204,16 +204,16 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		}
 		cred, err := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
 		if err != nil {
-			return ConnectURLResponse{}, fmt.Errorf("mcp service: could not fetch linked OAuth credential: %w", err)
+			return ConnectURLResponse{}, fmt.Errorf("mcp service: could not fetch linked OAuth credential (ID: %s) for tenant %s: %w", config.OAuthCredentialID.String(), tenantID, err)
 		}
 
-		if cred.AuthURL != nil {
+		if cred.AuthURL != nil && *cred.AuthURL != "" {
 			authURL = *cred.AuthURL
 		}
-		if cred.ClientID != nil {
+		if cred.ClientID != nil && *cred.ClientID != "" {
 			clientID = *cred.ClientID
 		}
-		if cred.Scopes != nil {
+		if cred.Scopes != nil && *cred.Scopes != "" {
 			scopes = *cred.Scopes
 		}
 	}
@@ -239,12 +239,11 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	}
 
 	if authURL == "" {
-		return ConnectURLResponse{}, fmt.Errorf("mcp service: could not auto-discover OAuth endpoints for URL: %s. Please link an OAuth credential with AuthURL.", url)
+		return ConnectURLResponse{}, fmt.Errorf("mcp service: authURL is empty for MCP %s (URL: %s). Ensure linked OAuth credential has AuthURL.", id.String(), url)
 	}
 
 	if clientID == "" {
-		// Use a placeholder if not provided, though it's likely to fail.
-		clientID = "placeholder_client_id"
+		return ConnectURLResponse{}, fmt.Errorf("mcp service: clientID is empty for MCP %s. Ensure linked OAuth credential has ClientID.", id.String())
 	}
 
 	finalURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s",

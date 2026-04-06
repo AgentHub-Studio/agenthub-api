@@ -181,7 +181,7 @@ func (h *Handler) getConnectURL(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "MCP server not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, "failed to get connect URL")
+		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
