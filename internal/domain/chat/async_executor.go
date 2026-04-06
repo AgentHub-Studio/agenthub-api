@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 const ChatRunQueue = "chat.run.queue"
@@ -142,22 +144,34 @@ func (e *AsyncExecutor) StartWorker(ctx context.Context) error {
 }
 
 func (e *AsyncExecutor) processTask(task ChatRunTask) {
-	ctx := context.Background()
-	// Set tenant context for DB calls
-	// (Needs tenant middleware logic or similar if not using a dedicated background ctx)
+	ctx := tenant.NewContext(context.Background(), task.TenantID)
 
-	slog.Info("chat: background run starting", "runId", task.RunID, "sessionId", task.SessionID)
+	slog.Info("chat: background run starting", "runId", task.RunID, "sessionId", task.SessionID, "tenant", task.TenantID)
 
 	// Since we are in a background worker, we don't have the original SSE stream.
 	// We just run the session and let the Runner handle persistence of messages.
-	// The Runner uses the provided runID if available (needs update to Runner).
 
-	// For now, we call the runner.
+	// 1. Resolve session to get AgentID
+	session, err := e.repo.GetSessionByID(ctx, task.SessionID)
+	if err != nil {
+		slog.Error("chat: background run failed to load session", "runId", task.RunID, "err", err)
+		e.repo.UpdateRunStatus(ctx, task.RunID, ChatRunStatusFailed, "")
+		return
+	}
+
+	if session.AgentID == nil {
+		slog.Error("chat: background run session has no agent", "runId", task.RunID)
+		e.repo.UpdateRunStatus(ctx, task.RunID, ChatRunStatusFailed, "")
+		return
+	}
+
+	// 2. Execute the run
 	events, err := e.runner.RunSession(ctx, RunInput{
+		RunID:       task.RunID,
 		SessionID:   task.SessionID,
+		AgentID:     *session.AgentID,
 		TenantID:    task.TenantID,
 		UserMessage: task.Message,
-		// runID: task.RunID, // Needs to be passed down
 	})
 
 	if err != nil {
