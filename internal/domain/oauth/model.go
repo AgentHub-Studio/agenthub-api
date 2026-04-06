@@ -15,7 +15,8 @@ var ErrNotFound = errors.New("oauth credential not found")
 type AuthType string
 
 const (
-	AuthTypeOAuth2ClientCredentials AuthType = "OAUTH2_CLIENT_CREDENTIALS"
+	AuthTypeOAuth2ClientCredentials  AuthType = "OAUTH2_CLIENT_CREDENTIALS"
+	AuthTypeOAuth2AuthorizationCode AuthType = "OAUTH2_AUTHORIZATION_CODE"
 	AuthTypeAPIKey                  AuthType = "API_KEY"
 	AuthTypeBearerToken             AuthType = "BEARER_TOKEN"
 	AuthTypeBasicAuth               AuthType = "BASIC_AUTH"
@@ -35,6 +36,10 @@ type OAuthCredential struct {
 	BearerToken  string    `db:"bearer_token"`
 	Username     string    `db:"username"`
 	Password     string    `db:"password"`
+	AuthURL      string    `db:"auth_url"`
+	RedirectURL  string    `db:"redirect_url"`
+	RefreshToken string    `db:"refresh_token"`
+	ExpiresAt    *time.Time `db:"expires_at"`
 	CreatedAt    time.Time `db:"created_at"`
 	UpdatedAt    time.Time `db:"updated_at"`
 }
@@ -54,6 +59,10 @@ type OAuthCredentialResponse struct {
 	BearerToken  string    `json:"bearerToken"`
 	Username     string    `json:"username"`
 	Password     string    `json:"password"`
+	AuthURL      string    `json:"authUrl"`
+	RedirectURL  string    `json:"redirectUrl"`
+	RefreshToken string    `json:"refreshToken"`
+	ExpiresAt    *time.Time `json:"expiresAt"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
@@ -66,6 +75,7 @@ func ResponseFrom(c OAuthCredential) OAuthCredentialResponse {
 	r.APIKeyValue = maskSecret(c.APIKeyValue)
 	r.BearerToken = maskSecret(c.BearerToken)
 	r.Password = maskSecret(c.Password)
+	r.RefreshToken = maskSecret(c.RefreshToken)
 	return r
 }
 
@@ -90,6 +100,8 @@ type CreateRequest struct {
 	BearerToken  string   `json:"bearerToken"`
 	Username     string   `json:"username"`
 	Password     string   `json:"password"`
+	AuthURL      string   `json:"authUrl"`
+	RedirectURL  string   `json:"redirectUrl"`
 }
 
 // ResolveResponse is the result of resolving an auth header.

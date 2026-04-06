@@ -72,15 +72,6 @@ func NewServiceWithEncryption(repo CredentialRepository, key string) *Service {
 	}
 }
 
-// NewServiceWithClient creates a new Service with a custom HTTP client (useful for testing).
-func NewServiceWithClient(repo CredentialRepository, client HTTPClient) *Service {
-	return &Service{
-		repo:       repo,
-		httpClient: client,
-		tokenCache: make(map[uuid.UUID]*cachedToken),
-	}
-}
-
 // encryptSecret encrypts s if an encryption key is configured.
 func (s *Service) encryptSecret(plaintext string) (string, error) {
 	if plaintext == "" {
@@ -138,14 +129,14 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 		BearerToken:  bearerToken,
 		Username:     req.Username,
 		Password:     password,
+		AuthURL:      req.AuthURL,
+		RedirectURL:  req.RedirectURL,
 	}
 	return s.repo.Create(ctx, tenantID, c)
 }
 
-// Update updates an existing OAuth credential, re-encrypting all secret fields, and clears its token cache entry.
-// Secret fields that arrive as "" or as the masked placeholder "***" are preserved unchanged.
+// Update updates an existing OAuth credential.
 func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (OAuthCredential, error) {
-	// Fetch existing credential so we can preserve secrets that were not changed.
 	existing, err := s.repo.GetByID(ctx, tenantID, id)
 	if err != nil {
 		return OAuthCredential{}, err
@@ -180,6 +171,8 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		BearerToken:  bearerToken,
 		Username:     req.Username,
 		Password:     password,
+		AuthURL:      req.AuthURL,
+		RedirectURL:  req.RedirectURL,
 	}
 	result, err := s.repo.Update(ctx, tenantID, id, c)
 	if err == nil {
@@ -190,9 +183,6 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	return result, err
 }
 
-// resolveUpdatedSecret returns the encrypted secret to store during an update.
-// When the incoming value is empty or the masked placeholder "***", the existing
-// already-encrypted value is returned unchanged (preserving the original secret).
 func (s *Service) resolveUpdatedSecret(incoming, existing string) (string, error) {
 	if incoming == "" || incoming == "***" {
 		return existing, nil
@@ -212,7 +202,6 @@ func (s *Service) Delete(ctx context.Context, tenantID string, id uuid.UUID) err
 }
 
 // ResolveAuthHeader resolves the credential to an HTTP Authorization header value.
-// For OAUTH2_CLIENT_CREDENTIALS the token is fetched (and cached) from the token URL.
 func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uuid.UUID) (ResolveResponse, error) {
 	c, err := s.repo.GetByID(ctx, tenantID, id)
 	if err != nil {
@@ -220,12 +209,26 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 	}
 
 	switch c.AuthType {
-	case AuthTypeOAuth2ClientCredentials:
-		// Decrypt client_secret before performing token exchange.
-		clientSecret, err := s.decryptSecret(c.ClientSecret)
-		if err != nil {
-			return ResolveResponse{}, fmt.Errorf("oauth: decrypt client_secret: %w", err)
+	case AuthTypeOAuth2ClientCredentials, AuthTypeOAuth2AuthorizationCode:
+		// Check database status first
+		if c.AuthType == AuthTypeOAuth2AuthorizationCode {
+			if c.BearerToken != "" && (c.ExpiresAt == nil || time.Now().Before(c.ExpiresAt.Add(-30*time.Second))) {
+				token, _ := s.decryptSecret(c.BearerToken)
+				if token != "" {
+					return ResolveResponse{Header: "Authorization", Value: "Bearer " + token}, nil
+				}
+			}
+			// Needs refresh or exchange
+			if c.RefreshToken != "" {
+				updated, err := s.RefreshToken(ctx, tenantID, id)
+				if err == nil {
+					token, _ := s.decryptSecret(updated.BearerToken)
+					return ResolveResponse{Header: "Authorization", Value: "Bearer " + token}, nil
+				}
+			}
 		}
+
+		clientSecret, _ := s.decryptSecret(c.ClientSecret)
 		c.ClientSecret = clientSecret
 		token, err := s.fetchOrCachedToken(ctx, id, c)
 		if err != nil {
@@ -234,17 +237,11 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 		return ResolveResponse{Header: "Authorization", Value: "Bearer " + token}, nil
 
 	case AuthTypeBearerToken:
-		bearerToken, err := s.decryptSecret(c.BearerToken)
-		if err != nil {
-			return ResolveResponse{}, fmt.Errorf("oauth: decrypt bearer_token: %w", err)
-		}
+		bearerToken, _ := s.decryptSecret(c.BearerToken)
 		return ResolveResponse{Header: "Authorization", Value: "Bearer " + bearerToken}, nil
 
 	case AuthTypeAPIKey:
-		apiKeyValue, err := s.decryptSecret(c.APIKeyValue)
-		if err != nil {
-			return ResolveResponse{}, fmt.Errorf("oauth: decrypt api_key_value: %w", err)
-		}
+		apiKeyValue, _ := s.decryptSecret(c.APIKeyValue)
 		header := c.APIKeyHeader
 		if header == "" {
 			header = "X-API-Key"
@@ -252,10 +249,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 		return ResolveResponse{Header: header, Value: apiKeyValue}, nil
 
 	case AuthTypeBasicAuth:
-		password, err := s.decryptSecret(c.Password)
-		if err != nil {
-			return ResolveResponse{}, fmt.Errorf("oauth: decrypt password: %w", err)
-		}
+		password, _ := s.decryptSecret(c.Password)
 		encoded := base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + password))
 		return ResolveResponse{Header: "Authorization", Value: "Basic " + encoded}, nil
 
@@ -264,8 +258,6 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 	}
 }
 
-// fetchOrCachedToken returns a valid access token for the credential, using the
-// in-memory cache when the cached token is still valid.
 func (s *Service) fetchOrCachedToken(ctx context.Context, id uuid.UUID, c OAuthCredential) (string, error) {
 	s.mu.Lock()
 	if cached, ok := s.tokenCache[id]; ok && cached.isValid() {
@@ -288,12 +280,7 @@ func (s *Service) fetchOrCachedToken(ctx context.Context, id uuid.UUID, c OAuthC
 	return token, nil
 }
 
-// exchangeClientCredentials performs an OAuth2 Client Credentials grant request.
-func (s *Service) exchangeClientCredentials(ctx context.Context, c OAuthCredential) (token string, expiresIn int, err error) {
-	if c.TokenURL == "" {
-		return "", 0, fmt.Errorf("oauth: token_url is required for CLIENT_CREDENTIALS flow")
-	}
-
+func (s *Service) exchangeClientCredentials(ctx context.Context, c OAuthCredential) (string, int, error) {
 	params := url.Values{}
 	params.Set("grant_type", "client_credentials")
 	params.Set("client_id", c.ClientID)
@@ -302,36 +289,106 @@ func (s *Service) exchangeClientCredentials(ctx context.Context, c OAuthCredenti
 		params.Set("scope", c.Scopes)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.TokenURL,
-		strings.NewReader(params.Encode()))
+	return s.doTokenRequest(ctx, c.TokenURL, params)
+}
+
+func (s *Service) ExchangeCode(ctx context.Context, tenantID string, id uuid.UUID, code string) error {
+	c, err := s.repo.GetByID(ctx, tenantID, id)
 	if err != nil {
-		return "", 0, fmt.Errorf("oauth: build token request: %w", err)
+		return err
+	}
+
+	clientSecret, _ := s.decryptSecret(c.ClientSecret)
+	params := url.Values{}
+	params.Set("grant_type", "authorization_code")
+	params.Set("code", code)
+	params.Set("client_id", c.ClientID)
+	params.Set("client_secret", clientSecret)
+	params.Set("redirect_uri", c.RedirectURL)
+
+	token, refreshToken, expiresIn, err := s.doFullTokenRequest(ctx, c.TokenURL, params)
+	if err != nil {
+		return err
+	}
+
+	encToken, _ := s.encryptSecret(token)
+	encRefresh, _ := s.encryptSecret(refreshToken)
+	expiry := time.Now().Add(time.Duration(expiresIn) * time.Second)
+
+	c.BearerToken = encToken
+	c.RefreshToken = encRefresh
+	c.ExpiresAt = &expiry
+
+	_, err = s.repo.Update(ctx, tenantID, id, c)
+	return err
+}
+
+func (s *Service) RefreshToken(ctx context.Context, tenantID string, id uuid.UUID) (OAuthCredential, error) {
+	c, err := s.repo.GetByID(ctx, tenantID, id)
+	if err != nil {
+		return OAuthCredential{}, err
+	}
+
+	clientSecret, _ := s.decryptSecret(c.ClientSecret)
+	refreshToken, _ := s.decryptSecret(c.RefreshToken)
+
+	params := url.Values{}
+	params.Set("grant_type", "refresh_token")
+	params.Set("refresh_token", refreshToken)
+	params.Set("client_id", c.ClientID)
+	params.Set("client_secret", clientSecret)
+
+	token, newRefresh, expiresIn, err := s.doFullTokenRequest(ctx, c.TokenURL, params)
+	if err != nil {
+		return OAuthCredential{}, err
+	}
+
+	encToken, _ := s.encryptSecret(token)
+	expiry := time.Now().Add(time.Duration(expiresIn) * time.Second)
+
+	c.BearerToken = encToken
+	if newRefresh != "" {
+		encRefresh, _ := s.encryptSecret(newRefresh)
+		c.RefreshToken = encRefresh
+	}
+	c.ExpiresAt = &expiry
+
+	return s.repo.Update(ctx, tenantID, id, c)
+}
+
+func (s *Service) doTokenRequest(ctx context.Context, tokenURL string, params url.Values) (string, int, error) {
+	token, _, expiresIn, err := s.doFullTokenRequest(ctx, tokenURL, params)
+	return token, expiresIn, err
+}
+
+func (s *Service) doFullTokenRequest(ctx context.Context, tokenURL string, params url.Values) (string, string, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(params.Encode()))
+	if err != nil {
+		return "", "", 0, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("oauth: token request failed: %w", err)
+		return "", "", 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("oauth: token endpoint returned %d", resp.StatusCode)
+		return "", "", 0, fmt.Errorf("oauth: token endpoint returned %d", resp.StatusCode)
 	}
 
 	var body struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", 0, fmt.Errorf("oauth: decode token response: %w", err)
-	}
-	if body.AccessToken == "" {
-		return "", 0, fmt.Errorf("oauth: empty access_token in response")
+		return "", "", 0, err
 	}
 	if body.ExpiresIn <= 0 {
-		body.ExpiresIn = 3600 // default 1h when not provided
+		body.ExpiresIn = 3600
 	}
-	return body.AccessToken, body.ExpiresIn, nil
+	return body.AccessToken, body.RefreshToken, body.ExpiresIn, nil
 }

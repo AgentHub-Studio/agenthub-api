@@ -22,6 +22,8 @@ type service interface {
 	Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (OAuthCredential, error)
 	Delete(ctx context.Context, tenantID string, id uuid.UUID) error
 	ResolveAuthHeader(ctx context.Context, tenantID string, id uuid.UUID) (ResolveResponse, error)
+	ExchangeCode(ctx context.Context, tenantID string, id uuid.UUID, code string) error
+	RefreshToken(ctx context.Context, tenantID string, id uuid.UUID) (OAuthCredential, error)
 }
 
 // Handler handles HTTP requests for OAuth credentials.
@@ -44,6 +46,7 @@ func (h *Handler) Routes() http.Handler {
 	r.Patch("/{id}", h.update)
 	r.Delete("/{id}", h.delete)
 	r.Get("/{id}/resolve", h.resolve)
+	r.Get("/callback", h.callback)
 	return r
 }
 
@@ -164,4 +167,46 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, res)
+}
+
+func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.URL.Query().Get("tenantId")
+	if tenantID == "" {
+		respond.Error(w, http.StatusBadRequest, "tenantId is required")
+		return
+	}
+
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		respond.Error(w, http.StatusBadRequest, "state (credential id) is required")
+		return
+	}
+
+	id, err := uuid.Parse(state)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid state")
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		respond.Error(w, http.StatusBadRequest, "code is required")
+		return
+	}
+
+	if err := h.svc.ExchangeCode(r.Context(), tenantID, id, code); err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Redirect back to the UI (e.g. to a success page or back to MCP list)
+	redirectUI := r.URL.Query().Get("redirect_ui")
+	if redirectUI == "" {
+		// Default fallback
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<h1>Authentication Successful!</h1><p>You can close this window now.</p>"))
+		return
+	}
+
+	http.Redirect(w, r, redirectUI, http.StatusTemporaryRedirect)
 }

@@ -87,3 +87,13 @@ type UpdateRequest struct {
 	AutoStart         *bool              `json:"autoStart"`
 	Enabled           *bool              `json:"enabled"`
 }
+
+// AuthStatusResponse indicates if the MCP server is authenticated.
+type AuthStatusResponse struct {
+	Authenticated bool `json:"authenticated"`
+}
+
+// ConnectURLResponse provides the URL to initiate OAuth flow.
+type ConnectURLResponse struct {
+	URL string `json:"url"`
+}

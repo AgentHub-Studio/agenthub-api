@@ -110,14 +110,15 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	promptTemplateHandler := prompttemplate.NewHandler(prompttemplate.NewService(prompttemplate.NewRepository(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
-	oauthHandler := oauth.NewHandler(oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey))
+	oauthSvc := oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey)
+	oauthHandler := oauth.NewHandler(oauthSvc)
 	auditHandler := audit.NewHandler(audit.NewService(audit.NewRepository(pool)))
 	metricsHandler := metrics.NewHandler(metrics.NewService(metrics.NewRepository(pool)))
 	vpnSvc := vpnresource.NewService(vpnresource.NewRepository(pool))
 	vpnHandler := vpnresource.NewHandler(vpnSvc)
 	datasourceHandler := datasource.NewHandler(datasourceSvc)
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
-	mcpSvc := mcp.NewService(mcp.NewRepository(pool))
+	mcpSvc := mcp.NewService(mcp.NewRepository(pool)).WithOAuthService(oauthSvc)
 	integrationHandler := integration.NewHandler(integration.NewService(
 		toolSvc,
 		datasourceSvc,

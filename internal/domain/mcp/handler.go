@@ -20,6 +20,8 @@ type mcpService interface {
 	GetByID(ctx context.Context, id uuid.UUID) (McpServerConfigResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (McpServerConfigResponse, error)
 	Delete(ctx context.Context, id uuid.UUID) error
+	GetAuthStatus(ctx context.Context, id uuid.UUID) (AuthStatusResponse, error)
+	GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL string) (ConnectURLResponse, error)
 }
 
 // listResponse wraps the flat slice in the Page envelope expected by the frontend.
@@ -45,6 +47,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Put("/api/mcp-server-configs/{id}", h.update)
 	r.Patch("/api/mcp-server-configs/{id}", h.update)
 	r.Delete("/api/mcp-server-configs/{id}", h.delete)
+	r.Get("/api/mcp-server-configs/{id}/auth-status", h.getAuthStatus)
+	r.Get("/api/mcp-server-configs/{id}/connect", h.getConnectURL)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -136,4 +140,50 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.NoContent(w)
+}
+
+func (h *Handler) getAuthStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	resp, err := h.svc.GetAuthStatus(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "MCP server not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to get auth status")
+		return
+	}
+
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) getConnectURL(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	redirectURL := r.URL.Query().Get("redirectUrl")
+	if redirectURL == "" {
+		respond.Error(w, http.StatusBadRequest, "redirectUrl query param is required")
+		return
+	}
+
+	resp, err := h.svc.GetConnectURL(r.Context(), id, redirectURL)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "MCP server not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to get connect URL")
+		return
+	}
+
+	respond.JSON(w, http.StatusOK, resp)
 }
