@@ -451,20 +451,24 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 
 	// 1. Check if registered
 	statusURL := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
-	resp, err := http.Get(statusURL)
-	if err == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			// Already registered, check status
-			var status struct {
-				Status string `json:"Status"`
-			}
-			if decodeErr := json.NewDecoder(resp.Body).Decode(&status); decodeErr == nil {
-				if status.Status == "running" {
-					return nil
+	for i := 0; i < 3; i++ {
+		resp, err := http.Get(statusURL)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				// Already registered, check status
+				var status struct {
+					Status string `json:"Status"`
+				}
+				if decodeErr := json.NewDecoder(resp.Body).Decode(&status); decodeErr == nil {
+					if status.Status == "running" {
+						return nil
+					}
+					log.Printf("mcp service: server %s registered but status is %s, waiting...", config.Name, status.Status)
 				}
 			}
 		}
+		time.Sleep(1 * time.Second)
 	}
 
 	// 2. Not registered or not running, register/start it
@@ -503,7 +507,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 
 	body, _ := json.Marshal(regReq)
 	regURL := fmt.Sprintf("%s/servers", s.mcpRuntimeURL)
-	resp, err = http.Post(regURL, "application/json", bytes.NewReader(body))
+	resp, err := http.Post(regURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to register server in runtime: %w", err)
 	}
