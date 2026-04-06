@@ -140,16 +140,16 @@ func (r *Repository) Update(ctx context.Context, tenantID string, id uuid.UUID, 
 		`UPDATE oauth_credential SET
 		   name=$1, auth_type=$2, token_url=$3, client_id=$4, client_secret=$5, scopes=$6,
 		   api_key_header=$7, api_key_value=$8, bearer_token=$9, username=$10, password=$11,
-		   auth_url=$12, redirect_url=$13,
+		   auth_url=$12, redirect_url=$13, refresh_token=$14, expires_at=$15,
 		   updated_at=NOW()
-		 WHERE id=$14
+		 WHERE id=$16
 		 RETURNING id, name, auth_type, token_url, client_id, client_secret, scopes,
 		           api_key_header, api_key_value, bearer_token, username, password,
 		           auth_url, redirect_url, refresh_token, expires_at,
 		           created_at, updated_at`,
 		c.Name, c.AuthType, c.TokenURL, c.ClientID, c.ClientSecret, c.Scopes,
 		c.APIKeyHeader, c.APIKeyValue, c.BearerToken, c.Username, c.Password,
-		c.AuthURL, c.RedirectURL, id,
+		c.AuthURL, c.RedirectURL, c.RefreshToken, c.ExpiresAt, id,
 	).Scan(
 		&updated.ID, &updated.Name, &updated.AuthType, &updated.TokenURL, &updated.ClientID,
 		&updated.ClientSecret, &updated.Scopes, &updated.APIKeyHeader, &updated.APIKeyValue,

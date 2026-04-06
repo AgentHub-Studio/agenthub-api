@@ -73,19 +73,27 @@ func NewServiceWithEncryption(repo CredentialRepository, key string) *Service {
 }
 
 // encryptSecret encrypts s if an encryption key is configured.
-func (s *Service) encryptSecret(plaintext string) (string, error) {
-	if plaintext == "" {
-		return "", nil
+func (s *Service) encryptSecret(plaintext *string) (*string, error) {
+	if plaintext == nil || *plaintext == "" {
+		return plaintext, nil
 	}
-	return crypto.Encrypt(s.encryptionKey, plaintext)
+	enc, err := crypto.Encrypt(s.encryptionKey, *plaintext)
+	if err != nil {
+		return nil, err
+	}
+	return &enc, nil
 }
 
 // decryptSecret decrypts s if an encryption key is configured.
-func (s *Service) decryptSecret(ciphertext string) (string, error) {
-	if ciphertext == "" {
-		return "", nil
+func (s *Service) decryptSecret(ciphertext *string) (*string, error) {
+	if ciphertext == nil || *ciphertext == "" {
+		return ciphertext, nil
 	}
-	return crypto.Decrypt(s.encryptionKey, ciphertext)
+	dec, err := crypto.Decrypt(s.encryptionKey, *ciphertext)
+	if err != nil {
+		return nil, err
+	}
+	return &dec, nil
 }
 
 // ListAll returns a paginated list of OAuth credentials for the tenant.
@@ -183,8 +191,8 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	return result, err
 }
 
-func (s *Service) resolveUpdatedSecret(incoming, existing string) (string, error) {
-	if incoming == "" || incoming == "***" {
+func (s *Service) resolveUpdatedSecret(incoming *string, existing *string) (*string, error) {
+	if incoming == nil || *incoming == "" || *incoming == "***" {
 		return existing, nil
 	}
 	return s.encryptSecret(incoming)
@@ -211,25 +219,27 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 	switch c.AuthType {
 	case AuthTypeOAuth2ClientCredentials, AuthTypeOAuth2AuthorizationCode:
 		// Check database status first
-		if c.AuthType == AuthTypeOAuth2AuthorizationCode {
-			if c.BearerToken != "" && (c.ExpiresAt == nil || time.Now().Before(c.ExpiresAt.Add(-30*time.Second))) {
-				token, _ := s.decryptSecret(c.BearerToken)
-				if token != "" {
-					return ResolveResponse{Header: "Authorization", Value: "Bearer " + token}, nil
+ 	if c.AuthType == AuthTypeOAuth2AuthorizationCode {
+			if c.BearerToken != nil && *c.BearerToken != "" && (c.ExpiresAt == nil || time.Now().Before(c.ExpiresAt.Add(-30*time.Second))) {
+				tokenPtr, _ := s.decryptSecret(c.BearerToken)
+				if tokenPtr != nil && *tokenPtr != "" {
+					return ResolveResponse{Header: "Authorization", Value: "Bearer " + *tokenPtr}, nil
 				}
 			}
 			// Needs refresh or exchange
-			if c.RefreshToken != "" {
+			if c.RefreshToken != nil && *c.RefreshToken != "" {
 				updated, err := s.RefreshToken(ctx, tenantID, id)
 				if err == nil {
-					token, _ := s.decryptSecret(updated.BearerToken)
-					return ResolveResponse{Header: "Authorization", Value: "Bearer " + token}, nil
+					tokenPtr, _ := s.decryptSecret(updated.BearerToken)
+					if tokenPtr != nil && *tokenPtr != "" {
+						return ResolveResponse{Header: "Authorization", Value: "Bearer " + *tokenPtr}, nil
+					}
 				}
 			}
 		}
 
-		clientSecret, _ := s.decryptSecret(c.ClientSecret)
-		c.ClientSecret = clientSecret
+		clientSecretPtr, _ := s.decryptSecret(c.ClientSecret)
+		c.ClientSecret = clientSecretPtr
 		token, err := s.fetchOrCachedToken(ctx, id, c)
 		if err != nil {
 			return ResolveResponse{}, err
@@ -237,20 +247,39 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 		return ResolveResponse{Header: "Authorization", Value: "Bearer " + token}, nil
 
 	case AuthTypeBearerToken:
-		bearerToken, _ := s.decryptSecret(c.BearerToken)
-		return ResolveResponse{Header: "Authorization", Value: "Bearer " + bearerToken}, nil
+		bearerTokenPtr, _ := s.decryptSecret(c.BearerToken)
+		val := ""
+		if bearerTokenPtr != nil {
+			val = *bearerTokenPtr
+		}
+		return ResolveResponse{Header: "Authorization", Value: "Bearer " + val}, nil
 
 	case AuthTypeAPIKey:
-		apiKeyValue, _ := s.decryptSecret(c.APIKeyValue)
-		header := c.APIKeyHeader
+		apiKeyValuePtr, _ := s.decryptSecret(c.APIKeyValue)
+		header := ""
+		if c.APIKeyHeader != nil {
+			header = *c.APIKeyHeader
+		}
 		if header == "" {
 			header = "X-API-Key"
 		}
-		return ResolveResponse{Header: header, Value: apiKeyValue}, nil
+		val := ""
+		if apiKeyValuePtr != nil {
+			val = *apiKeyValuePtr
+		}
+		return ResolveResponse{Header: header, Value: val}, nil
 
 	case AuthTypeBasicAuth:
-		password, _ := s.decryptSecret(c.Password)
-		encoded := base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + password))
+		passwordPtr, _ := s.decryptSecret(c.Password)
+		pass := ""
+		if passwordPtr != nil {
+			pass = *passwordPtr
+		}
+		user := ""
+		if c.Username != nil {
+			user = *c.Username
+		}
+		encoded := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 		return ResolveResponse{Header: "Authorization", Value: "Basic " + encoded}, nil
 
 	default:
@@ -283,13 +312,21 @@ func (s *Service) fetchOrCachedToken(ctx context.Context, id uuid.UUID, c OAuthC
 func (s *Service) exchangeClientCredentials(ctx context.Context, c OAuthCredential) (string, int, error) {
 	params := url.Values{}
 	params.Set("grant_type", "client_credentials")
-	params.Set("client_id", c.ClientID)
-	params.Set("client_secret", c.ClientSecret)
-	if c.Scopes != "" {
-		params.Set("scope", c.Scopes)
+	if c.ClientID != nil {
+		params.Set("client_id", *c.ClientID)
+	}
+	if c.ClientSecret != nil {
+		params.Set("client_secret", *c.ClientSecret)
+	}
+	if c.Scopes != nil && *c.Scopes != "" {
+		params.Set("scope", *c.Scopes)
 	}
 
-	return s.doTokenRequest(ctx, c.TokenURL, params)
+	tokenURL := ""
+	if c.TokenURL != nil {
+		tokenURL = *c.TokenURL
+	}
+	return s.doTokenRequest(ctx, tokenURL, params)
 }
 
 func (s *Service) ExchangeCode(ctx context.Context, tenantID string, id uuid.UUID, code string) error {
@@ -298,21 +335,31 @@ func (s *Service) ExchangeCode(ctx context.Context, tenantID string, id uuid.UUI
 		return err
 	}
 
-	clientSecret, _ := s.decryptSecret(c.ClientSecret)
+	clientSecretPtr, _ := s.decryptSecret(c.ClientSecret)
 	params := url.Values{}
 	params.Set("grant_type", "authorization_code")
 	params.Set("code", code)
-	params.Set("client_id", c.ClientID)
-	params.Set("client_secret", clientSecret)
-	params.Set("redirect_uri", c.RedirectURL)
+	if c.ClientID != nil {
+		params.Set("client_id", *c.ClientID)
+	}
+	if clientSecretPtr != nil {
+		params.Set("client_secret", *clientSecretPtr)
+	}
+	if c.RedirectURL != nil {
+		params.Set("redirect_uri", *c.RedirectURL)
+	}
 
-	token, refreshToken, expiresIn, err := s.doFullTokenRequest(ctx, c.TokenURL, params)
+	tokenURL := ""
+	if c.TokenURL != nil {
+		tokenURL = *c.TokenURL
+	}
+	token, refreshToken, expiresIn, err := s.doFullTokenRequest(ctx, tokenURL, params)
 	if err != nil {
 		return err
 	}
 
-	encToken, _ := s.encryptSecret(token)
-	encRefresh, _ := s.encryptSecret(refreshToken)
+	encToken, _ := s.encryptSecret(&token)
+	encRefresh, _ := s.encryptSecret(&refreshToken)
 	expiry := time.Now().Add(time.Duration(expiresIn) * time.Second)
 
 	c.BearerToken = encToken
@@ -329,26 +376,36 @@ func (s *Service) RefreshToken(ctx context.Context, tenantID string, id uuid.UUI
 		return OAuthCredential{}, err
 	}
 
-	clientSecret, _ := s.decryptSecret(c.ClientSecret)
-	refreshToken, _ := s.decryptSecret(c.RefreshToken)
+	clientSecretPtr, _ := s.decryptSecret(c.ClientSecret)
+	refreshTokenPtr, _ := s.decryptSecret(c.RefreshToken)
 
 	params := url.Values{}
 	params.Set("grant_type", "refresh_token")
-	params.Set("refresh_token", refreshToken)
-	params.Set("client_id", c.ClientID)
-	params.Set("client_secret", clientSecret)
+	if refreshTokenPtr != nil {
+		params.Set("refresh_token", *refreshTokenPtr)
+	}
+	if c.ClientID != nil {
+		params.Set("client_id", *c.ClientID)
+	}
+	if clientSecretPtr != nil {
+		params.Set("client_secret", *clientSecretPtr)
+	}
 
-	token, newRefresh, expiresIn, err := s.doFullTokenRequest(ctx, c.TokenURL, params)
+	tokenURL := ""
+	if c.TokenURL != nil {
+		tokenURL = *c.TokenURL
+	}
+	token, newRefresh, expiresIn, err := s.doFullTokenRequest(ctx, tokenURL, params)
 	if err != nil {
 		return OAuthCredential{}, err
 	}
 
-	encToken, _ := s.encryptSecret(token)
+	encToken, _ := s.encryptSecret(&token)
 	expiry := time.Now().Add(time.Duration(expiresIn) * time.Second)
 
 	c.BearerToken = encToken
 	if newRefresh != "" {
-		encRefresh, _ := s.encryptSecret(newRefresh)
+		encRefresh, _ := s.encryptSecret(&newRefresh)
 		c.RefreshToken = encRefresh
 	}
 	c.ExpiresAt = &expiry
