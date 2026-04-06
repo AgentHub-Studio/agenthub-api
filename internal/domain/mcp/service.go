@@ -476,8 +476,12 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 					
 					// Try to start explicitly
 					startURL := fmt.Sprintf("%s/servers/%s/start", s.mcpRuntimeURL, config.Name)
-					if startResp, startErr := http.Post(startURL, "application/json", nil); startErr == nil {
-						startResp.Body.Close()
+					startResp, startErr := http.Post(startURL, "application/json", nil)
+					if startErr == nil {
+						defer startResp.Body.Close()
+						if startResp.StatusCode == http.StatusUnauthorized {
+							return fmt.Errorf("OAuth token expired or invalid for server '%s'. Please reconnect via the MCP server list (click 'Connect')", config.Name)
+						}
 					}
 				}
 			}
