@@ -83,3 +83,12 @@ func Decrypt(key, ciphertext string) (string, error) {
 
 	return string(plaintext), nil
 }
+
+// GenerateRandomKey creates a cryptographically secure random byte slice of the given size.
+func GenerateRandomKey(size int) []byte {
+	key := make([]byte, size)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		panic(fmt.Sprintf("crypto: failed to generate random key: %v", err))
+	}
+	return key
+}

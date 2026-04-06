@@ -38,6 +38,7 @@ type OAuthCredential struct {
 	Password     *string    `db:"password"`
 	AuthURL      *string    `db:"auth_url"`
 	RedirectURL  *string    `db:"redirect_url"`
+	CodeVerifier *string    `db:"code_verifier"`
 	RefreshToken *string    `db:"refresh_token"`
 	ExpiresAt    *time.Time `db:"expires_at"`
 	CreatedAt    time.Time `db:"created_at"`
@@ -61,6 +62,7 @@ type OAuthCredentialResponse struct {
 	Password     *string    `json:"password"`
 	AuthURL      *string    `json:"authUrl"`
 	RedirectURL  *string    `json:"redirectUrl"`
+	CodeVerifier *string    `json:"codeVerifier"`
 	RefreshToken *string    `json:"refreshToken"`
 	ExpiresAt    *time.Time `json:"expiresAt"`
 	CreatedAt    time.Time `json:"createdAt"`
@@ -117,6 +119,7 @@ type CreateRequest struct {
 	Password     *string  `json:"password"`
 	AuthURL      *string  `json:"authUrl"`
 	RedirectURL  *string  `json:"redirectUrl"`
+	CodeVerifier *string  `json:"codeVerifier"`
 }
 
 // ResolveResponse is the result of resolving an auth header.

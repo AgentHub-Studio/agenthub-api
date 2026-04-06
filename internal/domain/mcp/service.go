@@ -14,6 +14,8 @@ import (
 // oauthService defines methods needed from oauth domain.
 type oauthService interface {
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (oauth.OAuthCredential, error)
+	Update(ctx context.Context, tenantID string, id uuid.UUID, req oauth.CreateRequest) (oauth.OAuthCredential, error)
+	GeneratePKCE() (verifier string, challenge string)
 }
 
 // Service provides business logic for McpServerConfig operations.
@@ -247,6 +249,33 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 
 	finalURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s",
 		authURL, clientID, redirectURL, scopes, config.ID.String())
+
+	// 3. Generate and store PKCE
+	if s.oauthSvc != nil && config.OAuthCredentialID != nil {
+		verifier, challenge := s.oauthSvc.GeneratePKCE()
+		finalURL += fmt.Sprintf("&code_challenge=%s&code_challenge_method=S256", challenge)
+
+		// Persist the verifier in the credential so it can be used during exchange.
+		// This is a bit simplified; ideally we'd have a separate temporary storage for flows in progress.
+		cred, _ := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
+		updateReq := oauth.CreateRequest{
+			Name:         cred.Name,
+			AuthType:     cred.AuthType,
+			TokenURL:     cred.TokenURL,
+			ClientID:     cred.ClientID,
+			ClientSecret: cred.ClientSecret,
+			Scopes:       cred.Scopes,
+			APIKeyHeader: cred.APIKeyHeader,
+			APIKeyValue:  cred.APIKeyValue,
+			BearerToken:  cred.BearerToken,
+			Username:     cred.Username,
+			Password:     cred.Password,
+			AuthURL:      cred.AuthURL,
+			RedirectURL:  cred.RedirectURL,
+			CodeVerifier: &verifier,
+		}
+		_, _ = s.oauthSvc.Update(ctx, tenantID, *config.OAuthCredentialID, updateReq)
+	}
 
 	return ConnectURLResponse{URL: finalURL}, nil
 }

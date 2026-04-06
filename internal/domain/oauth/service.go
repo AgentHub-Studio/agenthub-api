@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -139,6 +140,7 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 		Password:     password,
 		AuthURL:      req.AuthURL,
 		RedirectURL:  req.RedirectURL,
+		CodeVerifier: req.CodeVerifier,
 	}
 	return s.repo.Create(ctx, tenantID, c)
 }
@@ -181,6 +183,7 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		Password:     password,
 		AuthURL:      req.AuthURL,
 		RedirectURL:  req.RedirectURL,
+		CodeVerifier: req.CodeVerifier,
 	}
 	result, err := s.repo.Update(ctx, tenantID, id, c)
 	if err == nil {
@@ -348,6 +351,9 @@ func (s *Service) ExchangeCode(ctx context.Context, tenantID string, id uuid.UUI
 	if c.RedirectURL != nil {
 		params.Set("redirect_uri", *c.RedirectURL)
 	}
+	if c.CodeVerifier != nil && *c.CodeVerifier != "" {
+		params.Set("code_verifier", *c.CodeVerifier)
+	}
 
 	tokenURL := ""
 	if c.TokenURL != nil {
@@ -419,6 +425,9 @@ func (s *Service) doTokenRequest(ctx context.Context, tokenURL string, params ur
 }
 
 func (s *Service) doFullTokenRequest(ctx context.Context, tokenURL string, params url.Values) (string, string, int, error) {
+	if tokenURL == "" {
+		return "", "", 0, fmt.Errorf("oauth: token_url is empty")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(params.Encode()))
 	if err != nil {
 		return "", "", 0, err
@@ -448,4 +457,12 @@ func (s *Service) doFullTokenRequest(ctx context.Context, tokenURL string, param
 		body.ExpiresIn = 3600
 	}
 	return body.AccessToken, body.RefreshToken, body.ExpiresIn, nil
+}
+
+// GeneratePKCE creates a code_verifier and code_challenge (S256).
+func (s *Service) GeneratePKCE() (verifier string, challenge string) {
+	verifier = base64.RawURLEncoding.EncodeToString(crypto.GenerateRandomKey(32))
+	hash := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(hash[:])
+	return verifier, challenge
 }
