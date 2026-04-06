@@ -89,10 +89,6 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	if temperature == 0 {
 		temperature = 0.7
 	}
-	visibility := req.Visibility
-	if visibility == "" {
-		visibility = VisibilityPrivate
-	}
 
 	p := LLMPreset{
 		ID:          uuid.New(),
@@ -101,14 +97,10 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 		Description: req.Description,
 		Provider:    req.Provider,
 		Model:       req.Model,
-		BaseURL:     req.BaseURL,
-		APIKeyEnv:   req.APIKeyEnv,
 		MaxTokens:   maxTokens,
 		Temperature: temperature,
 		ConfigJSON:  req.ConfigJSON,
 		IsDefault:   req.IsDefault,
-		IsPublic:    req.IsPublic,
-		Visibility:  visibility,
 	}
 	created, err := s.repo.Create(ctx, p)
 	if err != nil {
@@ -134,12 +126,6 @@ func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	if req.Model != nil {
 		p.Model = *req.Model
 	}
-	if req.BaseURL != nil {
-		p.BaseURL = *req.BaseURL
-	}
-	if req.APIKeyEnv != nil {
-		p.APIKeyEnv = *req.APIKeyEnv
-	}
 	if req.MaxTokens != nil {
 		p.MaxTokens = *req.MaxTokens
 	}
@@ -148,12 +134,6 @@ func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	}
 	if req.ConfigJSON != nil {
 		p.ConfigJSON = req.ConfigJSON
-	}
-	if req.IsPublic != nil {
-		p.IsPublic = *req.IsPublic
-	}
-	if req.Visibility != nil {
-		p.Visibility = *req.Visibility
 	}
 	updated, err := s.repo.Update(ctx, p)
 	if err != nil {

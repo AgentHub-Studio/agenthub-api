@@ -15,14 +15,10 @@ type LLMPresetResponse struct {
 	Description string          `json:"description,omitempty"`
 	Provider    string          `json:"provider"`
 	Model       string          `json:"model"`
-	BaseURL     string          `json:"baseUrl,omitempty"`
-	APIKeyEnv   string          `json:"apiKeyEnv,omitempty"`
 	MaxTokens   int             `json:"maxTokens"`
 	Temperature float64         `json:"temperature"`
 	ConfigJSON  json.RawMessage `json:"configJson,omitempty"`
 	IsDefault   bool            `json:"isDefault"`
-	IsPublic    bool            `json:"isPublic"`
-	Visibility  string          `json:"visibility"`
 	CreatedAt   time.Time       `json:"createdAt"`
 	UpdatedAt   time.Time       `json:"updatedAt"`
 }
@@ -38,14 +34,10 @@ type CreateLLMPresetRequest struct {
 	Description string          `json:"description"`
 	Provider    string          `json:"provider"`
 	Model       string          `json:"model"`
-	BaseURL     string          `json:"baseUrl"`
-	APIKeyEnv   string          `json:"apiKeyEnv"`
 	MaxTokens   int             `json:"maxTokens"`
 	Temperature float64         `json:"temperature"`
 	ConfigJSON  json.RawMessage `json:"configJson"`
 	IsDefault   bool            `json:"isDefault"`
-	IsPublic    bool            `json:"isPublic"`
-	Visibility  string          `json:"visibility"` // PRIVATE, ORGANIZATION, PUBLIC
 }
 
 // UpdateLLMPresetRequest is the JSON body for partial preset updates.
@@ -54,11 +46,7 @@ type UpdateLLMPresetRequest struct {
 	Description *string          `json:"description,omitempty"`
 	Provider    *string          `json:"provider,omitempty"`
 	Model       *string          `json:"model,omitempty"`
-	BaseURL     *string          `json:"baseUrl,omitempty"`
-	APIKeyEnv   *string          `json:"apiKeyEnv,omitempty"`
 	MaxTokens   *int             `json:"maxTokens,omitempty"`
 	Temperature *float64         `json:"temperature,omitempty"`
 	ConfigJSON  json.RawMessage  `json:"configJson,omitempty"`
-	IsPublic    *bool            `json:"isPublic,omitempty"`
-	Visibility  *string          `json:"visibility,omitempty"`
 }

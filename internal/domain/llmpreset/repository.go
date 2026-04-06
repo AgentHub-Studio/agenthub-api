@@ -40,16 +40,16 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &pgRepository{pool: pool}
 }
 
-const presetColumns = `id, tenant_id, name, description, provider, model, base_url, api_key_env,
-	max_tokens, temperature, config_json, is_default, is_public, visibility, created_at, updated_at`
+const presetColumns = `id, tenant_id, name, description, provider, model,
+	max_tokens, temperature, config_json, is_default, created_at, updated_at`
 
 func scanPreset(row pgx.Row) (LLMPreset, error) {
 	var p LLMPreset
 	var configJSON []byte
 	err := row.Scan(
 		&p.ID, &p.TenantID, &p.Name, &p.Description, &p.Provider, &p.Model,
-		&p.BaseURL, &p.APIKeyEnv, &p.MaxTokens, &p.Temperature,
-		&configJSON, &p.IsDefault, &p.IsPublic, &p.Visibility,
+		&p.MaxTokens, &p.Temperature,
+		&configJSON, &p.IsDefault,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {
@@ -152,20 +152,16 @@ func (r *pgRepository) Create(ctx context.Context, p LLMPreset) (LLMPreset, erro
 	if len(configJSON) == 0 {
 		configJSON = json.RawMessage("{}")
 	}
-	visibility := p.Visibility
-	if visibility == "" {
-		visibility = VisibilityPrivate
-	}
 	query := fmt.Sprintf(`
 		INSERT INTO public.llm_config_preset
-			(id, tenant_id, name, description, provider, model, base_url, api_key_env,
-			 max_tokens, temperature, config_json, is_default, is_public, visibility, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+			(id, tenant_id, name, description, provider, model,
+			 max_tokens, temperature, config_json, is_default, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
 		RETURNING %s`, presetColumns)
 	row := r.pool.QueryRow(ctx, query,
 		p.ID, p.TenantID, p.Name, p.Description, p.Provider, p.Model,
-		p.BaseURL, p.APIKeyEnv, p.MaxTokens, p.Temperature,
-		[]byte(configJSON), p.IsDefault, p.IsPublic, visibility,
+		p.MaxTokens, p.Temperature,
+		[]byte(configJSON), p.IsDefault,
 	)
 	created, err := scanPreset(row)
 	if err != nil {
@@ -181,14 +177,14 @@ func (r *pgRepository) Update(ctx context.Context, p LLMPreset) (LLMPreset, erro
 	}
 	query := fmt.Sprintf(`
 		UPDATE public.llm_config_preset
-		SET name=$3, description=$4, provider=$5, model=$6, base_url=$7, api_key_env=$8,
-		    max_tokens=$9, temperature=$10, config_json=$11, is_public=$12, visibility=$13, updated_at=NOW()
+		SET name=$3, description=$4, provider=$5, model=$6,
+		    max_tokens=$7, temperature=$8, config_json=$9, updated_at=NOW()
 		WHERE tenant_id=$1 AND id=$2
 		RETURNING %s`, presetColumns)
 	row := r.pool.QueryRow(ctx, query,
 		p.TenantID, p.ID, p.Name, p.Description, p.Provider, p.Model,
-		p.BaseURL, p.APIKeyEnv, p.MaxTokens, p.Temperature,
-		[]byte(configJSON), p.IsPublic, p.Visibility,
+		p.MaxTokens, p.Temperature,
+		[]byte(configJSON),
 	)
 	updated, err := scanPreset(row)
 	if errors.Is(err, pgx.ErrNoRows) {
