@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -238,7 +239,12 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		return ConnectURLResponse{}, err
 	}
 
-	// 1. Check if we have local discovery metadata from runtime
+	// 1. Ensure server is registered in runtime
+	if s.mcpRuntimeURL != "" {
+		_ = s.ensureServerRegistered(ctx, config)
+	}
+
+	// 2. Check if we have local discovery metadata from runtime
 	discoveredAuthURL := ""
 	discoveredTokenURL := ""
 	discoveredScopes := ""
@@ -426,4 +432,48 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	}
 
 	return ConnectURLResponse{URL: finalURL}, nil
+}
+
+// ensureServerRegistered checks if server is in runtime and registers if missing.
+func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerConfig) error {
+	if s.mcpRuntimeURL == "" {
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		resp.Body.Close()
+		return nil // Already registered
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	// Register
+	regReq := map[string]interface{}{
+		"name":          config.Name,
+		"transportType": config.TransportType,
+		"httpBaseUrl":   config.HTTPBaseURL,
+		"autoStart":     true,
+	}
+	body, _ := json.Marshal(regReq)
+	url = fmt.Sprintf("%s/servers", s.mcpRuntimeURL)
+	hReq, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(body)))
+	hReq.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(hReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("runtime registration failed: %d", resp.StatusCode)
+	}
+
+	// Wait a bit for discovery to trigger (probing)
+	time.Sleep(1 * time.Second)
+
+	return nil
 }
