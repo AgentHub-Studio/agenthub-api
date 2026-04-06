@@ -369,7 +369,7 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		finalURL += fmt.Sprintf("&code_challenge=%s&code_challenge_method=S256", challenge)
 	}
 
-	// 4. Persist flow state (Simplified)
+	// 4. Persist flow state (Enhanced for DCR persistence)
 	if s.oauthSvc != nil {
 		var credID *uuid.UUID
 		var cred oauth.OAuthCredential
@@ -378,6 +378,23 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		if config.OAuthCredentialID != nil {
 			credID = config.OAuthCredentialID
 			cred, err = s.oauthSvc.GetByID(ctx, tenantID, *credID)
+		} else if clientID != "" {
+			// Auto-create credential if none linked but we have a clientID from DCR
+			newCred, createErr := s.oauthSvc.Update(ctx, tenantID, uuid.Nil, oauth.CreateRequest{
+				Name:     config.Name + " OAuth",
+				AuthType: "oauth2",
+				AuthURL:  &authURL,
+				TokenURL: &tokenURL,
+				ClientID: &clientID,
+				Scopes:   &scopes,
+			})
+			if createErr == nil {
+				credID = &newCred.ID
+				cred = newCred
+				// Link to MCP server
+				config.OAuthCredentialID = credID
+				_, _ = s.repo.Update(ctx, config)
+			}
 		}
 
 		if (err == nil && credID != nil) {
