@@ -414,6 +414,11 @@ func (s *Service) ListTools(ctx context.Context, id uuid.UUID) ([]ToolResponse, 
 	url := fmt.Sprintf("%s/servers/%s/tools", s.mcpRuntimeURL, config.Name)
 	log.Printf("mcp service: fetching tools from %s", url)
 
+	// Ensure server is registered in runtime before fetching tools
+	if err := s.ensureServerRegistered(ctx, config); err != nil {
+		log.Printf("mcp service: failed to ensure server registration for %s: %v", config.Name, err)
+	}
+
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("mcp service: tools: failed to contact runtime: %w", err)
@@ -436,6 +441,82 @@ func (s *Service) ListTools(ctx context.Context, id uuid.UUID) ([]ToolResponse, 
 	}
 
 	return result.Tools, nil
+}
+
+// ensureServerRegistered checks if an MCP server is registered in the runtime and registers it if missing.
+func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerConfig) error {
+	if s.mcpRuntimeURL == "" {
+		return fmt.Errorf("MCP runtime URL not configured")
+	}
+
+	// 1. Check if registered
+	statusURL := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
+	resp, err := http.Get(statusURL)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			// Already registered, check status
+			var status struct {
+				Status string `json:"Status"`
+			}
+			if decodeErr := json.NewDecoder(resp.Body).Decode(&status); decodeErr == nil {
+				if status.Status == "running" {
+					return nil
+				}
+			}
+		}
+	}
+
+	// 2. Not registered or not running, register/start it
+	mcpURL := ""
+	if config.HTTPBaseURL != nil {
+		mcpURL = *config.HTTPBaseURL
+	}
+
+	regReq := map[string]interface{}{
+		"name":          config.Name,
+		"transportType": config.TransportType,
+		"httpBaseUrl":   mcpURL,
+		"autoStart":     true,
+		"enabled":       true,
+	}
+
+	// Add OAuth credentials if available
+	tenantID := tenant.FromContext(ctx)
+	if tenantID != "" && config.OAuthCredentialID != nil && s.oauthSvc != nil {
+		cred, credErr := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
+		if credErr == nil {
+			if cred.TokenURL != nil {
+				regReq["oauthTokenUrl"] = *cred.TokenURL
+			}
+			if cred.ClientID != nil {
+				regReq["oauthClientId"] = *cred.ClientID
+			}
+			if cred.ClientSecret != nil {
+				regReq["oauthClientSecret"] = *cred.ClientSecret
+			}
+			if cred.Scopes != nil {
+				regReq["oauthScopes"] = strings.Split(*cred.Scopes, " ")
+			}
+		}
+	}
+
+	body, _ := json.Marshal(regReq)
+	regURL := fmt.Sprintf("%s/servers", s.mcpRuntimeURL)
+	resp, err = http.Post(regURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to register server in runtime: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("runtime registration failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	// Give it a moment to initialize
+	time.Sleep(1 * time.Second)
+	return nil
 }
 
 // discoverAuthServerMetadata implements the MCP spec discovery flow (mirrors mcp-go oauth.go getServerMetadata):
