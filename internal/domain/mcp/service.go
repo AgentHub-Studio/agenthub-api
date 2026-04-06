@@ -425,6 +425,14 @@ func (s *Service) ListTools(ctx context.Context, id uuid.UUID) ([]ToolResponse, 
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		var errResp struct {
+			Error        string `json:"error"`
+			AuthRequired bool   `json:"auth_required"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		return nil, fmt.Errorf("mcp service: tools: OAuth token expired or invalid for server '%s'. Please reconnect via the MCP server list (click 'Connect')", config.Name)
+	}
 	if resp.StatusCode != http.StatusOK {
 		var errResp struct {
 			Error string `json:"error"`
