@@ -194,6 +194,7 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	}
 
 	authURL := ""
+	tokenURL := ""
 	clientID := ""
 	scopes := ""
 
@@ -209,6 +210,9 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 
 		if cred.AuthURL != nil && *cred.AuthURL != "" {
 			authURL = *cred.AuthURL
+		}
+		if cred.TokenURL != nil && *cred.TokenURL != "" {
+			tokenURL = *cred.TokenURL
 		}
 		if cred.ClientID != nil && *cred.ClientID != "" {
 			clientID = *cred.ClientID
@@ -227,16 +231,23 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	if authURL == "" {
 		if strings.Contains(url, "github.com") {
 			authURL = "https://github.com/login/oauth/authorize"
+			tokenURL = "https://github.com/login/oauth/access_token"
 			if scopes == "" {
 				scopes = "repo,read:user,user:email"
 			}
 		} else if strings.Contains(url, "asana.com") {
 			authURL = "https://app.asana.com/-/oauth_authorize"
+			tokenURL = "https://app.asana.com/-/oauth_token"
 			if scopes == "" {
 				scopes = "default"
 			}
 		}
 	}
+
+	// 3. MCP Authorization Server Discovery (Draft)
+	// If authURL is still empty, we could potentially try to fetch /.well-known/oauth-authorization-server
+	// For now, we will assume that the user has to provide it in the Credential or it must be a known provider.
+	// But let's add a placeholder for future implementation of RFC 8414 discovery.
 
 	if authURL == "" {
 		return ConnectURLResponse{}, fmt.Errorf("mcp service: authURL is empty for MCP %s (URL: %s). Ensure linked OAuth credential has AuthURL.", id.String(), url)
@@ -246,21 +257,26 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		return ConnectURLResponse{}, fmt.Errorf("mcp service: clientID is empty for MCP %s. Ensure linked OAuth credential has ClientID.", id.String())
 	}
 
+	// PKCE is REQUIRED by OAuth 2.1 (and thus the MCP draft)
+	verifier, challenge := "", ""
+	if s.oauthSvc != nil {
+		verifier, challenge = s.oauthSvc.GeneratePKCE()
+	}
+
 	finalURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s",
 		authURL, clientID, redirectURL, scopes, config.ID.String())
 
-	// 3. Generate and store PKCE
-	if s.oauthSvc != nil && config.OAuthCredentialID != nil {
-		verifier, challenge := s.oauthSvc.GeneratePKCE()
+	if challenge != "" {
 		finalURL += fmt.Sprintf("&code_challenge=%s&code_challenge_method=S256", challenge)
+	}
 
-		// Persist the verifier in the credential so it can be used during exchange.
-		// This is a bit simplified; ideally we'd have a separate temporary storage for flows in progress.
+	// 4. Persist flow state (Simplified)
+	if s.oauthSvc != nil && config.OAuthCredentialID != nil {
 		cred, _ := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
 		updateReq := oauth.CreateRequest{
 			Name:         cred.Name,
 			AuthType:     cred.AuthType,
-			TokenURL:     cred.TokenURL,
+			TokenURL:     &tokenURL,
 			ClientID:     cred.ClientID,
 			ClientSecret: cred.ClientSecret,
 			Scopes:       cred.Scopes,
@@ -269,10 +285,18 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 			BearerToken:  cred.BearerToken,
 			Username:     cred.Username,
 			Password:     cred.Password,
-			AuthURL:      cred.AuthURL,
+			AuthURL:      &authURL,
 			RedirectURL:  cred.RedirectURL,
 			CodeVerifier: &verifier,
 		}
+		// If cred already has TokenURL/AuthURL, don't overwrite with fallbacks unless they were empty
+		if cred.TokenURL != nil && *cred.TokenURL != "" {
+			updateReq.TokenURL = cred.TokenURL
+		}
+		if cred.AuthURL != nil && *cred.AuthURL != "" {
+			updateReq.AuthURL = cred.AuthURL
+		}
+
 		_, _ = s.oauthSvc.Update(ctx, tenantID, *config.OAuthCredentialID, updateReq)
 	}
 
