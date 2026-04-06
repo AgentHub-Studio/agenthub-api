@@ -43,11 +43,11 @@ func main() {
 		RunID:     os.Getenv("RUN_ID"),
 		SessionID: os.Getenv("SESSION_ID"),
 		TenantID:  os.Getenv("SCHEMA"),
-		Message:   "Por favor, liste as skills que tenho cadastradas no sistema.",
+		Message:   os.Getenv("MESSAGE"),
 	}
 
-	if task.RunID == "" || task.SessionID == "" || task.TenantID == "" {
-		log.Fatalf("RUN_ID, SESSION_ID and SCHEMA are required")
+	if task.RunID == "" || task.SessionID == "" || task.TenantID == "" || task.Message == "" {
+		log.Fatalf("RUN_ID, SESSION_ID, MESSAGE and SCHEMA are required")
 	}
 
 	body, _ := json.Marshal(task)
@@ -60,5 +60,5 @@ func main() {
 		log.Fatalf("Failed to publish a message: %v", err)
 	}
 
-	log.Printf(" [x] Sent message to chat.run.queue for session 9f5a04fa-9ba1-48d4-bf3e-76b6d8bb7451")
+	log.Printf(" [x] Sent message to chat.run.queue for session %s", task.SessionID)
 }

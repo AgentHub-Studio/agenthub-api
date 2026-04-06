@@ -306,12 +306,17 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	})
 
 	// Persist user message.
-	if _, err := r.persister.CreateMessage(ctx, chat.ChatMessage{
+	userMsg := chat.ChatMessage{
 		SessionID:   in.SessionID,
 		Role:        "user",
 		Content:     in.UserMessage,
 		MessageType: chat.MessageTypeText,
-	}); err != nil {
+		RunID:       &r.runID,
+	}
+	if r.runID == uuid.Nil {
+		userMsg.RunID = nil
+	}
+	if _, err := r.persister.CreateMessage(ctx, userMsg); err != nil {
 		emitError(ch, "persist_user_msg", err)
 		return
 	}
@@ -686,6 +691,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					MessageType: chat.MessageTypeToolResult,
 					ToolCallID:  &tcID,
 					TurnIndex:   turnIndex,
+					RunID:       &r.runID,
+				}
+				if r.runID == uuid.Nil {
+					toolMsg.RunID = nil
 				}
 				if _, err := r.persister.CreateMessage(ctx, toolMsg); err != nil {
 					emitError(ch, "persist_tool_result", err)
