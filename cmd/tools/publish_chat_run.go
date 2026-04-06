@@ -43,7 +43,7 @@ func main() {
 		RunID:     os.Getenv("RUN_ID"),
 		SessionID: os.Getenv("SESSION_ID"),
 		TenantID:  os.Getenv("SCHEMA"),
-		Message:   "Quais skills estão cadastradas?",
+		Message:   "Por favor, liste as skills que tenho cadastradas no sistema.",
 	}
 
 	if task.RunID == "" || task.SessionID == "" || task.TenantID == "" {
