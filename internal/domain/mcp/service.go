@@ -1,11 +1,14 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -30,16 +33,20 @@ type Service struct {
 	mcpRuntimeURL string
 }
 
-// mcpRuntimeClient defines methods to query the MCP runtime.
-type mcpRuntimeClient interface {
-	GetServerStatus(ctx context.Context, name string) (*McpRuntimeStatus, error)
+// AuthServerMetadata represents OAuth 2.0 Authorization Server Metadata (RFC 8414).
+// Mirrors the structure used by mcp-go for spec compliance.
+type AuthServerMetadata struct {
+	Issuer                string   `json:"issuer"`
+	AuthorizationEndpoint string   `json:"authorization_endpoint"`
+	TokenEndpoint         string   `json:"token_endpoint"`
+	RegistrationEndpoint  string   `json:"registration_endpoint,omitempty"`
+	ScopesSupported       []string `json:"scopes_supported,omitempty"`
 }
 
-// McpRuntimeStatus matches the response from mcp-client-runtime /servers/:name/status
-type McpRuntimeStatus struct {
-	Name         string        `json:"Name"`
-	Status       string        `json:"Status"`
-	AuthMetadata *AuthMetadata `json:"AuthMetadata,omitempty"`
+// OAuthProtectedResource represents the response from /.well-known/oauth-protected-resource (RFC 9728).
+type OAuthProtectedResource struct {
+	AuthorizationServers []string `json:"authorization_servers"`
+	Resource             string   `json:"resource"`
 }
 
 type DCRResponse struct {
@@ -203,31 +210,18 @@ func (s *Service) GetAuthStatus(ctx context.Context, id uuid.UUID) (AuthStatusRe
 
 	res := AuthStatusResponse{Authenticated: false}
 
-	// 1. Check if we have local discovery metadata from runtime
-	if s.mcpRuntimeURL != "" {
-		url := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
-		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			var runtimeStatus McpRuntimeStatus
-			if err := json.NewDecoder(resp.Body).Decode(&runtimeStatus); err == nil {
-				res.Metadata = runtimeStatus.AuthMetadata
-			}
-			resp.Body.Close()
-		}
-	}
-
-	// 2. Check if we have a linked credential with a token
 	if config.OAuthCredentialID != nil {
-		// In a real implementation, we would check if the token is valid.
-		// For now, if we have a linked credential, we consider it "potentially authenticated".
 		res.Authenticated = true
 	}
 
 	return res, nil
 }
 
-// GetConnectURL returns the URL to start OAuth flow for the MCP server.
+// GetConnectURL performs the full MCP OAuth 2.1 flow inline (following mcp-go's approach):
+// 1. Discover auth server via RFC 9728 (/.well-known/oauth-protected-resource)
+// 2. Fetch auth server metadata (RFC 8414 or OIDC Discovery)
+// 3. Dynamic Client Registration (RFC 7591) if no clientID
+// 4. Build authorization URL with PKCE
 func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL string) (ConnectURLResponse, error) {
 	tenantID := tenant.FromContext(ctx)
 	if tenantID == "" {
@@ -239,116 +233,31 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		return ConnectURLResponse{}, err
 	}
 
-	// 1. Ensure server is registered in runtime
-	if s.mcpRuntimeURL != "" {
-		_ = s.ensureServerRegistered(ctx, config)
-		// Wait a bit for discovery to occur if it just registered
-		time.Sleep(2 * time.Second)
-	}
-
-	// 2. Check if we have local discovery metadata from runtime
-	discoveredAuthURL := ""
-	discoveredTokenURL := ""
-	discoveredScopes := ""
-	discoveredClientID := ""
-	discoveredRegistrationURL := ""
-
-	if s.mcpRuntimeURL != "" {
-		url := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
-		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			var runtimeStatus McpRuntimeStatus
-			if err := json.NewDecoder(resp.Body).Decode(&runtimeStatus); err == nil && runtimeStatus.AuthMetadata != nil {
-				discoveredAuthURL = runtimeStatus.AuthMetadata.AuthorizationURL
-				discoveredTokenURL = runtimeStatus.AuthMetadata.TokenURL
-				discoveredRegistrationURL = runtimeStatus.AuthMetadata.RegistrationURL
-				if len(runtimeStatus.AuthMetadata.ScopesSupported) > 0 {
-					discoveredScopes = strings.Join(runtimeStatus.AuthMetadata.ScopesSupported, ",")
-				}
-				// If runtime has a client_id (from dynamic registration)
-				discoveredClientID = runtimeStatus.AuthMetadata.ClientID
-			}
-			resp.Body.Close()
-		}
-	}
-
-	authURL := discoveredAuthURL
-	tokenURL := discoveredTokenURL
-	registrationURL := discoveredRegistrationURL
-	clientID := discoveredClientID
-	scopes := discoveredScopes
-
-	// 2. Perform Dynamic Client Registration if we have a registrationURL and no clientID
-	if registrationURL != "" && clientID == "" && s.mcpRuntimeURL != "" {
-		// DCR logic
-		dcrReq := map[string]interface{}{
-			"client_name":   "AgentHub MCP Client",
-			"redirect_uris": []string{redirectURL}, // Use the actual redirectURL passed from frontend
-			"grant_types":   []string{"authorization_code", "refresh_token"},
-			"response_types": []string{"code"},
-		}
-		body, _ := json.Marshal(dcrReq)
-		url := fmt.Sprintf("%s/servers/%s/register-client", s.mcpRuntimeURL, config.Name)
-		hReq, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(body)))
-		hReq.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(hReq)
-		if err != nil {
-			fmt.Printf("mcp service: DCR failed for %s: %v\n", config.Name, err)
-		} else {
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-				respBody, _ := io.ReadAll(resp.Body)
-				fmt.Printf("mcp service: DCR failed for %s (Status: %d): %s\n", config.Name, resp.StatusCode, string(respBody))
-			} else {
-				var dcrResp DCRResponse
-				if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err == nil {
-					clientID = dcrResp.ClientID
-					fmt.Printf("mcp service: DCR successful for %s, ClientID: %s\n", config.Name, clientID)
-				}
-			}
-		}
-	}
-
-	// 2. Fallback to known providers by domain if discovery is not yet completed
-	url := ""
+	mcpURL := ""
 	if config.HTTPBaseURL != nil {
-		url = *config.HTTPBaseURL
+		mcpURL = *config.HTTPBaseURL
+	}
+	if mcpURL == "" {
+		return ConnectURLResponse{}, fmt.Errorf("mcp service: HTTP base URL is required for MCP %s", id)
 	}
 
-	if authURL == "" {
-		if strings.Contains(url, "github.com") {
-			authURL = "https://github.com/login/oauth/authorize"
-			tokenURL = "https://github.com/login/oauth/access_token"
-			if scopes == "" {
-				scopes = "repo,read:user,user:email"
-			}
-		} else if strings.Contains(url, "asana.com") {
-			authURL = "https://app.asana.com/-/oauth_authorize"
-			tokenURL = "https://app.asana.com/-/oauth_token"
-			if scopes == "" {
-				scopes = "default"
-			}
-		} else if strings.Contains(url, "atlassian.com") || strings.Contains(url, "atlassian.net") {
-			authURL = "https://auth.atlassian.com/authorize"
-			tokenURL = "https://auth.atlassian.com/oauth/token"
-			if scopes == "" {
-				scopes = "read:jira-work read:confluence-content.summary read:me"
-			}
-		}
+	// --- Step 1: Discover auth server metadata (following mcp-go oauth.go logic) ---
+	metadata, err := s.discoverAuthServerMetadata(ctx, mcpURL)
+	if err != nil {
+		return ConnectURLResponse{}, fmt.Errorf("mcp service: OAuth discovery failed for %s: %w", mcpURL, err)
 	}
 
-	// 3. Priority override: Use linked OAuthCredential ONLY if explicitly linked for HTTP tools compatibility
-	// but for MCP, we prefer Discovery.
+	log.Printf("mcp service: discovered metadata for %s: auth=%s token=%s reg=%s",
+		mcpURL, metadata.AuthorizationEndpoint, metadata.TokenEndpoint, metadata.RegistrationEndpoint)
+
+	// --- Step 2: Resolve clientID ---
+	clientID := ""
+	scopes := ""
+
+	// Check linked credential first
 	if config.OAuthCredentialID != nil && s.oauthSvc != nil {
-		cred, err := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
-		if err == nil {
-			if cred.AuthURL != nil && *cred.AuthURL != "" {
-				authURL = *cred.AuthURL
-			}
-			if cred.TokenURL != nil && *cred.TokenURL != "" {
-				tokenURL = *cred.TokenURL
-			}
+		cred, credErr := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
+		if credErr == nil {
 			if cred.ClientID != nil && *cred.ClientID != "" {
 				clientID = *cred.ClientID
 			}
@@ -358,90 +267,81 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		}
 	}
 
-	if authURL == "" {
-		return ConnectURLResponse{}, fmt.Errorf("mcp service: authURL is empty for MCP %s (URL: %s). Server discovery failed and no fallback available.", id.String(), url)
+	// Use scopes from metadata if not set
+	if scopes == "" && len(metadata.ScopesSupported) > 0 {
+		scopes = strings.Join(metadata.ScopesSupported, " ")
 	}
 
-	// 4. If we have authURL but no clientID, try OpenID Connect discovery + DCR directly
-	if clientID == "" && authURL != "" {
-		regURL := s.discoverRegistrationEndpoint(ctx, authURL)
-		if regURL != "" {
-			dcrReq := map[string]interface{}{
-				"client_name":    "AgentHub MCP Client",
-				"redirect_uris":  []string{redirectURL},
-				"grant_types":    []string{"authorization_code", "refresh_token"},
-				"response_types": []string{"code"},
-			}
-			dcrBody, _ := json.Marshal(dcrReq)
-			hReq, _ := http.NewRequestWithContext(ctx, "POST", regURL, strings.NewReader(string(dcrBody)))
-			hReq.Header.Set("Content-Type", "application/json")
-			resp, err := http.DefaultClient.Do(hReq)
-			if err == nil {
-				defer resp.Body.Close()
-				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
-					var dcrResp DCRResponse
-					if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err == nil && dcrResp.ClientID != "" {
-						clientID = dcrResp.ClientID
-						fmt.Printf("mcp service: DCR via OIDC discovery successful for %s, ClientID: %s\n", config.Name, clientID)
-					}
-				} else {
-					respBody, _ := io.ReadAll(resp.Body)
-					fmt.Printf("mcp service: DCR via OIDC discovery failed for %s (Status: %d): %s\n", config.Name, resp.StatusCode, string(respBody))
+	// --- Step 3: Dynamic Client Registration (RFC 7591) if no clientID ---
+	if clientID == "" && metadata.RegistrationEndpoint != "" {
+		log.Printf("mcp service: performing DCR at %s for %s", metadata.RegistrationEndpoint, config.Name)
+		dcrResp, dcrErr := s.performDCR(ctx, metadata.RegistrationEndpoint, redirectURL, scopes)
+		if dcrErr != nil {
+			log.Printf("mcp service: DCR failed for %s: %v", config.Name, dcrErr)
+		} else {
+			clientID = dcrResp.ClientID
+			log.Printf("mcp service: DCR successful for %s, clientID=%s", config.Name, clientID)
+
+			// Persist the DCR result as an OAuthCredential and link to MCP server
+			if s.oauthSvc != nil {
+				authURLStr := metadata.AuthorizationEndpoint
+				tokenURLStr := metadata.TokenEndpoint
+				newCred, createErr := s.oauthSvc.Update(ctx, tenantID, uuid.Nil, oauth.CreateRequest{
+					Name:     config.Name + " OAuth (DCR)",
+					AuthType: "oauth2",
+					AuthURL:  &authURLStr,
+					TokenURL: &tokenURLStr,
+					ClientID: &clientID,
+					Scopes:   &scopes,
+				})
+				if createErr == nil {
+					config.OAuthCredentialID = &newCred.ID
+					_, _ = s.repo.Update(ctx, config)
 				}
 			}
 		}
 	}
 
 	if clientID == "" {
-		return ConnectURLResponse{}, fmt.Errorf("mcp service: clientID is empty for MCP %s. Ensure dynamic registration (DCR) is supported or linked OAuth credential has ClientID", id)
+		return ConnectURLResponse{}, fmt.Errorf(
+			"mcp service: could not obtain clientID for MCP %s (URL: %s). "+
+				"OAuth discovery succeeded (auth=%s) but Dynamic Client Registration failed or is not supported. "+
+				"You may need to manually register an OAuth app and link the credential.",
+			id, mcpURL, metadata.AuthorizationEndpoint)
 	}
 
-	// PKCE is REQUIRED by OAuth 2.1 (and thus the MCP draft)
+	// --- Step 4: Build authorization URL with PKCE ---
 	verifier, challenge := "", ""
 	if s.oauthSvc != nil {
 		verifier, challenge = s.oauthSvc.GeneratePKCE()
 	}
 
-	finalURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s",
-		authURL, clientID, redirectURL, scopes, config.ID.String())
-
+	params := url.Values{}
+	params.Set("response_type", "code")
+	params.Set("client_id", clientID)
+	params.Set("redirect_uri", redirectURL)
+	params.Set("state", config.ID.String())
+	if scopes != "" {
+		params.Set("scope", scopes)
+	}
 	if challenge != "" {
-		finalURL += fmt.Sprintf("&code_challenge=%s&code_challenge_method=S256", challenge)
+		params.Set("code_challenge", challenge)
+		params.Set("code_challenge_method", "S256")
 	}
 
-	// 4. Persist flow state (Enhanced for DCR persistence)
-	if s.oauthSvc != nil {
-		var credID *uuid.UUID
-		var cred oauth.OAuthCredential
-		var err error
+	finalURL := metadata.AuthorizationEndpoint + "?" + params.Encode()
 
-		if config.OAuthCredentialID != nil {
-			credID = config.OAuthCredentialID
-			cred, err = s.oauthSvc.GetByID(ctx, tenantID, *credID)
-		} else if clientID != "" {
-			// Auto-create credential if none linked but we have a clientID from DCR
-			newCred, createErr := s.oauthSvc.Update(ctx, tenantID, uuid.Nil, oauth.CreateRequest{
-				Name:     config.Name + " OAuth",
-				AuthType: "oauth2",
-				AuthURL:  &authURL,
-				TokenURL: &tokenURL,
-				ClientID: &clientID,
-				Scopes:   &scopes,
-			})
-			if createErr == nil {
-				credID = &newCred.ID
-				cred = newCred
-				// Link to MCP server
-				config.OAuthCredentialID = credID
-				_, _ = s.repo.Update(ctx, config)
-			}
-		}
-
-		if (err == nil && credID != nil) {
+	// Persist PKCE verifier for the callback
+	if s.oauthSvc != nil && config.OAuthCredentialID != nil {
+		cred, credErr := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
+		if credErr == nil {
+			authURLStr := metadata.AuthorizationEndpoint
+			tokenURLStr := metadata.TokenEndpoint
 			updateReq := oauth.CreateRequest{
 				Name:         cred.Name,
 				AuthType:     cred.AuthType,
-				TokenURL:     &tokenURL,
+				AuthURL:      &authURLStr,
+				TokenURL:     &tokenURLStr,
 				ClientID:     cred.ClientID,
 				ClientSecret: cred.ClientSecret,
 				Scopes:       cred.Scopes,
@@ -450,111 +350,191 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 				BearerToken:  cred.BearerToken,
 				Username:     cred.Username,
 				Password:     cred.Password,
-				AuthURL:      &authURL,
 				RedirectURL:  cred.RedirectURL,
 				CodeVerifier: &verifier,
 			}
-			if clientID != "" && (cred.ClientID == nil || *cred.ClientID == "") {
-				updateReq.ClientID = &clientID
-			}
-			if scopes != "" && (cred.Scopes == nil || *cred.Scopes == "") {
-				updateReq.Scopes = &scopes
-			}
-
-			_, _ = s.oauthSvc.Update(ctx, tenantID, *credID, updateReq)
+			_, _ = s.oauthSvc.Update(ctx, tenantID, *config.OAuthCredentialID, updateReq)
 		}
 	}
 
 	return ConnectURLResponse{URL: finalURL}, nil
 }
 
-// ensureServerRegistered checks if server is in runtime and registers if missing.
-func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerConfig) error {
-	if s.mcpRuntimeURL == "" {
-		return nil
+// discoverAuthServerMetadata implements the MCP spec discovery flow (mirrors mcp-go oauth.go getServerMetadata):
+// 1. Try /.well-known/oauth-protected-resource on the MCP server (RFC 9728)
+// 2. If that returns authorization_servers, fetch metadata from the first one
+// 3. Fallback to /.well-known/oauth-authorization-server on the MCP server
+// 4. Fallback to /.well-known/openid-configuration on the auth server
+// 5. Last resort: default endpoints based on the MCP server URL
+func (s *Service) discoverAuthServerMetadata(ctx context.Context, mcpURL string) (*AuthServerMetadata, error) {
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+
+	// Step 1: Try RFC 9728 Protected Resource Metadata
+	prURL, err := buildWellKnownURL(mcpURL, "oauth-protected-resource")
+	if err == nil {
+		log.Printf("mcp service: trying protected resource discovery at %s", prURL)
+		pr, prErr := fetchJSON[OAuthProtectedResource](ctx, httpClient, prURL)
+		if prErr == nil && len(pr.AuthorizationServers) > 0 {
+			authServerURL := pr.AuthorizationServers[0]
+			log.Printf("mcp service: found auth server %s via protected resource metadata", authServerURL)
+
+			// Fetch metadata from the discovered auth server
+			meta := s.fetchAuthServerMetadata(ctx, httpClient, authServerURL)
+			if meta != nil {
+				return meta, nil
+			}
+		}
 	}
 
-	url := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		resp.Body.Close()
-		return nil // Already registered
-	}
-	if resp != nil {
-		resp.Body.Close()
+	// Step 2: Fallback - try /.well-known/oauth-authorization-server on the MCP server itself
+	asURL, err := buildWellKnownURL(mcpURL, "oauth-authorization-server")
+	if err == nil {
+		log.Printf("mcp service: trying oauth-authorization-server at %s", asURL)
+		meta, metaErr := fetchJSON[AuthServerMetadata](ctx, httpClient, asURL)
+		if metaErr == nil && meta.AuthorizationEndpoint != "" {
+			return &meta, nil
+		}
 	}
 
-	// Register
-	regReq := map[string]interface{}{
-		"name":          config.Name,
-		"transportType": config.TransportType,
-		"httpBaseUrl":   config.HTTPBaseURL,
-		"autoStart":     true,
-	}
-	body, _ := json.Marshal(regReq)
-	url = fmt.Sprintf("%s/servers", s.mcpRuntimeURL)
-	hReq, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(body)))
-	hReq.Header.Set("Content-Type", "application/json")
-	resp, err = http.DefaultClient.Do(hReq)
+	// Step 3: Extract host from MCP URL and try OIDC/RFC 8414 on the host root
+	parsed, err := url.Parse(mcpURL)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("invalid MCP URL: %w", err)
 	}
-	defer resp.Body.Close()
+	hostRoot := fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("runtime registration failed: %d", resp.StatusCode)
+	meta := s.fetchAuthServerMetadata(ctx, httpClient, hostRoot)
+	if meta != nil {
+		return meta, nil
 	}
 
-	// Wait a bit for discovery to trigger (probing)
-	time.Sleep(1 * time.Second)
+	// Step 4: Default endpoints (last resort, same as mcp-go getDefaultEndpoints)
+	log.Printf("mcp service: using default endpoints for %s", hostRoot)
+	return &AuthServerMetadata{
+		Issuer:                hostRoot,
+		AuthorizationEndpoint: hostRoot + "/authorize",
+		TokenEndpoint:         hostRoot + "/token",
+		RegistrationEndpoint:  hostRoot + "/register",
+	}, nil
+}
+
+// fetchAuthServerMetadata tries RFC 8414 and OIDC Discovery on a given auth server URL.
+func (s *Service) fetchAuthServerMetadata(ctx context.Context, httpClient *http.Client, authServerURL string) *AuthServerMetadata {
+	// Try RFC 8414 first
+	asMetaURL, err := buildWellKnownURL(authServerURL, "oauth-authorization-server")
+	if err == nil {
+		meta, metaErr := fetchJSON[AuthServerMetadata](ctx, httpClient, asMetaURL)
+		if metaErr == nil && meta.AuthorizationEndpoint != "" {
+			log.Printf("mcp service: found auth metadata via RFC 8414 at %s", asMetaURL)
+			return &meta
+		}
+	}
+
+	// Try OIDC Discovery
+	oidcURL, err := buildWellKnownURL(authServerURL, "openid-configuration")
+	if err == nil {
+		meta, metaErr := fetchJSON[AuthServerMetadata](ctx, httpClient, oidcURL)
+		if metaErr == nil && meta.AuthorizationEndpoint != "" {
+			log.Printf("mcp service: found auth metadata via OIDC at %s", oidcURL)
+			return &meta
+		}
+	}
 
 	return nil
 }
 
-// discoverRegistrationEndpoint uses OpenID Connect Discovery (or RFC 8414) to find
-// the dynamic client registration endpoint from the authorization server.
-func (s *Service) discoverRegistrationEndpoint(ctx context.Context, authURL string) string {
-	// Extract the issuer base from the authURL (e.g. https://auth.atlassian.com/authorize -> https://auth.atlassian.com)
-	idx := strings.Index(authURL, "://")
-	if idx == -1 {
-		return ""
+// buildWellKnownURL constructs a well-known URL following the same logic as mcp-go:
+// For a URL like https://example.com/v1/mcp, it produces:
+// https://example.com/.well-known/{suffix}/v1/mcp
+func buildWellKnownURL(baseURL string, suffix string) (string, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse URL: %w", err)
 	}
-	rest := authURL[idx+3:]
-	slashIdx := strings.Index(rest, "/")
-	issuer := authURL
-	if slashIdx != -1 {
-		issuer = authURL[:idx+3+slashIdx]
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid URL: missing scheme or host in %q", baseURL)
 	}
 
-	// Try OpenID Connect Discovery first, then RFC 8414
-	endpoints := []string{
-		issuer + "/.well-known/openid-configuration",
-		issuer + "/.well-known/oauth-authorization-server",
+	path := strings.TrimSuffix(parsed.EscapedPath(), "/")
+	root := fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+
+	if path == "" || path == "/" {
+		return root + "/.well-known/" + suffix, nil
+	}
+	return root + "/.well-known/" + suffix + path, nil
+}
+
+// performDCR performs Dynamic Client Registration (RFC 7591).
+func (s *Service) performDCR(ctx context.Context, registrationEndpoint, redirectURI, scopes string) (*DCRResponse, error) {
+	regRequest := map[string]interface{}{
+		"client_name":                "AgentHub MCP Client",
+		"redirect_uris":              []string{redirectURI},
+		"token_endpoint_auth_method": "none",
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+	}
+	if scopes != "" {
+		regRequest["scope"] = scopes
 	}
 
-	for _, ep := range endpoints {
-		req, err := http.NewRequestWithContext(ctx, "GET", ep, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			if resp != nil {
-				resp.Body.Close()
-			}
-			continue
-		}
-		var data struct {
-			RegistrationEndpoint string `json:"registration_endpoint"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&data); err == nil && data.RegistrationEndpoint != "" {
-			resp.Body.Close()
-			fmt.Printf("mcp service: discovered registration_endpoint=%s from %s\n", data.RegistrationEndpoint, ep)
-			return data.RegistrationEndpoint
-		}
-		resp.Body.Close()
+	reqBody, err := json.Marshal(regRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal DCR request: %w", err)
 	}
 
-	return ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, registrationEndpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DCR request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("DCR request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("DCR failed (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var dcrResp DCRResponse
+	if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err != nil {
+		return nil, fmt.Errorf("failed to decode DCR response: %w", err)
+	}
+	if dcrResp.ClientID == "" {
+		return nil, fmt.Errorf("DCR response missing client_id")
+	}
+
+	return &dcrResp, nil
+}
+
+// fetchJSON is a generic helper to GET a URL and decode JSON.
+func fetchJSON[T any](ctx context.Context, httpClient *http.Client, targetURL string) (T, error) {
+	var zero T
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return zero, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("MCP-Protocol-Version", "2025-03-26")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return zero, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return zero, fmt.Errorf("HTTP %d from %s", resp.StatusCode, targetURL)
+	}
+
+	var result T
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return zero, err
+	}
+	return result, nil
 }
