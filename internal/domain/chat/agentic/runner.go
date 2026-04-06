@@ -74,6 +74,7 @@ type Runner struct {
 	toolExec        *StreamingToolExecutor
 	subtaskExec     *SubtaskExecutor
 	agentMailbox    *AgentMailbox
+	managementExec  *ManagementExecutor
 	denialTracker   *DenialTracker
 	turnEndHandlers []TurnEndHandler
 	runEndHandlers  []RunEndHandler
@@ -116,6 +117,12 @@ func NewRunner(
 		config:        config,
 		denialTracker: dt,
 	}
+}
+
+// WithManagementExecutor attaches a ManagementExecutor to the Runner.
+func (r *Runner) WithManagementExecutor(exec *ManagementExecutor) *Runner {
+	r.managementExec = exec
+	return r
 }
 
 // Progress returns the Runner's progress tracker for external monitoring.
@@ -1190,6 +1197,62 @@ func (r *Runner) buildAssistantMessage(
 	return msg
 }
 
+// executeAgentHubManage handles administrative operations for Auto-Reflection.
+// This is the core mechanism that allows an agent to manage the platform itself.
+func (r *Runner) executeAgentHubManage(ctx context.Context, ch chan<- RunEvent, tc ai.ToolCall, in RunInput) ToolExecResult {
+	start := time.Now()
+	input := json.RawMessage(tc.Function.Arguments)
+
+	ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+		ID: tc.ID, Name: tc.Function.Name, Input: input,
+	})
+	ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+		ID: tc.ID, Name: tc.Function.Name, State: ToolStateExecuting,
+	})
+
+	// Forward the request to the administrative skill or internal API.
+	if r.managementExec != nil {
+		var args struct {
+			Operation string          `json:"operation"`
+			Resource  string          `json:"resource"`
+			ID        string          `json:"id"`
+			Query     string          `json:"query"`
+			Payload   json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(input, &args); err == nil {
+			execResult := r.managementExec.Execute(ctx, args.Operation, args.Resource, args.ID, args.Query, args.Payload)
+			execResult.LatencyMs = time.Since(start).Milliseconds()
+
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
+			ch <- NewRunEvent(EventToolResult, ToolResultData{
+				ID:         tc.ID,
+				Name:       tc.Function.Name,
+				Output:     execResult.Output,
+				DurationMs: execResult.LatencyMs,
+				Error:      execResult.Error,
+			})
+			return execResult
+		}
+	}
+
+	// Fallback to skill-runtime if no local executor is attached (legacy/remote).
+	execResult, err := r.skillClient.Execute(ctx, "agenthub-admin", input, in.TenantID, in.AgentID.String(), in.SessionID.String())
+
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		errMsg := err.Error()
+		res := ToolExecResult{Error: &errMsg, LatencyMs: latency}
+		ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
+		ch <- NewRunEvent(EventToolResult, ToolResultData{ID: tc.ID, Name: tc.Function.Name, Output: nil, Error: &errMsg, DurationMs: latency})
+		return res
+	}
+
+	execResult.LatencyMs = latency
+	ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
+	ch <- NewRunEvent(EventToolResult, ToolResultData{ID: tc.ID, Name: tc.Function.Name, Output: execResult.Output, DurationMs: latency})
+	return *execResult
+}
+
 // convertLLMToolsToAI converts the internal LLMTool format to the ai.Tool format.
 func convertLLMToolsToAI(tools []LLMTool) []ai.Tool {
 	result := make([]ai.Tool, len(tools))
@@ -1388,6 +1451,13 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
 			})
+			continue
+		}
+
+		// Builtin: agenthub_manage — handles administrative operations via reflection.
+		if tc.Function.Name == "agenthub_manage" {
+			execResult := r.executeAgentHubManage(ctx, ch, tc, in)
+			results[i] = execResult
 			continue
 		}
 

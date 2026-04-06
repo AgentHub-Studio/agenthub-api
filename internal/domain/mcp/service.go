@@ -17,6 +17,11 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
+// Repository returns the underlying repository.
+func (s *Service) Repository() Repository {
+	return s.repo
+}
+
 // List returns all MCP server configs for the tenant.
 func (s *Service) List(ctx context.Context) ([]McpServerConfigResponse, error) {
 	items, err := s.repo.List(ctx)

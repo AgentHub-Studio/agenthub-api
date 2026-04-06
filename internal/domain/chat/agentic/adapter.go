@@ -10,7 +10,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -45,6 +50,11 @@ type SessionRunnerAdapter struct {
 	hookExecutor *HookExecutor
 	repo         chat.Repository
 	agentLoader  AgentConfigLoader
+	agentRepo    agent.Repository
+	skillRepo    *skill.Repository
+	toolRepo     *tool.Repository
+	integRepo    integration.Service
+	mcpRepo      mcp.Repository
 
 	// elicitation manages a registry of active ElicitationHandlers keyed by
 	// session ID so that HTTP respond calls can be routed to the correct run.
@@ -98,10 +108,16 @@ func NewSessionRunnerAdapter(
 	hookExecutor *HookExecutor,
 	repo chat.Repository,
 	agentLoader AgentConfigLoader,
+	agentRepo agent.Repository,
+	skillRepo *skill.Repository,
+	toolRepo *tool.Repository,
+	integRepo *integration.Service,
+	mcpRepo mcp.Repository,
 ) *SessionRunnerAdapter {
 	return NewSessionRunnerAdapterWithFactory(
 		staticModelFactory{model: chatModel},
 		skillClient, prompt, tools, ctxManager, memory, hookExecutor, repo, agentLoader,
+		agentRepo, skillRepo, toolRepo, integRepo, mcpRepo,
 	)
 }
 
@@ -117,6 +133,11 @@ func NewSessionRunnerAdapterWithFactory(
 	hookExecutor *HookExecutor,
 	repo chat.Repository,
 	agentLoader AgentConfigLoader,
+	agentRepo agent.Repository,
+	skillRepo *skill.Repository,
+	toolRepo *tool.Repository,
+	integRepo *integration.Service,
+	mcpRepo mcp.Repository,
 ) *SessionRunnerAdapter {
 	return &SessionRunnerAdapter{
 		modelFactory: factory,
@@ -128,6 +149,11 @@ func NewSessionRunnerAdapterWithFactory(
 		hookExecutor: hookExecutor,
 		repo:         repo,
 		agentLoader:  agentLoader,
+		agentRepo:    agentRepo,
+		skillRepo:    skillRepo,
+		toolRepo:     toolRepo,
+		integRepo:    *integRepo,
+		mcpRepo:      mcpRepo,
 	}
 }
 
@@ -165,6 +191,10 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 		f.adapter.hookExecutor,
 		config,
 	)
+	if f.adapter.agentRepo != nil {
+		managementExec := NewManagementExecutor(f.adapter.agentRepo, f.adapter.skillRepo, f.adapter.toolRepo, f.adapter.mcpRepo)
+		runner.WithManagementExecutor(managementExec)
+	}
 	runner.WithAgentMailbox(f.agentMailbox)
 	subtaskExec := NewSubtaskExecutor(f)
 	subtaskExec.WithAgentMailbox(f.agentMailbox)
@@ -222,6 +252,10 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		a.hookExecutor,
 		config,
 	)
+	if a.agentRepo != nil {
+		managementExec := NewManagementExecutor(a.agentRepo, a.skillRepo, a.toolRepo, a.mcpRepo)
+		runner.WithManagementExecutor(managementExec)
+	}
 	runner.WithAgentMailbox(agentMailbox)
 	subtaskExec := NewSubtaskExecutor(factory)
 	subtaskExec.WithAgentMailbox(agentMailbox)

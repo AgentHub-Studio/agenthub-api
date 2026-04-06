@@ -128,7 +128,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
-	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo)
+	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc))
 	chatHandler := chat.NewHandler(chat.NewService(chatRepo, sessionRunner))
 	var docStorage document.StorageClient
 	if cfg.MinIO.IsConfigured() {
@@ -362,10 +362,12 @@ func buildAgenticRunner(
 	pool *pgxpool.Pool,
 	chatRepo chat.Repository,
 	agentRepo agent.Repository,
-	skillRepo *skill.Repository,
+	skillRepo skill.SkillRepository,
 	kbRepo knowledgebase.Repository,
-	toolRepo *tool.Repository,
+	toolRepo tool.ToolRepository,
 	settingsRepo settings.Repository,
+	mcpRepo mcp.Repository,
+	integSvc *integration.Service,
 ) chat.SessionRunner {
 	// Build an env-based fallback for agents that have no provider configured.
 	// This keeps backward-compatibility with existing deployments that set env vars.
@@ -398,6 +400,11 @@ func buildAgenticRunner(
 		hookExecutor,
 		chatRepo,
 		&agentConfigAdapter{repo: agentRepo},
+		agentRepo,
+		skillRepo.(*skill.Repository),
+		toolRepo.(*tool.Repository),
+		integSvc,
+		mcpRepo,
 	)
 }
 

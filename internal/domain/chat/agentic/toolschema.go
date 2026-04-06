@@ -243,6 +243,11 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 		tools = append(tools, sendMessageTool())
 	}
 
+	// Builtin: agenthub_manage — available to admin agents.
+	// This enables the "Auto-Reflection" where the agent can manage its own ecosystem.
+	// Inspired by OpenCode's self-management capabilities.
+	tools = append(tools, agentHubManageTool())
+
 	// MCP tools — fetched from external MCP servers via the bridge.
 	if b.mcpBridge != nil {
 		mcpTools, err := b.mcpBridge.ListTools(ctx)
@@ -644,6 +649,48 @@ func agentTool(remainingLevels int) LLMTool {
 		Description: desc,
 		InputSchema: schema,
 		Builtin:     true,
+	}
+}
+
+// agentHubManageTool returns the builtin agenthub_manage tool definition.
+// This is the core of "Auto-Reflection" — allowing the agent to perform
+// CRUD operations on agents, skills, tools, and integrations.
+func agentHubManageTool() LLMTool {
+	return LLMTool{
+		Name:    "agenthub_manage",
+		Builtin: true,
+		Description: `Manage the AgentHub ecosystem: agents, skills, tools, integrations, and MCP servers.
+Use this to perform administrative tasks, update configurations, or list available resources.
+The 'operation' can be: list, get, create, update, delete.
+The 'resource' can be: agent, skill, tool, integration, mcp_server.`,
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"operation": {
+					"type": "string",
+					"enum": ["list", "get", "create", "update", "delete"],
+					"description": "The administrative operation to perform"
+				},
+				"resource": {
+					"type": "string",
+					"enum": ["agent", "skill", "tool", "integration", "mcp_server"],
+					"description": "The type of resource to manage"
+				},
+				"id": {
+					"type": "string",
+					"description": "UUID of the resource (required for get, update, delete)"
+				},
+				"payload": {
+					"type": "object",
+					"description": "JSON payload for create or update operations"
+				},
+				"query": {
+					"type": "string",
+					"description": "Filter or search query for list operations"
+				}
+			},
+			"required": ["operation", "resource"]
+		}`),
 	}
 }
 
