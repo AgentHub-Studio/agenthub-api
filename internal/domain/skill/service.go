@@ -61,6 +61,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		Name:         req.Name,
 		Slug:         slug,
 		Description:  req.Description,
+		Instructions: req.Instructions,
 		Category:     req.Category,
 		InputSchema:  inputSchema,
 		OutputSchema: req.OutputSchema,

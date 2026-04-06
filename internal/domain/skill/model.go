@@ -12,6 +12,7 @@ type Skill struct {
 	Name         string    `db:"name"`
 	Slug         string    `db:"slug"`
 	Description  string    `db:"description"`
+	Instructions string    `db:"instructions"`
 	Category     string    `db:"category"`
 	InputSchema  []byte    `db:"input_schema"`
 	OutputSchema []byte    `db:"output_schema"`
