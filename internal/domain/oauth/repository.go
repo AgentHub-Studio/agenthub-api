@@ -39,6 +39,7 @@ func (r *Repository) ListAll(ctx context.Context, tenantID string, pr pagination
 	rows, err := conn.Query(ctx,
 		`SELECT id, name, auth_type, token_url, client_id, client_secret, scopes,
 		        api_key_header, api_key_value, bearer_token, username, password,
+		        auth_url, redirect_url, refresh_token, expires_at,
 		        created_at, updated_at
 		 FROM oauth_credential
 		 ORDER BY name
@@ -56,7 +57,8 @@ func (r *Repository) ListAll(ctx context.Context, tenantID string, pr pagination
 		if err := rows.Scan(
 			&c.ID, &c.Name, &c.AuthType, &c.TokenURL, &c.ClientID, &c.ClientSecret,
 			&c.Scopes, &c.APIKeyHeader, &c.APIKeyValue, &c.BearerToken, &c.Username,
-			&c.Password, &c.CreatedAt, &c.UpdatedAt,
+			&c.Password, &c.AuthURL, &c.RedirectURL, &c.RefreshToken, &c.ExpiresAt,
+			&c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("oauth: scan: %w", err)
 		}
@@ -77,13 +79,15 @@ func (r *Repository) GetByID(ctx context.Context, tenantID string, id uuid.UUID)
 	err = conn.QueryRow(ctx,
 		`SELECT id, name, auth_type, token_url, client_id, client_secret, scopes,
 		        api_key_header, api_key_value, bearer_token, username, password,
+		        auth_url, redirect_url, refresh_token, expires_at,
 		        created_at, updated_at
 		 FROM oauth_credential WHERE id = $1`,
 		id,
 	).Scan(
 		&c.ID, &c.Name, &c.AuthType, &c.TokenURL, &c.ClientID, &c.ClientSecret,
 		&c.Scopes, &c.APIKeyHeader, &c.APIKeyValue, &c.BearerToken, &c.Username,
-		&c.Password, &c.CreatedAt, &c.UpdatedAt,
+		&c.Password, &c.AuthURL, &c.RedirectURL, &c.RefreshToken, &c.ExpiresAt,
+		&c.CreatedAt, &c.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OAuthCredential{}, ErrNotFound
@@ -103,17 +107,21 @@ func (r *Repository) Create(ctx context.Context, tenantID string, c OAuthCredent
 	err = conn.QueryRow(ctx,
 		`INSERT INTO oauth_credential
 		 (name, auth_type, token_url, client_id, client_secret, scopes,
-		  api_key_header, api_key_value, bearer_token, username, password)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		  api_key_header, api_key_value, bearer_token, username, password,
+		  auth_url, redirect_url)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		 RETURNING id, name, auth_type, token_url, client_id, client_secret, scopes,
 		           api_key_header, api_key_value, bearer_token, username, password,
+		           auth_url, redirect_url, refresh_token, expires_at,
 		           created_at, updated_at`,
 		c.Name, c.AuthType, c.TokenURL, c.ClientID, c.ClientSecret, c.Scopes,
 		c.APIKeyHeader, c.APIKeyValue, c.BearerToken, c.Username, c.Password,
+		c.AuthURL, c.RedirectURL,
 	).Scan(
 		&created.ID, &created.Name, &created.AuthType, &created.TokenURL, &created.ClientID,
 		&created.ClientSecret, &created.Scopes, &created.APIKeyHeader, &created.APIKeyValue,
 		&created.BearerToken, &created.Username, &created.Password,
+		&created.AuthURL, &created.RedirectURL, &created.RefreshToken, &created.ExpiresAt,
 		&created.CreatedAt, &created.UpdatedAt,
 	)
 	return created, err
@@ -132,17 +140,21 @@ func (r *Repository) Update(ctx context.Context, tenantID string, id uuid.UUID, 
 		`UPDATE oauth_credential SET
 		   name=$1, auth_type=$2, token_url=$3, client_id=$4, client_secret=$5, scopes=$6,
 		   api_key_header=$7, api_key_value=$8, bearer_token=$9, username=$10, password=$11,
+		   auth_url=$12, redirect_url=$13,
 		   updated_at=NOW()
-		 WHERE id=$12
+		 WHERE id=$14
 		 RETURNING id, name, auth_type, token_url, client_id, client_secret, scopes,
 		           api_key_header, api_key_value, bearer_token, username, password,
+		           auth_url, redirect_url, refresh_token, expires_at,
 		           created_at, updated_at`,
 		c.Name, c.AuthType, c.TokenURL, c.ClientID, c.ClientSecret, c.Scopes,
-		c.APIKeyHeader, c.APIKeyValue, c.BearerToken, c.Username, c.Password, id,
+		c.APIKeyHeader, c.APIKeyValue, c.BearerToken, c.Username, c.Password,
+		c.AuthURL, c.RedirectURL, id,
 	).Scan(
 		&updated.ID, &updated.Name, &updated.AuthType, &updated.TokenURL, &updated.ClientID,
 		&updated.ClientSecret, &updated.Scopes, &updated.APIKeyHeader, &updated.APIKeyValue,
 		&updated.BearerToken, &updated.Username, &updated.Password,
+		&updated.AuthURL, &updated.RedirectURL, &updated.RefreshToken, &updated.ExpiresAt,
 		&updated.CreatedAt, &updated.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
