@@ -22,7 +22,6 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/experiment"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
@@ -33,7 +32,6 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/prompttemplate"
 	regDependency "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/dependency"
 	regInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/installation"
@@ -100,7 +98,6 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentHandler := agent.NewHandler(agent.NewService(agentRepo))
 	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionService(agentRepo, agent.NewVersionRepository(pool)))
 	agentBindingHandler := agent.NewBindingHandler(agentRepo, agent.NewBindingRepository(pool))
-	pipelineHandler := pipeline.NewHandler(pipeline.NewService(pipeline.NewRepository(pool)))
 	skillRepo := skill.NewRepository(pool)
 	skillHandler := skill.NewHandler(skill.NewService(skillRepo))
 	datasourceSvc := datasource.NewService(datasource.NewRepository(pool))
@@ -116,7 +113,6 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	oauthHandler := oauth.NewHandler(oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey))
 	auditHandler := audit.NewHandler(audit.NewService(audit.NewRepository(pool)))
 	metricsHandler := metrics.NewHandler(metrics.NewService(metrics.NewRepository(pool)))
-	experimentHandler := experiment.NewHandler(experiment.NewService(experiment.NewRepository(pool)))
 	vpnSvc := vpnresource.NewService(vpnresource.NewRepository(pool))
 	vpnHandler := vpnresource.NewHandler(vpnSvc)
 	datasourceHandler := datasource.NewHandler(datasourceSvc)
@@ -242,7 +238,6 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		agentHandler.RegisterRoutes(r)
 		agentVersionHandler.RegisterVersionRoutes(r)
 		agentBindingHandler.RegisterBindingRoutes(r)
-		pipelineHandler.RegisterRoutes(r)
 		skillHandler.RegisterRoutes(r)
 		toolHandler.RegisterRoutes(r)
 		memoryHandler.RegisterRoutes(r)
@@ -255,7 +250,6 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		r.Route("/api/agents/{agentId}/metrics", func(r chi.Router) {
 			r.Mount("/", metricsHandler.AgentRoutes())
 		})
-		r.Mount("/api/experiments", experimentHandler.Routes())
 		r.Mount("/api/vpn-resources", vpnHandler.Routes())
 		r.Mount("/api/datasources", datasourceHandler.Routes())
 		// Proxy credentials endpoint — requires PROXY_SERVICE role.
