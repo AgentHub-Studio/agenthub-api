@@ -362,6 +362,36 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		return ConnectURLResponse{}, fmt.Errorf("mcp service: authURL is empty for MCP %s (URL: %s). Server discovery failed and no fallback available.", id.String(), url)
 	}
 
+	// 4. If we have authURL but no clientID, try OpenID Connect discovery + DCR directly
+	if clientID == "" && authURL != "" {
+		regURL := s.discoverRegistrationEndpoint(ctx, authURL)
+		if regURL != "" {
+			dcrReq := map[string]interface{}{
+				"client_name":    "AgentHub MCP Client",
+				"redirect_uris":  []string{redirectURL},
+				"grant_types":    []string{"authorization_code", "refresh_token"},
+				"response_types": []string{"code"},
+			}
+			dcrBody, _ := json.Marshal(dcrReq)
+			hReq, _ := http.NewRequestWithContext(ctx, "POST", regURL, strings.NewReader(string(dcrBody)))
+			hReq.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(hReq)
+			if err == nil {
+				defer resp.Body.Close()
+				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+					var dcrResp DCRResponse
+					if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err == nil && dcrResp.ClientID != "" {
+						clientID = dcrResp.ClientID
+						fmt.Printf("mcp service: DCR via OIDC discovery successful for %s, ClientID: %s\n", config.Name, clientID)
+					}
+				} else {
+					respBody, _ := io.ReadAll(resp.Body)
+					fmt.Printf("mcp service: DCR via OIDC discovery failed for %s (Status: %d): %s\n", config.Name, resp.StatusCode, string(respBody))
+				}
+			}
+		}
+	}
+
 	if clientID == "" {
 		return ConnectURLResponse{}, fmt.Errorf("mcp service: clientID is empty for MCP %s. Ensure dynamic registration (DCR) is supported or linked OAuth credential has ClientID", id)
 	}
@@ -480,4 +510,51 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 	time.Sleep(1 * time.Second)
 
 	return nil
+}
+
+// discoverRegistrationEndpoint uses OpenID Connect Discovery (or RFC 8414) to find
+// the dynamic client registration endpoint from the authorization server.
+func (s *Service) discoverRegistrationEndpoint(ctx context.Context, authURL string) string {
+	// Extract the issuer base from the authURL (e.g. https://auth.atlassian.com/authorize -> https://auth.atlassian.com)
+	idx := strings.Index(authURL, "://")
+	if idx == -1 {
+		return ""
+	}
+	rest := authURL[idx+3:]
+	slashIdx := strings.Index(rest, "/")
+	issuer := authURL
+	if slashIdx != -1 {
+		issuer = authURL[:idx+3+slashIdx]
+	}
+
+	// Try OpenID Connect Discovery first, then RFC 8414
+	endpoints := []string{
+		issuer + "/.well-known/openid-configuration",
+		issuer + "/.well-known/oauth-authorization-server",
+	}
+
+	for _, ep := range endpoints {
+		req, err := http.NewRequestWithContext(ctx, "GET", ep, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			continue
+		}
+		var data struct {
+			RegistrationEndpoint string `json:"registration_endpoint"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err == nil && data.RegistrationEndpoint != "" {
+			resp.Body.Close()
+			fmt.Printf("mcp service: discovered registration_endpoint=%s from %s\n", data.RegistrationEndpoint, ep)
+			return data.RegistrationEndpoint
+		}
+		resp.Body.Close()
+	}
+
+	return ""
 }
