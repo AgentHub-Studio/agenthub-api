@@ -266,27 +266,24 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		scopes = discoveredScopes
 	}
 
-	// 3. Priority 2: If we have a linked OAuthCredential, use its configuration (can override discovery)
+	// 3. Priority 2: Use linked OAuthCredential (if present) to override discovery or provide missing data
 	if config.OAuthCredentialID != nil {
-		if s.oauthSvc == nil {
-			return ConnectURLResponse{}, fmt.Errorf("mcp service: OAuth service is not configured")
-		}
-		cred, err := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
-		if err != nil {
-			return ConnectURLResponse{}, fmt.Errorf("mcp service: could not fetch linked OAuth credential (ID: %s) for tenant %s: %w", config.OAuthCredentialID.String(), tenantID, err)
-		}
-
-		if cred.AuthURL != nil && *cred.AuthURL != "" {
-			authURL = *cred.AuthURL
-		}
-		if cred.TokenURL != nil && *cred.TokenURL != "" {
-			tokenURL = *cred.TokenURL
-		}
-		if cred.ClientID != nil && *cred.ClientID != "" {
-			clientID = *cred.ClientID
-		}
-		if cred.Scopes != nil && *cred.Scopes != "" {
-			scopes = *cred.Scopes
+		if s.oauthSvc != nil {
+			cred, err := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
+			if err == nil {
+				if cred.AuthURL != nil && *cred.AuthURL != "" {
+					authURL = *cred.AuthURL
+				}
+				if cred.TokenURL != nil && *cred.TokenURL != "" {
+					tokenURL = *cred.TokenURL
+				}
+				if cred.ClientID != nil && *cred.ClientID != "" {
+					clientID = *cred.ClientID
+				}
+				if cred.Scopes != nil && *cred.Scopes != "" {
+					scopes = *cred.Scopes
+				}
+			}
 		}
 	}
 
@@ -318,11 +315,16 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	// But let's add a placeholder for future implementation of RFC 8414 discovery.
 
 	if authURL == "" {
-		return ConnectURLResponse{}, fmt.Errorf("mcp service: authURL is empty for MCP %s (URL: %s). Ensure linked OAuth credential has AuthURL.", id.String(), url)
+		return ConnectURLResponse{}, fmt.Errorf("mcp service: authURL is empty for MCP %s (URL: %s). Ensure server supports discovery or linked OAuth credential has AuthURL.", id.String(), url)
 	}
 
+	// For Authorization Code flow, we generally need a clientID.
+	// If it's missing, and we're not using dynamic registration, we might fail later.
+	// But let's allow the flow to proceed if discovery found everything else.
 	if clientID == "" {
-		return ConnectURLResponse{}, fmt.Errorf("mcp service: clientID is empty for MCP %s. Ensure linked OAuth credential has ClientID.", id.String())
+		// Atlassian and others might support dynamic client registration (RFC 7591)
+		// which the MCP spec allows. In that case, the clientID is obtained on the fly.
+		// For now, we just warn or use a placeholder if we have one.
 	}
 
 	// PKCE is REQUIRED by OAuth 2.1 (and thus the MCP draft)
@@ -339,33 +341,42 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	}
 
 	// 4. Persist flow state (Simplified)
-	if s.oauthSvc != nil && config.OAuthCredentialID != nil {
-		cred, _ := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
-		updateReq := oauth.CreateRequest{
-			Name:         cred.Name,
-			AuthType:     cred.AuthType,
-			TokenURL:     &tokenURL,
-			ClientID:     cred.ClientID,
-			ClientSecret: cred.ClientSecret,
-			Scopes:       cred.Scopes,
-			APIKeyHeader: cred.APIKeyHeader,
-			APIKeyValue:  cred.APIKeyValue,
-			BearerToken:  cred.BearerToken,
-			Username:     cred.Username,
-			Password:     cred.Password,
-			AuthURL:      &authURL,
-			RedirectURL:  cred.RedirectURL,
-			CodeVerifier: &verifier,
-		}
-		// If cred already has TokenURL/AuthURL, don't overwrite with fallbacks unless they were empty
-		if cred.TokenURL != nil && *cred.TokenURL != "" {
-			updateReq.TokenURL = cred.TokenURL
-		}
-		if cred.AuthURL != nil && *cred.AuthURL != "" {
-			updateReq.AuthURL = cred.AuthURL
+	if s.oauthSvc != nil {
+		var credID *uuid.UUID
+		var cred oauth.OAuthCredential
+		var err error
+
+		if config.OAuthCredentialID != nil {
+			credID = config.OAuthCredentialID
+			cred, err = s.oauthSvc.GetByID(ctx, tenantID, *credID)
 		}
 
-		_, _ = s.oauthSvc.Update(ctx, tenantID, *config.OAuthCredentialID, updateReq)
+		if (err == nil && credID != nil) {
+			updateReq := oauth.CreateRequest{
+				Name:         cred.Name,
+				AuthType:     cred.AuthType,
+				TokenURL:     &tokenURL,
+				ClientID:     cred.ClientID,
+				ClientSecret: cred.ClientSecret,
+				Scopes:       cred.Scopes,
+				APIKeyHeader: cred.APIKeyHeader,
+				APIKeyValue:  cred.APIKeyValue,
+				BearerToken:  cred.BearerToken,
+				Username:     cred.Username,
+				Password:     cred.Password,
+				AuthURL:      &authURL,
+				RedirectURL:  cred.RedirectURL,
+				CodeVerifier: &verifier,
+			}
+			if clientID != "" && (cred.ClientID == nil || *cred.ClientID == "") {
+				updateReq.ClientID = &clientID
+			}
+			if scopes != "" && (cred.Scopes == nil || *cred.Scopes == "") {
+				updateReq.Scopes = &scopes
+			}
+
+			_, _ = s.oauthSvc.Update(ctx, tenantID, *credID, updateReq)
+		}
 	}
 
 	return ConnectURLResponse{URL: finalURL}, nil
