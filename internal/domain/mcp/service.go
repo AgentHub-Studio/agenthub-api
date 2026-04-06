@@ -306,6 +306,12 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 			if scopes == "" {
 				scopes = "default"
 			}
+		} else if strings.Contains(url, "atlassian.com") || strings.Contains(url, "atlassian.net") {
+			authURL = "https://auth.atlassian.com/authorize"
+			tokenURL = "https://auth.atlassian.com/oauth/token"
+			if scopes == "" {
+				scopes = "read:jira-work read:confluence-content.summary read:me"
+			}
 		}
 	}
 
