@@ -21,6 +21,7 @@ import (
 // oauthService defines methods needed from oauth domain.
 type oauthService interface {
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (oauth.OAuthCredential, error)
+	Create(ctx context.Context, tenantID string, req oauth.CreateRequest) (oauth.OAuthCredential, error)
 	Update(ctx context.Context, tenantID string, id uuid.UUID, req oauth.CreateRequest) (oauth.OAuthCredential, error)
 	GeneratePKCE() (verifier string, challenge string)
 	ExchangeCode(ctx context.Context, tenantID string, id uuid.UUID, code string) error
@@ -287,7 +288,7 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 			if s.oauthSvc != nil {
 				authURLStr := metadata.AuthorizationEndpoint
 				tokenURLStr := metadata.TokenEndpoint
-				newCred, createErr := s.oauthSvc.Update(ctx, tenantID, uuid.Nil, oauth.CreateRequest{
+				newCred, createErr := s.oauthSvc.Create(ctx, tenantID, oauth.CreateRequest{
 					Name:     config.Name + " OAuth (DCR)",
 					AuthType: "oauth2",
 					AuthURL:  &authURLStr,
@@ -298,6 +299,9 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 				if createErr == nil {
 					config.OAuthCredentialID = &newCred.ID
 					_, _ = s.repo.Update(ctx, config)
+					log.Printf("mcp service: persisted DCR credential %s and linked to MCP %s", newCred.ID, config.ID)
+				} else {
+					log.Printf("mcp service: failed to persist DCR credential for %s: %v", config.Name, createErr)
 				}
 			}
 		}
