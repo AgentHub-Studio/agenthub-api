@@ -257,8 +257,8 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 				if len(runtimeStatus.AuthMetadata.ScopesSupported) > 0 {
 					discoveredScopes = strings.Join(runtimeStatus.AuthMetadata.ScopesSupported, ",")
 				}
-				// If runtime has a client_id (from dynamic registration or env)
-				// discoveredClientID = runtimeStatus.AuthMetadata.ClientID
+				// If runtime has a client_id (from dynamic registration)
+				discoveredClientID = runtimeStatus.AuthMetadata.ClientID
 			}
 			resp.Body.Close()
 		}

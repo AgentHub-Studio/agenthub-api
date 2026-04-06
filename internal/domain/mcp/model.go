@@ -102,6 +102,7 @@ type AuthMetadata struct {
 	RegistrationURL     string   `json:"registration_url,omitempty"`
 	Issuer              string   `json:"issuer,omitempty"`
 	ScopesSupported     []string `json:"scopes_supported,omitempty"`
+	ClientID            string   `json:"client_id,omitempty"`
 }
 
 // ConnectURLResponse provides the URL to initiate OAuth flow.
