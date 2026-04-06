@@ -19,12 +19,9 @@ type McpServerConfig struct {
 	HTTPBaseURL      *string           `db:"http_base_url"`
 	Command          *string           `db:"command"`
 	Args             []string          `db:"args"`
-	Env              map[string]string `db:"env"`
-	OAuthTokenURL    *string           `db:"oauth_token_url"`
-	OAuthClientID    *string           `db:"oauth_client_id"`
-	OAuthClientSecret *string          `db:"oauth_client_secret"`
-	OAuthScopes      []string          `db:"oauth_scopes"`
-	AutoStart        bool              `db:"auto_start"`
+	Env               map[string]string `db:"env"`
+	OAuthCredentialID *uuid.UUID        `db:"oauth_credential_id"`
+	AutoStart         bool              `db:"auto_start"`
 	Enabled          bool              `db:"enabled"`
 	CreatedAt        time.Time         `db:"created_at"`
 	UpdatedAt        time.Time         `db:"updated_at"`
@@ -38,12 +35,10 @@ type McpServerConfigResponse struct {
 	TransportType string            `json:"transportType"`
 	HTTPBaseURL   *string           `json:"httpBaseUrl,omitempty"`
 	Command       *string           `json:"command,omitempty"`
-	Args          []string          `json:"args,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	OAuthTokenURL *string           `json:"oauthTokenUrl,omitempty"`
-	OAuthClientID *string           `json:"oauthClientId,omitempty"`
-	OAuthScopes   []string          `json:"oauthScopes,omitempty"`
-	AutoStart     bool              `json:"autoStart"`
+	Args              []string          `json:"args,omitempty"`
+	Env               map[string]string `json:"env,omitempty"`
+	OAuthCredentialID *uuid.UUID        `json:"oauthCredentialId,omitempty"`
+	AutoStart         bool              `json:"autoStart"`
 	Enabled       bool              `json:"enabled"`
 	CreatedAt     time.Time         `json:"createdAt"`
 	UpdatedAt     time.Time         `json:"updatedAt"`
@@ -57,12 +52,10 @@ func ResponseFrom(c McpServerConfig) McpServerConfigResponse {
 		TransportType: c.TransportType,
 		HTTPBaseURL:   c.HTTPBaseURL,
 		Command:       c.Command,
-		Args:          c.Args,
-		Env:           c.Env,
-		OAuthTokenURL: c.OAuthTokenURL,
-		OAuthClientID: c.OAuthClientID,
-		OAuthScopes:   c.OAuthScopes,
-		AutoStart:     c.AutoStart,
+		Args:              c.Args,
+		Env:               c.Env,
+		OAuthCredentialID: c.OAuthCredentialID,
+		AutoStart:         c.AutoStart,
 		Enabled:       c.Enabled,
 		CreatedAt:     c.CreatedAt,
 		UpdatedAt:     c.UpdatedAt,
@@ -77,10 +70,7 @@ type CreateRequest struct {
 	Command           *string           `json:"command"`
 	Args              []string          `json:"args"`
 	Env               map[string]string `json:"env"`
-	OAuthTokenURL     *string           `json:"oauthTokenUrl"`
-	OAuthClientID     *string           `json:"oauthClientId"`
-	OAuthClientSecret *string           `json:"oauthClientSecret"`
-	OAuthScopes       []string          `json:"oauthScopes"`
+	OAuthCredentialID *uuid.UUID        `json:"oauthCredentialId"`
 	AutoStart         bool              `json:"autoStart"`
 	Enabled           bool              `json:"enabled"`
 }
@@ -93,10 +83,7 @@ type UpdateRequest struct {
 	Command           *string            `json:"command"`
 	Args              *[]string          `json:"args"`
 	Env               *map[string]string `json:"env"`
-	OAuthTokenURL     *string            `json:"oauthTokenUrl"`
-	OAuthClientID     *string            `json:"oauthClientId"`
-	OAuthClientSecret *string            `json:"oauthClientSecret"`
-	OAuthScopes       *[]string          `json:"oauthScopes"`
+	OAuthCredentialID *uuid.UUID         `json:"oauthCredentialId"`
 	AutoStart         *bool              `json:"autoStart"`
 	Enabled           *bool              `json:"enabled"`
 }

@@ -36,16 +36,16 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 }
 
 const selectColumns = `id, name, transport_type, http_base_url, command, args, env,
-	oauth_token_url, oauth_client_id, oauth_client_secret, oauth_scopes,
+	oauth_credential_id,
 	auto_start, enabled, created_at, updated_at`
 
 func scanConfig(row pgx.Row) (McpServerConfig, error) {
 	var c McpServerConfig
-	var argsJSON, envJSON, scopesJSON []byte
+	var argsJSON, envJSON []byte
 	err := row.Scan(
 		&c.ID, &c.Name, &c.TransportType, &c.HTTPBaseURL, &c.Command,
 		&argsJSON, &envJSON,
-		&c.OAuthTokenURL, &c.OAuthClientID, &c.OAuthClientSecret, &scopesJSON,
+		&c.OAuthCredentialID,
 		&c.AutoStart, &c.Enabled, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
@@ -60,11 +60,6 @@ func scanConfig(row pgx.Row) (McpServerConfig, error) {
 	if envJSON != nil {
 		if err := json.Unmarshal(envJSON, &c.Env); err != nil {
 			return McpServerConfig{}, fmt.Errorf("mcp: unmarshal env: %w", err)
-		}
-	}
-	if scopesJSON != nil {
-		if err := json.Unmarshal(scopesJSON, &c.OAuthScopes); err != nil {
-			return McpServerConfig{}, fmt.Errorf("mcp: unmarshal oauth_scopes: %w", err)
 		}
 	}
 
@@ -159,18 +154,17 @@ func (r *postgresRepository) Create(ctx context.Context, c McpServerConfig) (Mcp
 
 	argsJSON, _ := json.Marshal(c.Args)
 	envJSON, _ := json.Marshal(c.Env)
-	scopesJSON, _ := json.Marshal(c.OAuthScopes)
 
 	_, err = conn.Exec(ctx,
 		`INSERT INTO mcp_server_config
 		 (id, name, transport_type, http_base_url, command, args, env,
-		  oauth_token_url, oauth_client_id, oauth_client_secret, oauth_scopes,
+		  oauth_credential_id,
 		  auto_start, enabled, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		c.ID, c.Name, c.TransportType, c.HTTPBaseURL, c.Command,
 		argsJSON, envJSON,
-		c.OAuthTokenURL, c.OAuthClientID, c.OAuthClientSecret, scopesJSON,
-		c.AutoStart, c.Enabled, c.CreatedAt, c.UpdatedAt,
+		c.OAuthCredentialID,
+		c.AutoStart, &c.Enabled, c.CreatedAt, c.UpdatedAt,
 	)
 	if err != nil {
 		return McpServerConfig{}, fmt.Errorf("mcp: create: %w", err)
@@ -189,16 +183,15 @@ func (r *postgresRepository) Update(ctx context.Context, c McpServerConfig) (Mcp
 	c.UpdatedAt = time.Now().UTC()
 	argsJSON, _ := json.Marshal(c.Args)
 	envJSON, _ := json.Marshal(c.Env)
-	scopesJSON, _ := json.Marshal(c.OAuthScopes)
 
 	tag, err := conn.Exec(ctx,
 		`UPDATE mcp_server_config
 		 SET name=$1, transport_type=$2, http_base_url=$3, command=$4, args=$5, env=$6,
-		     oauth_token_url=$7, oauth_client_id=$8, oauth_client_secret=$9, oauth_scopes=$10,
-		     auto_start=$11, enabled=$12, updated_at=$13
-		 WHERE id=$14`,
+		     oauth_credential_id=$7,
+		     auto_start=$8, enabled=$9, updated_at=$10
+		 WHERE id=$11`,
 		c.Name, c.TransportType, c.HTTPBaseURL, c.Command, argsJSON, envJSON,
-		c.OAuthTokenURL, c.OAuthClientID, c.OAuthClientSecret, scopesJSON,
+		c.OAuthCredentialID,
 		c.AutoStart, c.Enabled, c.UpdatedAt, c.ID,
 	)
 	if err != nil {

@@ -49,6 +49,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 	if req.TransportType == "" {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: transport type is required")
 	}
+	if req.TransportType == "stdio" {
+		return McpServerConfigResponse{}, fmt.Errorf("mcp service: stdio transport is no longer supported, use http")
+	}
 
 	c := McpServerConfig{
 		Name:              req.Name,
@@ -57,10 +60,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 		Command:           req.Command,
 		Args:              req.Args,
 		Env:               req.Env,
-		OAuthTokenURL:     req.OAuthTokenURL,
-		OAuthClientID:     req.OAuthClientID,
-		OAuthClientSecret: req.OAuthClientSecret,
-		OAuthScopes:       req.OAuthScopes,
+		OAuthCredentialID: req.OAuthCredentialID,
 		AutoStart:         req.AutoStart,
 		Enabled:           req.Enabled,
 	}
@@ -84,6 +84,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.Name = *req.Name
 	}
 	if req.TransportType != nil {
+		if *req.TransportType == "stdio" {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: stdio transport is no longer supported, use http")
+		}
 		existing.TransportType = *req.TransportType
 	}
 	if req.HTTPBaseURL != nil {
@@ -98,17 +101,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	if req.Env != nil {
 		existing.Env = *req.Env
 	}
-	if req.OAuthTokenURL != nil {
-		existing.OAuthTokenURL = req.OAuthTokenURL
-	}
-	if req.OAuthClientID != nil {
-		existing.OAuthClientID = req.OAuthClientID
-	}
-	if req.OAuthClientSecret != nil {
-		existing.OAuthClientSecret = req.OAuthClientSecret
-	}
-	if req.OAuthScopes != nil {
-		existing.OAuthScopes = *req.OAuthScopes
+	if req.OAuthCredentialID != nil {
+		existing.OAuthCredentialID = req.OAuthCredentialID
 	}
 	if req.AutoStart != nil {
 		existing.AutoStart = *req.AutoStart
