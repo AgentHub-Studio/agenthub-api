@@ -120,6 +120,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
 	mcpSvc := mcp.NewService(mcp.NewRepository(pool))
 	mcpSvc.WithOAuthService(oauthSvc)
+	if cfg.MCPRuntimeURL != "" {
+		mcpSvc.WithRuntimeURL(cfg.MCPRuntimeURL)
+	}
 	integrationHandler := integration.NewHandler(integration.NewService(
 		toolSvc,
 		datasourceSvc,

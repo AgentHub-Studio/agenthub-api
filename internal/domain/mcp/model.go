@@ -90,7 +90,18 @@ type UpdateRequest struct {
 
 // AuthStatusResponse indicates if the MCP server is authenticated.
 type AuthStatusResponse struct {
-	Authenticated bool `json:"authenticated"`
+	Authenticated bool          `json:"authenticated"`
+	Metadata      *AuthMetadata `json:"metadata,omitempty"`
+}
+
+// AuthMetadata contains discovered OAuth2 metadata from the MCP server.
+type AuthMetadata struct {
+	ResourceMetadataURL string   `json:"resource_metadata_url,omitempty"`
+	AuthorizationURL    string   `json:"authorization_url,omitempty"`
+	TokenURL            string   `json:"token_url,omitempty"`
+	RegistrationURL     string   `json:"registration_url,omitempty"`
+	Issuer              string   `json:"issuer,omitempty"`
+	ScopesSupported     []string `json:"scopes_supported,omitempty"`
 }
 
 // ConnectURLResponse provides the URL to initiate OAuth flow.

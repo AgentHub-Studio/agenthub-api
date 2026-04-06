@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
@@ -22,11 +24,31 @@ type oauthService interface {
 type Service struct {
 	repo     Repository
 	oauthSvc oauthService
+	// Discovery from runtime
+	mcpRuntimeURL string
+}
+
+// mcpRuntimeClient defines methods to query the MCP runtime.
+type mcpRuntimeClient interface {
+	GetServerStatus(ctx context.Context, name string) (*McpRuntimeStatus, error)
+}
+
+// McpRuntimeStatus matches the response from mcp-client-runtime /servers/:name/status
+type McpRuntimeStatus struct {
+	Name          string        `json:"Name"`
+	Status        string        `json:"Status"`
+	AuthMetadata  *AuthMetadata `json:"AuthMetadata,omitempty"`
 }
 
 // NewService creates a new Service backed by the given Repository.
 func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
+}
+
+// WithRuntimeURL attaches the MCP runtime URL to the service.
+func (s *Service) WithRuntimeURL(url string) *Service {
+	s.mcpRuntimeURL = url
+	return s
 }
 
 // WithOAuthService attaches the oauth service to the MCP service.
@@ -172,13 +194,30 @@ func (s *Service) GetAuthStatus(ctx context.Context, id uuid.UUID) (AuthStatusRe
 		return AuthStatusResponse{}, err
 	}
 
-	if config.OAuthCredentialID == nil {
-		return AuthStatusResponse{Authenticated: false}, nil
+	res := AuthStatusResponse{Authenticated: false}
+
+	// 1. Check if we have local discovery metadata from runtime
+	if s.mcpRuntimeURL != "" {
+		url := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
+		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			var runtimeStatus McpRuntimeStatus
+			if err := json.NewDecoder(resp.Body).Decode(&runtimeStatus); err == nil {
+				res.Metadata = runtimeStatus.AuthMetadata
+			}
+			resp.Body.Close()
+		}
 	}
 
-	// In a real implementation, we would check if the token is valid.
-	// For now, if we have a linked credential, we consider it "potentially authenticated".
-	return AuthStatusResponse{Authenticated: true}, nil
+	// 2. Check if we have a linked credential with a token
+	if config.OAuthCredentialID != nil {
+		// In a real implementation, we would check if the token is valid.
+		// For now, if we have a linked credential, we consider it "potentially authenticated".
+		res.Authenticated = true
+	}
+
+	return res, nil
 }
 
 // GetConnectURL returns the URL to start OAuth flow for the MCP server.
@@ -193,12 +232,41 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		return ConnectURLResponse{}, err
 	}
 
+	// 1. Check if we have local discovery metadata from runtime
+	discoveredAuthURL := ""
+	discoveredTokenURL := ""
+	discoveredScopes := ""
+
+	if s.mcpRuntimeURL != "" {
+		url := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
+		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			var runtimeStatus McpRuntimeStatus
+			if err := json.NewDecoder(resp.Body).Decode(&runtimeStatus); err == nil && runtimeStatus.AuthMetadata != nil {
+				discoveredAuthURL = runtimeStatus.AuthMetadata.AuthorizationURL
+				discoveredTokenURL = runtimeStatus.AuthMetadata.TokenURL
+				if len(runtimeStatus.AuthMetadata.ScopesSupported) > 0 {
+					discoveredScopes = strings.Join(runtimeStatus.AuthMetadata.ScopesSupported, ",")
+				}
+			}
+			resp.Body.Close()
+		}
+	}
+
 	authURL := ""
 	tokenURL := ""
 	clientID := ""
 	scopes := ""
 
-	// 1. If we have a linked OAuthCredential, use its configuration.
+	// 2. Priority 1: Use discovered metadata from runtime (MCP Spec Discovery)
+	if discoveredAuthURL != "" {
+		authURL = discoveredAuthURL
+		tokenURL = discoveredTokenURL
+		scopes = discoveredScopes
+	}
+
+	// 3. Priority 2: If we have a linked OAuthCredential, use its configuration (can override discovery)
 	if config.OAuthCredentialID != nil {
 		if s.oauthSvc == nil {
 			return ConnectURLResponse{}, fmt.Errorf("mcp service: OAuth service is not configured")

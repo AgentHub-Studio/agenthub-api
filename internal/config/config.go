@@ -41,6 +41,7 @@ type Config struct {
 	OAuthEncryptionKey  string // 32-byte AES-256 key; empty disables encryption (dev mode)
 	RabbitMQURL         string // RABBITMQ_URL — optional; enables document pipeline events when set
 	SkillRuntimeURL     string // SKILL_RUNTIME_URL — optional; base URL for skill-runtime service
+	MCPRuntimeURL       string // MCP_RUNTIME_URL — optional; base URL for mcp-client-runtime service
 }
 
 // Load reads configuration from environment variables.
@@ -73,6 +74,7 @@ func Load() (*Config, error) {
 
 	cfg.RabbitMQURL = os.Getenv("RABBITMQ_URL")
 	cfg.SkillRuntimeURL = getEnv("SKILL_RUNTIME_URL", "http://agenthub-skill-runtime:8083")
+	cfg.MCPRuntimeURL = getEnv("MCP_RUNTIME_URL", "http://agenthub-mcp-client-runtime:8080")
 
 	cfg.MinIO = MinIOConfig{
 		Endpoint:        os.Getenv("MINIO_ENDPOINT"),
