@@ -40,10 +40,14 @@ func main() {
 	}
 
 	task := ChatRunTask{
-		RunID:     "e13e0632-22ce-4806-8712-e91b9f2050d6",
-		SessionID: "9f5a04fa-9ba1-48d4-bf3e-76b6d8bb7451",
-		TenantID:  "test",
+		RunID:     os.Getenv("RUN_ID"),
+		SessionID: os.Getenv("SESSION_ID"),
+		TenantID:  os.Getenv("SCHEMA"),
 		Message:   "Quais skills estão cadastradas?",
+	}
+
+	if task.RunID == "" || task.SessionID == "" || task.TenantID == "" {
+		log.Fatalf("RUN_ID, SESSION_ID and SCHEMA are required")
 	}
 
 	body, _ := json.Marshal(task)

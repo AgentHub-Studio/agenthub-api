@@ -144,7 +144,16 @@ func (e *AsyncExecutor) StartWorker(ctx context.Context) error {
 }
 
 func (e *AsyncExecutor) processTask(task ChatRunTask) {
-	ctx := tenant.NewContext(context.Background(), task.TenantID)
+	// task.TenantID already contains the schema name (e.g., "ah_test") in some contexts, 
+	// but the NewContext should receive the raw tenant ID if AcquireWithTenant 
+	// adds the "ah_" prefix. 
+	// Based on AcquireWithTenant: schema := fmt.Sprintf("ah_%s", tenantID)
+	// If task.TenantID is "ah_test", we should pass "test".
+	tenantID := task.TenantID
+	if len(tenantID) > 3 && tenantID[:3] == "ah_" {
+		tenantID = tenantID[3:]
+	}
+	ctx := tenant.NewContext(context.Background(), tenantID)
 
 	slog.Info("chat: background run starting", "runId", task.RunID, "sessionId", task.SessionID, "tenant", task.TenantID)
 
