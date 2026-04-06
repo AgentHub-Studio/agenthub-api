@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // oauthService defines methods needed from oauth domain.
@@ -179,39 +181,70 @@ func (s *Service) GetAuthStatus(ctx context.Context, id uuid.UUID) (AuthStatusRe
 
 // GetConnectURL returns the URL to start OAuth flow for the MCP server.
 func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL string) (ConnectURLResponse, error) {
+	tenantID := tenant.FromContext(ctx)
+	if tenantID == "" {
+		return ConnectURLResponse{}, fmt.Errorf("mcp service: tenant context is required")
+	}
+
 	config, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return ConnectURLResponse{}, err
 	}
 
-	// Simple discovery based on URL for known providers
 	authURL := ""
+	clientID := ""
 	scopes := ""
 
+	// 1. If we have a linked OAuthCredential, use its configuration.
+	if config.OAuthCredentialID != nil {
+		if s.oauthSvc == nil {
+			return ConnectURLResponse{}, fmt.Errorf("mcp service: OAuth service is not configured")
+		}
+		cred, err := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
+		if err != nil {
+			return ConnectURLResponse{}, fmt.Errorf("mcp service: could not fetch linked OAuth credential: %w", err)
+		}
+
+		if cred.AuthURL != nil {
+			authURL = *cred.AuthURL
+		}
+		if cred.ClientID != nil {
+			clientID = *cred.ClientID
+		}
+		if cred.Scopes != nil {
+			scopes = *cred.Scopes
+		}
+	}
+
+	// 2. Simple discovery based on URL for known providers (fallback)
 	url := ""
 	if config.HTTPBaseURL != nil {
 		url = *config.HTTPBaseURL
 	}
 
-	if strings.Contains(url, "github.com") {
-		authURL = "https://github.com/login/oauth/authorize"
-		scopes = "repo,read:user,user:email"
-	} else if strings.Contains(url, "asana.com") {
-		authURL = "https://app.asana.com/-/oauth_authorize"
-		scopes = "default"
+	if authURL == "" {
+		if strings.Contains(url, "github.com") {
+			authURL = "https://github.com/login/oauth/authorize"
+			if scopes == "" {
+				scopes = "repo,read:user,user:email"
+			}
+		} else if strings.Contains(url, "asana.com") {
+			authURL = "https://app.asana.com/-/oauth_authorize"
+			if scopes == "" {
+				scopes = "default"
+			}
+		}
 	}
 
 	if authURL == "" {
-		return ConnectURLResponse{}, fmt.Errorf("mcp service: could not auto-discover OAuth endpoints for URL: %s", url)
+		return ConnectURLResponse{}, fmt.Errorf("mcp service: could not auto-discover OAuth endpoints for URL: %s. Please link an OAuth credential with AuthURL.", url)
 	}
 
-	// In a real flow, we would create/get an OAuthCredential of type AUTHORIZATION_CODE
-	// and return the authorization URL.
-	// For this task, we return a mock URL or a real one if we had ClientID configured.
-	
-	// We'll use a placeholder client_id for now or look up from a global config.
-	clientID := "placeholder_client_id" 
-	
+	if clientID == "" {
+		// Use a placeholder if not provided, though it's likely to fail.
+		clientID = "placeholder_client_id"
+	}
+
 	finalURL := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s",
 		authURL, clientID, redirectURL, scopes, config.ID.String())
 

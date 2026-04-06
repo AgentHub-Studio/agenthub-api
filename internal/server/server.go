@@ -118,7 +118,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	vpnHandler := vpnresource.NewHandler(vpnSvc)
 	datasourceHandler := datasource.NewHandler(datasourceSvc)
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
-	mcpSvc := mcp.NewService(mcp.NewRepository(pool)).WithOAuthService(oauthSvc)
+	mcpSvc := mcp.NewService(mcp.NewRepository(pool))
+	mcpSvc.WithOAuthService(oauthSvc)
 	integrationHandler := integration.NewHandler(integration.NewService(
 		toolSvc,
 		datasourceSvc,
