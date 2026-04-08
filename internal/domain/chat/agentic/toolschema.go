@@ -484,10 +484,12 @@ func deriveSchemaFromToolConfig(t tool.Tool) json.RawMessage {
 	if err := json.Unmarshal(t.Config, &cfg); err != nil {
 		return nil
 	}
-	// If the tool config already has an "inputSchema" field, use it.
+	// If the tool config already has an "inputSchema" field, use it (after validation).
 	if raw, ok := cfg["inputSchema"]; ok {
 		if data, err := json.Marshal(raw); err == nil {
-			return data
+			if normalised := normaliseSchema(data); normalised != nil {
+				return normalised
+			}
 		}
 	}
 

@@ -1266,14 +1266,21 @@ func SanitizeMessages(messages []ai.Message) []ai.Message {
 	}
 
 	var result []ai.Message
-	for i, m := range messages {
+	for _, m := range messages {
 		// Filter 1: whitespace-only assistant messages without tool calls.
 		if m.Role == ai.RoleAssistant && len(m.ToolCalls) == 0 && strings.TrimSpace(m.Content) == "" {
 			continue
 		}
 
-		// Filter 2: consecutive duplicate user messages.
-		if m.Role == ai.RoleUser && i > 0 && messages[i-1].Role == ai.RoleUser && messages[i-1].Content == m.Content {
+		// Filter 2: consecutive user messages — collapse to the last one in each run.
+		// This handles orphaned user messages from failed LLM calls: when the runner
+		// persists the user message before calling the LLM and the LLM call fails,
+		// no assistant response is saved. On the next run the history has consecutive
+		// user messages which most LLM providers (e.g. Ollama) reject with HTTP 400.
+		// We keep the most recent user message in each consecutive run so that when
+		// the runner appends the new user message it lands after an assistant turn.
+		if m.Role == ai.RoleUser && len(result) > 0 && result[len(result)-1].Role == ai.RoleUser {
+			result[len(result)-1] = m // replace previous with current (keep last)
 			continue
 		}
 

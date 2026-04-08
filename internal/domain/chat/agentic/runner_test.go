@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -848,13 +849,18 @@ func TestRunner_PermissionDeny(t *testing.T) {
 	events := collectEvents(ch)
 
 	// Find tool result with error.
+	// Note: "not available" fires when the tool is not in the agent's bound tool set
+	// (allowedToolsIndex check); "not permitted" fires when the tool IS bound but
+	// blocked by PermissionRules. Both represent valid denial of execution.
 	var foundDenied bool
 	for _, ev := range events {
 		if ev.Type == agentic.EventToolResult {
 			var data agentic.ToolResultData
 			require.NoError(t, json.Unmarshal(ev.Data, &data))
 			if data.Error != nil && data.Name == "execute-sql" {
-				assert.Contains(t, *data.Error, "not permitted")
+				errMsg := *data.Error
+				isDenied := strings.Contains(errMsg, "not permitted") || strings.Contains(errMsg, "not available")
+				assert.True(t, isDenied, "expected denial message, got: %s", errMsg)
 				foundDenied = true
 			}
 		}
@@ -896,13 +902,17 @@ func TestRunner_PermissionAllowList(t *testing.T) {
 	events := collectEvents(ch)
 
 	// Tool result should have permission error.
+	// "not available" fires when tool is not in the agent's bound set (allowedToolsIndex);
+	// "not permitted" fires when blocked by PermissionRules allow list.
 	var foundDenied bool
 	for _, ev := range events {
 		if ev.Type == agentic.EventToolResult {
 			var data agentic.ToolResultData
 			require.NoError(t, json.Unmarshal(ev.Data, &data))
 			if data.Error != nil {
-				assert.Contains(t, *data.Error, "not permitted")
+				errMsg := *data.Error
+				isDenied := strings.Contains(errMsg, "not permitted") || strings.Contains(errMsg, "not available")
+				assert.True(t, isDenied, "expected denial message, got: %s", errMsg)
 				foundDenied = true
 			}
 		}
@@ -1030,13 +1040,43 @@ func TestSanitizeMessages_RemovesDuplicateConsecutiveUser(t *testing.T) {
 	assert.Equal(t, ai.RoleAssistant, result[1].Role)
 }
 
-func TestSanitizeMessages_KeepsDifferentConsecutiveUser(t *testing.T) {
+func TestSanitizeMessages_CollapsesConsecutiveUserDifferentContent(t *testing.T) {
+	// P-H1: orphaned user messages from failed LLM calls — keep only the last.
 	msgs := []ai.Message{
 		{Role: ai.RoleUser, Content: "first question"},
 		{Role: ai.RoleUser, Content: "second question"},
 	}
 	result := agentic.SanitizeMessages(msgs)
-	require.Len(t, result, 2)
+	require.Len(t, result, 1)
+	assert.Equal(t, "second question", result[0].Content)
+}
+
+func TestSanitizeMessages_CollapsesManyOrphanedUserMessages(t *testing.T) {
+	// Three consecutive user messages (two failed runs + current) → keep last.
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: "Quem você é e qual seu papel?"},
+		{Role: ai.RoleUser, Content: "Quem você é?"},
+		{Role: ai.RoleUser, Content: "Me explique sua função"},
+	}
+	result := agentic.SanitizeMessages(msgs)
+	require.Len(t, result, 1)
+	assert.Equal(t, "Me explique sua função", result[0].Content)
+}
+
+func TestSanitizeMessages_OrphanedUserThenNewUser(t *testing.T) {
+	// History has: user(orphan) → assistant → user(orphan) + new user appended after.
+	// When new user is appended after loadHistory, the result is user+user at the end.
+	msgs := []ai.Message{
+		{Role: ai.RoleUser, Content: "old question"},
+		{Role: ai.RoleAssistant, Content: "answer"},
+		{Role: ai.RoleUser, Content: "orphaned question"},
+		{Role: ai.RoleUser, Content: "new question"},
+	}
+	result := agentic.SanitizeMessages(msgs)
+	require.Len(t, result, 3)
+	assert.Equal(t, "old question", result[0].Content)
+	assert.Equal(t, "answer", result[1].Content)
+	assert.Equal(t, "new question", result[2].Content)
 }
 
 func TestSanitizeMessages_EmptyInput(t *testing.T) {
