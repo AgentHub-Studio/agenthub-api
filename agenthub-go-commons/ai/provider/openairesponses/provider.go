@@ -45,14 +45,15 @@ func (p *Provider) GetProviderName() string { return "openai-responses" }
 // ---- Responses API request types ----
 
 type responsesRequest struct {
-	Model        string      `json:"model"`
-	Input        interface{} `json:"input"` // string or []inputItem
-	Instructions string      `json:"instructions,omitempty"`
-	Tools        []rTool     `json:"tools,omitempty"`
-	MaxTokens    int         `json:"max_output_tokens,omitempty"`
-	Temperature  float64     `json:"temperature,omitempty"`
-	TopP         float64     `json:"top_p,omitempty"`
-	Stream       bool        `json:"stream,omitempty"`
+	Model              string      `json:"model"`
+	Input              interface{} `json:"input"` // string or []inputItem
+	Instructions       string      `json:"instructions,omitempty"`
+	Tools              []rTool     `json:"tools,omitempty"`
+	MaxTokens          int         `json:"max_output_tokens,omitempty"`
+	Temperature        float64     `json:"temperature,omitempty"`
+	TopP               float64     `json:"top_p,omitempty"`
+	Stream             bool        `json:"stream,omitempty"`
+	PreviousResponseID string      `json:"previous_response_id,omitempty"`
 }
 
 // inputItem represents an item in the Responses API input array.
@@ -306,6 +307,7 @@ func (p *Provider) consumeStream(resp *http.Response, ch chan<- ai.StreamChunk) 
 				}
 				ch <- ai.StreamChunk{
 					FinishReason: finishReason,
+					ResponseID:   r.ID,
 					Usage: &ai.Usage{
 						PromptTokens:     r.Usage.InputTokens,
 						CompletionTokens: r.Usage.OutputTokens,
@@ -354,10 +356,11 @@ func (p *Provider) consumeStream(resp *http.Response, ch chan<- ai.StreamChunk) 
 
 func (p *Provider) buildRequest(messages []ai.Message, opts ai.ChatOptions, stream bool) responsesRequest {
 	req := responsesRequest{
-		Model:       opts.Model,
-		Temperature: opts.Temperature,
-		TopP:        opts.TopP,
-		Stream:      stream,
+		Model:              opts.Model,
+		Temperature:        opts.Temperature,
+		TopP:               opts.TopP,
+		Stream:             stream,
+		PreviousResponseID: opts.PreviousResponseID,
 	}
 
 	if opts.MaxTokens > 0 {
@@ -400,8 +403,18 @@ func (p *Provider) buildRequest(messages []ai.Message, opts ai.ChatOptions, stre
 
 		case ai.RoleAssistant:
 			if len(m.ToolCalls) > 0 {
-				// Assistant message with tool calls → emit function_call items.
-				// First emit the text content as a message if present.
+				// When response chaining is active the server already holds the
+				// function_call items from the previous response — re-sending them
+				// would cause a 400 "Expected an ID that begins with 'fc'" error
+				// because our stored IDs use the call_xxx format returned by the
+				// Responses API streaming, not the fc_xxx item-ID format the
+				// Responses API expects in input arrays.
+				// Skip these items entirely; only function_call_output items
+				// (RoleTool) are needed to complete the chained turn.
+				if req.PreviousResponseID != "" {
+					continue
+				}
+				// Full-history path (no chaining): emit function_call items.
 				if m.Content != "" {
 					items = append(items, inputItem{
 						Type:    "message",
@@ -409,16 +422,12 @@ func (p *Provider) buildRequest(messages []ai.Message, opts ai.ChatOptions, stre
 						Content: m.Content,
 					})
 				}
-				// Then emit each tool call as a function_call item.
 				for _, tc := range m.ToolCalls {
-					args := tc.Function.Arguments
-					if strings.TrimSpace(args) == "" {
-						args = "{}"
-					}
 					items = append(items, inputItem{
 						Type:   "function_call",
+						ID:     tc.ID,
 						Name:   tc.Function.Name,
-						Args:   args,
+						Args:   tc.Function.Arguments,
 						CallID: tc.ID,
 					})
 				}
@@ -452,6 +461,7 @@ func (p *Provider) setHeaders(req *http.Request) {
 func (p *Provider) convertResponse(r *responsesResponse) *ai.ChatResponse {
 	resp := &ai.ChatResponse{
 		Model:        r.Model,
+		ResponseID:   r.ID,
 		FinishReason: "stop",
 		Usage: ai.Usage{
 			PromptTokens:     r.Usage.InputTokens,
@@ -518,6 +528,9 @@ func (p *Provider) sentinelFor(statusCode int, code string) error {
 	case http.StatusBadRequest:
 		if code == "context_length_exceeded" {
 			return ai.ErrContextLengthExceeded
+		}
+		if code == "invalid_previous_response_id" || code == "previous_response_not_found" {
+			return ai.ErrInvalidResponseID
 		}
 		return ai.ErrInvalidRequest
 	}
