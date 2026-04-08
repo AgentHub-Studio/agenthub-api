@@ -68,6 +68,7 @@ type Runner struct {
 	skillClient     *SkillRuntimeClient
 	prompt          *PromptBuilder
 	tools           *ToolSchemaBuilder
+	mcpClient       MCPClientService
 	ctxManager      *ContextManager
 	memory          *MemoryBridge
 	persister       MessagePersister
@@ -124,6 +125,13 @@ func NewRunner(
 // WithManagementExecutor attaches a ManagementExecutor to the Runner.
 func (r *Runner) WithManagementExecutor(exec *ManagementExecutor) *Runner {
 	r.managementExec = exec
+	return r
+}
+
+// WithMCPClient attaches an MCP client so each run can build a tenant-scoped
+// MCP bridge for tool schema loading and tool execution routing.
+func (r *Runner) WithMCPClient(client MCPClientService) *Runner {
+	r.mcpClient = client
 	return r
 }
 
@@ -241,11 +249,30 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	// are separated — only their names go into the system prompt, and the LLM must call
 	// tool_search to load their full schemas on demand.
 	// Inspired by Claude Code's isDeferredTool + ToolSearchTool pattern.
-	r.tools.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
-	toolResult, err := r.tools.BuildWithDeferred(ctx, in.AgentID)
+	toolBuilder := r.tools.Clone()
+	if toolBuilder == nil {
+		emitError(ch, "tool_schema_build", fmt.Errorf("tool builder not configured"))
+		return
+	}
+
+	if r.mcpClient != nil {
+		bridge := NewMCPToolBridge(r.mcpClient, in.TenantID)
+		toolBuilder.WithMCPBridge(bridge)
+		if r.toolExec != nil {
+			r.toolExec.WithMCPBridge(bridge)
+		}
+	} else if r.toolExec != nil {
+		r.toolExec.WithMCPBridge(nil)
+	}
+
+	toolBuilder.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
+	toolResult, err := toolBuilder.BuildWithDeferred(ctx, in.AgentID)
 	if err != nil {
 		emitError(ch, "tool_schema_build", err)
 		return
+	}
+	for _, w := range toolResult.Warnings {
+		emitWarning(ch, "mcp_load_failed", w)
 	}
 	aiTools := convertLLMToolsToAI(toolResult.Loaded)
 	toolNames := make([]string, len(toolResult.Loaded))
@@ -259,6 +286,14 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	interruptBehaviorIndex := BuildInterruptBehaviorIndex(toolResult.All)
 	searchOrReadIndex := BuildSearchOrReadIndex(toolResult.All)
 	deferredTools := toolResult.Deferred
+
+	// Build allowed-tool index: only tools in toolResult.All (loaded + deferred) may be
+	// executed in this run. This prevents the LLM from calling tools it "remembers" from
+	// prior turns that are no longer bound to the agent (P-SK6 security fix).
+	allowedToolsIndex := make(map[string]bool, len(toolResult.All))
+	for _, t := range toolResult.All {
+		allowedToolsIndex[t.Name] = true
+	}
 	_ = contextModeIndex       // TODO: use for fork-mode skill execution via SubtaskExecutor
 	_ = interruptBehaviorIndex // TODO: pass to SSE handler for graceful stop
 	_ = searchOrReadIndex      // TODO: pass to SSE handler for result auto-collapse
@@ -286,6 +321,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		CoordinatorMode:   gates.CoordinatorMode,
 		DeferredToolNames: toolResult.DeferredToolNames(),
 		UserOnlySkills:    toolResult.UserOnlySkills,
+		UnavailableTools:  toolResult.Warnings,
 	})
 	if err != nil {
 		emitError(ch, "prompt_build", err)
@@ -293,11 +329,15 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	// 4. Load conversation history.
-	messages, err := r.loadHistory(ctx, in.SessionID)
+	messages, lastResponseID, err := r.loadHistory(ctx, in.SessionID)
 	if err != nil {
 		emitError(ch, "load_history", err)
 		return
 	}
+
+	// Track the index of the last message sent to the LLM, used to slice
+	// messages when response chaining is active (previous_response_id).
+	lastSentIndex := 0
 
 	// 5. Append user message.
 	messages = append(messages, ai.Message{
@@ -420,8 +460,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			turnSource = SourceSubtask
 		}
 
+		// Response chaining: set previous_response_id and slice messages to
+		// only send new items when the provider supports server-side history.
+		opts.PreviousResponseID = lastResponseID
+		messagesToSend := messages
+		if lastResponseID != "" && lastSentIndex > 0 && lastSentIndex < len(messages) {
+			messagesToSend = messages[lastSentIndex:]
+		}
+
 		// 5a. Call LLM with streaming (with retry + model fallback).
-		fallbackResult, err := retryStreamWithFallbackSource(ctx, r.chatModel, messages, opts, r.config, turnSource,
+		fallbackResult, err := retryStreamWithFallbackSource(ctx, r.chatModel, messagesToSend, opts, r.config, turnSource,
 			func(from, to string, fallbackErr error) {
 				ch <- NewRunEvent(EventModelFallback, ModelFallbackData{
 					FromModel: from,
@@ -476,6 +524,9 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					return
 				}
 				messages = chatMessagesToAI(compactResult.Messages)
+				// Compaction invalidates the server-side response chain.
+				lastResponseID = ""
+				lastSentIndex = 0
 				ch <- NewRunEvent(EventContextCompacted, CompactData{
 					OriginalMessages: compactResult.OriginalCount,
 					CompactedTo:      compactResult.CompactedCount,
@@ -483,6 +534,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				compactFailures = 0
 				continue // retry the turn with compacted context
 			}
+
+			// Recovery: invalid previous_response_id — clear chain and retry with full history.
+			if isInvalidResponseID(err) && lastResponseID != "" {
+				slog.Warn("previous_response_id rejected, falling back to full history",
+					"responseID", lastResponseID)
+				lastResponseID = ""
+				lastSentIndex = 0
+				continue // retry the turn with full history
+			}
+
 			emitError(ch, "llm_call", err)
 			return
 		}
@@ -498,10 +559,24 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		)
 
 		// 5b. Consume stream, accumulate response.
-		assistantContent, toolCalls, finishReason, usage, streamErr := r.consumeStream(ctx, ch, fallbackResult.Stream)
+		assistantContent, toolCalls, finishReason, usage, streamResponseID, streamErr := r.consumeStream(ctx, ch, fallbackResult.Stream)
 		if streamErr != nil {
 			emitError(ch, "stream_consume", streamErr)
 			return
+		}
+
+		// Update response chaining state: record the index before appending
+		// the assistant message so the next iteration can slice correctly.
+		lastSentIndex = len(messages)
+		if streamResponseID != "" {
+			lastResponseID = streamResponseID
+		}
+
+		// Clear response chain when the model was swapped (different provider
+		// won't recognise the previous response_id).
+		if fallbackResult.WasFallback {
+			lastResponseID = ""
+			lastSentIndex = 0
 		}
 
 		// Guard against empty LLM response (no text, no tool calls).
@@ -539,7 +614,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 
 		// 5c. Build and persist assistant message.
-		assistantMsg := r.buildAssistantMessage(in.SessionID, assistantContent, toolCalls, finishReason, usage, turnIndex)
+		assistantMsg := r.buildAssistantMessage(in.SessionID, assistantContent, toolCalls, finishReason, usage, turnIndex, streamResponseID)
 		if _, err := r.persister.CreateMessage(ctx, assistantMsg); err != nil {
 			emitError(ch, "persist_assistant_msg", err)
 			return
@@ -655,7 +730,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				tcNames[ti] = tc.Function.Name
 			}
 			slog.Info("agentic: LLM requested tool_calls", "turn", turnIndex, "tools", tcNames)
-			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools)
+			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools, allowedToolsIndex)
 			slog.Info("agentic: tool execution completed", "turn", turnIndex, "resultCount", len(toolResults), "ctxErr", ctx.Err())
 
 			// Check if denial tracking indicates a stuck loop.
@@ -707,14 +782,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					ToolCallID: tcID,
 				})
 
-				// Emit tool result event.
-				ch <- NewRunEvent(EventToolResult, ToolResultData{
-					ID:         tcID,
-					Name:       toolName,
-					Output:     result.Output,
-					DurationMs: result.LatencyMs,
-					Error:      result.Error,
-				})
+				// Emit tool result event (skip if executor already emitted to avoid duplicates).
+				if !result.EmittedToStream {
+					ch <- NewRunEvent(EventToolResult, ToolResultData{
+						ID:         tcID,
+						Name:       toolName,
+						Output:     result.Output,
+						DurationMs: result.LatencyMs,
+						Error:      result.Error,
+					})
+				}
 
 				// Track tool execution in progress.
 				r.progress.RecordToolCall(toolName)
@@ -788,6 +865,9 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					}
 					// Apply compacted messages back.
 					messages = chatMessagesToAI(result.Messages)
+					// Compaction invalidates the server-side response chain.
+					lastResponseID = ""
+					lastSentIndex = 0
 					compactFailures = 0
 					ch <- NewRunEvent(EventContextCompacted, CompactData{
 						OriginalMessages: result.OriginalCount,
@@ -844,6 +924,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 							CoordinatorMode:   gates.CoordinatorMode,
 							DeferredToolNames: toolResult.DeferredToolNames(),
 							UserOnlySkills:    toolResult.UserOnlySkills,
+							UnavailableTools:  toolResult.Warnings,
 						}); err == nil {
 							systemPrompt = rebuilt
 						}
@@ -939,7 +1020,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 // consumeStream reads all chunks from the stream channel and accumulates the response.
 func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <-chan ai.StreamChunk) (
-	content string, toolCalls []ai.ToolCall, finishReason string, usage ai.Usage, err error,
+	content string, toolCalls []ai.ToolCall, finishReason string, usage ai.Usage, responseID string, err error,
 ) {
 	// Track tool calls being built incrementally. Some providers emit
 	// repeated deltas for the same tool call ID while arguments stream in.
@@ -949,11 +1030,11 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 
 	for chunk := range stream {
 		if ctx.Err() != nil {
-			return "", nil, "", ai.Usage{}, ctx.Err()
+			return "", nil, "", ai.Usage{}, "", ctx.Err()
 		}
 
 		if chunk.Error != nil {
-			return "", nil, "", ai.Usage{}, chunk.Error
+			return "", nil, "", ai.Usage{}, "", chunk.Error
 		}
 
 		// Accumulate usage from stream (providers may send partial usage across chunks).
@@ -980,6 +1061,14 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 		if chunk.Delta != "" {
 			content += chunk.Delta
 			ch <- NewRunEvent(EventTextDelta, TextDeltaData{Content: chunk.Delta})
+			// Guard against models that generate runaway recursive JSON instead
+			// of proper tool calls (observed with some local 20B models).
+			// If the text buffer exceeds 50 KB and contains a deeply nested
+			// JSON-in-JSON pattern, abort the stream to avoid OOM and 100 KB+
+			// garbage being sent to the client.
+			if len(content) > 50_000 && strings.Count(content, `"arguments":{`) > 5 {
+				return content, nil, "stop", usage, responseID, fmt.Errorf("runaway recursive output detected (>50KB with nested JSON pattern) — model may be generating malformed tool calls as text")
+			}
 		}
 
 		if chunk.ToolCallDelta != nil {
@@ -1016,6 +1105,10 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 			}
 		}
 
+		if chunk.ResponseID != "" {
+			responseID = chunk.ResponseID
+		}
+
 		if chunk.FinishReason != "" {
 			finishReason = chunk.FinishReason
 		}
@@ -1036,20 +1129,22 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 		finishReason = "stop"
 	}
 
-	return content, toolCalls, finishReason, usage, nil
+	return content, toolCalls, finishReason, usage, responseID, nil
 }
 
 // loadHistory loads messages from the database and converts to ai.Message format.
 // Applies time-based tool result eviction when the session has been idle longer
 // than the cache TTL (inspired by Claude Code's microCompact.ts cold-cache trigger).
-func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID) ([]ai.Message, error) {
+// Returns the messages and the response_id from the last assistant message's metadata
+// (for response chaining with providers that support it).
+func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID) ([]ai.Message, string, error) {
 	if r.history == nil {
-		return nil, nil
+		return nil, "", nil
 	}
 
 	chatMsgs, err := r.history.FindAllMessages(ctx, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("runner: load history: %w", err)
+		return nil, "", fmt.Errorf("runner: load history: %w", err)
 	}
 
 	// Time-based tool result eviction: if the session has been idle longer
@@ -1061,6 +1156,19 @@ func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID) ([]ai.Mes
 			idleTime := time.Since(lastMsg.CreatedAt)
 			cfg := DefaultTimeBasedEvictionConfig()
 			chatMsgs = EvictStaleToolResults(chatMsgs, idleTime, cfg)
+		}
+	}
+
+	// Extract response_id from the last assistant message's metadata.
+	// This enables response chaining when resuming a session.
+	var lastResponseID string
+	for i := len(chatMsgs) - 1; i >= 0; i-- {
+		if chatMsgs[i].Role == "assistant" && len(chatMsgs[i].Metadata) > 0 {
+			var meta map[string]string
+			if json.Unmarshal(chatMsgs[i].Metadata, &meta) == nil {
+				lastResponseID = meta["response_id"]
+			}
+			break
 		}
 	}
 
@@ -1090,7 +1198,7 @@ func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID) ([]ai.Mes
 
 	messages = filterUnresolvedToolUses(messages)
 	messages = SanitizeMessages(messages)
-	return messages, nil
+	return messages, lastResponseID, nil
 }
 
 // filterUnresolvedToolUses removes assistant messages that contain tool_calls
@@ -1183,6 +1291,7 @@ func (r *Runner) buildAssistantMessage(
 	finishReason string,
 	usage ai.Usage,
 	turnIndex int,
+	responseID string,
 ) chat.ChatMessage {
 	msg := chat.ChatMessage{
 		SessionID:    sessionID,
@@ -1208,6 +1317,15 @@ func (r *Runner) buildAssistantMessage(
 	if usage.TotalTokens > 0 {
 		if raw, err := json.Marshal(usage); err == nil {
 			msg.TokenUsage = raw
+		}
+	}
+
+	// Persist the provider's response ID so that subsequent runs can resume
+	// the response chain without resending the full conversation history.
+	if responseID != "" {
+		meta := map[string]string{"response_id": responseID}
+		if raw, err := json.Marshal(meta); err == nil {
+			msg.Metadata = raw
 		}
 	}
 
@@ -1248,6 +1366,7 @@ func (r *Runner) executeAgentHubManage(ctx context.Context, ch chan<- RunEvent, 
 				DurationMs: execResult.LatencyMs,
 				Error:      execResult.Error,
 			})
+			execResult.EmittedToStream = true
 			return execResult
 		}
 	}
@@ -1258,13 +1377,14 @@ func (r *Runner) executeAgentHubManage(ctx context.Context, ch chan<- RunEvent, 
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		errMsg := err.Error()
-		res := ToolExecResult{Error: &errMsg, LatencyMs: latency}
+		res := ToolExecResult{Error: &errMsg, LatencyMs: latency, EmittedToStream: true}
 		ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
 		ch <- NewRunEvent(EventToolResult, ToolResultData{ID: tc.ID, Name: tc.Function.Name, Output: nil, Error: &errMsg, DurationMs: latency})
 		return res
 	}
 
 	execResult.LatencyMs = latency
+	execResult.EmittedToStream = true
 	ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
 	ch <- NewRunEvent(EventToolResult, ToolResultData{ID: tc.ID, Name: tc.Function.Name, Output: execResult.Output, DurationMs: latency})
 	return *execResult
@@ -1352,7 +1472,7 @@ func truncateToolResult(result ToolExecResult, maxChars int) ToolExecResult {
 // permitted ones via StreamingToolExecutor, and returns results in the same order
 // as the input toolCalls. Denied/confirm tools get error results without execution.
 // Agent tool calls are routed to the SubtaskExecutor for sub-agent spawning.
-func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput, totalCost float64, readOnlyIndex map[string]bool, destructiveIndex map[string]bool, deferredTools []LLMTool) []ToolExecResult {
+func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput, totalCost float64, readOnlyIndex map[string]bool, destructiveIndex map[string]bool, deferredTools []LLMTool, allowedToolsIndex map[string]bool) []ToolExecResult {
 	results := make([]ToolExecResult, len(toolCalls))
 
 	// Partition tool calls into categories.
@@ -1362,6 +1482,25 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 	agentIdx := map[int]int{} // original index → agent index
 
 	for i, tc := range toolCalls {
+		// Reject tool calls for tools not in the allowed set for this run.
+		// This prevents the LLM from calling tools it remembers from conversation
+		// history that are no longer bound to the agent (P-SK6).
+		if len(allowedToolsIndex) > 0 && !allowedToolsIndex[tc.Function.Name] {
+			errMsg := fmt.Sprintf("Tool '%s' is not available for this agent.", tc.Function.Name)
+			results[i] = ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID:    tc.ID,
+				Name:  tc.Function.Name,
+				Input: json.RawMessage(tc.Function.Arguments),
+			})
+			ch <- NewRunEvent(EventToolResult, ToolResultData{
+				ID:    tc.ID,
+				Name:  tc.Function.Name,
+				Error: &errMsg,
+			})
+			continue
+		}
+
 		// Check permissions first.
 		if in.PermissionRules != nil {
 			decision := EvaluatePermission(in.PermissionRules, tc.Function.Name, tc.Function.Arguments)
@@ -1613,6 +1752,13 @@ func (r *Runner) buildToolUseSummary(
 func emitError(ch chan<- RunEvent, code string, err error) {
 	ch <- NewRunEvent(EventError, ErrorData{
 		Message: err.Error(),
+		Code:    code,
+	})
+}
+
+func emitWarning(ch chan<- RunEvent, code string, message string) {
+	ch <- NewRunEvent(EventWarning, WarningData{
+		Message: message,
 		Code:    code,
 	})
 }
