@@ -198,7 +198,7 @@ func DefaultRunConfig() RunConfig {
 		ContextWindowSize:   200000,
 		CompactThreshold:    0.75,
 		ToolTimeout:         30 * time.Second,
-		TotalTimeout:        5 * time.Minute,
+		TotalTimeout:        30 * time.Minute, // generous default for local/slow models; agents can lower via totalTimeoutSeconds
 		ConcurrentReadTools: 3,
 		StreamBufferSize:    64,
 		MaxBudgetUSD:        0, // no limit by default
@@ -239,6 +239,9 @@ type modelConfig struct {
 	Thinking            *ai.ThinkingConfig `json:"thinking,omitempty"`
 	Effort              *ai.EffortLevel    `json:"effort,omitempty"`
 	ToolCacheCapacity   *int               `json:"toolCacheCapacity,omitempty"`
+	// TotalTimeoutSeconds overrides the default 5-minute run timeout.
+	// Useful for large local models that need more time per inference pass.
+	TotalTimeoutSeconds *int `json:"totalTimeoutSeconds,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -314,6 +317,9 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	}
 	if mc.ToolCacheCapacity != nil {
 		cfg.ToolCacheCapacity = *mc.ToolCacheCapacity
+	}
+	if mc.TotalTimeoutSeconds != nil && *mc.TotalTimeoutSeconds > 0 {
+		cfg.TotalTimeout = time.Duration(*mc.TotalTimeoutSeconds) * time.Second
 	}
 	return cfg
 }
