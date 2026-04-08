@@ -61,7 +61,7 @@ func (e *ManagementExecutor) Execute(ctx context.Context, operation, resource st
 }
 
 func (e *ManagementExecutor) list(ctx context.Context, resource string, query string) ToolExecResult {
-	page := pagination.PageRequest{Page: 1, Size: 50}
+	page := pagination.PageRequest{Page: 0, Size: 50}
 
 	var data any
 	var err error
