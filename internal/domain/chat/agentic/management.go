@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -14,6 +15,27 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+// slugify converts a name to a kebab-case slug for use when the LLM omits it.
+func slugify(name string) string {
+	s := strings.ToLower(name)
+	var b strings.Builder
+	prevHyphen := true
+	for _, c := range s {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			b.WriteRune(c)
+			prevHyphen = false
+		} else if !prevHyphen {
+			b.WriteRune('-')
+			prevHyphen = true
+		}
+	}
+	result := strings.TrimRight(b.String(), "-")
+	if result == "" {
+		return "resource-" + uuid.New().String()[:8]
+	}
+	return result
+}
 
 // ManagementExecutor defines the operations allowed by the agenthub_manage tool.
 // It abstracts the underlying domain repositories to provide a unified CRUD interface.
@@ -148,23 +170,90 @@ func (e *ManagementExecutor) create(ctx context.Context, resource string, payloa
 
 	switch resource {
 	case "agent":
-		var a agent.Agent
-		if err = json.Unmarshal(payload, &a); err == nil {
+		// agentCreatePayload accepts snake_case field names from the LLM (as documented
+		// in skilldesc.go). agent.Agent has no JSON tags, so direct unmarshal would drop
+		// system_prompt and model_config (Go JSON requires exact-case or tagged matches).
+		var req struct {
+			ID              uuid.UUID       `json:"id"`
+			Name            string          `json:"name"`
+			Slug            string          `json:"slug"`
+			Description     string          `json:"description"`
+			Status          agent.AgentStatus `json:"status"`
+			SystemPrompt    *string         `json:"system_prompt"`
+			ModelConfig     json.RawMessage `json:"model_config"`
+			PermissionRules json.RawMessage `json:"permission_rules"`
+			Config          json.RawMessage `json:"config"`
+		}
+		if err = json.Unmarshal(payload, &req); err == nil {
+			a := agent.Agent{
+				ID:              req.ID,
+				Name:            req.Name,
+				Slug:            req.Slug,
+				Description:     req.Description,
+				Status:          req.Status,
+				SystemPrompt:    req.SystemPrompt,
+				ModelConfig:     req.ModelConfig,
+				PermissionRules: req.PermissionRules,
+				Config:          req.Config,
+			}
+			// Ensure the LLM cannot produce a nil or zero-value primary key.
+			// The repository does not generate IDs — the service layer does —
+			// but management bypasses the service, so we must guard here.
+			if a.ID == uuid.Nil {
+				a.ID = uuid.New()
+			}
+			if a.Name == "" {
+				errMsg := "agent name is required"
+				return ToolExecResult{Error: &errMsg}
+			}
+			if a.Slug == "" {
+				a.Slug = slugify(a.Name)
+			}
+			if a.Status == "" {
+				a.Status = agent.StatusDraft
+			}
+			if a.CurrentVersion == 0 {
+				a.CurrentVersion = 1
+			}
 			created, err = e.agents.Create(ctx, a)
 		}
 	case "skill":
 		var s skill.Skill
 		if err = json.Unmarshal(payload, &s); err == nil {
+			if s.ID == uuid.Nil {
+				s.ID = uuid.New()
+			}
+			if s.Name == "" {
+				errMsg := "skill name is required"
+				return ToolExecResult{Error: &errMsg}
+			}
+			if s.Slug == "" {
+				s.Slug = slugify(s.Name)
+			}
 			created, err = e.skills.Create(ctx, s)
 		}
 	case "tool":
 		var t tool.Tool
 		if err = json.Unmarshal(payload, &t); err == nil {
+			if t.ID == uuid.Nil {
+				t.ID = uuid.New()
+			}
+			if t.Name == "" {
+				errMsg := "tool name is required"
+				return ToolExecResult{Error: &errMsg}
+			}
 			created, err = e.tools.Create(ctx, t)
 		}
 	case "mcp_server":
 		var m mcp.McpServerConfig
 		if err = json.Unmarshal(payload, &m); err == nil {
+			if m.ID == uuid.Nil {
+				m.ID = uuid.New()
+			}
+			if m.Name == "" {
+				errMsg := "mcp_server name is required"
+				return ToolExecResult{Error: &errMsg}
+			}
 			created, err = e.mcpServers.Create(ctx, m)
 		}
 	default:
@@ -191,10 +280,51 @@ func (e *ManagementExecutor) update(ctx context.Context, resource string, idStr 
 	var updated any
 	switch resource {
 	case "agent":
-		var a agent.Agent
-		if err = json.Unmarshal(payload, &a); err == nil {
-			a.ID = id
-			updated, err = e.agents.Update(ctx, a)
+		// Fetch existing agent first so that partial LLM payloads do not zero-out fields
+		// that were not included in the payload. The repository.Update is a full overwrite.
+		var existing agent.Agent
+		existing, err = e.agents.FindByID(ctx, id)
+		if err != nil {
+			break
+		}
+		// Use snake_case DTO to match LLM-generated payloads (agent.Agent has no JSON tags).
+		var req struct {
+			Name            *string         `json:"name"`
+			Slug            *string         `json:"slug"`
+			Description     *string         `json:"description"`
+			Status          agent.AgentStatus `json:"status"`
+			SystemPrompt    *string         `json:"system_prompt"`
+			ModelConfig     json.RawMessage `json:"model_config"`
+			PermissionRules json.RawMessage `json:"permission_rules"`
+			Config          json.RawMessage `json:"config"`
+		}
+		if err = json.Unmarshal(payload, &req); err == nil {
+			// Merge: only overwrite fields that were explicitly provided.
+			if req.Name != nil {
+				existing.Name = *req.Name
+			}
+			if req.Slug != nil {
+				existing.Slug = *req.Slug
+			}
+			if req.Description != nil {
+				existing.Description = *req.Description
+			}
+			if req.Status != "" {
+				existing.Status = req.Status
+			}
+			if req.SystemPrompt != nil {
+				existing.SystemPrompt = req.SystemPrompt
+			}
+			if len(req.ModelConfig) > 0 {
+				existing.ModelConfig = req.ModelConfig
+			}
+			if len(req.PermissionRules) > 0 {
+				existing.PermissionRules = req.PermissionRules
+			}
+			if len(req.Config) > 0 {
+				existing.Config = req.Config
+			}
+			updated, err = e.agents.Update(ctx, existing)
 		}
 	case "skill":
 		var s skill.UpdateRequest

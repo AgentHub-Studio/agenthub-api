@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -102,11 +104,26 @@ type ToolSchemaBuilder struct {
 	currentDepth       int
 	maxDepth           int
 	lastUserOnlySkills []skill.Skill
+	lastWarnings       []string
 }
 
 // NewToolSchemaBuilder creates a ToolSchemaBuilder.
 func NewToolSchemaBuilder(skills SkillLister, tools ToolsBySkillLister, kbs KBLister) *ToolSchemaBuilder {
 	return &ToolSchemaBuilder{skills: skills, tools: tools, kbs: kbs, maxDepth: 3}
+}
+
+// Clone returns a shallow copy so per-run state (depth, MCP bridge, cached skill
+// subsets) can be mutated without racing other concurrent runs.
+func (b *ToolSchemaBuilder) Clone() *ToolSchemaBuilder {
+	if b == nil {
+		return nil
+	}
+	cloned := *b
+	if len(b.lastUserOnlySkills) > 0 {
+		cloned.lastUserOnlySkills = append([]skill.Skill(nil), b.lastUserOnlySkills...)
+	}
+	cloned.lastWarnings = nil
+	return &cloned
 }
 
 // WithMCPBridge attaches an MCP tool bridge so that MCP tools are included
@@ -136,6 +153,9 @@ type ToolBuildResult struct {
 	// These are announced in the system prompt so the LLM can suggest them
 	// to the user, but they are not included in the tools[] array.
 	UserOnlySkills []skill.Skill
+	// Warnings contains non-fatal issues encountered during tool loading
+	// (e.g. MCP auth failures). These should be surfaced to the client.
+	Warnings []string
 }
 
 // DeferredToolThreshold is the minimum number of total tools before deferred
@@ -249,11 +269,13 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	tools = append(tools, agentHubManageTool())
 
 	// MCP tools — fetched from external MCP servers via the bridge.
+	b.lastWarnings = nil
 	if b.mcpBridge != nil {
 		mcpTools, err := b.mcpBridge.ListTools(ctx)
 		if err != nil {
-			// Non-fatal: log and continue without MCP tools.
-			_ = err
+			slog.Warn("agentic: failed to load MCP tools", "error", err)
+			// Store a concise, LLM-readable warning (full error is too noisy for the prompt).
+			b.lastWarnings = append(b.lastWarnings, summarizeMCPError(err.Error()))
 		} else {
 			tools = append(tools, mcpTools...)
 		}
@@ -292,7 +314,7 @@ func (b *ToolSchemaBuilder) BuildWithDeferred(ctx context.Context, agentID uuid.
 
 	// Only activate deferred loading when there are enough tools.
 	if len(all) < DeferredToolThreshold {
-		return &ToolBuildResult{Loaded: all, All: all, UserOnlySkills: b.lastUserOnlySkills}, nil
+		return &ToolBuildResult{Loaded: all, All: all, UserOnlySkills: b.lastUserOnlySkills, Warnings: b.lastWarnings}, nil
 	}
 
 	var loaded, deferred []LLMTool
@@ -316,6 +338,7 @@ func (b *ToolSchemaBuilder) BuildWithDeferred(ctx context.Context, agentID uuid.
 		Deferred:       deferred,
 		All:            all,
 		UserOnlySkills: b.lastUserOnlySkills,
+		Warnings:       b.lastWarnings,
 	}, nil
 }
 
@@ -441,9 +464,18 @@ func normaliseSchema(raw []byte) json.RawMessage {
 	return json.RawMessage(raw)
 }
 
+// templateVarRe matches {variable} placeholders in URL and body templates.
+var templateVarRe = regexp.MustCompile(`\{(\w+)\}`)
+
 // deriveSchemaFromToolConfig attempts to extract a usable input schema from a
 // tool's config JSON. This covers cases where the skill has no explicit
 // inputSchema but the underlying tool config defines parameter shapes.
+//
+// Priority:
+//  1. Explicit "inputSchema" field in config — used as-is.
+//  2. For HTTP tools: template variables extracted from "url" and "body_template"
+//     fields (e.g. {city} in the URL becomes a required string parameter so the
+//     LLM knows what inputs to provide).
 func deriveSchemaFromToolConfig(t tool.Tool) json.RawMessage {
 	if len(t.Config) == 0 {
 		return nil
@@ -458,7 +490,42 @@ func deriveSchemaFromToolConfig(t tool.Tool) json.RawMessage {
 			return data
 		}
 	}
-	return nil
+
+	// For HTTP tools: auto-derive schema from {variable} placeholders in url/body_template.
+	// This ensures the LLM knows what parameters to pass even when inputSchema is absent.
+	seen := map[string]bool{}
+	var vars []string
+	for _, field := range []string{"url", "urlTemplate", "body_template"} {
+		if s, ok := cfg[field].(string); ok {
+			for _, m := range templateVarRe.FindAllStringSubmatch(s, -1) {
+				name := m[1]
+				if !seen[name] {
+					seen[name] = true
+					vars = append(vars, name)
+				}
+			}
+		}
+	}
+	if len(vars) == 0 {
+		return nil
+	}
+	props := make(map[string]any, len(vars))
+	for _, v := range vars {
+		props[v] = map[string]any{
+			"type":        "string",
+			"description": v,
+		}
+	}
+	schema := map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   vars,
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 // documentSearchTool returns the builtin document_search tool definition.
@@ -769,4 +836,47 @@ func join(elems []string, sep string) string {
 		result += e
 	}
 	return result
+}
+
+// summarizeMCPError extracts a concise, LLM-readable description from a raw MCP error.
+// The raw error includes internal host names, OAuth metadata URLs, and JSON that are
+// not useful in the system prompt. We extract just the server name and root cause.
+func summarizeMCPError(raw string) string {
+	// Try to extract server name from patterns like:
+	// "no MCP tools available (servername: ..." or "for server 'servername'"
+	serverName := ""
+	if idx := strings.Index(raw, "no MCP tools available ("); idx >= 0 {
+		rest := raw[idx+len("no MCP tools available ("):]
+		if end := strings.IndexByte(rest, ':'); end > 0 {
+			serverName = rest[:end]
+		}
+	}
+	if serverName == "" {
+		if idx := strings.Index(raw, "for server '"); idx >= 0 {
+			rest := raw[idx+len("for server '"):]
+			if end := strings.IndexByte(rest, '\''); end > 0 {
+				serverName = rest[:end]
+			}
+		}
+	}
+
+	// Classify the error
+	lower := strings.ToLower(raw)
+	var reason string
+	switch {
+	case strings.Contains(lower, "401") || strings.Contains(lower, "authentication failed") ||
+		strings.Contains(lower, "oauth") || strings.Contains(lower, "token expired"):
+		reason = "authentication required — OAuth token expired or missing"
+	case strings.Contains(lower, "403") || strings.Contains(lower, "forbidden"):
+		reason = "access forbidden"
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "no such host"):
+		reason = "server unreachable"
+	default:
+		reason = "unavailable"
+	}
+
+	if serverName != "" {
+		return fmt.Sprintf("MCP server '%s' is unavailable (%s). You cannot use any tools from this server.", serverName, reason)
+	}
+	return fmt.Sprintf("An MCP server is unavailable (%s). You cannot use its tools.", reason)
 }

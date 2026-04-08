@@ -40,6 +40,10 @@ type ToolExecResult struct {
 	LatencyMs int64           `json:"latencyMs"`
 	// ToolName is set by the executor for descriptive empty-result messages.
 	ToolName string `json:"toolName,omitempty"`
+	// EmittedToStream is set to true by executors that already emitted
+	// EventToolResult to the SSE channel. The main loop skips re-emission
+	// to avoid duplicate tool_result events.
+	EmittedToStream bool `json:"-"`
 }
 
 // skillExecRequest is the body sent to the skill-runtime.
@@ -112,7 +116,15 @@ func (c *SkillRuntimeClient) Execute(ctx context.Context, slug string, input jso
 	}
 
 	if resp.StatusCode >= 400 {
+		// Unwrap JSON error envelope {"error":"..."} from skill-runtime to avoid
+		// double-encoding the message in the tool_result SSE event.
 		errMsg := string(respBody)
+		var errEnvelope struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(respBody, &errEnvelope) == nil && errEnvelope.Error != "" {
+			errMsg = errEnvelope.Error
+		}
 		return &ToolExecResult{
 			Error:     &errMsg,
 			LatencyMs: elapsed,
