@@ -198,16 +198,25 @@ func (s *stubHTTPToolManager) Update(_ context.Context, _ uuid.UUID, req tool.Up
 	s.updated = append(s.updated, req)
 	var cfg map[string]any
 	_ = json.Unmarshal(req.Config, &cfg)
-	s.item = tool.Response{
-		ID:          s.item.ID,
-		Name:        req.Name,
-		Type:        req.Type,
-		Config:      cfg,
-		Description: req.Description,
-		ReadOnly:    req.ReadOnly,
-		CreatedAt:   s.item.CreatedAt,
-		UpdatedAt:   time.Now().UTC(),
+	resp := tool.Response{
+		ID:        s.item.ID,
+		Config:    cfg,
+		CreatedAt: s.item.CreatedAt,
+		UpdatedAt: time.Now().UTC(),
 	}
+	if req.Name != nil {
+		resp.Name = *req.Name
+	}
+	if req.Type != nil {
+		resp.Type = *req.Type
+	}
+	if req.Description != nil {
+		resp.Description = *req.Description
+	}
+	if req.ReadOnly != nil {
+		resp.ReadOnly = *req.ReadOnly
+	}
+	s.item = resp
 	return s.item, nil
 }
 

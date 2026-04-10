@@ -27,7 +27,10 @@ type ToolRepository interface {
 	ListLabels(ctx context.Context) ([]string, error)
 	Create(ctx context.Context, t Tool) (Tool, error)
 	GetByID(ctx context.Context, id uuid.UUID) (Tool, error)
-	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Tool, error)
+	// Update replaces a tool's mutable fields. The caller is responsible for
+	// merging the existing tool with the patch before calling Update so that
+	// unset fields are preserved. P-C196-1.
+	Update(ctx context.Context, id uuid.UUID, t Tool) (Tool, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	BindToSkill(ctx context.Context, skillID uuid.UUID, req BindRequest) (SkillTool, error)
 	UnbindFromSkill(ctx context.Context, skillID, toolID uuid.UUID) error
@@ -164,8 +167,10 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (Tool, error) {
 	return t, nil
 }
 
-// Update modifies an existing tool.
-func (r *Repository) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Tool, error) {
+// Update replaces a tool's mutable fields. The caller must first merge the
+// existing tool with the patch (via service.Update) so that unset fields are
+// preserved. P-C196-1.
+func (r *Repository) Update(ctx context.Context, id uuid.UUID, t Tool) (Tool, error) {
 	tenantID := tenant.FromContext(ctx)
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
@@ -174,17 +179,17 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, req UpdateRequest
 	defer release()
 
 	cfg := []byte("{}")
-	if len(req.Config) > 0 {
-		cfg = req.Config
+	if len(t.Config) > 0 {
+		cfg = t.Config
 	}
-	labels := req.Labels
+	labels := t.Labels
 	if labels == nil {
 		labels = []string{}
 	}
 
 	var inputSchema interface{}
-	if len(req.InputSchema) > 0 {
-		inputSchema = []byte(req.InputSchema)
+	if len(t.InputSchema) > 0 {
+		inputSchema = []byte(t.InputSchema)
 	}
 
 	row := conn.QueryRow(ctx,
@@ -194,16 +199,16 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, req UpdateRequest
 		           should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 		           max_result_chars, interrupt_behavior, is_search_or_read,
 		           created_at, updated_at`,
-		req.Name, req.Type, cfg, inputSchema, req.Description, labels, req.ReadOnly, id,
+		t.Name, t.Type, cfg, inputSchema, t.Description, labels, t.ReadOnly, id,
 	)
-	t, err := scanTool(row)
+	updated, err := scanTool(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Tool{}, ErrNotFound
 		}
 		return Tool{}, err
 	}
-	return t, nil
+	return updated, nil
 }
 
 // Delete removes a tool by ID.

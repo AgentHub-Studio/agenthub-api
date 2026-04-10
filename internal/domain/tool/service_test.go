@@ -45,15 +45,10 @@ func (m *mockToolRepo) GetByID(_ context.Context, id uuid.UUID) (tool.Tool, erro
 	return t, nil
 }
 
-func (m *mockToolRepo) Update(_ context.Context, id uuid.UUID, req tool.UpdateRequest) (tool.Tool, error) {
-	t, ok := m.data[id]
-	if !ok {
+func (m *mockToolRepo) Update(_ context.Context, id uuid.UUID, t tool.Tool) (tool.Tool, error) {
+	if _, ok := m.data[id]; !ok {
 		return tool.Tool{}, tool.ErrNotFound
 	}
-	t.Name = req.Name
-	t.Type = req.Type
-	t.Description = req.Description
-	t.Labels = req.Labels
 	m.data[id] = t
 	return t, nil
 }
@@ -210,6 +205,59 @@ func TestToolService_Create_ValidTypes(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// --- TR-01-TASK-19: PATCH preserves unset fields (P-C196-1) ---
+
+func TestPatchTool_OnlyDescriptionSent_TypePreserved(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name: "my-tool", Type: tool.ToolTypeHTTP, Description: "original",
+	})
+	require.NoError(t, err)
+
+	newDesc := "updated description"
+	updated, err := svc.Update(context.Background(), created.ID, tool.UpdateRequest{
+		Description: &newDesc,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "updated description", updated.Description)
+	assert.Equal(t, tool.ToolType(tool.ToolTypeHTTP), updated.Type, "type must be preserved")
+	assert.Equal(t, "my-tool", updated.Name, "name must be preserved")
+}
+
+func TestPatchTool_OnlyNameSent_TypeAndDescPreserved(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name: "old-name", Type: tool.ToolTypeSQL, Description: "keep me",
+	})
+	require.NoError(t, err)
+
+	newName := "new-name"
+	updated, err := svc.Update(context.Background(), created.ID, tool.UpdateRequest{
+		Name: &newName,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "new-name", updated.Name)
+	assert.Equal(t, tool.ToolType(tool.ToolTypeSQL), updated.Type, "type must be preserved")
+	assert.Equal(t, "keep me", updated.Description, "description must be preserved")
+}
+
+func TestPatchTool_EmptyBody_NoChanges(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name: "stable-tool", Type: tool.ToolTypeCustom, Description: "unchanged",
+	})
+	require.NoError(t, err)
+
+	// Empty UpdateRequest — nothing should change.
+	updated, err := svc.Update(context.Background(), created.ID, tool.UpdateRequest{})
+
+	require.NoError(t, err)
+	assert.Equal(t, "stable-tool", updated.Name)
+	assert.Equal(t, "unchanged", updated.Description)
 }
 
 func TestToolService_List_FilterByType(t *testing.T) {

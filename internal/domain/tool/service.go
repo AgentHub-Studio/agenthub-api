@@ -119,17 +119,47 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (Response, error) {
 	return ResponseFrom(t), nil
 }
 
-// Update updates a tool.
+// Update applies a partial update to a tool, preserving fields that are not
+// included in the request (P-C196-1: PATCH must not overwrite unset fields).
 func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Response, error) {
-	// P-C220-1 / P-C221-1: re-validate URL on update to catch retroactively dangerous changes.
-	if req.Type == ToolTypeHTTP {
-		if u := extractURLFromConfig(req.Config); u != "" {
+	existing, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return Response{}, err
+	}
+
+	// Merge only the fields that were explicitly included in the request.
+	if req.Name != nil {
+		existing.Name = *req.Name
+	}
+	if req.Type != nil {
+		existing.Type = *req.Type
+	}
+	if len(req.Config) > 0 {
+		existing.Config = req.Config
+	}
+	if len(req.InputSchema) > 0 {
+		existing.InputSchema = req.InputSchema
+	}
+	if req.Description != nil {
+		existing.Description = *req.Description
+	}
+	if req.Labels != nil {
+		existing.Labels = req.Labels
+	}
+	if req.ReadOnly != nil {
+		existing.ReadOnly = *req.ReadOnly
+	}
+
+	// P-C220-1 / P-C221-1: re-validate URL when type or config changed.
+	if existing.Type == ToolTypeHTTP {
+		if u := extractURLFromConfig(existing.Config); u != "" {
 			if err := ssrf.ValidateURL(u); err != nil {
 				return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
 			}
 		}
 	}
-	t, err := s.repo.Update(ctx, id, req)
+
+	t, err := s.repo.Update(ctx, id, existing)
 	if err != nil {
 		return Response{}, err
 	}

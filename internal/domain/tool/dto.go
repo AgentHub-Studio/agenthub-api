@@ -19,14 +19,17 @@ type CreateRequest struct {
 }
 
 // UpdateRequest is the payload for updating a tool.
+// All fields use pointer types so that PATCH callers can omit fields they
+// do not want to change — a nil pointer means "keep existing value".
+// P-C196-1: partial updates must not overwrite fields that were not sent.
 type UpdateRequest struct {
-	Name        string          `json:"name"`
-	Type        ToolType        `json:"type"`
-	Config      json.RawMessage `json:"config"`
+	Name        *string         `json:"name,omitempty"`
+	Type        *ToolType       `json:"type,omitempty"`
+	Config      json.RawMessage `json:"config,omitempty"`
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"` // P-C175-1: explicit schema
-	Description string          `json:"description"`
-	Labels      []string        `json:"labels"`
-	ReadOnly    bool            `json:"readOnly"`
+	Description *string         `json:"description,omitempty"`
+	Labels      []string        `json:"labels,omitempty"`
+	ReadOnly    *bool           `json:"readOnly,omitempty"`
 }
 
 // BindRequest is the payload for binding a tool to a skill.

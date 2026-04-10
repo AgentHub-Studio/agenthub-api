@@ -365,9 +365,39 @@ func (e *ManagementExecutor) update(ctx context.Context, resource string, idStr 
 			updated, err = e.skills.Update(ctx, id, s)
 		}
 	case "tool":
-		var t tool.UpdateRequest
-		if err = json.Unmarshal(payload, &t); err == nil {
-			updated, err = e.tools.Update(ctx, id, t)
+		var req tool.UpdateRequest
+		if err = json.Unmarshal(payload, &req); err == nil {
+			var existing tool.Tool
+			existing, err = e.tools.GetByID(ctx, id)
+			if err == nil {
+				// Merge: only overwrite fields that were explicitly provided.
+				if req.Name != nil {
+					existing.Name = *req.Name
+				}
+				if req.Type != nil {
+					existing.Type = *req.Type
+				}
+				if len(req.Config) > 0 {
+					existing.Config = req.Config
+				}
+				if len(req.InputSchema) > 0 {
+					existing.InputSchema = req.InputSchema
+				}
+				if req.Description != nil {
+					existing.Description = *req.Description
+				}
+				if req.Labels != nil {
+					existing.Labels = req.Labels
+				}
+				if req.ReadOnly != nil {
+					existing.ReadOnly = *req.ReadOnly
+				}
+				var updatedTool tool.Tool
+				updatedTool, err = e.tools.Update(ctx, id, existing)
+				if err == nil {
+					updated = tool.ResponseFrom(updatedTool)
+				}
+			}
 		}
 	case "integration":
 		// Manual integration update not supported via this path

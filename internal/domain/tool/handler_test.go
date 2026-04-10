@@ -58,7 +58,9 @@ func (m *mockToolSvc) Update(_ context.Context, id uuid.UUID, req tool.UpdateReq
 	if !ok {
 		return tool.Response{}, tool.ErrNotFound
 	}
-	t.Name = req.Name
+	if req.Name != nil {
+		t.Name = *req.Name
+	}
 	m.tools[id] = t
 	return t, nil
 }
@@ -265,7 +267,8 @@ func TestToolHandler_Patch_Success(t *testing.T) {
 	id := uuid.New()
 	svc.tools[id] = tool.Response{ID: id, Name: "Original", Type: "HTTP"}
 
-	body, _ := json.Marshal(tool.UpdateRequest{Name: "Patched"})
+	patchedName := "Patched"
+	body, _ := json.Marshal(tool.UpdateRequest{Name: &patchedName})
 	req := httptest.NewRequest(http.MethodPatch, "/api/tools/"+id.String(), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -279,7 +282,8 @@ func TestToolHandler_Patch_Success(t *testing.T) {
 
 func TestToolHandler_Patch_NotFound(t *testing.T) {
 	r, _ := setupTool()
-	body, _ := json.Marshal(tool.UpdateRequest{Name: "x"})
+	xName := "x"
+	body, _ := json.Marshal(tool.UpdateRequest{Name: &xName})
 	req := httptest.NewRequest(http.MethodPatch, "/api/tools/"+uuid.New().String(), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -293,7 +297,8 @@ func TestToolHandler_Update_Success(t *testing.T) {
 	id := uuid.New()
 	svc.tools[id] = tool.Response{ID: id, Name: "Original", Type: "HTTP"}
 
-	body, _ := json.Marshal(tool.UpdateRequest{Name: "Updated"})
+	updatedName := "Updated"
+	body, _ := json.Marshal(tool.UpdateRequest{Name: &updatedName})
 	req := httptest.NewRequest(http.MethodPut, "/api/tools/"+id.String(), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -307,7 +312,8 @@ func TestToolHandler_Update_Success(t *testing.T) {
 
 func TestToolHandler_Update_NotFound(t *testing.T) {
 	r, _ := setupTool()
-	body, _ := json.Marshal(tool.UpdateRequest{Name: "x"})
+	xName := "x"
+	body, _ := json.Marshal(tool.UpdateRequest{Name: &xName})
 	req := httptest.NewRequest(http.MethodPut, "/api/tools/"+uuid.New().String(), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

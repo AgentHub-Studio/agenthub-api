@@ -299,12 +299,13 @@ func (s *Service) UpdateHTTP(ctx context.Context, id uuid.UUID, req HTTPCreateRe
 		return HTTPResponse{}, fmt.Errorf("integration service: tool %s is not an HTTP integration", id)
 	}
 
+	httpType := tool.ToolType(tool.ToolTypeHTTP)
 	updated, err := s.httpTools.Update(ctx, id, tool.UpdateRequest{
-		Name:        req.Name,
-		Description: req.Description,
-		Type:        tool.ToolTypeHTTP,
+		Name:        &req.Name,
+		Description: &req.Description,
+		Type:        &httpType,
 		Config:      buildHTTPConfig(req),
-		ReadOnly:    req.ReadOnly,
+		ReadOnly:    &req.ReadOnly,
 	})
 	if err != nil {
 		return HTTPResponse{}, fmt.Errorf("integration service: update HTTP tool: %w", err)
@@ -820,10 +821,11 @@ func (s *Service) UpdateDatabase(ctx context.Context, id uuid.UUID, req Database
 	}
 
 	if err == nil {
+		sqlType := tool.ToolType(tool.ToolTypeSQL)
 		updated, err := s.httpTools.Update(ctx, linkedTool.ID, tool.UpdateRequest{
-			Name:        req.Name,
-			Description: req.Description,
-			Type:        tool.ToolTypeSQL,
+			Name:        &req.Name,
+			Description: &req.Description,
+			Type:        &sqlType,
 			Config:      buildDatabaseConfig(id, req),
 		})
 		if err != nil {
