@@ -53,6 +53,10 @@ type RunInput struct {
 	UserMessage  string
 	SystemPrompt string
 	TenantID     string
+	// UserMessageID is non-nil when the user message was already persisted by the
+	// caller (typically chat.Service.RunSession). When set, the runner skips
+	// its own user message persistence to avoid duplicates. P-C178-2.
+	UserMessageID *uuid.UUID
 }
 
 // ElicitationResponder routes a user's elicitation response to the active run.
@@ -256,10 +260,27 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		session.AgentID = defaultID
 	}
 
+	// P-C178-2: persist user message BEFORE starting the run so it is never lost
+	// even if the run fails to initialise (e.g. agent not published, model error).
+	var userMsgID *uuid.UUID
+	if userMessage != "" {
+		msg := ChatMessage{
+			SessionID: sessionID,
+			Role:      "user",
+			Content:   userMessage,
+		}
+		persisted, err := s.repo.CreateMessage(ctx, msg)
+		if err != nil {
+			return nil, fmt.Errorf("chat service: persist user message: %w", err)
+		}
+		userMsgID = &persisted.ID
+	}
+
 	return s.runner.RunSession(ctx, RunInput{
-		SessionID:   sessionID,
-		AgentID:     *session.AgentID,
-		UserMessage: userMessage,
-		TenantID:    tenantID,
+		SessionID:     sessionID,
+		AgentID:       *session.AgentID,
+		UserMessage:   userMessage,
+		TenantID:      tenantID,
+		UserMessageID: userMsgID,
 	})
 }

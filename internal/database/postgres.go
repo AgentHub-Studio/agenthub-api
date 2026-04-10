@@ -2,11 +2,27 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// PostgreSQL error codes.
+const (
+	PgErrUniqueViolation     = "23505"
+	PgErrForeignKeyViolation = "23503"
+	PgErrNotNullViolation    = "23502"
+	PgErrCheckViolation      = "23514"
+)
+
+// IsPgError reports whether err is a PostgreSQL error with the given code.
+func IsPgError(err error, code string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == code
+}
 
 // AcquireWithTenant acquires a connection from the pool and sets the search_path
 // to the tenant's schema (ah_{tenantID}) so that all queries run in the correct

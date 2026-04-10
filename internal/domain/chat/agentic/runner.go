@@ -464,20 +464,25 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		Content: in.UserMessage,
 	})
 
-	// Persist user message.
-	userMsg := chat.ChatMessage{
-		SessionID:   in.SessionID,
-		Role:        "user",
-		Content:     in.UserMessage,
-		MessageType: chat.MessageTypeText,
-		RunID:       &r.runID,
-	}
-	if r.runID == uuid.Nil {
-		userMsg.RunID = nil
-	}
-	if _, err := r.persister.CreateMessage(ctx, userMsg); err != nil {
-		localEmitError("persist_user_msg", err)
-		return
+	// Persist user message — only when not already persisted by the caller.
+	// P-C178-2: chat.Service.RunSession persists the message upfront so it is
+	// never lost if the run fails to initialise. When UserMessageID is set, the
+	// message is already in the DB; skip to avoid a duplicate.
+	if in.UserMessageID == nil {
+		userMsg := chat.ChatMessage{
+			SessionID:   in.SessionID,
+			Role:        "user",
+			Content:     in.UserMessage,
+			MessageType: chat.MessageTypeText,
+			RunID:       &r.runID,
+		}
+		if r.runID == uuid.Nil {
+			userMsg.RunID = nil
+		}
+		if _, err := r.persister.CreateMessage(ctx, userMsg); err != nil {
+			localEmitError("persist_user_msg", err)
+			return
+		}
 	}
 
 	// 5. Agentic loop.

@@ -120,6 +120,45 @@ func (m *mockChatRepo) GetLatestCompactSummary(_ context.Context, sessionID uuid
 	return chat.ChatMessage{}, false, nil
 }
 
+func (m *mockChatRepo) GetSessionListStamp(_ context.Context) (chat.ChatSessionListStamp, error) {
+	return chat.ChatSessionListStamp{}, nil
+}
+
+func (m *mockChatRepo) UpdateSessionAgent(_ context.Context, sessionID uuid.UUID, agentID uuid.UUID) error {
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		return chat.ErrNotFound
+	}
+	s.AgentID = &agentID
+	m.sessions[sessionID] = s
+	return nil
+}
+
+func (m *mockChatRepo) FindDefaultAgentID(_ context.Context) (*uuid.UUID, error) {
+	return nil, nil
+}
+
+func (m *mockChatRepo) CreateRun(_ context.Context, r chat.ChatRun) (chat.ChatRun, error) {
+	r.ID = uuid.New()
+	return r, nil
+}
+
+func (m *mockChatRepo) GetRunByID(_ context.Context, _ uuid.UUID) (chat.ChatRun, error) {
+	return chat.ChatRun{}, chat.ErrNotFound
+}
+
+func (m *mockChatRepo) GetActiveRunBySession(_ context.Context, _ uuid.UUID) (chat.ChatRun, bool, error) {
+	return chat.ChatRun{}, false, nil
+}
+
+func (m *mockChatRepo) UpdateRunStatus(_ context.Context, _ uuid.UUID, _ chat.ChatRunStatus, _ string) error {
+	return nil
+}
+
+func (m *mockChatRepo) MarkRunCompleted(_ context.Context, _ uuid.UUID) error {
+	return nil
+}
+
 func TestChatService_CreateSession_Success(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
 	agentID := uuid.New()
@@ -164,11 +203,13 @@ func TestChatService_AddMessage(t *testing.T) {
 // --- mock SessionRunner ---
 
 type mockSessionRunner struct {
-	events []chat.RunEvent
-	err    error
+	events    []chat.RunEvent
+	err       error
+	lastInput chat.RunInput
 }
 
-func (m *mockSessionRunner) RunSession(_ context.Context, _ chat.RunInput) (<-chan chat.RunEvent, error) {
+func (m *mockSessionRunner) RunSession(_ context.Context, in chat.RunInput) (<-chan chat.RunEvent, error) {
+	m.lastInput = in
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -252,4 +293,89 @@ func TestChatService_ListMessages(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), page.TotalElements)
 	assert.Len(t, page.Content, 3)
+}
+
+// --- TR-01-TASK-12: User message persisted before run (P-C178-2) ---
+
+// TestRunSession_UserMessagePersistedBeforeRun verifies that the user message is
+// written to the repository before the runner is invoked, so that it is never
+// lost even if the run later fails.
+func TestRunSession_UserMessagePersistedBeforeRun(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(repo, runner)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.RunSession(context.Background(), session.ID, "Hello from user", "test-tenant")
+	require.NoError(t, err)
+
+	// The runner must have received a non-nil UserMessageID.
+	require.NotNil(t, runner.lastInput.UserMessageID, "runner should receive a pre-persisted UserMessageID")
+
+	// The message must exist in the repository.
+	var found bool
+	for _, msg := range repo.messages {
+		if msg.Role == "user" && msg.Content == "Hello from user" {
+			found = true
+			assert.Equal(t, *runner.lastInput.UserMessageID, msg.ID)
+		}
+	}
+	assert.True(t, found, "user message must be persisted in the repo before the runner is called")
+}
+
+// TestRunSession_RunnerError_UserMessageStillPersisted verifies that even when the
+// runner returns an error (e.g. agent not published), the user message is already
+// in the repository and is not lost.
+func TestRunSession_RunnerError_UserMessageStillPersisted(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{err: chat.ErrAgentNotPublished}
+	svc := chat.NewService(repo, runner)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.RunSession(context.Background(), session.ID, "message before failure", "tenant")
+	require.Error(t, err)
+
+	// Despite the runner error, the user message must be persisted.
+	var found bool
+	for _, msg := range repo.messages {
+		if msg.Role == "user" && msg.Content == "message before failure" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "user message must be in the repo even when runner returns an error")
+}
+
+// TestRunSession_EmptyMessage_NoMessagePersisted verifies that when the user
+// sends an empty message no spurious record is written to the repository.
+func TestRunSession_EmptyMessage_NoMessagePersisted(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(repo, runner)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.RunSession(context.Background(), session.ID, "", "tenant")
+	require.NoError(t, err)
+
+	// No message should have been written for an empty user message.
+	assert.Empty(t, repo.messages, "no message should be persisted when userMessage is empty")
+	assert.Nil(t, runner.lastInput.UserMessageID, "UserMessageID must be nil when userMessage is empty")
 }
