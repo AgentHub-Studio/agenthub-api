@@ -20,6 +20,7 @@ type AgentResponse struct {
 	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
 	Config           json.RawMessage `json:"config"`
 	EnableManagement bool            `json:"enableManagement"`
+	SkillIDs         []uuid.UUID     `json:"skillIds,omitempty"`
 	CreatedAt        time.Time       `json:"createdAt"`
 	UpdatedAt        time.Time       `json:"updatedAt"`
 }
@@ -65,6 +66,7 @@ type CreateAgentRequest struct {
 	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
 	Config           json.RawMessage `json:"config,omitempty"`
 	EnableManagement bool            `json:"enableManagement,omitempty"`
+	SkillIDs         []uuid.UUID     `json:"skillIds,omitempty"`
 }
 
 // UpdateAgentRequest is the JSON body for partial agent updates.
@@ -77,6 +79,7 @@ type UpdateAgentRequest struct {
 	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
 	Config           json.RawMessage `json:"config,omitempty"`
 	EnableManagement *bool           `json:"enableManagement,omitempty"`
+	SkillIDs         []uuid.UUID     `json:"skillIds,omitempty"`
 }
 
 // CloneAgentRequest is the JSON body for cloning an agent.

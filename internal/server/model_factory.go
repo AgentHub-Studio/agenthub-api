@@ -76,6 +76,17 @@ func (f *settingsChatModelFactory) Build(ctx context.Context, provider, model st
 	}
 }
 
+// ResolveDefaultProvider returns the tenant's configured default LLM provider
+// from the settings table. Used to fall back when an agent's model_config has
+// no explicit provider.
+func (f *settingsChatModelFactory) ResolveDefaultProvider(ctx context.Context) string {
+	provider, err := readSettingString(ctx, f.settingsRepo, "llm.defaultProvider")
+	if err != nil || provider == "" {
+		return ""
+	}
+	return provider
+}
+
 // ResolveModel returns the default model for the given provider from settings.
 // For example, for "openai" it reads "openai.model". Returns "" if not configured.
 func (f *settingsChatModelFactory) ResolveModel(ctx context.Context, provider string) string {

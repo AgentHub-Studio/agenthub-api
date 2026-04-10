@@ -31,6 +31,9 @@ const (
 	// is blocked waiting for user input (elicitation). This prevents reverse
 	// proxies and browsers from closing the idle SSE connection.
 	EventHeartbeat RunEventType = "heartbeat"
+	// EventWarning is a non-fatal advisory emitted when a recoverable issue is
+	// detected during a run (e.g. a skill with no tools, an unavailable KB).
+	EventWarning RunEventType = "warning"
 )
 
 // ToolUseSummaryData carries a human-readable summary of a completed tool batch.
@@ -260,4 +263,11 @@ type UiFormPayloadDto struct {
 	Title       string         `json:"title"`
 	Elements    []UiElementDto `json:"elements"`
 	SubmitLabel string         `json:"submitLabel,omitempty"`
+}
+
+
+// WarningData is emitted for non-fatal advisories during a run.
+type WarningData struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }

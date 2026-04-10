@@ -77,6 +77,8 @@ const tenantID = "test-tenant"
 
 // helpers
 
+func strPtr(s string) *string { return &s }
+
 func createCred(t *testing.T, svc *oauth.Service, req oauth.CreateRequest) oauth.OAuthCredential {
 	t.Helper()
 	c, err := svc.Create(context.Background(), tenantID, req)
@@ -89,7 +91,7 @@ func createCred(t *testing.T, svc *oauth.Service, req oauth.CreateRequest) oauth
 func TestOAuthService_Create_GetByID(t *testing.T) {
 	svc := oauth.NewService(newMockRepo())
 	c := createCred(t, svc, oauth.CreateRequest{
-		Name: "My API Key", AuthType: oauth.AuthTypeAPIKey, APIKeyValue: "s3cr3t", APIKeyHeader: "X-Key",
+		Name: "My API Key", AuthType: oauth.AuthTypeAPIKey, APIKeyValue: strPtr("s3cr3t"), APIKeyHeader: strPtr("X-Key"),
 	})
 	assert.NotEqual(t, uuid.Nil, c.ID)
 	fetched, err := svc.GetByID(context.Background(), tenantID, c.ID)
@@ -118,7 +120,7 @@ func TestOAuthService_ListAll(t *testing.T) {
 func TestOAuthService_ResolveAuthHeader_APIKey(t *testing.T) {
 	svc := oauth.NewService(newMockRepo())
 	c := createCred(t, svc, oauth.CreateRequest{
-		Name: "k", AuthType: oauth.AuthTypeAPIKey, APIKeyHeader: "X-My-Key", APIKeyValue: "token123",
+		Name: "k", AuthType: oauth.AuthTypeAPIKey, APIKeyHeader: strPtr("X-My-Key"), APIKeyValue: strPtr("token123"),
 	})
 	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
 	require.NoError(t, err)
@@ -129,7 +131,7 @@ func TestOAuthService_ResolveAuthHeader_APIKey(t *testing.T) {
 func TestOAuthService_ResolveAuthHeader_APIKey_DefaultHeader(t *testing.T) {
 	svc := oauth.NewService(newMockRepo())
 	c := createCred(t, svc, oauth.CreateRequest{
-		Name: "k", AuthType: oauth.AuthTypeAPIKey, APIKeyValue: "mykey",
+		Name: "k", AuthType: oauth.AuthTypeAPIKey, APIKeyValue: strPtr("mykey"),
 	})
 	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
 	require.NoError(t, err)
@@ -139,7 +141,7 @@ func TestOAuthService_ResolveAuthHeader_APIKey_DefaultHeader(t *testing.T) {
 func TestOAuthService_ResolveAuthHeader_BearerToken(t *testing.T) {
 	svc := oauth.NewService(newMockRepo())
 	c := createCred(t, svc, oauth.CreateRequest{
-		Name: "b", AuthType: oauth.AuthTypeBearerToken, BearerToken: "jwt.token.here",
+		Name: "b", AuthType: oauth.AuthTypeBearerToken, BearerToken: strPtr("jwt.token.here"),
 	})
 	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
 	require.NoError(t, err)
@@ -150,7 +152,7 @@ func TestOAuthService_ResolveAuthHeader_BearerToken(t *testing.T) {
 func TestOAuthService_ResolveAuthHeader_BasicAuth(t *testing.T) {
 	svc := oauth.NewService(newMockRepo())
 	c := createCred(t, svc, oauth.CreateRequest{
-		Name: "basic", AuthType: oauth.AuthTypeBasicAuth, Username: "user", Password: "pass",
+		Name: "basic", AuthType: oauth.AuthTypeBasicAuth, Username: strPtr("user"), Password: strPtr("pass"),
 	})
 	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
 	require.NoError(t, err)
@@ -172,9 +174,9 @@ func TestOAuthService_ResolveAuthHeader_OAuth2_FetchesToken(t *testing.T) {
 	c := createCred(t, svc, oauth.CreateRequest{
 		Name:         "cc",
 		AuthType:     oauth.AuthTypeOAuth2ClientCredentials,
-		TokenURL:     "https://auth.example.com/token",
-		ClientID:     "client-id",
-		ClientSecret: "client-secret",
+		TokenURL:     strPtr("https://auth.example.com/token"),
+		ClientID:     strPtr("client-id"),
+		ClientSecret: strPtr("client-secret"),
 	})
 
 	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
@@ -194,8 +196,8 @@ func TestOAuthService_ResolveAuthHeader_OAuth2_UsesCache(t *testing.T) {
 
 	c := createCred(t, svc, oauth.CreateRequest{
 		Name: "cc", AuthType: oauth.AuthTypeOAuth2ClientCredentials,
-		TokenURL: "https://auth.example.com/token",
-		ClientID: "cid", ClientSecret: "cs",
+		TokenURL: strPtr("https://auth.example.com/token"),
+		ClientID: strPtr("cid"), ClientSecret: strPtr("cs"),
 	})
 
 	// First call — fetches from token endpoint
@@ -217,8 +219,8 @@ func TestOAuthService_ResolveAuthHeader_OAuth2_TokenEndpointError(t *testing.T) 
 
 	c := createCred(t, svc, oauth.CreateRequest{
 		Name: "cc", AuthType: oauth.AuthTypeOAuth2ClientCredentials,
-		TokenURL: "https://auth.example.com/token",
-		ClientID: "bad", ClientSecret: "bad",
+		TokenURL: strPtr("https://auth.example.com/token"),
+		ClientID: strPtr("bad"), ClientSecret: strPtr("bad"),
 	})
 
 	_, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
@@ -231,25 +233,29 @@ func TestOAuthService_ResolveAuthHeader_OAuth2_TokenEndpointError(t *testing.T) 
 func TestResponseFrom_MasksSecrets(t *testing.T) {
 	c := oauth.OAuthCredential{
 		Name:         "my-cred",
-		ClientSecret: "super-secret",
-		APIKeyValue:  "api-key-val",
-		BearerToken:  "bearer-tok",
-		Password:     "p4ssw0rd",
+		ClientSecret: strPtr("super-secret"),
+		APIKeyValue:  strPtr("api-key-val"),
+		BearerToken:  strPtr("bearer-tok"),
+		Password:     strPtr("p4ssw0rd"),
 	}
 	r := oauth.ResponseFrom(c)
-	assert.Equal(t, "***", r.ClientSecret)
-	assert.Equal(t, "***", r.APIKeyValue)
-	assert.Equal(t, "***", r.BearerToken)
-	assert.Equal(t, "***", r.Password)
+	require.NotNil(t, r.ClientSecret)
+	require.NotNil(t, r.APIKeyValue)
+	require.NotNil(t, r.BearerToken)
+	require.NotNil(t, r.Password)
+	assert.Equal(t, "***", *r.ClientSecret)
+	assert.Equal(t, "***", *r.APIKeyValue)
+	assert.Equal(t, "***", *r.BearerToken)
+	assert.Equal(t, "***", *r.Password)
 }
 
 func TestResponseFrom_EmptySecretsRemainEmpty(t *testing.T) {
 	c := oauth.OAuthCredential{Name: "my-cred"}
 	r := oauth.ResponseFrom(c)
-	assert.Equal(t, "", r.ClientSecret)
-	assert.Equal(t, "", r.APIKeyValue)
-	assert.Equal(t, "", r.BearerToken)
-	assert.Equal(t, "", r.Password)
+	assert.Nil(t, r.ClientSecret)
+	assert.Nil(t, r.APIKeyValue)
+	assert.Nil(t, r.BearerToken)
+	assert.Nil(t, r.Password)
 }
 
 // ---- AES-256-GCM encryption tests ----
@@ -260,7 +266,7 @@ func TestOAuthService_EncryptionRoundtrip_APIKey(t *testing.T) {
 	svc := oauth.NewServiceWithEncryption(newMockRepo(), aesKey)
 
 	c := createCred(t, svc, oauth.CreateRequest{
-		Name: "k", AuthType: oauth.AuthTypeAPIKey, APIKeyHeader: "X-Key", APIKeyValue: "my-secret-key",
+		Name: "k", AuthType: oauth.AuthTypeAPIKey, APIKeyHeader: strPtr("X-Key"), APIKeyValue: strPtr("my-secret-key"),
 	})
 
 	// Stored value must be encrypted (not plaintext).
@@ -276,10 +282,11 @@ func TestOAuthService_EncryptionRoundtrip_BearerToken(t *testing.T) {
 	svc := oauth.NewServiceWithEncryption(newMockRepo(), aesKey)
 
 	c := createCred(t, svc, oauth.CreateRequest{
-		Name: "b", AuthType: oauth.AuthTypeBearerToken, BearerToken: "my-bearer",
+		Name: "b", AuthType: oauth.AuthTypeBearerToken, BearerToken: strPtr("my-bearer"),
 	})
 
-	assert.NotEqual(t, "my-bearer", c.BearerToken)
+	require.NotNil(t, c.BearerToken)
+	assert.NotEqual(t, "my-bearer", *c.BearerToken)
 
 	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
 	require.NoError(t, err)
@@ -290,10 +297,11 @@ func TestOAuthService_EncryptionRoundtrip_BasicAuth(t *testing.T) {
 	svc := oauth.NewServiceWithEncryption(newMockRepo(), aesKey)
 
 	c := createCred(t, svc, oauth.CreateRequest{
-		Name: "ba", AuthType: oauth.AuthTypeBasicAuth, Username: "user", Password: "secret",
+		Name: "ba", AuthType: oauth.AuthTypeBasicAuth, Username: strPtr("user"), Password: strPtr("secret"),
 	})
 
-	assert.NotEqual(t, "secret", c.Password)
+	require.NotNil(t, c.Password)
+	assert.NotEqual(t, "secret", *c.Password)
 
 	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
 	require.NoError(t, err)
@@ -312,8 +320,8 @@ func TestOAuthService_Update_ClearsTokenCache(t *testing.T) {
 
 	c := createCred(t, svc, oauth.CreateRequest{
 		Name: "cc", AuthType: oauth.AuthTypeOAuth2ClientCredentials,
-		TokenURL: "https://auth.example.com/token",
-		ClientID: "cid", ClientSecret: "cs",
+		TokenURL: strPtr("https://auth.example.com/token"),
+		ClientID: strPtr("cid"), ClientSecret: strPtr("cs"),
 	})
 
 	// Populate cache
@@ -325,8 +333,8 @@ func TestOAuthService_Update_ClearsTokenCache(t *testing.T) {
 	httpClient.body = `{"access_token":"new-token","expires_in":3600}`
 	_, err = svc.Update(context.Background(), tenantID, c.ID, oauth.CreateRequest{
 		Name: "cc", AuthType: oauth.AuthTypeOAuth2ClientCredentials,
-		TokenURL: "https://auth.example.com/token",
-		ClientID: "cid2", ClientSecret: "cs2",
+		TokenURL: strPtr("https://auth.example.com/token"),
+		ClientID: strPtr("cid2"), ClientSecret: strPtr("cs2"),
 	})
 	require.NoError(t, err)
 

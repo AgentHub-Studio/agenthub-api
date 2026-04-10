@@ -62,6 +62,16 @@ func NewService(repo CredentialRepository) *Service {
 	}
 }
 
+// NewServiceWithClient creates a Service that uses a custom HTTPClient for OAuth2
+// token requests. Useful for testing without a real network.
+func NewServiceWithClient(repo CredentialRepository, client HTTPClient) *Service {
+	return &Service{
+		repo:       repo,
+		httpClient: client,
+		tokenCache: make(map[uuid.UUID]*cachedToken),
+	}
+}
+
 // NewServiceWithEncryption creates a Service with AES-256-GCM secret encryption.
 // key must be exactly 32 bytes; pass "" to disable encryption (development mode).
 func NewServiceWithEncryption(repo CredentialRepository, key string) *Service {
@@ -86,7 +96,7 @@ func (s *Service) encryptSecret(plaintext *string) (*string, error) {
 }
 
 // decryptSecret decrypts s if an encryption key is configured.
-func (s *Service) decryptSecret(ciphertext *string) (*string, error) {
+func (s *Service) DecryptSecret(ciphertext *string) (*string, error) {
 	if ciphertext == nil || *ciphertext == "" {
 		return ciphertext, nil
 	}
@@ -224,7 +234,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 		// Check database status first
  	if c.AuthType == AuthTypeOAuth2AuthorizationCode {
 			if c.BearerToken != nil && *c.BearerToken != "" && (c.ExpiresAt == nil || time.Now().Before(c.ExpiresAt.Add(-30*time.Second))) {
-				tokenPtr, _ := s.decryptSecret(c.BearerToken)
+				tokenPtr, _ := s.DecryptSecret(c.BearerToken)
 				if tokenPtr != nil && *tokenPtr != "" {
 					return ResolveResponse{Header: "Authorization", Value: "Bearer " + *tokenPtr}, nil
 				}
@@ -233,7 +243,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 			if c.RefreshToken != nil && *c.RefreshToken != "" {
 				updated, err := s.RefreshToken(ctx, tenantID, id)
 				if err == nil {
-					tokenPtr, _ := s.decryptSecret(updated.BearerToken)
+					tokenPtr, _ := s.DecryptSecret(updated.BearerToken)
 					if tokenPtr != nil && *tokenPtr != "" {
 						return ResolveResponse{Header: "Authorization", Value: "Bearer " + *tokenPtr}, nil
 					}
@@ -241,7 +251,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 			}
 		}
 
-		clientSecretPtr, _ := s.decryptSecret(c.ClientSecret)
+		clientSecretPtr, _ := s.DecryptSecret(c.ClientSecret)
 		c.ClientSecret = clientSecretPtr
 		token, err := s.fetchOrCachedToken(ctx, id, c)
 		if err != nil {
@@ -250,7 +260,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 		return ResolveResponse{Header: "Authorization", Value: "Bearer " + token}, nil
 
 	case AuthTypeBearerToken:
-		bearerTokenPtr, _ := s.decryptSecret(c.BearerToken)
+		bearerTokenPtr, _ := s.DecryptSecret(c.BearerToken)
 		val := ""
 		if bearerTokenPtr != nil {
 			val = *bearerTokenPtr
@@ -258,7 +268,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 		return ResolveResponse{Header: "Authorization", Value: "Bearer " + val}, nil
 
 	case AuthTypeAPIKey:
-		apiKeyValuePtr, _ := s.decryptSecret(c.APIKeyValue)
+		apiKeyValuePtr, _ := s.DecryptSecret(c.APIKeyValue)
 		header := ""
 		if c.APIKeyHeader != nil {
 			header = *c.APIKeyHeader
@@ -273,7 +283,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 		return ResolveResponse{Header: header, Value: val}, nil
 
 	case AuthTypeBasicAuth:
-		passwordPtr, _ := s.decryptSecret(c.Password)
+		passwordPtr, _ := s.DecryptSecret(c.Password)
 		pass := ""
 		if passwordPtr != nil {
 			pass = *passwordPtr
@@ -338,7 +348,7 @@ func (s *Service) ExchangeCode(ctx context.Context, tenantID string, id uuid.UUI
 		return err
 	}
 
-	clientSecretPtr, _ := s.decryptSecret(c.ClientSecret)
+	clientSecretPtr, _ := s.DecryptSecret(c.ClientSecret)
 	params := url.Values{}
 	params.Set("grant_type", "authorization_code")
 	params.Set("code", code)
@@ -382,8 +392,8 @@ func (s *Service) RefreshToken(ctx context.Context, tenantID string, id uuid.UUI
 		return OAuthCredential{}, err
 	}
 
-	clientSecretPtr, _ := s.decryptSecret(c.ClientSecret)
-	refreshTokenPtr, _ := s.decryptSecret(c.RefreshToken)
+	clientSecretPtr, _ := s.DecryptSecret(c.ClientSecret)
+	refreshTokenPtr, _ := s.DecryptSecret(c.RefreshToken)
 
 	params := url.Values{}
 	params.Set("grant_type", "refresh_token")

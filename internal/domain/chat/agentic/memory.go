@@ -276,6 +276,51 @@ func (mb *MemoryBridge) MaybeStore(ctx context.Context, agentID uuid.UUID, turnI
 	return stored, nil
 }
 
+// Store persists a single memory entry directly, without LLM evaluation.
+// This is the low-level path invoked by the memory_store builtin tool when
+// the LLM explicitly requests a value to be remembered.
+// Returns a human-readable status message suitable for the tool result.
+func (mb *MemoryBridge) Store(ctx context.Context, agentID uuid.UUID, content, category string) string {
+	if mb.upserter == nil {
+		return "Memory storage is not available for this agent."
+	}
+	if content == "" {
+		return "Nothing to store: content is empty."
+	}
+
+	// Use a key derived from category+content to allow idempotent upserts.
+	key := category
+	if key == "" {
+		key = "general"
+	}
+	// Truncate key to a safe length.
+	if len(key) > 64 {
+		key = key[:64]
+	}
+
+	valueJSON, err := json.Marshal(content)
+	if err != nil {
+		return fmt.Sprintf("Failed to encode memory: %v", err)
+	}
+
+	var embedding []float32
+	if mb.embedder != nil {
+		if emb, embedErr := mb.embedder.Embed(ctx, content); embedErr == nil {
+			embedding = emb
+		}
+	}
+
+	_, err = mb.upserter.Upsert(ctx, agentID, key, memory.UpsertMemoryRequest{
+		Value:      valueJSON,
+		MemoryType: category,
+		Embedding:  embedding,
+	})
+	if err != nil {
+		return fmt.Sprintf("Failed to store memory: %v", err)
+	}
+	return "Memory stored successfully."
+}
+
 // TurnMessage is a simplified message representation for memory evaluation.
 type TurnMessage struct {
 	Role    string `json:"role"`

@@ -730,3 +730,175 @@ func legacyEditPath(kind SourceKind, id uuid.UUID) string {
 }
 
 const httpMethodDefault = "GET"
+
+// CreateMCP delegates to the underlying MCP catalog.
+func (s *Service) CreateMCP(ctx context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error) {
+	return s.mcps.Create(ctx, req)
+}
+
+// CreateDatabase creates a datasource and generates a companion skill + SQL tool.
+func (s *Service) CreateDatabase(ctx context.Context, req DatabaseCreateRequest) (DatabaseResponse, error) {
+	if err := validateDatabaseRequest(req); err != nil {
+		return DatabaseResponse{}, err
+	}
+	if s.skillMgmt == nil || s.httpTools == nil || s.repo == nil {
+		return DatabaseResponse{}, errors.New("integration service: HTTP management not configured")
+	}
+
+	tenantID := tenant.FromContext(ctx)
+	ds, err := s.datasources.Create(ctx, tenantID, datasource.CreateRequest{
+		Name:          req.Name,
+		Type:          req.Type,
+		Host:          req.Host,
+		Port:          req.Port,
+		Database:      req.Database,
+		DBUser:        req.DBUser,
+		DBPassword:    req.DBPassword,
+		VpnResourceID: req.VpnResourceID,
+	})
+	if err != nil {
+		return DatabaseResponse{}, fmt.Errorf("integration service: create datasource: %w", err)
+	}
+
+	skillResp, err := s.skillMgmt.Create(ctx, skill.CreateRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		Category:    generatedDatabaseSkillCategory,
+	})
+	if err != nil {
+		_ = s.datasources.Delete(ctx, tenantID, ds.ID)
+		return DatabaseResponse{}, fmt.Errorf("integration service: create database skill: %w", err)
+	}
+
+	toolResp, err := s.httpTools.Create(ctx, tool.CreateRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		Type:        tool.ToolTypeSQL,
+		Config:      buildDatabaseConfig(ds.ID, req),
+	})
+	if err != nil {
+		_ = s.repo.DeleteSkill(ctx, skillResp.ID)
+		_ = s.datasources.Delete(ctx, tenantID, ds.ID)
+		return DatabaseResponse{}, fmt.Errorf("integration service: create SQL tool: %w", err)
+	}
+
+	_, err = s.httpTools.BindToSkill(ctx, skillResp.ID, tool.BindRequest{ToolID: toolResp.ID, Priority: 0})
+	if err != nil {
+		_ = s.httpTools.Delete(ctx, toolResp.ID)
+		_ = s.repo.DeleteSkill(ctx, skillResp.ID)
+		_ = s.datasources.Delete(ctx, tenantID, ds.ID)
+		return DatabaseResponse{}, fmt.Errorf("integration service: bind SQL tool to skill: %w", err)
+	}
+
+	return databaseResponseFromDatasource(ds, toolResp, req.Description), nil
+}
+
+// UpdateDatabase updates the datasource and its generated SQL tool and skill metadata.
+func (s *Service) UpdateDatabase(ctx context.Context, id uuid.UUID, req DatabaseCreateRequest) (DatabaseResponse, error) {
+	if s.httpTools == nil || s.repo == nil {
+		return DatabaseResponse{}, errors.New("integration service: HTTP management not configured")
+	}
+
+	tenantID := tenant.FromContext(ctx)
+	_, err := s.datasources.Update(ctx, tenantID, id, datasource.CreateRequest{
+		Name:          req.Name,
+		Type:          req.Type,
+		Host:          req.Host,
+		Port:          req.Port,
+		Database:      req.Database,
+		DBUser:        req.DBUser,
+		DBPassword:    req.DBPassword,
+		VpnResourceID: req.VpnResourceID,
+	})
+	if err != nil {
+		return DatabaseResponse{}, fmt.Errorf("integration service: update datasource: %w", err)
+	}
+
+	linkedTool, description, err := s.findDatabaseToolForDatasource(ctx, id)
+	if err != nil && !errors.Is(err, tool.ErrNotFound) {
+		return DatabaseResponse{}, fmt.Errorf("integration service: find database tool: %w", err)
+	}
+
+	if err == nil {
+		updated, err := s.httpTools.Update(ctx, linkedTool.ID, tool.UpdateRequest{
+			Name:        req.Name,
+			Description: req.Description,
+			Type:        tool.ToolTypeSQL,
+			Config:      buildDatabaseConfig(id, req),
+		})
+		if err != nil {
+			return DatabaseResponse{}, fmt.Errorf("integration service: update SQL tool: %w", err)
+		}
+		linkedTool = updated
+		description = req.Description
+
+		linkedSkills, err := s.repo.ListSkillsByToolID(ctx, linkedTool.ID)
+		if err != nil {
+			return DatabaseResponse{}, fmt.Errorf("integration service: load linked skills: %w", err)
+		}
+		for _, sk := range linkedSkills {
+			if sk.Category != generatedDatabaseSkillCategory {
+				continue
+			}
+			if err := s.repo.UpdateSkillMetadata(ctx, sk.ID, req.Name, req.Description); err != nil {
+				return DatabaseResponse{}, fmt.Errorf("integration service: update generated skill: %w", err)
+			}
+		}
+	}
+
+	ds, err := s.datasources.GetByID(ctx, tenantID, id)
+	if err != nil {
+		return DatabaseResponse{}, fmt.Errorf("integration service: reload datasource: %w", err)
+	}
+
+	return databaseResponseFromDatasource(ds, linkedTool, description), nil
+}
+
+// DeleteDatabase removes the datasource and cleans up generated SQL tool and skill.
+func (s *Service) DeleteDatabase(ctx context.Context, id uuid.UUID) error {
+	if s.httpTools == nil || s.repo == nil {
+		return errors.New("integration service: HTTP management not configured")
+	}
+
+	tenantID := tenant.FromContext(ctx)
+
+	linkedTool, _, err := s.findDatabaseToolForDatasource(ctx, id)
+	if err != nil && !errors.Is(err, tool.ErrNotFound) {
+		return fmt.Errorf("integration service: find database tool: %w", err)
+	}
+
+	if err == nil {
+		linkedSkills, err := s.repo.ListSkillsByToolID(ctx, linkedTool.ID)
+		if err != nil {
+			return fmt.Errorf("integration service: load linked skills: %w", err)
+		}
+		for _, sk := range linkedSkills {
+			if err := s.httpTools.UnbindFromSkill(ctx, sk.ID, linkedTool.ID); err != nil && !errors.Is(err, tool.ErrNotFound) {
+				return fmt.Errorf("integration service: unbind SQL tool from skill: %w", err)
+			}
+		}
+		if err := s.httpTools.Delete(ctx, linkedTool.ID); err != nil {
+			return fmt.Errorf("integration service: delete SQL tool: %w", err)
+		}
+		for _, sk := range linkedSkills {
+			if sk.Category != generatedDatabaseSkillCategory {
+				continue
+			}
+			bindings, err := s.repo.CountToolBindings(ctx, sk.ID)
+			if err != nil {
+				return fmt.Errorf("integration service: count generated skill bindings: %w", err)
+			}
+			if bindings == 0 {
+				if err := s.repo.DeleteSkill(ctx, sk.ID); err != nil {
+					return fmt.Errorf("integration service: delete generated skill: %w", err)
+				}
+			}
+		}
+	}
+
+	if err := s.datasources.Delete(ctx, tenantID, id); err != nil {
+		return fmt.Errorf("integration service: delete datasource: %w", err)
+	}
+
+	return nil
+}

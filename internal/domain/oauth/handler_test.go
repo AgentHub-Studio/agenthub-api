@@ -81,6 +81,14 @@ func (m *mockOAuthSvc) ResolveAuthHeader(_ context.Context, _ string, id uuid.UU
 	return oauth.ResolveResponse{Header: "Authorization", Value: "Bearer token123"}, nil
 }
 
+func (m *mockOAuthSvc) ExchangeCode(_ context.Context, _ string, _ uuid.UUID, _ string) error {
+	return nil
+}
+
+func (m *mockOAuthSvc) RefreshToken(_ context.Context, _ string, _ uuid.UUID) (oauth.OAuthCredential, error) {
+	return oauth.OAuthCredential{}, nil
+}
+
 func setupOAuth() (*chi.Mux, *mockOAuthSvc) {
 	svc := newMockOAuthSvc()
 	h := oauth.NewHandler(svc)

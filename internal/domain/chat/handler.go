@@ -348,9 +348,6 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			// Client disconnected -- run continues in background.
 			return
-		case <-done:
-			// Run completed while we were connected.
-			return
 		case ev, ok := <-sseCh:
 			if !ok {
 				// Channel closed -- run complete.
@@ -360,6 +357,30 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 			seq := buf.Append(ev)
 			fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data)
 			flusher.Flush()
+		case <-done:
+			// Run goroutine is done; drain any remaining buffered events.
+			for {
+				select {
+				case ev, ok := <-sseCh:
+					if !ok {
+						buf.MarkDone()
+						return
+					}
+					seq := buf.Append(ev)
+					fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data)
+					flusher.Flush()
+				default:
+					// No more events pending; done signal may have raced with close(sseCh).
+					// Wait for sseCh to be closed to ensure MarkDone is called.
+					for ev := range sseCh {
+						seq := buf.Append(ev)
+						fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data)
+						flusher.Flush()
+					}
+					buf.MarkDone()
+					return
+				}
+			}
 		}
 	}
 }

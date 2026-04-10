@@ -47,6 +47,11 @@ type RunConfig struct {
 	// TotalTimeout is the maximum duration for the entire run.
 	TotalTimeout time.Duration `json:"totalTimeout"`
 
+	// LLMCallTimeout is the maximum duration for a single LLM call (including streaming).
+	// P-C102-1: prevents a stalled provider from blocking the goroutine indefinitely.
+	// Default: 5 minutes. Set to 0 to disable (not recommended for production).
+	LLMCallTimeout time.Duration `json:"llmCallTimeout"`
+
 	// ConcurrentReadTools is the max number of read-only tools executed in parallel.
 	ConcurrentReadTools int `json:"concurrentReadTools"`
 
@@ -198,7 +203,8 @@ func DefaultRunConfig() RunConfig {
 		ContextWindowSize:   200000,
 		CompactThreshold:    0.75,
 		ToolTimeout:         30 * time.Second,
-		TotalTimeout:        30 * time.Minute, // generous default for local/slow models; agents can lower via totalTimeoutSeconds
+		TotalTimeout:        5 * time.Minute, // agents can override via totalTimeoutSeconds in model config
+		LLMCallTimeout:      5 * time.Minute,  // P-C102-1: per-call timeout; configurable via LLM_CALL_TIMEOUT_SECS
 		ConcurrentReadTools: 3,
 		StreamBufferSize:    64,
 		MaxBudgetUSD:        0, // no limit by default
@@ -242,6 +248,9 @@ type modelConfig struct {
 	// TotalTimeoutSeconds overrides the default 5-minute run timeout.
 	// Useful for large local models that need more time per inference pass.
 	TotalTimeoutSeconds *int `json:"totalTimeoutSeconds,omitempty"`
+	// LLMCallTimeoutSeconds overrides the per-LLM-call timeout (P-C102-1).
+	// Default: 300 (5 minutes). Set to 0 to disable.
+	LLMCallTimeoutSeconds *int `json:"llmCallTimeoutSeconds,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -320,6 +329,9 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	}
 	if mc.TotalTimeoutSeconds != nil && *mc.TotalTimeoutSeconds > 0 {
 		cfg.TotalTimeout = time.Duration(*mc.TotalTimeoutSeconds) * time.Second
+	}
+	if mc.LLMCallTimeoutSeconds != nil && *mc.LLMCallTimeoutSeconds >= 0 {
+		cfg.LLMCallTimeout = time.Duration(*mc.LLMCallTimeoutSeconds) * time.Second
 	}
 	return cfg
 }

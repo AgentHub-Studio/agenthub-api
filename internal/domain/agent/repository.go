@@ -21,6 +21,12 @@ var ErrNotFound = errors.New("agent: not found")
 // ErrSlugConflict is returned when the slug is already in use.
 var ErrSlugConflict = errors.New("agent: slug conflict")
 
+// ErrInvalidModelConfig is returned when modelConfig JSON fails validation.
+var ErrInvalidModelConfig = errors.New("agent: invalid model config")
+
+// ErrInvalidSkillIDs is returned when one or more skill IDs do not exist.
+var ErrInvalidSkillIDs = errors.New("agent: invalid skill IDs")
+
 // Repository defines persistence operations for Agent.
 type Repository interface {
 	FindAll(ctx context.Context, status AgentStatus, req pagination.PageRequest) ([]Agent, int64, error)

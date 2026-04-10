@@ -85,7 +85,7 @@ func (r *pgBindingRepository) SyncSkills(ctx context.Context, agentID uuid.UUID,
 			 ON CONFLICT (agent_id, skill_id) DO UPDATE SET priority = EXCLUDED.priority`,
 			agentID, sid, i,
 		); err != nil {
-			if isForeignKeyViolation(err) {
+			if database.IsPgError(err, database.PgErrForeignKeyViolation) {
 				return fmt.Errorf("skill not found: %s", sid)
 			}
 			return fmt.Errorf("agent.SyncSkills: insert %s: %w", sid, err)

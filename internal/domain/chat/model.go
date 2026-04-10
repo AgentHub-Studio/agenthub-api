@@ -162,6 +162,15 @@ type CreateSessionRequest struct {
 	Title   string     `json:"title"`
 }
 
+// PendingElicitationInfo describes an unresolved ask_user elicitation request.
+// P-C101-1: returned by GetPendingElicitations so async (RabbitMQ) callers can
+// discover pending user-input requests when the original SSE stream is gone.
+type PendingElicitationInfo struct {
+	RequestID string          `json:"requestId"`
+	Payload   interface{}     `json:"payload,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+}
+
 // CreateMessageRequest is the payload for adding a message to a session.
 type CreateMessageRequest struct {
 	Role         string          `json:"role"`

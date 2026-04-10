@@ -80,7 +80,7 @@ func TestMCPService_Create_Success(t *testing.T) {
 	svc := mcp.NewService(newMockRepo())
 	c, err := svc.Create(context.Background(), mcp.CreateRequest{
 		Name:          "filesystem",
-		TransportType: "stdio",
+		TransportType: "http",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "filesystem", c.Name)
@@ -102,9 +102,9 @@ func TestMCPService_Delete_NotFound(t *testing.T) {
 func TestMCPService_ListAutoStart(t *testing.T) {
 	svc := mcp.NewService(newMockRepo())
 	autoStart := true
-	_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: "auto", TransportType: "stdio", AutoStart: autoStart})
+	_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: "auto", TransportType: "http", AutoStart: autoStart})
 	require.NoError(t, err)
-	_, err = svc.Create(context.Background(), mcp.CreateRequest{Name: "manual", TransportType: "stdio"})
+	_, err = svc.Create(context.Background(), mcp.CreateRequest{Name: "manual", TransportType: "http"})
 	require.NoError(t, err)
 	items, err := svc.ListAutoStart(context.Background())
 	require.NoError(t, err)
@@ -114,7 +114,7 @@ func TestMCPService_ListAutoStart(t *testing.T) {
 func TestMCPService_List(t *testing.T) {
 	svc := mcp.NewService(newMockRepo())
 	for _, name := range []string{"fs", "github", "slack"} {
-		_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: name, TransportType: "stdio"})
+		_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: name, TransportType: "http"})
 		require.NoError(t, err)
 	}
 	items, err := svc.List(context.Background())

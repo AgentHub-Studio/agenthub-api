@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
@@ -95,7 +96,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	settingsHandler := settings.NewHandler(settings.NewService(settingsRepo))
 	llmpresetHandler := llmpreset.NewHandler(llmpreset.NewService(llmpreset.NewRepository(pool)))
 	agentRepo := agent.NewRepository(pool)
-	agentHandler := agent.NewHandler(agent.NewService(agentRepo))
+	agentHandler := agent.NewHandler(agent.NewService(agentRepo, agent.NewBindingRepository(pool)))
 	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionService(agentRepo, agent.NewVersionRepository(pool)))
 	agentBindingHandler := agent.NewBindingHandler(agentRepo, agent.NewBindingRepository(pool))
 	skillRepo := skill.NewRepository(pool)
@@ -406,7 +407,15 @@ func buildAgenticRunner(
 	hookRepo := agentic.NewHookRepository(pool)
 	hookExecutor := agentic.NewHookExecutor(hookRepo)
 
-	return agentic.NewSessionRunnerAdapterWithFactory(
+	var concreteSkillRepo *skill.Repository
+	if skillRepo != nil {
+		concreteSkillRepo = skillRepo.(*skill.Repository)
+	}
+	var concreteToolRepo *tool.Repository
+	if toolRepo != nil {
+		concreteToolRepo = toolRepo.(*tool.Repository)
+	}
+	adapter := agentic.NewSessionRunnerAdapterWithFactory(
 		factory,
 		skillClient,
 		promptBuilder,
@@ -417,11 +426,18 @@ func buildAgenticRunner(
 		chatRepo,
 		&agentConfigAdapter{repo: agentRepo},
 		agentRepo,
-		skillRepo.(*skill.Repository),
-		toolRepo.(*tool.Repository),
+		concreteSkillRepo,
+		concreteToolRepo,
 		integSvc,
 		mcpRepo,
 	)
+
+	// P-C102-1: apply server-level LLM call timeout from LLM_CALL_TIMEOUT_SECS.
+	if cfg.LLMCallTimeoutSecs > 0 {
+		adapter.WithLLMCallTimeout(time.Duration(cfg.LLMCallTimeoutSecs) * time.Second)
+	}
+
+	return adapter
 }
 
 // buildDefaultChatModel creates a ChatModel from environment variables as a fallback.

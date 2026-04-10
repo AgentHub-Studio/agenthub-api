@@ -73,6 +73,22 @@ func (m *mockMCPSvc) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (m *mockMCPSvc) GetAuthStatus(_ context.Context, _ uuid.UUID) (mcp.AuthStatusResponse, error) {
+	return mcp.AuthStatusResponse{}, nil
+}
+
+func (m *mockMCPSvc) GetConnectURL(_ context.Context, _ uuid.UUID, _ string) (mcp.ConnectURLResponse, error) {
+	return mcp.ConnectURLResponse{}, nil
+}
+
+func (m *mockMCPSvc) HandleOAuthCallback(_ context.Context, _ uuid.UUID, _ string) error {
+	return nil
+}
+
+func (m *mockMCPSvc) ListTools(_ context.Context, _ uuid.UUID) ([]mcp.ToolResponse, error) {
+	return nil, nil
+}
+
 func setupMCP() (*chi.Mux, *mockMCPSvc) {
 	svc := newMockMCPSvc()
 	h := mcp.NewHandler(svc)

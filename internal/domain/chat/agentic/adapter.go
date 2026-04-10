@@ -63,6 +63,11 @@ type SessionRunnerAdapter struct {
 	mcpRepo      mcp.Repository
 	mcpClient    MCPClientService
 
+	// llmCallTimeout overrides the default per-LLM-call timeout set by DefaultRunConfig.
+	// P-C102-1: sourced from LLM_CALL_TIMEOUT_SECS env var at server startup.
+	// Zero means "use the default from DefaultRunConfig".
+	llmCallTimeout time.Duration
+
 	// elicitation manages a registry of active ElicitationHandlers keyed by
 	// session ID so that HTTP respond calls can be routed to the correct run.
 	elicitation elicitationRegistry
@@ -182,6 +187,14 @@ func (a *SessionRunnerAdapter) WithMCPClient(client MCPClientService) *SessionRu
 	return a
 }
 
+// WithLLMCallTimeout sets the server-level per-LLM-call timeout.
+// P-C102-1: sourced from LLM_CALL_TIMEOUT_SECS at startup.
+// Zero means "keep the RunConfig default (5 minutes)".
+func (a *SessionRunnerAdapter) WithLLMCallTimeout(d time.Duration) *SessionRunnerAdapter {
+	a.llmCallTimeout = d
+	return a
+}
+
 // staticModelFactory always returns the same ChatModel regardless of provider.
 type staticModelFactory struct {
 	model ai.ChatModel
@@ -271,6 +284,12 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 
 	config := RunConfigFromModelConfig(agentCfg.ModelConfig)
 	defaultCfg := DefaultRunConfig()
+
+	// P-C102-1: apply server-level LLM call timeout when the agent's model_config
+	// did not explicitly override it (i.e. still equals the compiled default).
+	if a.llmCallTimeout > 0 && config.LLMCallTimeout == defaultCfg.LLMCallTimeout {
+		config.LLMCallTimeout = a.llmCallTimeout
+	}
 
 	// When the agent has no explicit provider, use the tenant's configured default.
 	// This avoids hard-coding the fallback to "anthropic" when the tenant is on

@@ -248,3 +248,53 @@ func HasExactMessage(err error, msg string) bool {
 	}
 	return err.Error() == msg
 }
+
+// sanitizeToolError scrubs internal infrastructure details (hostnames, ports,
+// internal error codes) from a tool error message before emitting it to the
+// LLM or to the SSE stream. P-C65-2.
+func sanitizeToolError(msg string) string {
+	if msg == "" {
+		return msg
+	}
+	// Remove stack traces and internal Go package paths.
+	if idx := strings.Index(msg, "\ngoroutine "); idx > 0 {
+		msg = msg[:idx]
+	}
+	// Trim to a reasonable length for the LLM.
+	const maxLen = 512
+	if len(msg) > maxLen {
+		msg = msg[:maxLen] + "…"
+	}
+	return strings.TrimSpace(msg)
+}
+
+// sanitizeToolErrorPtr is the pointer variant of sanitizeToolError.
+func sanitizeToolErrorPtr(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	safe := sanitizeToolError(*s)
+	return &safe
+}
+
+// isInvalidResponseID returns true when a provider error indicates that the
+// PreviousResponseID supplied in the request is no longer valid (e.g. the
+// server-side context has expired or been evicted). On this error the caller
+// should clear the response chain and retry with the full message history.
+func isInvalidResponseID(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"invalid_previous_response_id",
+		"previous_response_id",
+		"response not found",
+		"context expired",
+	} {
+		if strings.Contains(msg, fragment) {
+			return true
+		}
+	}
+	return false
+}

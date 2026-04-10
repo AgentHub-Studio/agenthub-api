@@ -69,8 +69,28 @@ func (m *mockAgentRepo) UpdateStatus(_ context.Context, id uuid.UUID, status age
 	return a, nil
 }
 
+// mockNoopBindingRepo is a no-op BindingRepository for service unit tests.
+type mockNoopBindingRepo struct{}
+
+func (m *mockNoopBindingRepo) ListSkillIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (m *mockNoopBindingRepo) SyncSkills(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
+	return nil
+}
+func (m *mockNoopBindingRepo) ListKnowledgeBaseIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (m *mockNoopBindingRepo) SyncKnowledgeBases(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
+	return nil
+}
+
+func newMockAgentSvc() agent.Service {
+	return agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+}
+
 func TestAgentService_Create_Success(t *testing.T) {
-	svc := agent.NewService(newMockRepo())
+	svc := newMockAgentSvc()
 	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "My Agent"})
 	require.NoError(t, err)
 	assert.Equal(t, "My Agent", resp.Name)
@@ -79,27 +99,27 @@ func TestAgentService_Create_Success(t *testing.T) {
 }
 
 func TestAgentService_Create_MissingName(t *testing.T) {
-	svc := agent.NewService(newMockRepo())
+	svc := newMockAgentSvc()
 	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{})
 	require.Error(t, err)
 }
 
 func TestAgentService_Create_AutoSlug(t *testing.T) {
-	svc := agent.NewService(newMockRepo())
+	svc := newMockAgentSvc()
 	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "My Test Agent"})
 	require.NoError(t, err)
 	assert.Equal(t, "my-test-agent", resp.Slug)
 }
 
 func TestAgentService_Get_NotFound(t *testing.T) {
-	svc := agent.NewService(newMockRepo())
+	svc := newMockAgentSvc()
 	_, err := svc.Get(context.Background(), uuid.New())
 	require.ErrorIs(t, err, agent.ErrNotFound)
 }
 
 func TestAgentService_Update_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo)
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Old Name"})
 	require.NoError(t, err)
 
@@ -111,7 +131,7 @@ func TestAgentService_Update_Success(t *testing.T) {
 
 func TestAgentService_Delete_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo)
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
 	err = svc.Delete(context.Background(), created.ID)
@@ -119,14 +139,14 @@ func TestAgentService_Delete_Success(t *testing.T) {
 }
 
 func TestAgentService_Delete_NotFound(t *testing.T) {
-	svc := agent.NewService(newMockRepo())
+	svc := newMockAgentSvc()
 	err := svc.Delete(context.Background(), uuid.New())
 	require.ErrorIs(t, err, agent.ErrNotFound)
 }
 
 func TestAgentService_Publish_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo)
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
 	published, err := svc.Publish(context.Background(), created.ID)
@@ -136,7 +156,7 @@ func TestAgentService_Publish_Success(t *testing.T) {
 
 func TestAgentService_Archive_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo)
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
 	archived, err := svc.Archive(context.Background(), created.ID)
@@ -146,7 +166,7 @@ func TestAgentService_Archive_Success(t *testing.T) {
 
 func TestAgentService_Clone_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo)
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Original"})
 	require.NoError(t, err)
 	cloned, err := svc.Clone(context.Background(), created.ID, agent.CloneAgentRequest{Name: "Clone"})
@@ -157,7 +177,7 @@ func TestAgentService_Clone_Success(t *testing.T) {
 
 func TestAgentService_List(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo)
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
 	for i := 0; i < 3; i++ {
 		_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 			Name: "Agent " + string(rune('A'+i)),

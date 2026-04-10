@@ -172,6 +172,16 @@ func hasEventType(events []agentic.RunEvent, typ agentic.RunEventType) bool {
 	return false
 }
 
+func filterEvents(events []agentic.RunEvent, typ agentic.RunEventType) []agentic.RunEvent {
+	var out []agentic.RunEvent
+	for _, ev := range events {
+		if ev.Type == typ {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
 // newTestRunner creates a Runner with mocked dependencies for testing.
 func newTestRunner(
 	model ai.ChatModel,
@@ -1182,4 +1192,136 @@ func TestFormatToolResult_EmptyOutputWithoutToolName(t *testing.T) {
 func TestFormatToolResult_WhitespaceOnlyOutput(t *testing.T) {
 	r := agentic.ToolExecResult{Output: json.RawMessage(`   `), ToolName: "my_tool"}
 	assert.Equal(t, "(my_tool completed with no output)", agentic.FormatToolResult(r))
+}
+
+// --- TR-01-TASK-13: LLM call timeout (P-C102-1) ---
+
+// TestRunner_LLMCallTimeout_ReturnsError verifies that when the LLM hangs beyond
+// the configured per-call timeout, the run terminates with an error event.
+func TestRunner_LLMCallTimeout_ReturnsError(t *testing.T) {
+	// LLM that blocks until its context is cancelled.
+	blocked := make(chan struct{})
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			ch := make(chan ai.StreamChunk, 1)
+			go func() {
+				defer close(ch)
+				select {
+				case <-blocked: // test cleanup
+				case <-time.After(10 * time.Second): // slower than the 50ms test timeout
+				}
+				ch <- ai.StreamChunk{Error: context.DeadlineExceeded}
+			}()
+			return ch, nil
+		},
+	}
+	defer close(blocked)
+
+	persister := &mockPersister{}
+	history := &mockHistoryLoader{}
+	config := agentic.DefaultRunConfig()
+	config.LLMCallTimeout = 50 * time.Millisecond // very short for tests
+	config.RetryMaxAttempts = 1                   // no retries
+
+	runner := newTestRunner(model, persister, history, config)
+
+	start := time.Now()
+	ch := runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "hi",
+		SystemPrompt: "test",
+		TenantID:     "t",
+	})
+	events := collectEvents(ch)
+	elapsed := time.Since(start)
+
+	// Must complete well before the 10-second "slow" provider timeout.
+	assert.Less(t, elapsed, 5*time.Second, "run should terminate before slow provider")
+
+	// Should emit an error event (not a clean run_complete).
+	errEvents := filterEvents(events, agentic.EventError)
+	assert.NotEmpty(t, errEvents, "expected at least one error event")
+}
+
+// TestRunner_LLMCallFast_NoTimeout verifies that a fast LLM is not affected by the
+// per-call timeout — the run completes normally.
+func TestRunner_LLMCallFast_NoTimeout(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			return makeTextStream("hello"), nil
+		},
+	}
+
+	persister := &mockPersister{}
+	history := &mockHistoryLoader{}
+	config := agentic.DefaultRunConfig()
+	config.LLMCallTimeout = 5 * time.Second // generous for a fast mock
+	config.MaxIterations = 1
+
+	runner := newTestRunner(model, persister, history, config)
+
+	ch := runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "hello",
+		SystemPrompt: "test",
+		TenantID:     "t",
+	})
+	events := collectEvents(ch)
+
+	// Should have a clean text_delta + run_complete, no errors.
+	assert.True(t, hasEventType(events, agentic.EventTextDelta))
+	assert.True(t, hasEventType(events, agentic.EventRunComplete))
+	assert.False(t, hasEventType(events, agentic.EventError), "fast LLM should not trigger timeout")
+}
+
+// TestRunner_LLMCallTimeout_ZeroDisablesTimeout verifies that LLMCallTimeout=0
+// disables the per-call timeout (run continues until the parent context is cancelled).
+func TestRunner_LLMCallTimeout_ZeroDisablesTimeout(t *testing.T) {
+	callStarted := make(chan struct{})
+	unblock := make(chan struct{})
+
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			ch := make(chan ai.StreamChunk, 2)
+			go func() {
+				defer close(ch)
+				close(callStarted)
+				<-unblock
+				ch <- ai.StreamChunk{Delta: "done", FinishReason: "stop"}
+			}()
+			return ch, nil
+		},
+	}
+
+	persister := &mockPersister{}
+	history := &mockHistoryLoader{}
+	config := agentic.DefaultRunConfig()
+	config.LLMCallTimeout = 0 // disabled
+	config.MaxIterations = 1
+
+	runner := newTestRunner(model, persister, history, config)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := runner.Run(ctx, agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "hi",
+		SystemPrompt: "test",
+		TenantID:     "t",
+	})
+
+	// Wait until the LLM call is in progress, then unblock it.
+	select {
+	case <-callStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("LLM call never started")
+	}
+	close(unblock)
+
+	events := collectEvents(ch)
+	assert.False(t, hasEventType(events, agentic.EventError), "zero timeout should not interrupt a completing LLM call")
 }

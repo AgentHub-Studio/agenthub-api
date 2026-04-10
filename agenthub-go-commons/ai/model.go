@@ -112,6 +112,12 @@ type ChatOptions struct {
 	// is emitted. Useful for structured query flows that need early termination.
 	// Inspired by Claude Code's sideQuery.ts stop_sequences parameter.
 	StopSequences []string `json:"stopSequences,omitempty"`
+	// PreviousResponseID enables response chaining for providers that support
+	// server-side conversation history (e.g. OpenAI Responses API). When set,
+	// the provider appends only new messages to the stored context rather than
+	// resending the full conversation. The response ID returned by the previous
+	// call is passed as PreviousResponseID on the next call.
+	PreviousResponseID string `json:"previousResponseId,omitempty"`
 }
 
 // ToolChoiceType identifies how the model should use tools.
@@ -151,6 +157,10 @@ type ChatResponse struct {
 	Model        string     `json:"model"`
 	// ThinkingContent holds the model's chain-of-thought reasoning (if thinking was enabled).
 	ThinkingContent string `json:"thinkingContent,omitempty"`
+	// ResponseID is the server-assigned identifier for this response. Providers
+	// that support response chaining (e.g. OpenAI Responses API) return this ID;
+	// callers pass it as PreviousResponseID on the next request.
+	ResponseID string `json:"responseId,omitempty"`
 }
 
 // Usage holds token usage statistics.
@@ -222,4 +232,7 @@ type StreamChunk struct {
 	Error         error     `json:"-"`
 	// ThinkingDelta holds incremental thinking content (when extended thinking is enabled).
 	ThinkingDelta string `json:"thinkingDelta,omitempty"`
+	// ResponseID, when set, is the server-assigned ID for the response being streamed.
+	// Used for response chaining (PreviousResponseID on the next call).
+	ResponseID string `json:"responseId,omitempty"`
 }

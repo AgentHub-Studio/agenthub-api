@@ -425,5 +425,5 @@ func (e *ManagementExecutor) delete(ctx context.Context, resource string, idStr 
 		return ToolExecResult{Error: &errMsg}
 	}
 
-	return ToolExecResult{Output: []byte(`{"status": "deleted"}`)}
+	return ToolExecResult{Output: []byte(`{"status":"deleted"}`)}
 }

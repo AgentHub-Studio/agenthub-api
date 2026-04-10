@@ -89,8 +89,8 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
 	skills := &mockSkillLister{skills: nil}
 	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{
-		{Name: "Technical Docs"},
-		{Name: "FAQ"},
+		{Name: "Technical Docs", Status: knowledgebase.StatusActive},
+		{Name: "FAQ", Status: knowledgebase.StatusActive},
 	}}
 
 	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs).
@@ -162,8 +162,8 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
 	require.NoError(t, err)
 	// P-C62-1: skill without active tool bindings is excluded from tools[].
 	require.Len(t, tools, 4) // agent + agenthub_manage + ask_user + memory_store (builtins only)
-	for _, t := range tools {
-		assert.NotEqual(t, "empty-skill", t.Name,
+	for _, tool := range tools {
+		assert.NotEqual(t, "empty-skill", tool.Name,
 			"skill without active bindings must not appear in tools[]")
 	}
 }
@@ -281,7 +281,7 @@ func TestToolSchemaBuilder_Build_SortedByPartition(t *testing.T) {
 		{ID: zebraID, Slug: "zebra-tool", Name: "Zebra", Description: "Z tool"},
 		{ID: alphaID, Slug: "alpha-tool", Name: "Alpha", Description: "A tool"},
 	}}
-	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1"}}}
+	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1", Status: knowledgebase.StatusActive}}}
 
 	// Give each skill an active binding so they appear in tools[] (P-C62-1).
 	toolsMock := newMockToolsBySkill()
@@ -374,7 +374,7 @@ func TestToolSchemaBuilder_Build_BuiltinsFormContiguousPrefix(t *testing.T) {
 		{ID: alphaID, Slug: "alpha-tool", Name: "Alpha", Description: "A tool"},
 		{ID: midID, Slug: "mid-tool", Name: "Mid", Description: "M tool"},
 	}}
-	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1"}}}
+	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1", Status: knowledgebase.StatusActive}}}
 
 	// Give each skill an active binding so it appears in tools[] (P-C62-1).
 	toolsMock := newMockToolsBySkill()
@@ -423,7 +423,7 @@ func TestToolSchemaBuilder_Build_BuiltinFlagIsSet(t *testing.T) {
 	skills := &mockSkillLister{skills: []skill.Skill{
 		{ID: customID, Slug: "custom-skill", Name: "Custom", Description: "User skill"},
 	}}
-	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB"}}}
+	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB", Status: knowledgebase.StatusActive}}}
 
 	// Give the skill an active binding so it appears in tools[] (P-C62-1).
 	toolsMock := newMockToolsBySkill()

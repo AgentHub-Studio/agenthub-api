@@ -539,7 +539,7 @@ func FormatSkillInstructionsSection(skills []SkillWithTools) string {
 // Heuristic: looks for common invocation phrases ("call the X", "use the X", etc.).
 func referencesToolByName(instructions string) bool {
 	lower := strings.ToLower(instructions)
-	for _, p := range []string{"call the ", "use the ", "invoke ", "using tool"} {
+	for _, p := range []string{"call the ", "call ", "use the ", "invoke ", "using tool", " tool"} {
 		if strings.Contains(lower, p) {
 			return true
 		}

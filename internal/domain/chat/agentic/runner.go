@@ -68,6 +68,11 @@ type RunInput struct {
 	// EnableManagement, when true, indicates the agent has opted in to management tools.
 	// P-C184-2: must be combined with IsAdmin=true AND CurrentDepth==0 to include agenthub_manage.
 	EnableManagement bool
+
+	// UserMessageID, when non-nil, indicates the user message was already persisted
+	// by the caller (chat.Service.RunSession). The runner skips its own persistence
+	// to avoid duplicates. P-C178-2.
+	UserMessageID *uuid.UUID
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
@@ -120,7 +125,7 @@ func NewRunner(
 		chatModel:     chatModel,
 		skillClient:   skillClient,
 		prompt:        prompt,
-		promptCache:   NewSessionCache(),
+		promptCache:   make(map[string]string),
 		tools:         tools,
 		ctxManager:    ctxManager,
 		memory:        memory,
@@ -240,8 +245,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		rawMsg := err.Error()
 		lastRunError = &ErrorData{Message: rawMsg, Code: code}
 		slog.Warn("agentic: run error", "code", code, "error", rawMsg)
-		friendly := friendlyRunErrorMessage(code, rawMsg)
-		ch <- NewRunEvent(EventError, ErrorData{Message: friendly, Code: code})
+		ch <- NewRunEvent(EventError, ErrorData{Message: rawMsg, Code: code})
 	}
 
 	defer func() {
@@ -422,26 +426,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 	}
 
-	// Build the callable-skills set for the prompt builder so formatToolsSection
-	// can filter out instruction-only skills (P-C70-1: listing non-callable skills
-	// in "## Available Tools" causes weak models to hallucinate tool calls).
-	callableSkillSlugs := make(map[string]struct{}, len(toolResult.All))
-	for _, t := range toolResult.All {
-		callableSkillSlugs[t.Name] = struct{}{}
-	}
-
 	// 3. Build system prompt (after tools, so deferred tool names can be injected).
 	systemPrompt, err := r.prompt.Build(ctx, PromptInput{
-		AgentID:            in.AgentID,
-		SessionID:          in.SessionID,
-		SystemPrompt:       in.SystemPrompt,
-		Memories:           memories,
-		CoordinatorMode:    gates.CoordinatorMode,
-		DeferredToolNames:  toolResult.DeferredToolNames(),
-		UserOnlySkills:     toolResult.UserOnlySkills,
-		UnavailableTools:   toolResult.Warnings,
-		CallableSkillSlugs: callableSkillSlugs,
-	}, r.promptCache)
+		AgentID:           in.AgentID,
+		SessionID:         in.SessionID,
+		SystemPrompt:      in.SystemPrompt,
+		Memories:          memories,
+		CoordinatorMode:   gates.CoordinatorMode,
+		DeferredToolNames: toolResult.DeferredToolNames(),
+		UserOnlySkills:    toolResult.UserOnlySkills,
+	})
 	if err != nil {
 		localEmitError("prompt_build", err)
 		return
@@ -609,7 +603,15 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 
 		// 5a. Call LLM with streaming (with retry + model fallback).
-		fallbackResult, err := retryStreamWithFallbackSource(ctx, r.chatModel, messagesToSend, opts, r.config, turnSource,
+		// P-C102-1: wrap in a per-call timeout so a stalled provider never blocks forever.
+		callCtx := ctx
+		var cancelCall context.CancelFunc
+		if r.config.LLMCallTimeout > 0 {
+			callCtx, cancelCall = context.WithTimeout(ctx, r.config.LLMCallTimeout)
+		} else {
+			callCtx, cancelCall = context.WithCancel(ctx) // no-op cancel for uniform cleanup
+		}
+		fallbackResult, err := retryStreamWithFallbackSource(callCtx, r.chatModel, messagesToSend, opts, r.config, turnSource,
 			func(from, to string, fallbackErr error) {
 				ch <- NewRunEvent(EventModelFallback, ModelFallbackData{
 					FromModel: from,
@@ -619,6 +621,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			},
 		)
 		if err != nil {
+			cancelCall() // P-C102-1: release per-call timeout context on error
 			// Recovery: context overflow (input + max_tokens > limit).
 			// Reduce max_tokens and retry without compaction.
 			// Inspired by Claude Code's withRetry.ts adjustedMaxTokens logic.
@@ -699,7 +702,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		)
 
 		// 5b. Consume stream, accumulate response.
-		assistantContent, toolCalls, finishReason, usage, streamResponseID, streamErr := r.consumeStream(ctx, ch, fallbackResult.Stream)
+		// callCtx carries the per-call timeout so a stalled mid-stream provider
+		// is also detected and aborted. cancelCall deferred until after consume.
+		assistantContent, toolCalls, finishReason, usage, streamResponseID, streamErr := r.consumeStream(callCtx, ch, fallbackResult.Stream)
+		cancelCall() // P-C102-1: release per-call timeout context after streaming completes
 		if streamErr != nil {
 			localEmitError("stream_consume", streamErr)
 			return
@@ -1138,7 +1144,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					// are recomputed. After compaction the old cached values may reference
 					// context that was summarized away.
 					// Inspired by Claude Code's clearSystemPromptSections on /compact.
-					r.promptCache = NewSessionCache()
+					r.promptCache = make(map[string]string)
 
 					// Rebuild system prompt to re-inject tool descriptions, memories,
 					// deferred tool names, and KB context that were summarized away.
@@ -1152,16 +1158,14 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 							}
 						}
 						if rebuilt, err := r.prompt.Build(ctx, PromptInput{
-							AgentID:            in.AgentID,
-							SessionID:          in.SessionID,
-							SystemPrompt:       in.SystemPrompt,
-							Memories:           freshMemories,
-							CoordinatorMode:    gates.CoordinatorMode,
-							DeferredToolNames:  toolResult.DeferredToolNames(),
-							UserOnlySkills:     toolResult.UserOnlySkills,
-							UnavailableTools:   toolResult.Warnings,
-							CallableSkillSlugs: callableSkillSlugs,
-						}, r.promptCache); err == nil {
+							AgentID:           in.AgentID,
+							SessionID:         in.SessionID,
+							SystemPrompt:      in.SystemPrompt,
+							Memories:          freshMemories,
+							CoordinatorMode:   gates.CoordinatorMode,
+							DeferredToolNames: toolResult.DeferredToolNames(),
+							UserOnlySkills:    toolResult.UserOnlySkills,
+						}); err == nil {
 							systemPrompt = rebuilt
 						}
 					}
@@ -1264,9 +1268,17 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 	toolCallOrder := make([]string, 0)
 	var lastToolCall *ai.ToolCall
 
-	for chunk := range stream {
-		if ctx.Err() != nil {
+	for {
+		var chunk ai.StreamChunk
+		var ok bool
+		select {
+		case <-ctx.Done():
+			// P-C102-1: per-call timeout expired while waiting for a stream chunk.
 			return "", nil, "", ai.Usage{}, "", ctx.Err()
+		case chunk, ok = <-stream:
+		}
+		if !ok {
+			break // stream closed normally
 		}
 
 		if chunk.Error != nil {
