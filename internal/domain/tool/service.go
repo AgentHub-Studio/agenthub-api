@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
 // SettingsReader is a minimal interface for reading tenant settings.
@@ -86,6 +87,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if !IsValidToolType(req.Type) {
 		return Response{}, fmt.Errorf("tool: unsupported type: %s", req.Type)
 	}
+	// P-C220-1 / P-C221-1: block SSRF — validate URL before persisting.
+	if req.Type == ToolTypeHTTP {
+		if u := extractURLFromConfig(req.Config); u != "" {
+			if err := ssrf.ValidateURL(u); err != nil {
+				return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
+			}
+		}
+	}
 	t := Tool{
 		Name:        req.Name,
 		Type:        req.Type,
@@ -111,11 +120,34 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (Response, error) {
 
 // Update updates a tool.
 func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Response, error) {
+	// P-C220-1 / P-C221-1: re-validate URL on update to catch retroactively dangerous changes.
+	if req.Type == ToolTypeHTTP {
+		if u := extractURLFromConfig(req.Config); u != "" {
+			if err := ssrf.ValidateURL(u); err != nil {
+				return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
+			}
+		}
+	}
 	t, err := s.repo.Update(ctx, id, req)
 	if err != nil {
 		return Response{}, err
 	}
 	return ResponseFrom(t), nil
+}
+
+// extractURLFromConfig extracts the "url" field from a JSON config blob.
+// Returns empty string when the config is nil, unparseable, or has no url field.
+func extractURLFromConfig(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var cfg struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return ""
+	}
+	return cfg.URL
 }
 
 // Delete deletes a tool.
