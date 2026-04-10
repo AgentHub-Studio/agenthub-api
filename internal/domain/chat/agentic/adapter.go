@@ -2,7 +2,9 @@ package agentic
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -381,6 +383,23 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	effectiveModelConfig := resolveModelConfig(in, agentCfg)
 	_ = effectiveModelConfig // model config snapshot used for future provider resolution
 
+	// P-C173-1: detect modelConfig changes between turns and persist a system
+	// notification so the LLM is aware the configuration has changed.
+	currentHash := hashConfig(agentCfg.ModelConfig)
+	if session, err := a.repo.GetSessionByID(ctx, in.SessionID); err == nil {
+		if detectConfigChange(session, agentCfg.ModelConfig) {
+			notif := chat.ChatMessage{
+				SessionID:   in.SessionID,
+				Role:        "system",
+				Content:     "[system] Agent configuration was updated since the last turn. The new settings are now in effect.",
+				MessageType: chat.MessageTypeSystem,
+			}
+			if _, msgErr := a.repo.CreateMessage(ctx, notif); msgErr != nil {
+				slog.Warn("agentic: failed to persist config-change notification", "error", msgErr)
+			}
+		}
+	}
+
 	agenticCh := runner.Run(ctx, RunInput{
 		RunID:           in.RunID,
 		SessionID:       in.SessionID,
@@ -398,6 +417,12 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	go func() {
 		defer func() {
 			a.elicitation.unregister(runKey)
+			// P-C173-1: persist the current config hash so the next run can detect changes.
+			if currentHash != "" {
+				if hashErr := a.repo.UpdateSessionConfigHash(ctx, in.SessionID, currentHash); hashErr != nil {
+					slog.Warn("agentic: failed to update session config hash", "error", hashErr)
+				}
+			}
 			close(chatCh)
 		}()
 
@@ -566,4 +591,38 @@ func resolveModelConfig(in chat.RunInput, agentCfg *chat.AgentRunConfig) json.Ra
 		return in.ModelConfigSnapshot
 	}
 	return agentCfg.ModelConfig
+}
+
+// hashConfig returns the SHA-256 hex digest of the given JSON payload.
+// P-C173-1: used to detect modelConfig changes between turns.
+// Normalises the input by sorting JSON keys via re-marshal so that semantically
+// equivalent configs with different key ordering produce the same hash.
+func hashConfig(config json.RawMessage) string {
+	if len(config) == 0 {
+		return ""
+	}
+	// Normalise: unmarshal into a generic map and re-marshal so key order is stable.
+	var v interface{}
+	if err := json.Unmarshal(config, &v); err != nil {
+		// If the payload is not valid JSON, hash the raw bytes so we still track changes.
+		sum := sha256.Sum256(config)
+		return hex.EncodeToString(sum[:])
+	}
+	normalised, err := json.Marshal(v)
+	if err != nil {
+		sum := sha256.Sum256(config)
+		return hex.EncodeToString(sum[:])
+	}
+	sum := sha256.Sum256(normalised)
+	return hex.EncodeToString(sum[:])
+}
+
+// detectConfigChange returns true when the agent's current modelConfig differs
+// from the hash stored in the session (i.e. the config was updated since the
+// previous run). Returns false when the session has no stored hash (first run).
+func detectConfigChange(session chat.ChatSession, currentConfig json.RawMessage) bool {
+	if session.ConfigHash == nil || *session.ConfigHash == "" {
+		return false
+	}
+	return *session.ConfigHash != hashConfig(currentConfig)
 }

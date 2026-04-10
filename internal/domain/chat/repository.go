@@ -25,6 +25,9 @@ type Repository interface {
 	UpdateSessionTitle(ctx context.Context, id uuid.UUID, title string) (ChatSession, error)
 	// UpdateSessionAgent binds an agent to a session that has none.
 	UpdateSessionAgent(ctx context.Context, sessionID uuid.UUID, agentID uuid.UUID) error
+	// UpdateSessionConfigHash stores the SHA-256 hash of the current modelConfig.
+	// P-C173-1: used to detect config changes between turns.
+	UpdateSessionConfigHash(ctx context.Context, sessionID uuid.UUID, hash string) error
 	// FindDefaultAgentID returns the ID of the default agent for the tenant
 	// (slug='agenthub-assistant', PUBLISHED). Falls back to any PUBLISHED agent.
 	// Returns nil, nil when no published agent exists.
@@ -602,5 +605,27 @@ func (r *postgresRepository) MarkRunCompleted(ctx context.Context, id uuid.UUID)
 		return fmt.Errorf("chat: mark run completed: %w", err)
 	}
 
+	return nil
+}
+
+// UpdateSessionConfigHash persists the SHA-256 hash of the current modelConfig.
+// P-C173-1: used to detect config changes between turns and inject a system notification.
+func (r *postgresRepository) UpdateSessionConfigHash(ctx context.Context, sessionID uuid.UUID, hash string) error {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	tag, err := conn.Exec(ctx,
+		`UPDATE chat_session SET config_hash = $1, updated_at = $2 WHERE id = $3`,
+		hash, time.Now().UTC(), sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: update session config hash: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
 	return nil
 }

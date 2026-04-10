@@ -124,6 +124,10 @@ func (m *mockChatRepo) GetSessionListStamp(_ context.Context) (chat.ChatSessionL
 	return chat.ChatSessionListStamp{}, nil
 }
 
+func (m *mockChatRepo) UpdateSessionConfigHash(_ context.Context, _ uuid.UUID, _ string) error {
+	return nil
+}
+
 func (m *mockChatRepo) UpdateSessionAgent(_ context.Context, sessionID uuid.UUID, agentID uuid.UUID) error {
 	s, ok := m.sessions[sessionID]
 	if !ok {
