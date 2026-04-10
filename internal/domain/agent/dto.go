@@ -32,7 +32,7 @@ func ResponseFrom(a Agent) AgentResponse {
 	}
 	var modelConfig json.RawMessage
 	if len(a.ModelConfig) > 0 {
-		modelConfig = a.ModelConfig
+		modelConfig = SanitizeModelConfig(a.ModelConfig)
 	}
 	var permissionRules json.RawMessage
 	if len(a.PermissionRules) > 0 {

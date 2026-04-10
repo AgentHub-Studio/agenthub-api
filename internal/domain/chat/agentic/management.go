@@ -90,10 +90,14 @@ func (e *ManagementExecutor) list(ctx context.Context, resource string, query st
 
 	switch resource {
 	case "agent":
-		var items []agent.Agent
+		var raw []agent.Agent
 		var total int64
-		items, total, err = e.agents.FindAll(ctx, "", page)
-		data = map[string]any{"items": items, "total": total}
+		raw, total, err = e.agents.FindAll(ctx, "", page)
+		redacted := make([]agent.AgentManageResponse, len(raw))
+		for i, a := range raw {
+			redacted[i] = agent.ManageResponseFrom(a)
+		}
+		data = map[string]any{"items": redacted, "total": total}
 	case "skill":
 		var items []skill.Skill
 		var total int64
@@ -137,17 +141,31 @@ func (e *ManagementExecutor) get(ctx context.Context, resource string, idStr str
 	var data any
 	switch resource {
 	case "agent":
-		data, err = e.agents.FindByID(ctx, id)
+		// Use redacted DTO — omits systemPrompt, permissionRules, and credential fields.
+		// P-C208-1, P-C211-1
+		var a agent.Agent
+		a, err = e.agents.FindByID(ctx, id)
+		if err == nil {
+			data = agent.ManageResponseFrom(a)
+		}
 	case "skill":
 		data, err = e.skills.GetByID(ctx, id)
 	case "tool":
-		data, err = e.tools.GetByID(ctx, id)
+		// tool.ResponseFrom already sanitizes credential fields. P-C239-1
+		var t tool.Tool
+		t, err = e.tools.GetByID(ctx, id)
+		if err == nil {
+			data = tool.ResponseFrom(t)
+		}
 	case "mcp_server":
 		data, err = e.mcpServers.GetByID(ctx, id)
 	case "integration":
 		// Integration get: try tool first, then mcp server.
-		data, err = e.tools.GetByID(ctx, id)
-		if err != nil {
+		var t tool.Tool
+		t, err = e.tools.GetByID(ctx, id)
+		if err == nil {
+			data = tool.ResponseFrom(t)
+		} else {
 			data, err = e.mcpServers.GetByID(ctx, id)
 		}
 	default:
@@ -215,7 +233,11 @@ func (e *ManagementExecutor) create(ctx context.Context, resource string, payloa
 			if a.CurrentVersion == 0 {
 				a.CurrentVersion = 1
 			}
-			created, err = e.agents.Create(ctx, a)
+			var createdAgent agent.Agent
+			createdAgent, err = e.agents.Create(ctx, a)
+			if err == nil {
+				created = agent.ManageResponseFrom(createdAgent)
+			}
 		}
 	case "skill":
 		var s skill.Skill
@@ -324,7 +346,11 @@ func (e *ManagementExecutor) update(ctx context.Context, resource string, idStr 
 			if len(req.Config) > 0 {
 				existing.Config = req.Config
 			}
-			updated, err = e.agents.Update(ctx, existing)
+			var updatedAgent agent.Agent
+			updatedAgent, err = e.agents.Update(ctx, existing)
+			if err == nil {
+				updated = agent.ManageResponseFrom(updatedAgent)
+			}
 		}
 	case "skill":
 		var s skill.UpdateRequest

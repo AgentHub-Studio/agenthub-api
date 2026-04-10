@@ -57,10 +57,37 @@ type SkillToolResponse struct {
 	CreatedAt time.Time    `json:"createdAt"`
 }
 
+// sensitiveToolConfigKeys lists config keys that must not be returned in API responses
+// or tool results. P-C239-1: auth_token must not appear in any tool response body.
+var sensitiveToolConfigKeys = []string{
+	"auth_token", "authToken", "password", "secret", "apiKey", "api_key",
+}
+
+// SanitizeToolConfig removes credential keys from a raw tool config JSON blob.
+// Returns the sanitized JSON; on parse error returns the original input unchanged.
+// Safe to call on nil or empty input.
+func SanitizeToolConfig(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw // not a flat object — return as-is rather than corrupt it
+	}
+	for _, k := range sensitiveToolConfigKeys {
+		delete(m, k)
+	}
+	sanitized, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return sanitized
+}
+
 // ResponseFrom converts a Tool to a Response.
 func ResponseFrom(t Tool) Response {
 	var config any
-	_ = json.Unmarshal(t.Config, &config)
+	_ = json.Unmarshal(SanitizeToolConfig(t.Config), &config)
 	labels := t.Labels
 	if labels == nil {
 		labels = []string{}
