@@ -26,7 +26,7 @@ func newMockSvc() *mockAgentSvc {
 	return &mockAgentSvc{agents: make(map[uuid.UUID]agent.AgentResponse)}
 }
 
-func (m *mockAgentSvc) List(_ context.Context, _ agent.AgentStatus, req pagination.PageRequest) (pagination.Page[agent.AgentResponse], error) {
+func (m *mockAgentSvc) List(_ context.Context, _ agent.AgentStatus, _ string, req pagination.PageRequest) (pagination.Page[agent.AgentResponse], error) {
 	items := make([]agent.AgentResponse, 0, len(m.agents))
 	for _, a := range m.agents {
 		items = append(items, a)

@@ -29,7 +29,7 @@ var ErrInvalidSkillIDs = errors.New("agent: invalid skill IDs")
 
 // Repository defines persistence operations for Agent.
 type Repository interface {
-	FindAll(ctx context.Context, status AgentStatus, req pagination.PageRequest) ([]Agent, int64, error)
+	FindAll(ctx context.Context, status AgentStatus, q string, req pagination.PageRequest) ([]Agent, int64, error)
 	FindByID(ctx context.Context, id uuid.UUID) (Agent, error)
 	Create(ctx context.Context, a Agent) (Agent, error)
 	Update(ctx context.Context, a Agent) (Agent, error)
@@ -80,35 +80,28 @@ func (r *pgRepository) acquire(ctx context.Context) (*pgxpool.Conn, func(), erro
 	return database.AcquireWithTenant(ctx, r.pool, tenantID)
 }
 
-func (r *pgRepository) FindAll(ctx context.Context, status AgentStatus, req pagination.PageRequest) ([]Agent, int64, error) {
+func (r *pgRepository) FindAll(ctx context.Context, status AgentStatus, q string, req pagination.PageRequest) ([]Agent, int64, error) {
 	conn, release, err := r.acquire(ctx)
 	if err != nil {
 		return nil, 0, fmt.Errorf("agent.FindAll: acquire: %w", err)
 	}
 	defer release()
 
+	// Build WHERE clause from optional filters.
+	where, args := buildAgentFilters(status, q)
+
 	var total int64
-	var countQ string
-	var countArgs []any
-	if status != "" {
-		countQ = `SELECT COUNT(*) FROM agent WHERE status = $1`
-		countArgs = []any{string(status)}
-	} else {
-		countQ = `SELECT COUNT(*) FROM agent`
-	}
-	if err := conn.QueryRow(ctx, countQ, countArgs...).Scan(&total); err != nil {
+	countQ := "SELECT COUNT(*) FROM agent" + where
+	if err := conn.QueryRow(ctx, countQ, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("agent.FindAll count: %w", err)
 	}
 
-	var query string
-	var args []any
-	if status != "" {
-		query = fmt.Sprintf(`SELECT %s FROM agent WHERE status = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`, agentColumns)
-		args = []any{string(status), req.Size, req.Offset()}
-	} else {
-		query = fmt.Sprintf(`SELECT %s FROM agent ORDER BY created_at DESC LIMIT $1 OFFSET $2`, agentColumns)
-		args = []any{req.Size, req.Offset()}
-	}
+	n := len(args)
+	query := fmt.Sprintf(
+		`SELECT %s FROM agent%s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`,
+		agentColumns, where, n+1, n+2,
+	)
+	args = append(args, req.Size, req.Offset())
 
 	rows, err := conn.Query(ctx, query, args...)
 	if err != nil {
@@ -128,6 +121,33 @@ func (r *pgRepository) FindAll(ctx context.Context, status AgentStatus, req pagi
 		agents = []Agent{}
 	}
 	return agents, total, rows.Err()
+}
+
+// buildAgentFilters constructs the WHERE clause and positional args for FindAll.
+// P-C210-1: supports optional status filter and ?q= full-text search on name/description.
+func buildAgentFilters(status AgentStatus, q string) (string, []any) {
+	var clauses []string
+	var args []any
+
+	if status != "" {
+		args = append(args, string(status))
+		clauses = append(clauses, fmt.Sprintf("status = $%d", len(args)))
+	}
+	if q != "" {
+		like := "%" + q + "%"
+		args = append(args, like)
+		n := len(args)
+		clauses = append(clauses, fmt.Sprintf("(name ILIKE $%d OR description ILIKE $%d)", n, n))
+	}
+
+	if len(clauses) == 0 {
+		return "", args
+	}
+	where := " WHERE " + clauses[0]
+	for _, c := range clauses[1:] {
+		where += " AND " + c
+	}
+	return where, args
 }
 
 func (r *pgRepository) FindByID(ctx context.Context, id uuid.UUID) (Agent, error) {

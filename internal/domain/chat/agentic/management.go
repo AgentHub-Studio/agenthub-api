@@ -99,7 +99,7 @@ func (e *ManagementExecutor) list(ctx context.Context, resource string, query st
 	case "agent":
 		var raw []agent.Agent
 		var total int64
-		raw, total, err = e.agents.FindAll(ctx, "", page)
+		raw, total, err = e.agents.FindAll(ctx, "", "", page)
 		redacted := make([]agent.AgentManageResponse, len(raw))
 		for i, a := range raw {
 			redacted[i] = agent.ManageResponseFrom(a)

@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -21,14 +22,24 @@ func newMockRepo() *mockAgentRepo {
 	return &mockAgentRepo{data: make(map[uuid.UUID]agent.Agent)}
 }
 
-func (m *mockAgentRepo) FindAll(_ context.Context, status agent.AgentStatus, req pagination.PageRequest) ([]agent.Agent, int64, error) {
+func (m *mockAgentRepo) FindAll(_ context.Context, status agent.AgentStatus, q string, req pagination.PageRequest) ([]agent.Agent, int64, error) {
 	var out []agent.Agent
 	for _, a := range m.data {
-		if status == "" || a.Status == status {
-			out = append(out, a)
+		if status != "" && a.Status != status {
+			continue
 		}
+		if q != "" {
+			if !contains(a.Name, q) && !contains(a.Description, q) {
+				continue
+			}
+		}
+		out = append(out, a)
 	}
 	return out, int64(len(out)), nil
+}
+
+func contains(s, sub string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
 }
 
 func (m *mockAgentRepo) FindByID(_ context.Context, id uuid.UUID) (agent.Agent, error) {
@@ -185,9 +196,68 @@ func TestAgentService_List(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
-	page, err := svc.List(context.Background(), "", pagination.PageRequest{Page: 0, Size: 20})
+	page, err := svc.List(context.Background(), "", "", pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), page.TotalElements)
+}
+
+// --- TR-01-TASK-29: filtro ?q= por nome/descrição (P-C210-1) ---
+
+func TestAgentService_List_FilterByQ_Name(t *testing.T) {
+	repo := newMockRepo()
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Invoice Agent", Description: "handles invoices"})
+	require.NoError(t, err)
+	_, err = svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Support Bot", Description: "customer support"})
+	require.NoError(t, err)
+
+	page, err := svc.List(context.Background(), "", "invoice", pagination.PageRequest{Page: 0, Size: 20})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), page.TotalElements)
+	assert.Equal(t, "Invoice Agent", page.Content[0].Name)
+}
+
+func TestAgentService_List_FilterByQ_Description(t *testing.T) {
+	repo := newMockRepo()
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Bot A", Description: "handles billing tasks"})
+	require.NoError(t, err)
+	_, err = svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Bot B", Description: "does nothing"})
+	require.NoError(t, err)
+
+	page, err := svc.List(context.Background(), "", "billing", pagination.PageRequest{Page: 0, Size: 20})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), page.TotalElements)
+	assert.Equal(t, "Bot A", page.Content[0].Name)
+}
+
+func TestAgentService_List_FilterByQ_NoMatch(t *testing.T) {
+	repo := newMockRepo()
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Alpha"})
+	require.NoError(t, err)
+
+	page, err := svc.List(context.Background(), "", "zzznotfound", pagination.PageRequest{Page: 0, Size: 20})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), page.TotalElements)
+	assert.Empty(t, page.Content)
+}
+
+func TestAgentService_List_FilterByQ_EmptyReturnsAll(t *testing.T) {
+	repo := newMockRepo()
+	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Alpha"})
+	require.NoError(t, err)
+	_, err = svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Beta"})
+	require.NoError(t, err)
+
+	page, err := svc.List(context.Background(), "", "", pagination.PageRequest{Page: 0, Size: 20})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), page.TotalElements)
 }
 
 // --- TR-01-TASK-21: provider validation (P-C268-1, P-C327-3) ---

@@ -13,7 +13,7 @@ import (
 
 // Service defines business logic operations for Agent.
 type Service interface {
-	List(ctx context.Context, status AgentStatus, req pagination.PageRequest) (pagination.Page[AgentResponse], error)
+	List(ctx context.Context, status AgentStatus, q string, req pagination.PageRequest) (pagination.Page[AgentResponse], error)
 	Get(ctx context.Context, id uuid.UUID) (AgentResponse, error)
 	Create(ctx context.Context, req CreateAgentRequest) (AgentResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateAgentRequest) (AgentResponse, error)
@@ -33,8 +33,8 @@ func NewService(repo Repository, bindingRepo BindingRepository) Service {
 	return &service{repo: repo, bindingRepo: bindingRepo}
 }
 
-func (s *service) List(ctx context.Context, status AgentStatus, req pagination.PageRequest) (pagination.Page[AgentResponse], error) {
-	agents, total, err := s.repo.FindAll(ctx, status, req)
+func (s *service) List(ctx context.Context, status AgentStatus, q string, req pagination.PageRequest) (pagination.Page[AgentResponse], error) {
+	agents, total, err := s.repo.FindAll(ctx, status, q, req)
 	if err != nil {
 		return pagination.Page[AgentResponse]{}, err
 	}

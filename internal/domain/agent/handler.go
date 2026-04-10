@@ -38,7 +38,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	req := pagination.ParsePageRequest(r)
 	status := AgentStatus(r.URL.Query().Get("status"))
-	page, err := h.svc.List(r.Context(), status, req)
+	q := r.URL.Query().Get("q") // P-C210-1: filter by name/description
+	page, err := h.svc.List(r.Context(), status, q, req)
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return

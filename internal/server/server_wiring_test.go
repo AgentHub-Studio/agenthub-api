@@ -22,7 +22,7 @@ type stubAgentRepo struct {
 	err    error
 }
 
-func (s *stubAgentRepo) FindAll(_ context.Context, _ agent.AgentStatus, _ pagination.PageRequest) ([]agent.Agent, int64, error) {
+func (s *stubAgentRepo) FindAll(_ context.Context, _ agent.AgentStatus, _ string, _ pagination.PageRequest) ([]agent.Agent, int64, error) {
 	return nil, 0, nil
 }
 
