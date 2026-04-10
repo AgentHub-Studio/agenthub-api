@@ -15,7 +15,9 @@ type AgentResponse struct {
 	Description      string          `json:"description"`
 	Status           string          `json:"status"`
 	CurrentVersion   int             `json:"currentVersion"`
-	SystemPrompt     *string         `json:"systemPrompt,omitempty"`
+	// SystemPrompt is always present (may be null). P-C164-4: frontend needs this to populate the edit form.
+	// AgentManageResponse intentionally omits this field for LLM safety.
+	SystemPrompt     *string         `json:"systemPrompt"`
 	ModelConfig      json.RawMessage `json:"modelConfig,omitempty"`
 	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
 	Config           json.RawMessage `json:"config"`

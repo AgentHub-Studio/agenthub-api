@@ -128,6 +128,39 @@ func TestAgentResponse_DoesNotContainApiKey(t *testing.T) {
 	assert.NotContains(t, string(data), "apiKey")
 }
 
+// TestAgentResponse_AlwaysContainsSystemPromptField verifies systemPrompt key is present even when nil.
+// P-C164-4: frontend needs the key to detect whether field is unset vs empty.
+func TestAgentResponse_AlwaysContainsSystemPromptField(t *testing.T) {
+	ag := agent.Agent{SystemPrompt: nil}
+	resp := agent.ResponseFrom(ag)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"systemPrompt"`)
+	assert.Contains(t, string(data), `"systemPrompt":null`)
+}
+
+// TestAgentResponse_WithSystemPrompt_IncludedInResponse verifies systemPrompt value is serialised.
+func TestAgentResponse_WithSystemPrompt_IncludedInResponse(t *testing.T) {
+	prompt := "You are a helpful assistant."
+	ag := agent.Agent{SystemPrompt: &prompt}
+	resp := agent.ResponseFrom(ag)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "You are a helpful assistant.")
+}
+
+// TestAgentManageResponse_StillOmitsSystemPrompt verifies the redacted LLM DTO never leaks systemPrompt.
+// The AgentManageResponse is used inside agenthub_manage tool results — the LLM must not see systemPrompt.
+func TestAgentManageResponse_StillOmitsSystemPrompt(t *testing.T) {
+	prompt := "secret system instructions"
+	ag := agent.Agent{SystemPrompt: &prompt}
+	resp := agent.ManageResponseFrom(ag)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "systemPrompt")
+	assert.NotContains(t, string(data), "secret system instructions")
+}
+
 // TestAgentResponse_ModelConfigFieldsPreserved verifies non-sensitive fields survive sanitization.
 func TestAgentResponse_ModelConfigFieldsPreserved(t *testing.T) {
 	ag := agent.Agent{
