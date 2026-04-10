@@ -18,10 +18,13 @@ type AgentLoader interface {
 
 // AgentRunConfig carries agent fields consumed by the agentic Runner.
 type AgentRunConfig struct {
-	ID              uuid.UUID
-	SystemPrompt    string
-	ModelConfig     json.RawMessage // raw JSON — passed to RunConfigFromModelConfig
-	PermissionRules json.RawMessage // raw JSON — {"allow":[],"deny":[],"confirm":[]}
+	ID               uuid.UUID
+	SystemPrompt     string
+	ModelConfig      json.RawMessage // raw JSON — passed to RunConfigFromModelConfig
+	PermissionRules  json.RawMessage // raw JSON — {"allow":[],"deny":[],"confirm":[]}
+	// EnableManagement controls whether the agenthub_manage builtin tool is included.
+	// P-C184-2: both this flag AND the caller's admin role must be true.
+	EnableManagement bool
 }
 
 // RunEvent is the envelope emitted by the agentic loop.

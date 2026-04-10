@@ -354,7 +354,8 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		TenantID:        in.TenantID,
 		PermissionRules: ParsePermissionRules(agentCfg.PermissionRules),
 		Elicitation:     elicHandler,
-		IsAdmin:         callerHasAdminRole(ctx), // P-C298-1
+		IsAdmin:          callerHasAdminRole(ctx),    // P-C298-1
+		EnableManagement: agentCfg.EnableManagement, // P-C184-2
 	})
 
 	chatCh := make(chan chat.RunEvent, config.StreamBufferSize)

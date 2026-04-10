@@ -68,7 +68,8 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	}
 	kbs := &mockKBLister{kbs: nil}
 
-	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, kbs)
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, kbs).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -92,7 +93,8 @@ func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
 		{Name: "FAQ"},
 	}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs)
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -131,7 +133,8 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T
 		}},
 	}
 
-	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{})
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -152,7 +155,8 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
 		{ID: skillID, Name: "Empty", Slug: "empty-skill"},
 	}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), &mockKBLister{})
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), &mockKBLister{}).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -168,7 +172,8 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
 }
 
 func TestToolSchemaBuilder_Build_NoSkillsNoKBs(t *testing.T) {
-	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{})
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{}).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -205,7 +210,8 @@ func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
 		},
 	}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{})
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -230,7 +236,8 @@ func TestToolSchemaBuilder_Build_PrefersDatabaseDescriptionOverStaticCatalog(t *
 		},
 	}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), &mockKBLister{})
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), &mockKBLister{}).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -241,7 +248,8 @@ func TestToolSchemaBuilder_Build_PrefersDatabaseDescriptionOverStaticCatalog(t *
 }
 
 func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
-	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{})
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{}).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -264,7 +272,8 @@ func TestToolSchemaBuilder_Build_SortedByPartition(t *testing.T) {
 	}}
 	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1"}}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs)
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -325,7 +334,8 @@ func TestToolSchemaBuilder_Build_BuiltinsFormContiguousPrefix(t *testing.T) {
 	}}
 	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1"}}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs)
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs).
+		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -461,4 +471,77 @@ func TestToolBuildResult_DeferredToolNames_Empty(t *testing.T) {
 	result := &agentic.ToolBuildResult{}
 	names := result.DeferredToolNames()
 	assert.Empty(t, names)
+}
+
+// --- TR-01-TASK-01: enable_management gate tests (P-C184-2, P-C281-1) ---
+
+func toolNames(tools []agentic.LLMTool) []string {
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	return names
+}
+
+// TestBuildTools_ManagementExcludedWhenFlagFalse verifies that agenthub_manage is
+// absent when enable_management=false, even when adminScope=true.
+func TestBuildTools_ManagementExcludedWhenFlagFalse(t *testing.T) {
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{}).
+		WithAdminScope(true).
+		WithEnableManagement(false) // explicit opt-out
+
+	tools, err := builder.Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	for _, tool := range tools {
+		assert.NotEqual(t, "agenthub_manage", tool.Name,
+			"agenthub_manage must not appear when enable_management=false")
+	}
+}
+
+// TestBuildTools_ManagementIncludedWhenFlagTrue verifies that agenthub_manage is
+// present when both enable_management=true and adminScope=true at depth 0.
+func TestBuildTools_ManagementIncludedWhenFlagTrue(t *testing.T) {
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{}).
+		WithAdminScope(true).
+		WithEnableManagement(true)
+
+	tools, err := builder.Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	assert.Contains(t, toolNames(tools), "agenthub_manage",
+		"agenthub_manage must appear when enable_management=true and adminScope=true at depth 0")
+}
+
+// TestBuildTools_SubAgentDepthGTZero_NeverHasManagement verifies that agenthub_manage
+// is excluded from sub-agents even when both flags are true (P-C281-1).
+func TestBuildTools_SubAgentDepthGTZero_NeverHasManagement(t *testing.T) {
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{}).
+		WithAdminScope(true).
+		WithEnableManagement(true).
+		WithDepthLimits(1, 3) // depth=1 = sub-agent
+
+	tools, err := builder.Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	for _, tool := range tools {
+		assert.NotEqual(t, "agenthub_manage", tool.Name,
+			"agenthub_manage must never appear in sub-agent toolset (depth > 0)")
+	}
+}
+
+// TestBuildTools_ManagementExcludedWhenNoAdminScope verifies that agenthub_manage
+// is absent when enable_management=true but adminScope=false (non-admin caller).
+func TestBuildTools_ManagementExcludedWhenNoAdminScope(t *testing.T) {
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{}).
+		WithAdminScope(false). // non-admin caller
+		WithEnableManagement(true)
+
+	tools, err := builder.Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	for _, tool := range tools {
+		assert.NotEqual(t, "agenthub_manage", tool.Name,
+			"agenthub_manage must not appear for non-admin callers even when enable_management=true")
+	}
 }

@@ -75,16 +75,17 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 		config = json.RawMessage(`{}`)
 	}
 	a := Agent{
-		ID:              uuid.New(),
-		Name:            req.Name,
-		Slug:            slug,
-		Description:     req.Description,
-		Status:          StatusDraft,
-		CurrentVersion:  1,
-		SystemPrompt:    req.SystemPrompt,
-		ModelConfig:     req.ModelConfig,
-		PermissionRules: req.PermissionRules,
-		Config:          config,
+		ID:               uuid.New(),
+		Name:             req.Name,
+		Slug:             slug,
+		Description:      req.Description,
+		Status:           StatusDraft,
+		CurrentVersion:   1,
+		SystemPrompt:     req.SystemPrompt,
+		ModelConfig:      req.ModelConfig,
+		PermissionRules:  req.PermissionRules,
+		Config:           config,
+		EnableManagement: req.EnableManagement,
 	}
 	created, err := s.repo.Create(ctx, a)
 	if err != nil {
@@ -131,6 +132,9 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	}
 	if len(req.Config) > 0 {
 		a.Config = req.Config
+	}
+	if req.EnableManagement != nil {
+		a.EnableManagement = *req.EnableManagement
 	}
 	updated, err := s.repo.Update(ctx, a)
 	if err != nil {

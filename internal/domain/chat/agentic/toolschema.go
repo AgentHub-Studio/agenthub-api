@@ -104,6 +104,7 @@ type ToolSchemaBuilder struct {
 	currentDepth       int
 	maxDepth           int
 	adminScope         bool // P-C298-1: gate agenthub_manage to admin callers only
+	enableManagement   bool // P-C184-2: gate agenthub_manage to agents with enable_management=true
 	lastUserOnlySkills []skill.Skill
 	lastWarnings       []string
 }
@@ -147,6 +148,16 @@ func (b *ToolSchemaBuilder) WithDepthLimits(currentDepth, maxDepth int) *ToolSch
 // it opportunistically during normal user sessions.
 func (b *ToolSchemaBuilder) WithAdminScope(admin bool) *ToolSchemaBuilder {
 	b.adminScope = admin
+	return b
+}
+
+// WithEnableManagement sets whether the agent has explicitly opted in to management tools.
+// P-C184-2: agenthub_manage is only included when BOTH adminScope AND enableManagement are true,
+// AND the run is at depth 0 (not a sub-agent). This two-layer gate prevents:
+// - Non-admin callers from getting management tools even on opted-in agents
+// - Sub-agents from inheriting management scope from their parent (P-C281-1)
+func (b *ToolSchemaBuilder) WithEnableManagement(enabled bool) *ToolSchemaBuilder {
+	b.enableManagement = enabled
 	return b
 }
 
@@ -279,11 +290,12 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 		tools = append(tools, sendMessageTool())
 	}
 
-	// Builtin: agenthub_manage — available only to admin callers (P-C298-1).
-	// Restrict to prevent weaker models from calling it opportunistically as
-	// "tool discovery" during normal user sessions. Admin scope is granted when
-	// the caller's JWT contains the "admin" realm role.
-	if b.adminScope {
+	// Builtin: agenthub_manage — requires ALL three conditions (P-C184-2, P-C298-1, P-C281-1):
+	// 1. The agent has enable_management=true (per-agent opt-in)
+	// 2. The caller has the "admin" realm role (JWT-based)
+	// 3. This is not a sub-agent run (depth == 0)
+	// Sub-agents must never inherit management scope from their parent agent.
+	if b.enableManagement && b.adminScope && b.currentDepth == 0 {
 		tools = append(tools, agentHubManageTool())
 	}
 

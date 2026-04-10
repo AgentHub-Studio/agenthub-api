@@ -461,9 +461,10 @@ func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (
 	}
 
 	return &chat.AgentRunConfig{
-		ID:              ag.ID,
-		SystemPrompt:    systemPrompt,
-		ModelConfig:     ag.ModelConfig,
-		PermissionRules: ag.PermissionRules,
+		ID:               ag.ID,
+		SystemPrompt:     systemPrompt,
+		ModelConfig:      ag.ModelConfig,
+		PermissionRules:  ag.PermissionRules,
+		EnableManagement: ag.EnableManagement,
 	}, nil
 }

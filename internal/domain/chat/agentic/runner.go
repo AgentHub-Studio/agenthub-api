@@ -64,6 +64,10 @@ type RunInput struct {
 	// IsAdmin, when true, grants access to the agenthub_manage builtin tool.
 	// P-C298-1: set from the caller's JWT "admin" realm role.
 	IsAdmin bool
+
+	// EnableManagement, when true, indicates the agent has opted in to management tools.
+	// P-C184-2: must be combined with IsAdmin=true AND CurrentDepth==0 to include agenthub_manage.
+	EnableManagement bool
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
@@ -370,7 +374,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	toolBuilder.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
-	toolBuilder.WithAdminScope(in.IsAdmin) // P-C298-1: gate agenthub_manage on admin role
+	toolBuilder.WithAdminScope(in.IsAdmin)               // P-C298-1: gate agenthub_manage on admin role
+	toolBuilder.WithEnableManagement(in.EnableManagement) // P-C184-2: gate on agent opt-in flag
 	toolResult, err := toolBuilder.BuildWithDeferred(ctx, in.AgentID)
 	if err != nil {
 		localEmitError("tool_schema_build", err)

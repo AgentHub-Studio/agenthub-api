@@ -21,18 +21,22 @@ const (
 // Agent is the domain entity for a tenant-scoped agent.
 // Stored in ah_{tenantID}.agent — no tenant_id column.
 type Agent struct {
-	ID              uuid.UUID
-	Name            string
-	Slug            string
-	Description     string
-	Status          AgentStatus
-	CurrentVersion  int
-	SystemPrompt    *string
-	ModelConfig     json.RawMessage
-	PermissionRules json.RawMessage
-	Config          json.RawMessage
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID               uuid.UUID
+	Name             string
+	Slug             string
+	Description      string
+	Status           AgentStatus
+	CurrentVersion   int
+	SystemPrompt     *string
+	ModelConfig      json.RawMessage
+	PermissionRules  json.RawMessage
+	Config           json.RawMessage
+	// EnableManagement controls whether the agenthub_manage builtin tool is included
+	// in this agent's toolset. Default false — requires explicit opt-in.
+	// P-C184-2: prevents agents from managing other agents without explicit authorization.
+	EnableManagement bool
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // VersionStatus represents the lifecycle of an AgentVersion.
