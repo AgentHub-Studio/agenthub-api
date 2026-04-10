@@ -228,7 +228,8 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 		config,
 	)
 	if f.adapter.agentRepo != nil {
-		managementExec := NewManagementExecutor(f.adapter.agentRepo, f.adapter.skillRepo, f.adapter.toolRepo, f.adapter.mcpRepo)
+		// Pass skill.NewService as skillDeleter so delete operations enforce binding checks. P-C185-1.
+		managementExec := NewManagementExecutor(f.adapter.agentRepo, f.adapter.skillRepo, skill.NewService(f.adapter.skillRepo), f.adapter.toolRepo, f.adapter.mcpRepo)
 		runner.WithManagementExecutor(managementExec)
 	}
 	if f.adapter.mcpClient != nil {
@@ -302,7 +303,8 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		config,
 	)
 	if a.agentRepo != nil {
-		managementExec := NewManagementExecutor(a.agentRepo, a.skillRepo, a.toolRepo, a.mcpRepo)
+		// Pass skill.NewService as skillDeleter so delete operations enforce binding checks. P-C185-1.
+		managementExec := NewManagementExecutor(a.agentRepo, a.skillRepo, skill.NewService(a.skillRepo), a.toolRepo, a.mcpRepo)
 		runner.WithManagementExecutor(managementExec)
 	}
 	if a.mcpClient != nil {

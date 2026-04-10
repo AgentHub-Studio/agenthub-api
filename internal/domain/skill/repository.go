@@ -27,6 +27,9 @@ type SkillRepository interface {
 	SlugExists(ctx context.Context, slug string) (bool, error)
 	// ListByAgentID returns all skills linked to an agent via the agent_skill table.
 	ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]Skill, error)
+	// CountAgentBindings returns the number of agents that reference this skill via agent_skill.
+	// Used by Service.Delete to block deletion of skills that are still in use.
+	CountAgentBindings(ctx context.Context, skillID uuid.UUID) (int64, error)
 }
 
 // Repository handles persistence for skills.
@@ -182,6 +185,26 @@ func (r *Repository) SlugExists(ctx context.Context, slug string) (bool, error) 
 	var exists bool
 	err = conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM skill WHERE slug=$1)`, slug).Scan(&exists)
 	return exists, err
+}
+
+// CountAgentBindings returns how many agents reference the given skill via agent_skill.
+func (r *Repository) CountAgentBindings(ctx context.Context, skillID uuid.UUID) (int64, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
+	var count int64
+	err = conn.QueryRow(ctx,
+		`SELECT COUNT(*) FROM agent_skill WHERE skill_id = $1`,
+		skillID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("skill: count agent bindings: %w", err)
+	}
+	return count, nil
 }
 
 // --- scan helpers ---

@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -10,6 +11,17 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+// ErrSkillBoundToAgents is returned when a skill cannot be deleted because one or
+// more agents still reference it. P-C185-1: management executor must not bypass this check.
+var ErrSkillBoundToAgents = errors.New("skill: cannot delete — skill is bound to one or more agents")
+
+// Deleter is a narrow interface for delete-with-binding-protection.
+// Implemented by *Service; used by ManagementExecutor to ensure the service
+// layer is called instead of the repository directly.
+type Deleter interface {
+	Delete(ctx context.Context, id uuid.UUID) error
+}
 
 // Service holds business logic for skills.
 type Service struct {
@@ -91,8 +103,17 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	return ResponseFrom(sk), nil
 }
 
-// Delete deletes a skill.
+// Delete deletes a skill, but only if no agents currently reference it.
+// Returns ErrSkillBoundToAgents when the skill is still in use.
+// P-C185-1: prevents management executor from orphaning agent toolsets.
 func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
+	count, err := s.repo.CountAgentBindings(ctx, id)
+	if err != nil {
+		return fmt.Errorf("skill: check bindings before delete: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("%w (agents bound: %d)", ErrSkillBoundToAgents, count)
+	}
 	return s.repo.Delete(ctx, id)
 }
 

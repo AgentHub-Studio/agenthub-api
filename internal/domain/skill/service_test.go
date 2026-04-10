@@ -82,6 +82,11 @@ func (m *mockSkillRepo) ListByAgentID(_ context.Context, _ uuid.UUID) ([]skill.S
 	return out, nil
 }
 
+func (m *mockSkillRepo) CountAgentBindings(_ context.Context, _ uuid.UUID) (int64, error) {
+	// Default to 0 bindings so existing delete tests pass.
+	return 0, nil
+}
+
 func TestSkillService_Create_AutoSlug(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	s, err := svc.Create(context.Background(), skill.CreateRequest{

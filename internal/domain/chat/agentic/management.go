@@ -40,24 +40,31 @@ func slugify(name string) string {
 // ManagementExecutor defines the operations allowed by the agenthub_manage tool.
 // It abstracts the underlying domain repositories to provide a unified CRUD interface.
 type ManagementExecutor struct {
-	agents     agent.Repository
-	skills     skill.SkillRepository
-	tools      tool.ToolRepository
-	mcpServers mcp.Repository
+	agents       agent.Repository
+	skills       skill.SkillRepository
+	// skillDeleter routes skill deletions through the service layer so that
+	// binding-protection checks are enforced. P-C185-1.
+	skillDeleter skill.Deleter
+	tools        tool.ToolRepository
+	mcpServers   mcp.Repository
 }
 
 // NewManagementExecutor creates a new ManagementExecutor.
+// skillDeleter should be a *skill.Service (implements skill.Deleter) so that
+// delete operations pass through the binding-protection check.
 func NewManagementExecutor(
 	agents agent.Repository,
 	skills skill.SkillRepository,
+	skillDeleter skill.Deleter,
 	tools tool.ToolRepository,
 	mcpServers mcp.Repository,
 ) *ManagementExecutor {
 	return &ManagementExecutor{
-		agents:     agents,
-		skills:     skills,
-		tools:      tools,
-		mcpServers: mcpServers,
+		agents:       agents,
+		skills:       skills,
+		skillDeleter: skillDeleter,
+		tools:        tools,
+		mcpServers:   mcpServers,
 	}
 }
 
@@ -396,7 +403,8 @@ func (e *ManagementExecutor) delete(ctx context.Context, resource string, idStr 
 	case "agent":
 		err = e.agents.Delete(ctx, id)
 	case "skill":
-		err = e.skills.Delete(ctx, id)
+		// Route through service so CountAgentBindings check is enforced. P-C185-1.
+		err = e.skillDeleter.Delete(ctx, id)
 	case "tool":
 		err = e.tools.Delete(ctx, id)
 	case "integration":
