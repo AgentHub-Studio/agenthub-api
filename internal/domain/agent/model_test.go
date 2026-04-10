@@ -115,3 +115,28 @@ func TestResponseFrom_DoesNotContainApiKey(t *testing.T) {
 	assert.NotContains(t, string(data), "apiKey")
 	assert.NotContains(t, string(data), "sk-leak")
 }
+
+// TestAgentResponse_DoesNotContainApiKey matches the test name expected by TASK-05 spec.
+func TestAgentResponse_DoesNotContainApiKey(t *testing.T) {
+	ag := agent.Agent{
+		ModelConfig: json.RawMessage(`{"provider":"openai","model":"gpt-4o","apiKey":"sk-secret123"}`),
+	}
+	resp := agent.ResponseFrom(ag)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "sk-secret123")
+	assert.NotContains(t, string(data), "apiKey")
+}
+
+// TestAgentResponse_ModelConfigFieldsPreserved verifies non-sensitive fields survive sanitization.
+func TestAgentResponse_ModelConfigFieldsPreserved(t *testing.T) {
+	ag := agent.Agent{
+		ModelConfig: json.RawMessage(`{"provider":"openrouter","model":"openai/gpt-oss-20b","maxTokens":4096,"apiKey":"sk-x"}`),
+	}
+	resp := agent.ResponseFrom(ag)
+	var mc map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.ModelConfig, &mc))
+	assert.Equal(t, "openrouter", mc["provider"])
+	assert.Equal(t, float64(4096), mc["maxTokens"])
+	assert.NotContains(t, mc, "apiKey")
+}

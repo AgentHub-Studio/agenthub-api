@@ -77,3 +77,27 @@ func TestResponseFrom_DoesNotContainAuthToken(t *testing.T) {
 	assert.NotContains(t, string(data), "auth_token")
 	assert.NotContains(t, string(data), "Bearer leak")
 }
+
+// TestToolResponse_DoesNotContainAuthToken matches the test name expected by TASK-05 spec.
+func TestToolResponse_DoesNotContainAuthToken(t *testing.T) {
+	t_ := tool.Tool{
+		Config: []byte(`{"url":"https://api.example.com","auth_token":"Bearer secret-token"}`),
+	}
+	resp := tool.ResponseFrom(t_)
+	data, _ := json.Marshal(resp)
+	assert.NotContains(t, string(data), "secret-token")
+	assert.NotContains(t, string(data), "auth_token")
+}
+
+// TestToolResponse_NonSensitiveConfigPreserved verifies non-sensitive fields survive sanitization.
+func TestToolResponse_NonSensitiveConfigPreserved(t *testing.T) {
+	t_ := tool.Tool{
+		Config: []byte(`{"url":"https://api.example.com","method":"POST","auth_token":"x"}`),
+	}
+	resp := tool.ResponseFrom(t_)
+	data, _ := json.Marshal(resp.Config)
+	var cfg map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &cfg))
+	assert.Equal(t, "https://api.example.com", cfg["url"])
+	assert.NotContains(t, cfg, "auth_token")
+}
