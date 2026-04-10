@@ -61,6 +61,11 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if req.Name == "" {
 		return AgentResponse{}, fmt.Errorf("name is required")
 	}
+	// P-C249-2: reject modelConfig nested inside the config field. Clients must
+	// send modelConfig at the root level of the request body.
+	if hasNestedModelConfig(req.Config) {
+		return AgentResponse{}, fmt.Errorf("modelConfig must be at the root of the request body, not inside config")
+	}
 	// P-C97-1: reject invalid modelConfig at creation time so the agent is never
 	// stored in a broken state (e.g. maxIterations=-5 makes the loop exit immediately).
 	if err := validateModelConfig(req.ModelConfig); err != nil {
@@ -105,6 +110,10 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 }
 
 func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentRequest) (AgentResponse, error) {
+	// P-C249-2: same guard as Create — reject nested modelConfig.
+	if hasNestedModelConfig(req.Config) {
+		return AgentResponse{}, fmt.Errorf("modelConfig must be at the root of the request body, not inside config")
+	}
 	a, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		return AgentResponse{}, err
@@ -411,4 +420,19 @@ func (s *versionService) ListVersions(ctx context.Context, agentID uuid.UUID, re
 		responses[i] = VersionResponseFrom(v)
 	}
 	return pagination.NewPage(responses, total, req), nil
+}
+
+// hasNestedModelConfig returns true when the given config JSON blob contains a
+// top-level "modelConfig" key. P-C249-2: clients that accidentally nest modelConfig
+// inside the config field would silently produce non-functional agents; reject early.
+func hasNestedModelConfig(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return false
+	}
+	_, ok := cfg["modelConfig"]
+	return ok
 }

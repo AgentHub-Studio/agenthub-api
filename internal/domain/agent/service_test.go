@@ -527,3 +527,47 @@ func TestVersionService_GetLatestPublished(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "PUBLISHED", resp.Status)
 }
+
+// --- TR-01-TASK-31: rejeitar config.modelConfig aninhado (P-C249-2) ---
+
+func TestCreate_NestedModelConfig_Rejected(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name:   "Bad Agent",
+		Config: json.RawMessage(`{"modelConfig":{"provider":"openai","model":"gpt-4o"}}`),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "modelConfig")
+	assert.Contains(t, err.Error(), "root")
+}
+
+func TestCreate_NestedModelConfig_ConfigWithOtherFields_Rejected(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name:   "Also Bad",
+		Config: json.RawMessage(`{"someKey":"value","modelConfig":{"provider":"anthropic","model":"claude-3"}}`),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "modelConfig")
+}
+
+func TestCreate_ConfigWithoutModelConfig_Accepted(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name:   "Good Agent",
+		Config: json.RawMessage(`{"timeout":30,"retries":3}`),
+	})
+	require.NoError(t, err)
+}
+
+func TestUpdate_NestedModelConfig_Rejected(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	require.NoError(t, err)
+
+	_, err = svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{
+		Config: json.RawMessage(`{"modelConfig":{"provider":"openai","model":"gpt-4o"}}`),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "modelConfig")
+}
