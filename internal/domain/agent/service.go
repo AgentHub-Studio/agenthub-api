@@ -200,10 +200,25 @@ func (s *service) Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest
 	return ResponseFrom(created), nil
 }
 
+// SupportedProviders lists the LLM providers recognised by the platform runner.
+// P-C268-1, P-C327-3: provider is validated at agent creation/update time.
+var SupportedProviders = []string{
+	"openai",
+	"openrouter",
+	"anthropic",
+	"ollama",
+	"azure-openai",
+	"google",
+}
+
+// ErrUnsupportedProvider is returned when modelConfig.provider is not in SupportedProviders.
+var ErrUnsupportedProvider = fmt.Errorf("unsupported LLM provider")
+
 // validateModelConfig checks that modelConfig contains valid JSON and that
 // numeric fields are within safe ranges. Returns nil when raw is empty.
 // P-C97-1: prevents agents with broken model_config from being stored.
 // P-C294-2: validates provider/model consistency — if one is set, both must be.
+// P-C268-1: validates provider against supported enum.
 func validateModelConfig(raw json.RawMessage) error {
 	if len(raw) == 0 {
 		return nil
@@ -220,6 +235,20 @@ func validateModelConfig(raw json.RawMessage) error {
 	}
 	if err := json.Unmarshal(raw, &mc); err != nil {
 		return fmt.Errorf("must be a valid JSON object")
+	}
+	// P-C268-1: validate provider against supported enum.
+	if mc.Provider != "" {
+		supported := false
+		for _, p := range SupportedProviders {
+			if mc.Provider == p {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			return fmt.Errorf("%w: %q — supported providers: %s",
+				ErrUnsupportedProvider, mc.Provider, strings.Join(SupportedProviders, ", "))
+		}
 	}
 	// P-C294-2: provider and model are a pair — both or neither.
 	if mc.Provider != "" && mc.Model == "" {
