@@ -7,6 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -68,6 +71,9 @@ type StreamingToolExecutor struct {
 	cache          *ToolResultCache
 	stallDetector  *StallDetector
 	config         RunConfig
+	// P-C179-1: document_search is executed locally (not delegated to skill-runtime).
+	docSearch   knowledge.DocumentSearchClient
+	activeKBIDs []uuid.UUID
 }
 
 // NewStreamingToolExecutor creates a StreamingToolExecutor.
@@ -107,6 +113,15 @@ func (e *StreamingToolExecutor) emitToolResult(ch chan<- RunEvent, tt *TrackedTo
 // WithMCPBridge attaches an MCP tool bridge for routing mcp__ prefixed tool calls.
 func (e *StreamingToolExecutor) WithMCPBridge(bridge *MCPToolBridge) *StreamingToolExecutor {
 	e.mcpBridge = bridge
+	return e
+}
+
+// WithDocumentSearch wires the local document search client and the set of active
+// knowledge base IDs for this run. When set, document_search calls are executed
+// locally via pgvector (P-C179-1) instead of being delegated to the skill-runtime.
+func (e *StreamingToolExecutor) WithDocumentSearch(client knowledge.DocumentSearchClient, kbIDs []uuid.UUID) *StreamingToolExecutor {
+	e.docSearch = client
+	e.activeKBIDs = kbIDs
 	return e
 }
 
@@ -440,8 +455,10 @@ func (e *StreamingToolExecutor) executeParallel(
 			var execResult *ToolExecResult
 			var execErr error
 
-			// Route MCP tool calls to the MCPToolBridge.
-			if IsMCPToolCall(tc.Function.Name) && e.mcpBridge != nil {
+			// Route document_search locally (P-C179-1), then MCP, then skill-runtime.
+			if tc.Function.Name == "document_search" && e.docSearch != nil {
+				execResult, execErr = executeDocumentSearchInternal(toolCtx, e.docSearch, e.activeKBIDs, toolInput)
+			} else if IsMCPToolCall(tc.Function.Name) && e.mcpBridge != nil {
 				execResult, execErr = e.mcpBridge.Execute(toolCtx, tc.Function.Name, toolInput)
 			} else {
 				execResult, execErr = e.skillClient.Execute(
@@ -566,12 +583,21 @@ func (e *StreamingToolExecutor) executeToolCall(
 		defer cancel()
 	}
 
-	execResult, err := e.skillClient.Execute(
-		toolCtx,
-		tc.Function.Name,
-		json.RawMessage(tc.Function.Arguments),
-		in.TenantID, in.AgentID.String(), in.SessionID.String(),
-	)
+	// Route document_search locally (P-C179-1), then MCP, then skill-runtime.
+	var execResult *ToolExecResult
+	var err error
+	if tc.Function.Name == "document_search" && e.docSearch != nil {
+		execResult, err = executeDocumentSearchInternal(toolCtx, e.docSearch, e.activeKBIDs, json.RawMessage(tc.Function.Arguments))
+	} else if IsMCPToolCall(tc.Function.Name) && e.mcpBridge != nil {
+		execResult, err = e.mcpBridge.Execute(toolCtx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+	} else {
+		execResult, err = e.skillClient.Execute(
+			toolCtx,
+			tc.Function.Name,
+			json.RawMessage(tc.Function.Arguments),
+			in.TenantID, in.AgentID.String(), in.SessionID.String(),
+		)
+	}
 
 	hasErr := false
 	if err != nil {
@@ -659,6 +685,39 @@ func ValidateToolInput(toolName string, input json.RawMessage) string {
 	}
 
 	return ""
+}
+
+// executeDocumentSearchInternal routes a document_search tool call to the local
+// DocumentSearchClient (pgvector). It decodes the tool arguments, calls Search,
+// and returns the results serialised as JSON.
+func executeDocumentSearchInternal(ctx context.Context, client knowledge.DocumentSearchClient, kbIDs []uuid.UUID, rawArgs json.RawMessage) (*ToolExecResult, error) {
+	var args struct {
+		Query string `json:"query"`
+		TopK  int    `json:"top_k"`
+	}
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return nil, fmt.Errorf("document_search: invalid arguments: %w", err)
+	}
+	if args.TopK <= 0 {
+		args.TopK = 5
+	}
+
+	results, err := client.Search(ctx, args.Query, kbIDs, args.TopK)
+	if err != nil {
+		return nil, fmt.Errorf("document_search: search failed: %w", err)
+	}
+
+	out, err := json.Marshal(results)
+	if err != nil {
+		return nil, fmt.Errorf("document_search: failed to marshal results: %w", err)
+	}
+	return &ToolExecResult{Output: out, ToolName: "document_search"}, nil
+}
+
+// ExecuteDocumentSearch is the exported entry point for unit tests and wiring.
+// It delegates to executeDocumentSearchInternal.
+func ExecuteDocumentSearch(ctx context.Context, client knowledge.DocumentSearchClient, kbIDs []uuid.UUID, rawArgs json.RawMessage) (*ToolExecResult, error) {
+	return executeDocumentSearchInternal(ctx, client, kbIDs, rawArgs)
 }
 
 // FormatToolError produces an LLM-readable error string with head+tail preservation

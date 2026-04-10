@@ -3,6 +3,7 @@ package agentic_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -236,4 +238,87 @@ func TestFormatToolError_PreservesHeadAndTail(t *testing.T) {
 	assert.True(t, strings.HasPrefix(result, "ERROR"), "head should be preserved")
 	// Tail should be preserved.
 	assert.True(t, strings.HasSuffix(result, "42"), "tail should be preserved")
+}
+
+// --- TR-01-TASK-07: ExecuteDocumentSearch (P-C179-1) ---
+
+// TestExecuteDocumentSearch_ReturnsJSONResults verifies that ExecuteDocumentSearch
+// serialises the search results as JSON.
+func TestExecuteDocumentSearch_ReturnsJSONResults(t *testing.T) {
+	kb1 := uuid.New()
+	client := &mockKnowledgeSearchClient{
+		results: []map[string]any{
+			{"content": "chunk one", "score": 0.9},
+			{"content": "chunk two", "score": 0.8},
+		},
+	}
+
+	result, err := agentic.ExecuteDocumentSearch(
+		context.Background(),
+		client,
+		[]uuid.UUID{kb1},
+		json.RawMessage(`{"query":"test query","top_k":2}`),
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "document_search", result.ToolName)
+	assert.Nil(t, result.Error)
+	// Output should be a valid JSON array.
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(result.Output, &out))
+	assert.Len(t, out, 2)
+}
+
+// TestExecuteDocumentSearch_DefaultsTopKToFive verifies that top_k defaults to 5
+// when not provided in the arguments.
+func TestExecuteDocumentSearch_DefaultsTopKToFive(t *testing.T) {
+	client := &mockKnowledgeSearchClient{}
+
+	_, err := agentic.ExecuteDocumentSearch(
+		context.Background(),
+		client,
+		nil,
+		json.RawMessage(`{"query":"hello"}`),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, 5, client.lastTopK)
+}
+
+// TestExecuteDocumentSearch_PropagatesError verifies that search errors are returned.
+func TestExecuteDocumentSearch_PropagatesError(t *testing.T) {
+	client := &mockKnowledgeSearchClient{err: fmt.Errorf("vector db unavailable")}
+
+	_, err := agentic.ExecuteDocumentSearch(
+		context.Background(),
+		client,
+		nil,
+		json.RawMessage(`{"query":"hello"}`),
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vector db unavailable")
+}
+
+// mockKnowledgeSearchClient is a test double for knowledge.DocumentSearchClient.
+type mockKnowledgeSearchClient struct {
+	results  any
+	err      error
+	lastTopK int
+}
+
+func (m *mockKnowledgeSearchClient) Search(_ context.Context, _ string, _ []uuid.UUID, topK int) ([]knowledge.SearchResult, error) {
+	m.lastTopK = topK
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.results == nil {
+		return nil, nil
+	}
+	// Marshal+unmarshal to convert []map[string]any → []knowledge.SearchResult.
+	b, _ := json.Marshal(m.results)
+	var res []knowledge.SearchResult
+	_ = json.Unmarshal(b, &res)
+	return res, nil
 }

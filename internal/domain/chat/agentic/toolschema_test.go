@@ -662,3 +662,73 @@ func TestBuildTools_SkillWithTools_InToolArray(t *testing.T) {
 	assert.Contains(t, toolNames(tools), "search-skill",
 		"skill with active binding must appear in tools[]")
 }
+
+
+// --- TR-01-TASK-07: FilterActiveKBs (P-C179-1, P-C168-1) ---
+
+// TestFilterActiveKBs_ExcludesPaused verifies that PAUSED KBs are excluded.
+func TestFilterActiveKBs_ExcludesPaused(t *testing.T) {
+	kbs := []knowledgebase.KnowledgeBase{
+		{Name: "Active KB", Status: knowledgebase.StatusActive},
+		{Name: "Paused KB", Status: knowledgebase.StatusPaused},
+	}
+
+	active := agentic.FilterActiveKBs(kbs)
+
+	require.Len(t, active, 1)
+	assert.Equal(t, "Active KB", active[0].Name)
+}
+
+// TestFilterActiveKBs_AllActive verifies that all KBs are returned when all are active.
+func TestFilterActiveKBs_AllActive(t *testing.T) {
+	kbs := []knowledgebase.KnowledgeBase{
+		{Name: "KB1", Status: knowledgebase.StatusActive},
+		{Name: "KB2", Status: knowledgebase.StatusActive},
+	}
+
+	active := agentic.FilterActiveKBs(kbs)
+
+	assert.Len(t, active, 2)
+}
+
+// TestFilterActiveKBs_AllPaused_ReturnsNil verifies that nil is returned when all KBs
+// are paused (prevents document_search from being offered to the LLM).
+func TestFilterActiveKBs_AllPaused_ReturnsNil(t *testing.T) {
+	kbs := []knowledgebase.KnowledgeBase{
+		{Name: "Paused KB", Status: knowledgebase.StatusPaused},
+	}
+
+	active := agentic.FilterActiveKBs(kbs)
+
+	assert.Nil(t, active)
+}
+
+// TestBuildTools_PausedKB_NoDocumentSearch verifies that document_search is NOT added
+// to the tools[] when all KBs are PAUSED.
+func TestBuildTools_PausedKB_NoDocumentSearch(t *testing.T) {
+	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{
+		{Name: "Paused KB", Status: knowledgebase.StatusPaused},
+	}}
+
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), kbs)
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	for _, tool := range tools {
+		assert.NotEqual(t, "document_search", tool.Name, "document_search must not appear when all KBs are PAUSED")
+	}
+}
+
+// TestBuildTools_ActiveKB_DocumentSearchPresent verifies that document_search IS added
+// when at least one KB is ACTIVE.
+func TestBuildTools_ActiveKB_DocumentSearchPresent(t *testing.T) {
+	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{
+		{Name: "Active KB", Status: knowledgebase.StatusActive},
+	}}
+
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), kbs)
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	assert.Contains(t, toolNames(tools), "document_search")
+}

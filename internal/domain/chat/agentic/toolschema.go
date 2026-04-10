@@ -269,8 +269,11 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 			}
 		}
 
-		if len(kbs) > 0 {
-			tools = append(tools, documentSearchTool(kbs))
+		// P-C179-1: exclude PAUSED KBs — document_search on a paused KB would
+		// silently return no results or an error, confusing the LLM.
+		activeKBs := FilterActiveKBs(kbs)
+		if len(activeKBs) > 0 {
+			tools = append(tools, documentSearchTool(activeKBs))
 		}
 	}
 
@@ -581,6 +584,19 @@ func deriveSchemaFromToolConfig(t tool.Tool) json.RawMessage {
 		return nil
 	}
 	return data
+}
+
+// FilterActiveKBs returns only knowledge bases with status ACTIVE.
+// P-C179-1: PAUSED KBs are excluded so document_search is only offered when
+// there is at least one operational knowledge base.
+func FilterActiveKBs(kbs []knowledgebase.KnowledgeBase) []knowledgebase.KnowledgeBase {
+	var active []knowledgebase.KnowledgeBase
+	for _, kb := range kbs {
+		if kb.Status == knowledgebase.StatusActive {
+			active = append(active, kb)
+		}
+	}
+	return active
 }
 
 // documentSearchTool returns the builtin document_search tool definition.
