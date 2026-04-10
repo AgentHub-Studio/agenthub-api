@@ -32,22 +32,40 @@ type chatService interface {
 	RespondElicitation(sessionID, requestID string, result ElicitationResult) bool
 }
 
+// RunLookup is a narrow interface for looking up a persisted run by ID.
+// P-C325-1: decoupled from AsyncExecutor to allow unit-test injection.
+type RunLookup interface {
+	GetRunByID(ctx context.Context, id uuid.UUID) (ChatRun, error)
+}
+
 // Handler handles HTTP requests for chat sessions and messages.
 type Handler struct {
 	svc            chatService
 	executor       *AsyncExecutor
+	runLookup      RunLookup // nil when executor is nil (tests without DB)
 	bgRegistry     *BackgroundRunRegistry
 	bufferRegistry *RunEventBufferRegistry
 }
 
 // NewHandler creates a new Handler.
 func NewHandler(svc chatService, executor *AsyncExecutor) *Handler {
-	return &Handler{
+	h := &Handler{
 		svc:            svc,
 		executor:       executor,
 		bgRegistry:     NewBackgroundRunRegistry(0),
 		bufferRegistry: NewRunEventBufferRegistry(),
 	}
+	if executor != nil {
+		h.runLookup = executor
+	}
+	return h
+}
+
+// WithRunLookup overrides the run lookup used by GET /api/chat/runs/{id}.
+// Intended for use in unit tests where a real AsyncExecutor is not available.
+func (h *Handler) WithRunLookup(rl RunLookup) *Handler {
+	h.runLookup = rl
+	return h
 }
 
 // RegisterRoutes mounts chat routes onto the given router.
@@ -65,6 +83,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/chat/sessions/{id}/run/{runId}/cancel", h.cancelRun)
 	r.Get("/api/chat/sessions/{id}/run/{runId}/resume", h.resumeSession)
 	r.Post("/api/chat/sessions/{id}/elicitation/{requestId}/respond", h.respondElicitation)
+	r.Get("/api/chat/runs/{id}", h.getRun)
 }
 
 func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -634,4 +653,31 @@ func filterReplayableEvents(events []BufferedEvent) []BufferedEvent {
 	}
 
 	return filtered
+}
+
+// getRun handles GET /api/chat/runs/{id}. P-C325-1: allows clients to query
+// run state and metrics by run ID without knowing the parent session ID.
+func (h *Handler) getRun(w http.ResponseWriter, r *http.Request) {
+	if h.runLookup == nil {
+		respond.Error(w, http.StatusServiceUnavailable, "run lookup not available")
+		return
+	}
+
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid run id")
+		return
+	}
+
+	run, err := h.runLookup.GetRunByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "run not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to get run")
+		return
+	}
+
+	respond.JSON(w, http.StatusOK, RunResponseFrom(run))
 }

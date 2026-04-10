@@ -464,3 +464,88 @@ func TestChatHandler_ResumeSession_InvalidSessionID(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, resumeW.Code)
 }
+
+// --- GET /api/chat/runs/{id} (TR-01-TASK-27, P-C325-1) ---
+
+// mockRunLookup satisfies chat.RunLookup for unit tests.
+type mockRunLookup struct {
+	runs map[uuid.UUID]chat.ChatRun
+}
+
+func (m *mockRunLookup) GetRunByID(_ context.Context, id uuid.UUID) (chat.ChatRun, error) {
+	if r, ok := m.runs[id]; ok {
+		return r, nil
+	}
+	return chat.ChatRun{}, chat.ErrNotFound
+}
+
+func setupChatWithRuns(rl chat.RunLookup) (*chi.Mux, *mockChatSvc) {
+	svc := newMockChatSvc()
+	h := chat.NewHandler(svc, nil).WithRunLookup(rl)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r, svc
+}
+
+func TestGetRun_Success(t *testing.T) {
+	runID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	rl := &mockRunLookup{runs: map[uuid.UUID]chat.ChatRun{
+		runID: {
+			ID:        runID,
+			SessionID: sessionID,
+			Status:    chat.ChatRunStatusCompleted,
+			StartedAt: now,
+		},
+	}}
+	r, _ := setupChatWithRuns(rl)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/runs/"+runID.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp chat.ChatRunResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, runID, resp.ID)
+	assert.Equal(t, sessionID, resp.SessionID)
+	assert.Equal(t, chat.ChatRunStatusCompleted, resp.Status)
+}
+
+func TestGetRun_NotFound(t *testing.T) {
+	rl := &mockRunLookup{runs: map[uuid.UUID]chat.ChatRun{}}
+	r, _ := setupChatWithRuns(rl)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/runs/"+uuid.New().String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestGetRun_InvalidID(t *testing.T) {
+	rl := &mockRunLookup{runs: map[uuid.UUID]chat.ChatRun{}}
+	r, _ := setupChatWithRuns(rl)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/runs/not-a-uuid", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetRun_NoLookupConfigured(t *testing.T) {
+	// Handler created without any executor or runLookup.
+	svc := newMockChatSvc()
+	h := chat.NewHandler(svc, nil)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/runs/"+uuid.New().String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
