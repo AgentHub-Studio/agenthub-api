@@ -204,6 +204,36 @@ func (r *Runner) WithCacheSafeParamsSnapshot(snap *CacheSafeParamsSnapshot) *Run
 	return r
 }
 
+// maxToolRetries is the maximum number of times a given tool may be called within
+// a single run. After this limit the runner returns a synthetic error result to the
+// LLM instead of executing the tool, preventing infinite tool-error retry loops.
+// P-C57-3: padrão recorrente de LLM reattempting the same failing tool indefinitely.
+const maxToolRetries = 3
+
+// runState holds mutable per-run counters that are reset at the start of each Run.
+type runState struct {
+	// toolRetries maps tool name → number of times it has been invoked this run.
+	toolRetries map[string]int
+}
+
+// newRunState initialises a fresh runState for a new run.
+func newRunState() *runState {
+	return &runState{toolRetries: make(map[string]int)}
+}
+
+// checkAndIncrementRetry returns an error when the tool has already been called
+// maxToolRetries times, otherwise increments the counter and returns nil.
+// P-C57-3: prevents the LLM from retrying a consistently-failing tool forever.
+func (s *runState) checkAndIncrementRetry(toolName string) error {
+	count := s.toolRetries[toolName]
+	if count >= maxToolRetries {
+		return fmt.Errorf("tool %q reached the maximum call limit (%d per run) — please proceed without it",
+			toolName, maxToolRetries)
+	}
+	s.toolRetries[toolName] = count + 1
+	return nil
+}
+
 // Run starts the agentic loop in a goroutine and returns a channel of events.
 // The channel is closed when the run completes or an error occurs.
 func (r *Runner) Run(ctx context.Context, in RunInput) <-chan RunEvent {
@@ -227,6 +257,9 @@ func (r *Runner) Run(ctx context.Context, in RunInput) <-chan RunEvent {
 }
 
 func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
+	// P-C57-3: initialise per-run tool retry counters.
+	rs := newRunState()
+
 	// Track whether a clean EventRunComplete was emitted. If the loop exits
 	// via an error path (emitError + return) without emitting run_complete,
 	// the deferred guard emits a minimal one so the client always knows the
@@ -967,7 +1000,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				continue
 			}
 
-			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools, allowedToolsIndex, lastTurnHadToolErrors)
+			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools, allowedToolsIndex, lastTurnHadToolErrors, rs)
 			slog.Info("agentic: tool execution completed", "turn", turnIndex, "resultCount", len(toolResults), "ctxErr", ctx.Err())
 
 			// Check if denial tracking indicates a stuck loop.
@@ -1750,7 +1783,7 @@ func truncateToolResult(result ToolExecResult, maxChars int) ToolExecResult {
 // prevTurnHadToolErrors indicates whether the immediately-preceding tool turn
 // returned at least one error. When true, any ask_user call is auto-answered
 // with a synthetic config-error response instead of blocking for user input (P-G1).
-func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput, totalCost float64, readOnlyIndex map[string]bool, destructiveIndex map[string]bool, deferredTools []LLMTool, allowedToolsIndex map[string]bool, prevTurnHadToolErrors bool) []ToolExecResult {
+func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput, totalCost float64, readOnlyIndex map[string]bool, destructiveIndex map[string]bool, deferredTools []LLMTool, allowedToolsIndex map[string]bool, prevTurnHadToolErrors bool, rs *runState) []ToolExecResult {
 	results := make([]ToolExecResult, len(toolCalls))
 
 	// Partition tool calls into categories.
@@ -1760,6 +1793,24 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 	agentIdx := map[int]int{} // original index → agent index
 
 	for i, tc := range toolCalls {
+		// P-C57-3: enforce per-run retry limit before any other checks so that
+		// exhausted tools never reach permission evaluation or execution.
+		if retryErr := rs.checkAndIncrementRetry(tc.Function.Name); retryErr != nil {
+			errMsg := retryErr.Error()
+			results[i] = ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID:    tc.ID,
+				Name:  tc.Function.Name,
+				Input: json.RawMessage(tc.Function.Arguments),
+			})
+			ch <- NewRunEvent(EventToolResult, ToolResultData{
+				ID:    tc.ID,
+				Name:  tc.Function.Name,
+				Error: &errMsg,
+			})
+			continue
+		}
+
 		// Reject tool calls for tools not in the allowed set for this run.
 		// This prevents the LLM from calling tools it remembers from conversation
 		// history that are no longer bound to the agent (P-SK6).
