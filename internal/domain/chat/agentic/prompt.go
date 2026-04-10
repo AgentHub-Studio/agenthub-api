@@ -148,7 +148,12 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 		sections = append(sections, in.SystemPrompt)
 	}
 
-	// 1b. User interaction policy — injected at the top of every prompt so
+	// 1b. Anti-hallucination guard (P-C127-3, P-C130-1, P-C142-2).
+	// Always present — guarantees safe behaviour regardless of agent prompt.
+	// Not configurable from prompt_template: injected unconditionally.
+	sections = append(sections, antiHallucinationGuard)
+
+	// 1c. User interaction policy — injected at the top of every prompt so
 	// the LLM sees it before the tool list. This ensures the model always
 	// uses ask_user for structured input instead of asking in plain text.
 	userInteractionSection, err := b.resolvePromptSection(
@@ -455,6 +460,20 @@ When a sub-agent reports failure (tests failed, build errors, file not found):
 - Simple tasks you can handle directly with a single tool call
 - Tasks with strong sequential dependencies (sub-agent B needs sub-agent A's result)
 - Trivial questions that don't require tool usage`
+
+// antiHallucinationGuard is injected into every system prompt immediately after
+// the agent's persona instructions. It establishes hard behavioural guardrails
+// that prevent the LLM from fabricating tool calls, referencing non-existent
+// tools, or inventing data when it lacks a tool to retrieve real information.
+// P-C127-3, P-C127-4, P-C130-1, P-C142-2.
+// This constant is not configurable from the prompt_template table — it is
+// always present and cannot be overridden by skill instructions.
+const antiHallucinationGuard = `## Tool Usage Rules (enforced by system)
+- You MUST NOT claim to have called a tool unless it appears in your tool_use block in this turn.
+- You MUST NOT reference tools by name unless they are listed in your available tools for this turn.
+- If a user asks you to use a tool you do not have access to, respond clearly: "I don't have access to that capability."
+- If you don't know something and have no tool to look it up, say so honestly — do not fabricate data, statistics, or API results.
+- If a tool call fails, report the failure to the user — do not invent a successful result.`
 
 // userInteractionPolicy is a high-priority section injected near the top of the
 // prompt so the LLM sees it BEFORE the tool list. It establishes the hard rule
