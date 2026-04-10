@@ -101,3 +101,32 @@ func TestToolResponse_NonSensitiveConfigPreserved(t *testing.T) {
 	assert.Equal(t, "https://api.example.com", cfg["url"])
 	assert.NotContains(t, cfg, "auth_token")
 }
+
+// --- TR-01-TASK-10: InputSchema (P-C175-1/P-C175-2) ---
+
+// TestResponseFrom_ContainsInputSchema verifies that InputSchema is included in the response.
+func TestResponseFrom_ContainsInputSchema(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`)
+	t_ := tool.Tool{InputSchema: schema}
+	resp := tool.ResponseFrom(t_)
+	assert.Equal(t, string(schema), string(resp.InputSchema))
+}
+
+// TestResponseFrom_NilInputSchema_OmittedFromJSON verifies that a nil InputSchema
+// is omitted from the JSON response (omitempty).
+func TestResponseFrom_NilInputSchema_OmittedFromJSON(t *testing.T) {
+	t_ := tool.Tool{}
+	resp := tool.ResponseFrom(t_)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "inputSchema")
+}
+
+// TestCreateRequest_InputSchema_PassedThrough verifies the DTO carries InputSchema.
+func TestCreateRequest_InputSchema_PassedThrough(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"limit":{"type":"integer"}},"required":["limit"]}`)
+	raw := []byte(`{"name":"search","type":"HTTP","config":{},"inputSchema":` + string(schema) + `}`)
+	var req tool.CreateRequest
+	require.NoError(t, json.Unmarshal(raw, &req))
+	assert.Equal(t, string(schema), string(req.InputSchema))
+}

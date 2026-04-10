@@ -732,3 +732,83 @@ func TestBuildTools_ActiveKB_DocumentSearchPresent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, toolNames(tools), "document_search")
 }
+
+// --- TR-01-TASK-10: InputSchema preference over derived schema (P-C175-1/P-C175-2) ---
+
+// TestBuildTools_ExplicitInputSchema_UsedOverDerived verifies that when a bound tool
+// has an explicit InputSchema, it is used verbatim instead of the auto-derived schema.
+func TestBuildTools_ExplicitInputSchema_UsedOverDerived(t *testing.T) {
+	skillID := uuid.New()
+	toolID := uuid.New()
+	explicit := json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","enum":["a","b","c"]}},"required":["query"]}`)
+
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: skillID, Name: "Search", Slug: "search-skill"},
+	}}
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID:          toolID,
+			Name:        "search_http",
+			InputSchema: explicit,
+			Config:      []byte(`{"url":"https://example.com/{query}","method":"GET"}`),
+		}},
+	}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{})
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	idx := -1
+	for i, t := range tools {
+		if t.Name == "search-skill" {
+			idx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, idx, 0, "search-skill must be in tools")
+	// Explicit schema should contain the enum — derived schema would not.
+	assert.Contains(t, string(tools[idx].InputSchema), `"enum"`, "explicit InputSchema must be used")
+}
+
+// TestBuildTools_NoInputSchema_DerivedFromConfig verifies that when InputSchema is
+// nil, the schema is derived from the tool config URL template.
+func TestBuildTools_NoInputSchema_DerivedFromConfig(t *testing.T) {
+	skillID := uuid.New()
+	toolID := uuid.New()
+
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: skillID, Name: "Fetch", Slug: "fetch-skill"},
+	}}
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID:     toolID,
+			Name:   "fetch_http",
+			Config: []byte(`{"url":"https://example.com/{city}","method":"GET"}`),
+		}},
+	}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{})
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	idx := -1
+	for i, t := range tools {
+		if t.Name == "fetch-skill" {
+			idx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, idx, 0, "fetch-skill must be in tools")
+	// Derived schema should contain "city" from URL template.
+	assert.Contains(t, string(tools[idx].InputSchema), `"city"`, "schema must be derived from URL template")
+}

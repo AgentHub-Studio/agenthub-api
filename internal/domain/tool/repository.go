@@ -62,8 +62,8 @@ func (r *Repository) List(ctx context.Context, req pagination.PageRequest, toolT
 			return nil, 0, fmt.Errorf("tool: count: %w", err)
 		}
 		rows, err = conn.Query(ctx,
-			`SELECT id, name, type, config, description, labels, read_only, 
-			        should_defer, is_destructive, search_hint, always_load, concurrency_safe, 
+			`SELECT id, name, type, config, input_schema, description, labels, read_only,
+			        should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 			        max_result_chars, interrupt_behavior, is_search_or_read,
 			        created_at, updated_at
 			 FROM tool WHERE type=$1 ORDER BY name LIMIT $2 OFFSET $3`,
@@ -74,8 +74,8 @@ func (r *Repository) List(ctx context.Context, req pagination.PageRequest, toolT
 			return nil, 0, fmt.Errorf("tool: count: %w", err)
 		}
 		rows, err = conn.Query(ctx,
-			`SELECT id, name, type, config, description, labels, read_only, 
-			        should_defer, is_destructive, search_hint, always_load, concurrency_safe, 
+			`SELECT id, name, type, config, input_schema, description, labels, read_only,
+			        should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 			        max_result_chars, interrupt_behavior, is_search_or_read,
 			        created_at, updated_at
 			 FROM tool ORDER BY name LIMIT $1 OFFSET $2`,
@@ -117,16 +117,21 @@ func (r *Repository) Create(ctx context.Context, t Tool) (Tool, error) {
 		labels = []string{}
 	}
 
+	var inputSchema interface{}
+	if len(t.InputSchema) > 0 {
+		inputSchema = []byte(t.InputSchema)
+	}
+
 	row := conn.QueryRow(ctx,
-		`INSERT INTO tool (name, type, config, description, labels, read_only, 
-		                   should_defer, is_destructive, search_hint, always_load, 
+		`INSERT INTO tool (name, type, config, input_schema, description, labels, read_only,
+		                   should_defer, is_destructive, search_hint, always_load,
 		                   concurrency_safe, max_result_chars, interrupt_behavior, is_search_or_read)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-		 RETURNING id, name, type, config, description, labels, read_only, 
-		           should_defer, is_destructive, search_hint, always_load, concurrency_safe, 
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		 RETURNING id, name, type, config, input_schema, description, labels, read_only,
+		           should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 		           max_result_chars, interrupt_behavior, is_search_or_read,
 		           created_at, updated_at`,
-		t.Name, t.Type, cfg, t.Description, labels, t.ReadOnly,
+		t.Name, t.Type, cfg, inputSchema, t.Description, labels, t.ReadOnly,
 		t.ShouldDefer, t.IsDestructive, t.SearchHint, t.AlwaysLoad,
 		t.ConcurrencySafe, t.MaxResultChars, t.InterruptBehavior, t.IsSearchOrRead,
 	)
@@ -143,10 +148,10 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (Tool, error) {
 	defer release()
 
 	row := conn.QueryRow(ctx,
-		`SELECT id, name, type, config, description, labels, read_only, 
-		        should_defer, is_destructive, search_hint, always_load, concurrency_safe, 
+		`SELECT id, name, type, config, input_schema, description, labels, read_only,
+		        should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 		        max_result_chars, interrupt_behavior, is_search_or_read,
-		        created_at, updated_at 
+		        created_at, updated_at
 		 FROM tool WHERE id=$1`, id,
 	)
 	t, err := scanTool(row)
@@ -177,14 +182,19 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, req UpdateRequest
 		labels = []string{}
 	}
 
+	var inputSchema interface{}
+	if len(req.InputSchema) > 0 {
+		inputSchema = []byte(req.InputSchema)
+	}
+
 	row := conn.QueryRow(ctx,
-		`UPDATE tool SET name=$1, type=$2, config=$3, description=$4, labels=$5, read_only=$6, updated_at=NOW()
-		 WHERE id=$7
-		 RETURNING id, name, type, config, description, labels, read_only, 
-		           should_defer, is_destructive, search_hint, always_load, concurrency_safe, 
+		`UPDATE tool SET name=$1, type=$2, config=$3, input_schema=$4, description=$5, labels=$6, read_only=$7, updated_at=NOW()
+		 WHERE id=$8
+		 RETURNING id, name, type, config, input_schema, description, labels, read_only,
+		           should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 		           max_result_chars, interrupt_behavior, is_search_or_read,
 		           created_at, updated_at`,
-		req.Name, req.Type, cfg, req.Description, labels, req.ReadOnly, id,
+		req.Name, req.Type, cfg, inputSchema, req.Description, labels, req.ReadOnly, id,
 	)
 	t, err := scanTool(row)
 	if err != nil {
@@ -276,8 +286,8 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 
 	rows, err := conn.Query(ctx,
 		`SELECT st.id, st.skill_id, st.tool_id, st.priority, st.is_active, st.created_at,
-		        t.id, t.name, t.type, t.config, t.description, t.labels, t.read_only, 
-		        t.should_defer, t.is_destructive, t.search_hint, t.always_load, t.concurrency_safe, 
+		        t.id, t.name, t.type, t.config, t.input_schema, t.description, t.labels, t.read_only,
+		        t.should_defer, t.is_destructive, t.search_hint, t.always_load, t.concurrency_safe,
 		        t.max_result_chars, t.interrupt_behavior, t.is_search_or_read,
 		        t.created_at, t.updated_at
 		 FROM skill_tool st
@@ -297,9 +307,10 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 		var st SkillTool
 		var t Tool
 		var cfg []byte
+		var inputSchema []byte
 		if err := rows.Scan(
 			&st.ID, &st.SkillID, &st.ToolID, &st.Priority, &st.IsActive, &st.CreatedAt,
-			&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.ReadOnly,
+			&t.ID, &t.Name, &t.Type, &cfg, &inputSchema, &t.Description, &t.Labels, &t.ReadOnly,
 			&t.ShouldDefer, &t.IsDestructive, &t.SearchHint, &t.AlwaysLoad, &t.ConcurrencySafe,
 			&t.MaxResultChars, &t.InterruptBehavior, &t.IsSearchOrRead,
 			&t.CreatedAt, &t.UpdatedAt,
@@ -307,6 +318,9 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 			return nil, nil, fmt.Errorf("tool: scan skill_tool: %w", err)
 		}
 		t.Config = cfg
+		if len(inputSchema) > 0 {
+			t.InputSchema = inputSchema
+		}
 		bindings = append(bindings, st)
 		tools = append(tools, t)
 	}
@@ -318,8 +332,9 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 func scanTool(row pgx.Row) (Tool, error) {
 	var t Tool
 	var cfg []byte
+	var inputSchema []byte
 	if err := row.Scan(
-		&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.ReadOnly,
+		&t.ID, &t.Name, &t.Type, &cfg, &inputSchema, &t.Description, &t.Labels, &t.ReadOnly,
 		&t.ShouldDefer, &t.IsDestructive, &t.SearchHint, &t.AlwaysLoad, &t.ConcurrencySafe,
 		&t.MaxResultChars, &t.InterruptBehavior, &t.IsSearchOrRead,
 		&t.CreatedAt, &t.UpdatedAt,
@@ -327,14 +342,18 @@ func scanTool(row pgx.Row) (Tool, error) {
 		return Tool{}, fmt.Errorf("tool: scan: %w", err)
 	}
 	t.Config = cfg
+	if len(inputSchema) > 0 {
+		t.InputSchema = inputSchema
+	}
 	return t, nil
 }
 
 func scanToolFromRows(rows pgx.Rows) (Tool, error) {
 	var t Tool
 	var cfg []byte
+	var inputSchema []byte
 	if err := rows.Scan(
-		&t.ID, &t.Name, &t.Type, &cfg, &t.Description, &t.Labels, &t.ReadOnly,
+		&t.ID, &t.Name, &t.Type, &cfg, &inputSchema, &t.Description, &t.Labels, &t.ReadOnly,
 		&t.ShouldDefer, &t.IsDestructive, &t.SearchHint, &t.AlwaysLoad, &t.ConcurrencySafe,
 		&t.MaxResultChars, &t.InterruptBehavior, &t.IsSearchOrRead,
 		&t.CreatedAt, &t.UpdatedAt,
@@ -342,6 +361,9 @@ func scanToolFromRows(rows pgx.Rows) (Tool, error) {
 		return Tool{}, fmt.Errorf("tool: scan: %w", err)
 	}
 	t.Config = cfg
+	if len(inputSchema) > 0 {
+		t.InputSchema = inputSchema
+	}
 	return t, nil
 }
 

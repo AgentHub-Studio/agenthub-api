@@ -431,10 +431,14 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		for i, bt := range bindings {
 			if bt.IsActive && i < len(boundTools) {
 				hasActiveTool = true
-				// Derive schema from tool config.
-				derived := deriveSchemaFromToolConfig(boundTools[i])
-				if len(derived) > 0 {
-					inputSchema = derived
+				// P-C175-1: prefer explicit InputSchema; fall back to derived schema.
+				if len(boundTools[i].InputSchema) > 2 { // non-nil, non-"{}"
+					inputSchema = boundTools[i].InputSchema
+				} else {
+					derived := deriveSchemaFromToolConfig(boundTools[i])
+					if len(derived) > 0 {
+						inputSchema = derived
+					}
 				}
 				// Use DB flags from bound tool.
 				if boundTools[i].ReadOnly {

@@ -99,6 +99,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		Name:        req.Name,
 		Type:        req.Type,
 		Config:      req.Config,
+		InputSchema: req.InputSchema,
 		Description: req.Description,
 		Labels:      req.Labels,
 	}

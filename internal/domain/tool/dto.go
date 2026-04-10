@@ -12,6 +12,7 @@ type CreateRequest struct {
 	Name        string          `json:"name"`
 	Type        ToolType        `json:"type"`
 	Config      json.RawMessage `json:"config"`
+	InputSchema json.RawMessage `json:"inputSchema,omitempty"` // P-C175-1: explicit schema
 	Description string          `json:"description"`
 	Labels      []string        `json:"labels"`
 	ReadOnly    bool            `json:"readOnly"`
@@ -22,6 +23,7 @@ type UpdateRequest struct {
 	Name        string          `json:"name"`
 	Type        ToolType        `json:"type"`
 	Config      json.RawMessage `json:"config"`
+	InputSchema json.RawMessage `json:"inputSchema,omitempty"` // P-C175-1: explicit schema
 	Description string          `json:"description"`
 	Labels      []string        `json:"labels"`
 	ReadOnly    bool            `json:"readOnly"`
@@ -36,15 +38,16 @@ type BindRequest struct {
 
 // Response is the JSON representation of a Tool.
 type Response struct {
-	ID          uuid.UUID `json:"id"`
-	Name        string    `json:"name"`
-	Type        ToolType  `json:"type"`
-	Config      any       `json:"config"`
-	Description string    `json:"description"`
-	Labels      []string  `json:"labels"`
-	ReadOnly    bool      `json:"readOnly"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID          uuid.UUID       `json:"id"`
+	Name        string          `json:"name"`
+	Type        ToolType        `json:"type"`
+	Config      any             `json:"config"`
+	InputSchema json.RawMessage `json:"inputSchema,omitempty"` // P-C175-1: exposed when set
+	Description string          `json:"description"`
+	Labels      []string        `json:"labels"`
+	ReadOnly    bool            `json:"readOnly"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
 }
 
 // SkillToolResponse is the JSON representation of a SkillTool binding.
@@ -97,6 +100,7 @@ func ResponseFrom(t Tool) Response {
 		Name:        t.Name,
 		Type:        t.Type,
 		Config:      config,
+		InputSchema: t.InputSchema,
 		Description: t.Description,
 		Labels:      labels,
 		ReadOnly:    t.ReadOnly,

@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,13 +45,17 @@ func IsValidToolType(t string) bool {
 
 // Tool is a concrete implementation of a skill capability.
 type Tool struct {
-	ID            uuid.UUID `db:"id"`
-	Name          string    `db:"name"`
-	Type          ToolType  `db:"type"`
-	Config        []byte    `db:"config"`
-	Description   string    `db:"description"`
-	Labels        []string  `db:"labels"`
-	ReadOnly      bool      `db:"read_only"`
+	ID            uuid.UUID       `db:"id"`
+	Name          string          `db:"name"`
+	Type          ToolType        `db:"type"`
+	Config        []byte          `db:"config"`
+	// InputSchema is an explicit JSON Schema for this tool's input parameters.
+	// When set, the runner uses this schema verbatim instead of auto-deriving one
+	// from the tool config. P-C175-1/P-C175-2.
+	InputSchema   json.RawMessage `db:"input_schema"`
+	Description   string          `db:"description"`
+	Labels        []string        `db:"labels"`
+	ReadOnly      bool            `db:"read_only"`
 	// ShouldDefer marks tools whose full schema should not be sent to the LLM
 	// in the initial prompt. The LLM loads them on demand via tool_search.
 	// Inspired by Claude Code's shouldDefer flag (Tool.ts).
