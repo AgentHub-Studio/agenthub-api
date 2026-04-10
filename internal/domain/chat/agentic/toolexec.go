@@ -720,6 +720,38 @@ func ExecuteDocumentSearch(ctx context.Context, client knowledge.DocumentSearchC
 	return executeDocumentSearchInternal(ctx, client, kbIDs, rawArgs)
 }
 
+// stripStatusCodeFromToolOutput removes the `status_code` / `statusCode` key from
+// a JSON tool result before it is sent to the LLM. HTTP status codes are transport-
+// level metadata that the LLM should not use for reasoning — it should focus on the
+// content of the response body. P-C176-1.
+//
+// If raw is not a JSON object, or neither key is present, the input is returned unchanged
+// (preserving exact byte-for-byte formatting of the original JSON).
+func stripStatusCodeFromToolOutput(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw // not a JSON object — leave unchanged
+	}
+	_, hasSnake := m["status_code"]
+	_, hasCamel := m["statusCode"]
+	if !hasSnake && !hasCamel {
+		return raw // neither key present — return original unchanged (preserves formatting)
+	}
+	delete(m, "status_code")
+	delete(m, "statusCode")
+	if len(m) == 0 {
+		return raw // all keys removed — keep original rather than returning empty object
+	}
+	sanitised, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return sanitised
+}
+
 // FormatToolError produces an LLM-readable error string with head+tail preservation
 // for long errors. Errors exceeding maxChars keep the first half and last half with
 // a truncation notice in the middle. This preserves both the error type (usually at

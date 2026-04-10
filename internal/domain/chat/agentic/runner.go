@@ -1730,7 +1730,11 @@ func FormatToolResult(r ToolExecResult) string {
 		return fmt.Sprintf("Error: %s", *r.Error)
 	}
 	if len(r.Output) > 0 {
-		s := string(r.Output)
+		// P-C176-1: strip status_code / statusCode from HTTP tool output before
+		// sending to LLM. HTTP status codes are transport metadata; the LLM should
+		// reason about the response body, not the protocol-level code.
+		sanitised := stripStatusCodeFromToolOutput(r.Output)
+		s := string(sanitised)
 		if strings.TrimSpace(s) != "" && s != "{}" && s != "null" {
 			return s
 		}

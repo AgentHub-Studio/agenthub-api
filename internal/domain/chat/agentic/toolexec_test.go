@@ -322,3 +322,35 @@ func (m *mockKnowledgeSearchClient) Search(_ context.Context, _ string, _ []uuid
 	_ = json.Unmarshal(b, &res)
 	return res, nil
 }
+
+// TestFormatToolResult_NoStatusCodeForLLM verifies status_code is stripped from HTTP output.
+// P-C176-1: the LLM must not see HTTP status codes in tool results.
+func TestFormatToolResult_NoStatusCodeForLLM(t *testing.T) {
+	r := agentic.ToolExecResult{
+		Output: json.RawMessage(`{"response":{"data":"value"},"status_code":200}`),
+	}
+	result := agentic.FormatToolResult(r)
+	assert.NotContains(t, result, "status_code")
+	assert.NotContains(t, result, "200")
+	assert.Contains(t, result, "value")
+}
+
+// TestFormatToolResult_StripsStatusCodeVariants verifies both snake_case and camelCase variants.
+func TestFormatToolResult_StripsStatusCodeVariants(t *testing.T) {
+	r := agentic.ToolExecResult{
+		Output: json.RawMessage(`{"response":"ok","status_code":201,"statusCode":201}`),
+	}
+	result := agentic.FormatToolResult(r)
+	assert.NotContains(t, result, "status_code")
+	assert.NotContains(t, result, "statusCode")
+	assert.Contains(t, result, "response")
+}
+
+// TestFormatToolResult_NonHTTP_OutputUnchanged verifies non-HTTP outputs (no status_code) pass through.
+func TestFormatToolResult_NonHTTP_OutputUnchanged(t *testing.T) {
+	r := agentic.ToolExecResult{
+		Output: json.RawMessage(`{"users":[{"id":1,"name":"Alice"}]}`),
+	}
+	result := agentic.FormatToolResult(r)
+	assert.JSONEq(t, `{"users":[{"id":1,"name":"Alice"}]}`, result)
+}
