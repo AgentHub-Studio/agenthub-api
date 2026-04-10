@@ -2,9 +2,11 @@ package agentic
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -36,6 +39,9 @@ type ChatModelFactory interface {
 	// ResolveModel returns the default model name for the given provider
 	// from the tenant's settings. Returns "" if not configured.
 	ResolveModel(ctx context.Context, provider string) string
+	// ResolveDefaultProvider returns the tenant's configured default LLM provider
+	// from the "general.defaultProvider" setting. Returns "" if not configured.
+	ResolveDefaultProvider(ctx context.Context) string
 }
 
 // SessionRunnerAdapter implements chat.SessionRunner by creating a Runner
@@ -53,8 +59,9 @@ type SessionRunnerAdapter struct {
 	agentRepo    agent.Repository
 	skillRepo    *skill.Repository
 	toolRepo     *tool.Repository
-	integRepo    integration.Service
+	integRepo    *integration.Service
 	mcpRepo      mcp.Repository
+	mcpClient    MCPClientService
 
 	// elicitation manages a registry of active ElicitationHandlers keyed by
 	// session ID so that HTTP respond calls can be routed to the correct run.
@@ -92,6 +99,18 @@ func (r *elicitationRegistry) Respond(runKey, requestID string, result Elicitati
 		return false
 	}
 	return h.Respond(requestID, result)
+}
+
+// Pending returns all unresolved requests for the given run key (sessionID).
+// Returns nil when no active run is found.
+func (r *elicitationRegistry) Pending(runKey string) []*ElicitationRequest {
+	r.mu.Lock()
+	h, ok := r.byRunID[runKey]
+	r.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return h.Pending()
 }
 
 // NewSessionRunnerAdapter creates an adapter that wires the chat.Service
@@ -152,9 +171,15 @@ func NewSessionRunnerAdapterWithFactory(
 		agentRepo:    agentRepo,
 		skillRepo:    skillRepo,
 		toolRepo:     toolRepo,
-		integRepo:    *integRepo,
+		integRepo:    integRepo,
 		mcpRepo:      mcpRepo,
 	}
+}
+
+// WithMCPClient wires the runtime-backed MCP client into runners spawned by the adapter.
+func (a *SessionRunnerAdapter) WithMCPClient(client MCPClientService) *SessionRunnerAdapter {
+	a.mcpClient = client
+	return a
 }
 
 // staticModelFactory always returns the same ChatModel regardless of provider.
@@ -169,7 +194,18 @@ func (f staticModelFactory) Build(_ context.Context, _, _ string) (ai.ChatModel,
 	return f.model, nil
 }
 
-func (f staticModelFactory) ResolveModel(_ context.Context, _ string) string { return "" }
+func (f staticModelFactory) ResolveModel(_ context.Context, _ string) string          { return "" }
+func (f staticModelFactory) ResolveDefaultProvider(_ context.Context) string { return "" }
+
+// nopPersister is a MessagePersister that accepts writes without hitting the
+// database. It is used for sub-agent (subtask) runners whose sessions are
+// ephemeral and never inserted into the chat_session table, preventing FK
+// violations on chat_message.session_id_fkey.
+type nopPersister struct{}
+
+func (nopPersister) CreateMessage(_ context.Context, msg chat.ChatMessage) (chat.ChatMessage, error) {
+	return msg, nil
+}
 
 // adapterRunnerFactory implements RunnerFactory for sub-runner spawning.
 type adapterRunnerFactory struct {
@@ -186,7 +222,7 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 		f.adapter.tools,
 		f.adapter.ctxManager,
 		f.adapter.memory,
-		f.adapter.repo,
+		nopPersister{}, // sub-sessions are ephemeral — skip DB persistence to avoid FK violations
 		&repoHistoryLoader{repo: f.adapter.repo},
 		f.adapter.hookExecutor,
 		config,
@@ -194,6 +230,9 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	if f.adapter.agentRepo != nil {
 		managementExec := NewManagementExecutor(f.adapter.agentRepo, f.adapter.skillRepo, f.adapter.toolRepo, f.adapter.mcpRepo)
 		runner.WithManagementExecutor(managementExec)
+	}
+	if f.adapter.mcpClient != nil {
+		runner.WithMCPClient(f.adapter.mcpClient)
 	}
 	runner.WithAgentMailbox(f.agentMailbox)
 	subtaskExec := NewSubtaskExecutor(f)
@@ -220,9 +259,19 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	}
 
 	config := RunConfigFromModelConfig(agentCfg.ModelConfig)
+	defaultCfg := DefaultRunConfig()
+
+	// When the agent has no explicit provider, use the tenant's configured default.
+	// This avoids hard-coding the fallback to "anthropic" when the tenant is on
+	// a different provider (P-C75-1).
+	if config.Provider == "" || config.Provider == defaultCfg.Provider {
+		if defaultProvider := a.modelFactory.ResolveDefaultProvider(ctx); defaultProvider != "" {
+			config.Provider = defaultProvider
+		}
+	}
 
 	// If the agent doesn't specify a model, resolve it from the tenant's settings.
-	if config.Model == "" || config.Model == DefaultRunConfig().Model {
+	if config.Model == "" || config.Model == defaultCfg.Model {
 		if settingsModel := a.modelFactory.ResolveModel(ctx, config.Provider); settingsModel != "" {
 			config.Model = settingsModel
 		}
@@ -255,6 +304,9 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	if a.agentRepo != nil {
 		managementExec := NewManagementExecutor(a.agentRepo, a.skillRepo, a.toolRepo, a.mcpRepo)
 		runner.WithManagementExecutor(managementExec)
+	}
+	if a.mcpClient != nil {
+		runner.WithMCPClient(a.mcpClient)
 	}
 	runner.WithAgentMailbox(agentMailbox)
 	subtaskExec := NewSubtaskExecutor(factory)
@@ -302,6 +354,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		TenantID:        in.TenantID,
 		PermissionRules: ParsePermissionRules(agentCfg.PermissionRules),
 		Elicitation:     elicHandler,
+		IsAdmin:         callerHasAdminRole(ctx), // P-C298-1
 	})
 
 	chatCh := make(chan chat.RunEvent, config.StreamBufferSize)
@@ -358,6 +411,25 @@ func (a *SessionRunnerAdapter) RespondElicitation(sessionID, requestID string, r
 	return a.elicitation.Respond(sessionID, requestID, agResult)
 }
 
+// GetPendingElicitations returns unresolved ask_user requests for the given session.
+// P-C101-1: enables async (RabbitMQ) callers to discover pending elicitations by polling,
+// since the SSE input_request event may have been drained by the background worker.
+func (a *SessionRunnerAdapter) GetPendingElicitations(sessionID string) []chat.PendingElicitationInfo {
+	reqs := a.elicitation.Pending(sessionID)
+	if len(reqs) == 0 {
+		return nil
+	}
+	result := make([]chat.PendingElicitationInfo, 0, len(reqs))
+	for _, req := range reqs {
+		result = append(result, chat.PendingElicitationInfo{
+			RequestID: req.RequestID,
+			Payload:   buildUiFormPayload(req.Params),
+			CreatedAt: req.CreatedAt,
+		})
+	}
+	return result
+}
+
 func (a *SessionRunnerAdapter) attachAuxiliaryComponents(
 	runner *Runner,
 	factory RunnerFactory,
@@ -380,6 +452,55 @@ func (a *SessionRunnerAdapter) attachAuxiliaryComponents(
 		DefaultSessionMemoryConfig(),
 	).WithPromptTemplateResolver(a.prompt.tpl)
 	runner.WithSessionMemoryExtractor(memoryExtractor)
+}
+
+// callerHasAdminRole parses the raw JWT from the context and returns true when
+// the caller has the "admin" role in either realm_access.roles or any
+// resource_access.{client}.roles claim.
+// P-C298-1: used to gate the agenthub_manage builtin tool to admin callers.
+// Parsing is without signature verification — the token is already validated
+// by the auth middleware before reaching this point.
+func callerHasAdminRole(ctx context.Context) bool {
+	raw := tenant.TokenFromContext(ctx)
+	if raw == "" {
+		return false
+	}
+	// JWT = header.payload.signature — parse only the payload segment.
+	parts := strings.SplitN(raw, ".", 3)
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		RealmAccess struct {
+			Roles []string `json:"roles"`
+		} `json:"realm_access"`
+		// Keycloak may place roles in resource_access.<clientId>.roles
+		ResourceAccess map[string]struct {
+			Roles []string `json:"roles"`
+		} `json:"resource_access"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return false
+	}
+	// Check realm-level roles first.
+	for _, r := range claims.RealmAccess.Roles {
+		if r == "admin" {
+			return true
+		}
+	}
+	// Check resource-level roles (e.g. resource_access.agenthub-frontend.roles).
+	for _, access := range claims.ResourceAccess {
+		for _, r := range access.Roles {
+			if r == "admin" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // repoHistoryLoader adapts chat.Repository to HistoryLoader.

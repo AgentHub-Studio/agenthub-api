@@ -60,6 +60,10 @@ type RunInput struct {
 	// Elicitation, when set, handles ask_user tool calls by blocking until the
 	// user submits a response via POST /elicitation/{requestId}/respond.
 	Elicitation ElicitationSubmitter
+
+	// IsAdmin, when true, grants access to the agenthub_manage builtin tool.
+	// P-C298-1: set from the caller's JWT "admin" realm role.
+	IsAdmin bool
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
@@ -67,6 +71,7 @@ type Runner struct {
 	chatModel       ai.ChatModel
 	skillClient     *SkillRuntimeClient
 	prompt          *PromptBuilder
+	promptCache     map[string]string // session-scoped prompt section cache (owned per Runner)
 	tools           *ToolSchemaBuilder
 	mcpClient       MCPClientService
 	ctxManager      *ContextManager
@@ -84,6 +89,7 @@ type Runner struct {
 	memoryExtractor *SessionMemoryExtractor
 	cacheSafeSnap   *CacheSafeParamsSnapshot
 	progress        *RunProgressTracker
+	commands        *CommandRegistry
 	config          RunConfig
 	runID           uuid.UUID
 }
@@ -110,6 +116,7 @@ func NewRunner(
 		chatModel:     chatModel,
 		skillClient:   skillClient,
 		prompt:        prompt,
+		promptCache:   NewSessionCache(),
 		tools:         tools,
 		ctxManager:    ctxManager,
 		memory:        memory,
@@ -117,6 +124,7 @@ func NewRunner(
 		history:       history,
 		toolExec:      NewStreamingToolExecutor(skillClient, hookExecutor, config),
 		progress:      NewRunProgressTracker(10),
+		commands:      NewCommandRegistry(),
 		config:        config,
 		denialTracker: dt,
 	}
@@ -216,7 +224,44 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	var totalCost float64
 	var turnIndex int
 
+	// lastRunError tracks the most recent fatal error so the deferred cleanup
+	// can persist it as an assistant message (P-P1: run errors were silently
+	// dropped from chat history — user saw no response after a failed run).
+	var lastRunError *ErrorData
+
+	// localEmitError wraps emitError to record the error for deferred persistence.
+	// P-C96-1: emit the friendly message to the SSE stream instead of the raw error,
+	// so the frontend and the DB history receive consistent, user-facing messages.
+	localEmitError := func(code string, err error) {
+		rawMsg := err.Error()
+		lastRunError = &ErrorData{Message: rawMsg, Code: code}
+		slog.Warn("agentic: run error", "code", code, "error", rawMsg)
+		friendly := friendlyRunErrorMessage(code, rawMsg)
+		ch <- NewRunEvent(EventError, ErrorData{Message: friendly, Code: code})
+	}
+
 	defer func() {
+		// Persist a system error message so the chat history always reflects what
+		// happened — even when the run fails before producing any assistant output.
+		// Use context.Background() because the request context may already be
+		// cancelled by the time this deferred function executes.
+		if lastRunError != nil {
+			errContent := friendlyRunErrorMessage(lastRunError.Code, lastRunError.Message)
+			msg := chat.ChatMessage{
+				SessionID:   in.SessionID,
+				Role:        "assistant",
+				Content:     errContent,
+				MessageType: chat.MessageTypeText,
+				// RunID intentionally omitted: the run record may not exist in the DB
+				// when the error occurs before run creation (e.g. LLM API key invalid),
+				// which would cause a FK violation on chat_message_run_id_fkey.
+			}
+			// Use WithoutCancel to preserve tenant/values from ctx without inheriting its cancellation.
+			persistCtx := context.WithoutCancel(ctx)
+			if _, persistErr := r.persister.CreateMessage(persistCtx, msg); persistErr != nil {
+				slog.Warn("runner: failed to persist run error message", "error", persistErr)
+			}
+		}
 		if !runCompleted {
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:                    turnIndex,
@@ -244,6 +289,65 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 	}
 
+	// 1b. Intercept slash commands before touching the LLM.
+	// CommandRegistry is pre-wired in NewRunner(); if the user message starts with '/'
+	// and matches a registered command, we execute it locally, persist the response as
+	// an assistant message, emit text_delta + run_complete, and return without ever
+	// building tool schemas or calling the LLM.
+	if r.commands != nil {
+		if cmd, args, ok := r.commands.Parse(in.UserMessage); ok {
+			cc := CommandContext{
+				SessionID: in.SessionID.String(),
+				AgentID:   in.AgentID.String(),
+				TenantID:  in.TenantID,
+			}
+			result, cmdErr := r.commands.Execute(ctx, cmd, args, cc)
+			if cmdErr != nil {
+				localEmitError("slash_command", cmdErr)
+				return
+			}
+			// Persist user message so history is consistent.
+			userCmdMsg := chat.ChatMessage{
+				SessionID:   in.SessionID,
+				Role:        "user",
+				Content:     in.UserMessage,
+				MessageType: chat.MessageTypeText,
+				RunID:       &r.runID,
+			}
+			if r.runID == uuid.Nil {
+				userCmdMsg.RunID = nil
+			}
+			if _, err := r.persister.CreateMessage(ctx, userCmdMsg); err != nil {
+				localEmitError("persist_user_msg", err)
+				return
+			}
+			// Persist assistant response.
+			assistantCmdMsg := chat.ChatMessage{
+				SessionID:   in.SessionID,
+				Role:        "assistant",
+				Content:     result.Output,
+				MessageType: chat.MessageTypeText,
+				RunID:       &r.runID,
+			}
+			if r.runID == uuid.Nil {
+				assistantCmdMsg.RunID = nil
+			}
+			if _, err := r.persister.CreateMessage(ctx, assistantCmdMsg); err != nil {
+				localEmitError("persist_assistant_msg", err)
+				return
+			}
+			// Emit the command output as a text stream.
+			ch <- NewRunEvent(EventTextDelta, TextDeltaData{Content: result.Output})
+			runCompleted = true
+			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
+				TotalTurns:  1,
+				TotalTokens: 0,
+				TotalCost:   0,
+			})
+			return
+		}
+	}
+
 	// 2. Build tool schemas with deferred loading (depth limits for sub-agent availability).
 	// When the total tool count exceeds DeferredToolThreshold, tools marked ShouldDefer
 	// are separated — only their names go into the system prompt, and the LLM must call
@@ -251,7 +355,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	// Inspired by Claude Code's isDeferredTool + ToolSearchTool pattern.
 	toolBuilder := r.tools.Clone()
 	if toolBuilder == nil {
-		emitError(ch, "tool_schema_build", fmt.Errorf("tool builder not configured"))
+		localEmitError("tool_schema_build", fmt.Errorf("tool builder not configured"))
 		return
 	}
 
@@ -266,9 +370,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	toolBuilder.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
+	toolBuilder.WithAdminScope(in.IsAdmin) // P-C298-1: gate agenthub_manage on admin role
 	toolResult, err := toolBuilder.BuildWithDeferred(ctx, in.AgentID)
 	if err != nil {
-		emitError(ch, "tool_schema_build", err)
+		localEmitError("tool_schema_build", err)
 		return
 	}
 	for _, w := range toolResult.Warnings {
@@ -312,26 +417,35 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 	}
 
+	// Build the callable-skills set for the prompt builder so formatToolsSection
+	// can filter out instruction-only skills (P-C70-1: listing non-callable skills
+	// in "## Available Tools" causes weak models to hallucinate tool calls).
+	callableSkillSlugs := make(map[string]struct{}, len(toolResult.All))
+	for _, t := range toolResult.All {
+		callableSkillSlugs[t.Name] = struct{}{}
+	}
+
 	// 3. Build system prompt (after tools, so deferred tool names can be injected).
 	systemPrompt, err := r.prompt.Build(ctx, PromptInput{
-		AgentID:           in.AgentID,
-		SessionID:         in.SessionID,
-		SystemPrompt:      in.SystemPrompt,
-		Memories:          memories,
-		CoordinatorMode:   gates.CoordinatorMode,
-		DeferredToolNames: toolResult.DeferredToolNames(),
-		UserOnlySkills:    toolResult.UserOnlySkills,
-		UnavailableTools:  toolResult.Warnings,
-	})
+		AgentID:            in.AgentID,
+		SessionID:          in.SessionID,
+		SystemPrompt:       in.SystemPrompt,
+		Memories:           memories,
+		CoordinatorMode:    gates.CoordinatorMode,
+		DeferredToolNames:  toolResult.DeferredToolNames(),
+		UserOnlySkills:     toolResult.UserOnlySkills,
+		UnavailableTools:   toolResult.Warnings,
+		CallableSkillSlugs: callableSkillSlugs,
+	}, r.promptCache)
 	if err != nil {
-		emitError(ch, "prompt_build", err)
+		localEmitError("prompt_build", err)
 		return
 	}
 
 	// 4. Load conversation history.
 	messages, lastResponseID, err := r.loadHistory(ctx, in.SessionID)
 	if err != nil {
-		emitError(ch, "load_history", err)
+		localEmitError("load_history", err)
 		return
 	}
 
@@ -357,7 +471,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		userMsg.RunID = nil
 	}
 	if _, err := r.persister.CreateMessage(ctx, userMsg); err != nil {
-		emitError(ch, "persist_user_msg", err)
+		localEmitError("persist_user_msg", err)
 		return
 	}
 
@@ -372,6 +486,22 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	const maxMaxTokensRecoveries = 3
 	effectiveMaxTokens := r.config.MaxTokensPerCall // may increase on "length" recovery
 	budgetTracker := &BudgetTracker{}
+	// emptyResponseRetries tracks how many consecutive turns returned neither text
+	// nor tool calls. One retry is allowed (with a nudge); on the second empty
+	// response we fall through and persist "(no content)" as-is.
+	emptyResponseRetries := 0
+	// duplicateToolCallStreak tracks consecutive turns that called the exact same
+	// tool with the same arguments. When this exceeds the threshold the runner
+	// injects a nudge instead of executing the duplicate call, to break loops.
+	duplicateToolCallStreak := 0
+	lastToolCallSignature := ""
+	const maxDuplicateToolCallStreak = 3
+	// lastTurnHadToolErrors tracks whether the immediately-preceding tool-execution
+	// turn returned at least one error result. When true, any ask_user call in the
+	// next turn is auto-answered with a synthetic "config error" response instead of
+	// blocking for user input (P-G1 fix: prevents the LLM from delegating tool config
+	// failures to the user via ask_user).
+	lastTurnHadToolErrors := false
 	// taskBudgetRemaining tracks how much of the output token budget has been
 	// "consumed" by compacted-away context. After compaction the LLM can no
 	// longer count tokens from the removed history, so we decrement remaining
@@ -510,17 +640,17 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					slog.Error("reactive compaction failed during prompt_too_long recovery",
 						"error", compactErr, "failures", compactFailures)
 					if compactFailures >= maxCompactFailures {
-						emitError(ch, "compact_circuit_breaker", fmt.Errorf("compaction failed %d times consecutively", compactFailures))
+						localEmitError("compact_circuit_breaker", fmt.Errorf("compaction failed %d times consecutively", compactFailures))
 						return
 					}
-					emitError(ch, "llm_call", err)
+					localEmitError("llm_call", err)
 					return
 				}
 				// Verify compaction actually reduced tokens; escalate if needed.
 				compactResult, compactErr = r.ctxManager.VerifyCompaction(ctx, compactResult, systemTokens, r.config, nil)
 				if compactErr != nil {
 					compactFailures++
-					emitError(ch, "llm_call", err)
+					localEmitError("llm_call", err)
 					return
 				}
 				messages = chatMessagesToAI(compactResult.Messages)
@@ -544,7 +674,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				continue // retry the turn with full history
 			}
 
-			emitError(ch, "llm_call", err)
+			localEmitError("llm_call", err)
 			return
 		}
 
@@ -561,7 +691,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		// 5b. Consume stream, accumulate response.
 		assistantContent, toolCalls, finishReason, usage, streamResponseID, streamErr := r.consumeStream(ctx, ch, fallbackResult.Stream)
 		if streamErr != nil {
-			emitError(ch, "stream_consume", streamErr)
+			localEmitError("stream_consume", streamErr)
 			return
 		}
 
@@ -580,9 +710,28 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 
 		// Guard against empty LLM response (no text, no tool calls).
-		// Some providers return empty content on edge cases; treat as no-op stop.
+		// Some providers (e.g. local Ollama models) return empty content on edge cases.
+		// Allow one retry by injecting a nudge message; on the second empty response
+		// fall through with "(no content)" so the turn is persisted and the run ends.
 		if assistantContent == "" && len(toolCalls) == 0 && finishReason == "stop" {
+			if emptyResponseRetries < 1 {
+				emptyResponseRetries++
+				slog.Warn("agentic: empty LLM response, retrying with nudge",
+					"turn", turnIndex, "attempt", emptyResponseRetries)
+				// Append a transient nudge — not persisted to the DB — to prompt the model
+				// to produce a substantive response on the next iteration.
+				messages = append(messages, ai.Message{
+					Role:    ai.RoleUser,
+					Content: "[SYSTEM] Your previous response was empty. Please respond to the user's request with text or by calling one of the available tools. If you need more information, ask the user a question.",
+				})
+				turnIndex++
+				continue
+			}
+			// Second consecutive empty response — give up and store sentinel.
+			slog.Warn("agentic: empty LLM response on retry, storing sentinel", "turn", turnIndex)
 			assistantContent = "(no content)"
+		} else {
+			emptyResponseRetries = 0 // reset on any non-empty response
 		}
 
 		totalTokens += usage.TotalTokens
@@ -609,7 +758,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		// Budget check.
 		if gates.HasBudgetLimit && totalCost > effectiveBudget {
-			emitError(ch, "budget_exceeded", fmt.Errorf("run cost $%.4f exceeded budget $%.4f", totalCost, effectiveBudget))
+			localEmitError("budget_exceeded", fmt.Errorf("run cost $%.4f exceeded budget $%.4f", totalCost, effectiveBudget))
 			return
 		}
 
@@ -649,6 +798,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		// 5d. Check finish reason.
 		switch finishReason {
 		case "stop":
+			// LLM produced a final response — reset the P-G1 error guard.
+			lastTurnHadToolErrors = false
 			// Token budget continuation: if a budget is set and the LLM stopped
 			// before reaching it, inject a nudge message to keep working.
 			if gates.HasOutputTokenBudget {
@@ -730,7 +881,68 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				tcNames[ti] = tc.Function.Name
 			}
 			slog.Info("agentic: LLM requested tool_calls", "turn", turnIndex, "tools", tcNames)
-			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools, allowedToolsIndex)
+
+			// Duplicate tool-call loop detection: if the LLM keeps calling the same
+			// tool with identical arguments, it is stuck and unlikely to self-correct.
+			// After maxDuplicateToolCallStreak identical consecutive calls, inject a
+			// nudge message (without executing the duplicate) to break the cycle.
+			callSig := computeToolCallSignature(toolCalls)
+			if callSig == lastToolCallSignature {
+				duplicateToolCallStreak++
+			} else {
+				duplicateToolCallStreak = 0
+				lastToolCallSignature = callSig
+			}
+			// When the previous turn produced tool errors, allow at most one retry of
+			// the same tool signature — re-calling an already-failed tool immediately
+			// is a transient-error retry loop (P-C71-1 fix).
+			effectiveStreakThreshold := maxDuplicateToolCallStreak
+			if lastTurnHadToolErrors {
+				effectiveStreakThreshold = 1
+			}
+			if duplicateToolCallStreak >= effectiveStreakThreshold {
+				slog.Warn("agentic: duplicate tool-call loop detected, injecting break nudge",
+					"turn", turnIndex, "streak", duplicateToolCallStreak, "signature", callSig,
+					"prevTurnHadErrors", lastTurnHadToolErrors)
+				// NOTE: the assistant message was already persisted and appended to messages
+				// at lines 761-773 (the main flow above). Do NOT re-persist or re-append here —
+				// that would produce duplicate DB rows and a doubled/tripled LLM context window.
+				// Only persist and append the synthetic nudge tool_result.
+				nudgeContent := fmt.Sprintf("[SYSTEM] You have called the same tool (%s) with identical arguments %d times. The data is already in your context. Please stop calling tools and provide a final summary response to the user now.",
+					tcNames[0], duplicateToolCallStreak+1)
+				// P-C216-1: persist a nudge tool_result for EVERY tool_call in the batch.
+				// When the LLM calls N tools in parallel and the repetition guard fires,
+				// previously only toolCalls[0] got a result, leaving the other tool_call_ids
+				// orphaned. OpenAI then rejects the entire session history with HTTP 400
+				// ("tool_call_id did not have response messages"), permanently corrupting
+				// the session. Fix: emit a nudge result for each tool_call in the turn.
+				for _, tc := range toolCalls {
+					tcID := tc.ID // capture loop variable
+					nudgeResult := chat.ChatMessage{
+						SessionID:    in.SessionID,
+						Role:         "tool",
+						Content:      nudgeContent,
+						MessageType:  chat.MessageTypeToolResult,
+						ToolCallID:   &tcID,
+						RunID:        &r.runID,
+					}
+					if _, err := r.persister.CreateMessage(ctx, nudgeResult); err != nil {
+						emitError(ch, "persist_loop_nudge", err)
+						return
+					}
+					messages = append(messages, ai.Message{
+						Role:       ai.RoleTool,
+						Content:    nudgeContent,
+						ToolCallID: tc.ID,
+					})
+				}
+				duplicateToolCallStreak = 0 // reset after nudge
+				ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{TurnIndex: turnIndex, Source: "loop_break"})
+				turnIndex++
+				continue
+			}
+
+			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools, allowedToolsIndex, lastTurnHadToolErrors)
 			slog.Info("agentic: tool execution completed", "turn", turnIndex, "resultCount", len(toolResults), "ctxErr", ctx.Err())
 
 			// Check if denial tracking indicates a stuck loop.
@@ -758,7 +970,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				}
 				turnResultChars += len(result.Output)
 
-				resultContent := FormatToolResult(result)
+				// P-C84-1: sanitize error before sending to LLM, same as for SSE (P-C65-2).
+				sanitizedResult := result
+				sanitizedResult.Error = sanitizeToolErrorPtr(result.Error)
+				resultContent := FormatToolResult(sanitizedResult)
 				toolMsg := chat.ChatMessage{
 					SessionID:   in.SessionID,
 					Role:        "tool",
@@ -789,12 +1004,22 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 						Name:       toolName,
 						Output:     result.Output,
 						DurationMs: result.LatencyMs,
-						Error:      result.Error,
+						Error:      sanitizeToolErrorPtr(result.Error), // P-C65-2: scrub internal infra details
 					})
 				}
 
 				// Track tool execution in progress.
 				r.progress.RecordToolCall(toolName)
+			}
+
+			// Update P-G1 guard: track whether this turn had any tool errors.
+			// The next turn's ask_user calls will be auto-answered if this is true.
+			lastTurnHadToolErrors = false
+			for _, res := range toolResults {
+				if res.Error != nil {
+					lastTurnHadToolErrors = true
+					break
+				}
 			}
 
 			if summary := r.buildToolUseSummary(ctx, in.AgentID, toolCalls, toolResults, assistantContent); summary != "" {
@@ -899,11 +1124,11 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					maxTokensRecoveryCount = 0
 					effectiveMaxTokens = r.config.MaxTokensPerCall
 
-					// Clear prompt section cache so stable sections (tools, KBs) are
-					// recomputed. After compaction the old cached values may reference
+					// Clear the session-scoped prompt cache so stable sections (tools, KBs)
+					// are recomputed. After compaction the old cached values may reference
 					// context that was summarized away.
 					// Inspired by Claude Code's clearSystemPromptSections on /compact.
-					r.prompt.ClearCache()
+					r.promptCache = NewSessionCache()
 
 					// Rebuild system prompt to re-inject tool descriptions, memories,
 					// deferred tool names, and KB context that were summarized away.
@@ -917,15 +1142,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 							}
 						}
 						if rebuilt, err := r.prompt.Build(ctx, PromptInput{
-							AgentID:           in.AgentID,
-							SessionID:         in.SessionID,
-							SystemPrompt:      in.SystemPrompt,
-							Memories:          freshMemories,
-							CoordinatorMode:   gates.CoordinatorMode,
-							DeferredToolNames: toolResult.DeferredToolNames(),
-							UserOnlySkills:    toolResult.UserOnlySkills,
-							UnavailableTools:  toolResult.Warnings,
-						}); err == nil {
+							AgentID:            in.AgentID,
+							SessionID:          in.SessionID,
+							SystemPrompt:       in.SystemPrompt,
+							Memories:           freshMemories,
+							CoordinatorMode:    gates.CoordinatorMode,
+							DeferredToolNames:  toolResult.DeferredToolNames(),
+							UserOnlySkills:     toolResult.UserOnlySkills,
+							UnavailableTools:   toolResult.Warnings,
+							CallableSkillSlugs: callableSkillSlugs,
+						}, r.promptCache); err == nil {
 							systemPrompt = rebuilt
 						}
 					}
@@ -1015,7 +1241,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	// Safety brake: max iterations reached.
-	emitError(ch, "max_iterations", fmt.Errorf("agentic loop exceeded maximum iterations (%d)", r.config.MaxIterations))
+	localEmitError("max_iterations", fmt.Errorf("agentic loop exceeded maximum iterations (%d)", r.config.MaxIterations))
 }
 
 // consumeStream reads all chunks from the stream channel and accumulates the response.
@@ -1284,6 +1510,16 @@ func SanitizeMessages(messages []ai.Message) []ai.Message {
 			continue
 		}
 
+		// Filter 3: consecutive assistant messages — collapse to the last one.
+		// P-C99-2: caused by concurrent runs both completing and persisting an
+		// assistant reply. Most LLM providers reject adjacent assistant turns.
+		// We keep the last assistant message in each run so the context stays valid.
+		if m.Role == ai.RoleAssistant && len(result) > 0 && result[len(result)-1].Role == ai.RoleAssistant &&
+			len(result[len(result)-1].ToolCalls) == 0 && len(m.ToolCalls) == 0 {
+			result[len(result)-1] = m
+			continue
+		}
+
 		result = append(result, m)
 	}
 
@@ -1383,10 +1619,11 @@ func (r *Runner) executeAgentHubManage(ctx context.Context, ch chan<- RunEvent, 
 
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
-		errMsg := err.Error()
-		res := ToolExecResult{Error: &errMsg, LatencyMs: latency, EmittedToStream: true}
+		rawMsg := err.Error()
+		safeMsg := sanitizeToolError(rawMsg) // P-C65-2: scrub internal infra details before emitting
+		res := ToolExecResult{Error: &safeMsg, LatencyMs: latency, EmittedToStream: true}
 		ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
-		ch <- NewRunEvent(EventToolResult, ToolResultData{ID: tc.ID, Name: tc.Function.Name, Output: nil, Error: &errMsg, DurationMs: latency})
+		ch <- NewRunEvent(EventToolResult, ToolResultData{ID: tc.ID, Name: tc.Function.Name, Output: nil, Error: &safeMsg, DurationMs: latency})
 		return res
 	}
 
@@ -1479,7 +1716,10 @@ func truncateToolResult(result ToolExecResult, maxChars int) ToolExecResult {
 // permitted ones via StreamingToolExecutor, and returns results in the same order
 // as the input toolCalls. Denied/confirm tools get error results without execution.
 // Agent tool calls are routed to the SubtaskExecutor for sub-agent spawning.
-func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput, totalCost float64, readOnlyIndex map[string]bool, destructiveIndex map[string]bool, deferredTools []LLMTool, allowedToolsIndex map[string]bool) []ToolExecResult {
+// prevTurnHadToolErrors indicates whether the immediately-preceding tool turn
+// returned at least one error. When true, any ask_user call is auto-answered
+// with a synthetic config-error response instead of blocking for user input (P-G1).
+func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput, totalCost float64, readOnlyIndex map[string]bool, destructiveIndex map[string]bool, deferredTools []LLMTool, allowedToolsIndex map[string]bool, prevTurnHadToolErrors bool) []ToolExecResult {
 	results := make([]ToolExecResult, len(toolCalls))
 
 	// Partition tool calls into categories.
@@ -1574,6 +1814,22 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 
 		// Route ask_user calls to the ElicitationHandler — block until the user
 		// submits a response via POST /elicitation/{requestId}/respond.
+		// P-G1 guard: if the previous turn had tool errors, auto-answer ask_user with
+		// a synthetic "config error" response instead of blocking for user input.
+		// This prevents the LLM from delegating backend configuration failures to the
+		// user (e.g., asking for datasource_id when the tool is simply misconfigured).
+		if tc.Function.Name == "ask_user" && prevTurnHadToolErrors {
+			slog.Warn("agentic: ask_user intercepted after tool error turn — auto-answering to prevent P-G1 block", "toolCallID", tc.ID)
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+			})
+			autoReply := `{"action":"cancel","reason":"The previous tool call failed due to a server-side configuration error. This is not information the user can provide — please explain the tool limitation directly to the user without asking for configuration details."}`
+			results[i] = ToolExecResult{Output: json.RawMessage(autoReply), ToolName: tc.Function.Name}
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
+			})
+			continue
+		}
 		if tc.Function.Name == "ask_user" && in.Elicitation != nil {
 			slog.Info("agentic: ask_user intercepted — blocking for user input", "toolCallID", tc.ID, "args", tc.Function.Arguments)
 			var params struct {
@@ -1621,6 +1877,30 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 		if tc.Function.Name == "agenthub_manage" {
 			execResult := r.executeAgentHubManage(ctx, ch, tc, in)
 			results[i] = execResult
+			continue
+		}
+
+		// Builtin: memory_store — persists a memory entry for long-term recall.
+		if tc.Function.Name == "memory_store" {
+			var args struct {
+				Content  string `json:"content"`
+				Category string `json:"category"`
+			}
+			_ = json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args)
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+			})
+			var memResult string
+			if r.memory != nil {
+				memResult = r.memory.Store(ctx, in.AgentID, args.Content, args.Category)
+			} else {
+				memResult = "Memory storage is not available for this agent."
+			}
+			out, _ := json.Marshal(memResult)
+			results[i] = ToolExecResult{Output: out, ToolName: tc.Function.Name}
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
+			})
 			continue
 		}
 
@@ -1754,6 +2034,20 @@ func (r *Runner) buildToolUseSummary(
 	}
 
 	return r.toolSummary.Generate(ctx, agentID, infos, lastAssistantText)
+}
+
+// computeToolCallSignature returns a stable string that uniquely identifies the
+// set of tool calls in a turn (name + raw arguments). Used to detect identical
+// consecutive calls that indicate a stuck tool-call loop.
+func computeToolCallSignature(calls []ai.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	parts := make([]string, len(calls))
+	for i, c := range calls {
+		parts[i] = c.Function.Name + ":" + c.Function.Arguments
+	}
+	return strings.Join(parts, "|")
 }
 
 func emitError(ch chan<- RunEvent, code string, err error) {
@@ -1949,4 +2243,47 @@ func defaultThinkingBudget(maxTokens int) int {
 		budget = 1024
 	}
 	return budget
+}
+
+// friendlyRunErrorMessage maps internal error codes to user-facing messages.
+// This is used when a run fails and the error needs to be persisted to chat history.
+func friendlyRunErrorMessage(code, rawMsg string) string {
+	switch code {
+	case "llm_call", "stream_consume":
+		if strings.Contains(rawMsg, "401") || strings.Contains(rawMsg, "authentication") || strings.Contains(rawMsg, "Unauthorized") {
+			return "Não foi possível chamar o modelo de IA: credenciais inválidas ou expiradas. Verifique a chave de API nas configurações."
+		}
+		if strings.Contains(rawMsg, "402") || strings.Contains(rawMsg, "credit") || strings.Contains(rawMsg, "balance") {
+			return "Não foi possível chamar o modelo de IA: saldo insuficiente. Verifique seu plano na plataforma do provedor."
+		}
+		if strings.Contains(rawMsg, "429") || strings.Contains(rawMsg, "rate limit") {
+			return "O serviço de IA está temporariamente sobrecarregado (rate limit). Tente novamente em alguns instantes."
+		}
+		if strings.Contains(rawMsg, "503") || strings.Contains(rawMsg, "unavailable") {
+			return "O serviço de IA está temporariamente indisponível. Tente novamente em alguns instantes."
+		}
+		if strings.Contains(rawMsg, "404") || strings.Contains(rawMsg, "does not exist") || strings.Contains(rawMsg, "model not found") {
+			return "O modelo de IA configurado neste agente não existe. Verifique o nome do modelo nas configurações do agente."
+		}
+		if strings.Contains(rawMsg, "400") {
+			return "O modelo de IA rejeitou a solicitação. Verifique a configuração do modelo nas configurações do agente."
+		}
+		return "O serviço de IA encontrou um erro inesperado. Tente novamente."
+	case "prompt_build":
+		return "Ocorreu um erro ao preparar o contexto da conversa. Tente novamente."
+	case "load_history":
+		return "Ocorreu um erro ao carregar o histórico da conversa. Tente novamente."
+	case "tool_schema_build":
+		return "Ocorreu um erro ao carregar as ferramentas do agente. Tente novamente."
+	case "budget_exceeded":
+		return "O limite de custo desta sessão foi atingido. A execução foi interrompida."
+	case "max_iterations":
+		return "O agente atingiu o limite máximo de iterações sem concluir a tarefa. Tente reformular sua solicitação."
+	case "compact_circuit_breaker":
+		return "Ocorreu um erro ao compactar o contexto da conversa. Tente iniciar uma nova sessão."
+	case "context_cancelled":
+		return "A solicitação foi cancelada."
+	default:
+		return fmt.Sprintf("Não foi possível completar a solicitação. Tente novamente. (código: %s)", code)
+	}
 }

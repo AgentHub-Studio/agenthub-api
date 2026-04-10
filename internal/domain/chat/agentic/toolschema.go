@@ -103,6 +103,7 @@ type ToolSchemaBuilder struct {
 	mcpBridge          *MCPToolBridge
 	currentDepth       int
 	maxDepth           int
+	adminScope         bool // P-C298-1: gate agenthub_manage to admin callers only
 	lastUserOnlySkills []skill.Skill
 	lastWarnings       []string
 }
@@ -137,6 +138,15 @@ func (b *ToolSchemaBuilder) WithMCPBridge(bridge *MCPToolBridge) *ToolSchemaBuil
 func (b *ToolSchemaBuilder) WithDepthLimits(currentDepth, maxDepth int) *ToolSchemaBuilder {
 	b.currentDepth = currentDepth
 	b.maxDepth = maxDepth
+	return b
+}
+
+// WithAdminScope controls whether the agenthub_manage builtin tool is included.
+// P-C298-1: restrict agenthub_manage to sessions where the caller has the "admin" role.
+// When false (default), the tool is omitted — preventing weaker models from calling
+// it opportunistically during normal user sessions.
+func (b *ToolSchemaBuilder) WithAdminScope(admin bool) *ToolSchemaBuilder {
+	b.adminScope = admin
 	return b
 }
 
@@ -204,9 +214,15 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 			userOnlySkills = append(userOnlySkills, sk)
 			continue
 		}
-		t, err := b.skillToLLMTool(ctx, sk)
+		t, callable, err := b.skillToLLMTool(ctx, sk)
 		if err != nil {
 			return nil, err
+		}
+		// P-SK10: skills with no active bound tools must not appear as callable tools.
+		// They contribute only to behavioral instructions (injected via prompt.go),
+		// and listing them as tools causes the LLM to invoke them → "skill not found".
+		if !callable {
+			continue
 		}
 		tools = append(tools, t)
 	}
@@ -263,22 +279,27 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 		tools = append(tools, sendMessageTool())
 	}
 
-	// Builtin: agenthub_manage — available to admin agents.
-	// This enables the "Auto-Reflection" where the agent can manage its own ecosystem.
-	// Inspired by OpenCode's self-management capabilities.
-	tools = append(tools, agentHubManageTool())
+	// Builtin: agenthub_manage — available only to admin callers (P-C298-1).
+	// Restrict to prevent weaker models from calling it opportunistically as
+	// "tool discovery" during normal user sessions. Admin scope is granted when
+	// the caller's JWT contains the "admin" realm role.
+	if b.adminScope {
+		tools = append(tools, agentHubManageTool())
+	}
 
 	// MCP tools — fetched from external MCP servers via the bridge.
+	// ListTools may return both tools and a non-nil error (partial success): some servers
+	// responded while others failed. Always add the tools we got; always emit warnings for
+	// the failures so neither the tools nor the problem are silently dropped.
 	b.lastWarnings = nil
 	if b.mcpBridge != nil {
-		mcpTools, err := b.mcpBridge.ListTools(ctx)
-		if err != nil {
-			slog.Warn("agentic: failed to load MCP tools", "error", err)
-			// Store a concise, LLM-readable warning (full error is too noisy for the prompt).
-			b.lastWarnings = append(b.lastWarnings, summarizeMCPError(err.Error()))
-		} else {
-			tools = append(tools, mcpTools...)
+		mcpTools, mcpErr := b.mcpBridge.ListTools(ctx)
+		if mcpErr != nil {
+			slog.Warn("agentic: failed to load MCP tools", "error", mcpErr)
+			// Parse one warning per server from the combined error message.
+			b.lastWarnings = append(b.lastWarnings, summarizeMCPErrors(mcpErr.Error())...)
 		}
+		tools = append(tools, mcpTools...)
 	}
 
 	if tools == nil {
@@ -352,7 +373,12 @@ func (r *ToolBuildResult) DeferredToolNames() []string {
 }
 
 // skillToLLMTool converts a single skill (plus its first active tool's config) into an LLMTool.
-func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) (LLMTool, error) {
+// skillToLLMTool converts a skill to an LLM-callable tool definition.
+// The second return value indicates whether the skill has active bound tools and
+// should therefore be included in the callable tool list. Skills with no active
+// tools (instructions-only skills) must not appear as callable — the LLM would
+// attempt to invoke them and receive "skill not found" errors (P-SK10).
+func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) (LLMTool, bool, error) {
 	// Prefer the description stored in the database so skill behaviour can be
 	// adjusted without redeploying. Fall back to the legacy static catalog only
 	// when the DB description is empty.
@@ -381,13 +407,15 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 	isSearchOrRead := false
 
 	// Load bound tools once — used for schema derivation, read-only, deferred, and destructive detection.
+	hasActiveTool := false
 	if b.tools != nil {
 		bindings, boundTools, err := b.tools.ListBySkill(ctx, sk.ID)
 		if err != nil {
-			return LLMTool{}, fmt.Errorf("toolschema: list tools for skill %s: %w", sk.Slug, err)
+			return LLMTool{}, false, fmt.Errorf("toolschema: list tools for skill %s: %w", sk.Slug, err)
 		}
 		for i, bt := range bindings {
 			if bt.IsActive && i < len(boundTools) {
+				hasActiveTool = true
 				// Derive schema from tool config.
 				derived := deriveSchemaFromToolConfig(boundTools[i])
 				if len(derived) > 0 {
@@ -426,6 +454,13 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		}
 	}
 
+	// P-C62-1: if a tool repository is wired but no active binding was found, this
+	// skill has no executable implementation. Exclude it from the LLM schema entirely
+	// so the model never announces a tool it cannot call.
+	if b.tools != nil && !hasActiveTool {
+		return LLMTool{}, false, nil
+	}
+
 	if len(inputSchema) == 0 {
 		inputSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 	}
@@ -445,7 +480,7 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		ConcurrencySafe:        concurrencySafe,
 		InterruptBehavior:      interruptBehavior,
 		IsSearchOrRead:         isSearchOrRead,
-	}, nil
+	}, hasActiveTool, nil
 }
 
 // normaliseSchema ensures the raw bytes are a valid JSON Schema object, or returns nil.
@@ -464,8 +499,10 @@ func normaliseSchema(raw []byte) json.RawMessage {
 	return json.RawMessage(raw)
 }
 
-// templateVarRe matches {variable} placeholders in URL and body templates.
-var templateVarRe = regexp.MustCompile(`\{(\w+)\}`)
+// templateVarRe matches both {variable} and {{input.variable}} placeholders in URL
+// and body templates. Group 1 captures the variable name in both cases.
+// The {{input.key}} form is matched first to avoid partial matches against {input.key}.
+var templateVarRe = regexp.MustCompile(`\{\{input\.(\w+)\}\}|\{(\w+)\}`)
 
 // deriveSchemaFromToolConfig attempts to extract a usable input schema from a
 // tool's config JSON. This covers cases where the skill has no explicit
@@ -500,8 +537,12 @@ func deriveSchemaFromToolConfig(t tool.Tool) json.RawMessage {
 	for _, field := range []string{"url", "urlTemplate", "body_template"} {
 		if s, ok := cfg[field].(string); ok {
 			for _, m := range templateVarRe.FindAllStringSubmatch(s, -1) {
+				// Group 1: {{input.key}} form; Group 2: {key} form.
 				name := m[1]
-				if !seen[name] {
+				if name == "" {
+					name = m[2]
+				}
+				if name != "" && !seen[name] {
 					seen[name] = true
 					vars = append(vars, name)
 				}
@@ -728,8 +769,9 @@ func agentHubManageTool() LLMTool {
 	return LLMTool{
 		Name:    "agenthub_manage",
 		Builtin: true,
-		Description: `Manage the AgentHub ecosystem: agents, skills, tools, integrations, and MCP servers.
-Use this to perform administrative tasks, update configurations, or list available resources.
+		Description: `Manage AgentHub CONFIGURATION — agents, skills, tools, integrations, and MCP servers.
+Use ONLY for administrative/CRUD tasks: listing or editing configurations, not for executing tasks or retrieving user data.
+Do NOT use this tool to execute a skill or invoke a domain tool — each executable capability is a separate tool in the schema.
 The 'operation' can be: list, get, create, update, delete.
 The 'resource' can be: agent, skill, tool, integration, mcp_server.`,
 		InputSchema: json.RawMessage(`{
@@ -840,30 +882,50 @@ func join(elems []string, sep string) string {
 	return result
 }
 
-// summarizeMCPError extracts a concise, LLM-readable description from a raw MCP error.
-// The raw error includes internal host names, OAuth metadata URLs, and JSON that are
-// not useful in the system prompt. We extract just the server name and root cause.
-func summarizeMCPError(raw string) string {
-	// Try to extract server name from patterns like:
-	// "no MCP tools available (servername: ..." or "for server 'servername'"
-	serverName := ""
-	if idx := strings.Index(raw, "no MCP tools available ("); idx >= 0 {
-		rest := raw[idx+len("no MCP tools available ("):]
-		if end := strings.IndexByte(rest, ':'); end > 0 {
-			serverName = rest[:end]
+// summarizeMCPErrors parses one or more server failures from a raw MCP error and
+// returns one concise, LLM-readable warning string per failing server.
+// When the error contains multiple failures (e.g. "no MCP tools available (s1: ...; s2: ...)")
+// each server gets its own entry so none are silently dropped.
+func summarizeMCPErrors(raw string) []string {
+	const multiPrefix = "no MCP tools available ("
+	if idx := strings.Index(raw, multiPrefix); idx >= 0 {
+		inner := raw[idx+len(multiPrefix):]
+		// Strip trailing ")" if present.
+		if end := strings.LastIndexByte(inner, ')'); end > 0 {
+			inner = inner[:end]
 		}
-	}
-	if serverName == "" {
-		if idx := strings.Index(raw, "for server '"); idx >= 0 {
-			rest := raw[idx+len("for server '"):]
-			if end := strings.IndexByte(rest, '\''); end > 0 {
-				serverName = rest[:end]
+		// Each failure is "serverName: errorDetail"; failures are separated by "; serverName:".
+		// We split naively on "; " and re-join entries that don't start a new server name.
+		parts := strings.Split(inner, "; ")
+		var warnings []string
+		for _, part := range parts {
+			colon := strings.IndexByte(part, ':')
+			if colon <= 0 {
+				continue
 			}
+			serverName := strings.TrimSpace(part[:colon])
+			detail := part[colon+1:]
+			warnings = append(warnings, summarizeMCPError(serverName, detail))
+		}
+		if len(warnings) > 0 {
+			return warnings
 		}
 	}
 
-	// Classify the error
-	lower := strings.ToLower(raw)
+	// Single-server fallback: extract server name from "for server 'name'"
+	serverName := ""
+	if idx := strings.Index(raw, "for server '"); idx >= 0 {
+		rest := raw[idx+len("for server '"):]
+		if end := strings.IndexByte(rest, '\''); end > 0 {
+			serverName = rest[:end]
+		}
+	}
+	return []string{summarizeMCPError(serverName, raw)}
+}
+
+// summarizeMCPError builds a single LLM-readable warning for one server failure.
+func summarizeMCPError(serverName, detail string) string {
+	lower := strings.ToLower(detail)
 	var reason string
 	switch {
 	case strings.Contains(lower, "401") || strings.Contains(lower, "authentication failed") ||
@@ -871,7 +933,8 @@ func summarizeMCPError(raw string) string {
 		reason = "authentication required — OAuth token expired or missing"
 	case strings.Contains(lower, "403") || strings.Contains(lower, "forbidden"):
 		reason = "access forbidden"
-	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "no such host"):
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "no such host") ||
+		strings.Contains(lower, "dial tcp") || strings.Contains(lower, "lookup "):
 		reason = "server unreachable"
 	default:
 		reason = "unavailable"
