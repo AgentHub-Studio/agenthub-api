@@ -81,6 +81,16 @@ func (m *mockSkillRepo) ListByAgentID(_ context.Context, _ uuid.UUID) ([]skill.S
 	return out, nil
 }
 
+func (m *mockSkillRepo) ListByIDs(_ context.Context, ids []uuid.UUID) ([]skill.Skill, error) {
+	var out []skill.Skill
+	for _, id := range ids {
+		if s, ok := m.data[id]; ok {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
 func (m *mockSkillRepo) CountAgentBindings(_ context.Context, _ uuid.UUID) (int64, error) {
 	// Default to 0 bindings so existing delete tests pass.
 	return 0, nil

@@ -19,6 +19,9 @@ import (
 	// SkillLister returns skills.
 	type SkillLister interface {
 		ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]skill.Skill, error)
+		// ListByIDs returns the skills with the given IDs. Used to load a session's
+		// snapshotted skill bindings (P-C115-1).
+		ListByIDs(ctx context.Context, ids []uuid.UUID) ([]skill.Skill, error)
 		List(ctx context.Context, category *string, req pagination.PageRequest) ([]skill.Skill, int64, error)
 	}
 	

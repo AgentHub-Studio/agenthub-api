@@ -27,6 +27,20 @@ func (m *mockSkillLister) ListByAgentID(_ context.Context, _ uuid.UUID) ([]skill
 	return m.skills, nil
 }
 
+func (m *mockSkillLister) ListByIDs(_ context.Context, ids []uuid.UUID) ([]skill.Skill, error) {
+	// Filter m.skills to only those whose ID appears in ids.
+	var result []skill.Skill
+	for _, s := range m.skills {
+		for _, id := range ids {
+			if s.ID == id {
+				result = append(result, s)
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 func (m *mockSkillLister) List(_ context.Context, _ *string, _ pagination.PageRequest) ([]skill.Skill, int64, error) {
 	return nil, 0, nil
 }

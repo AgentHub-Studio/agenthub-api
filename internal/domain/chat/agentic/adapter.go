@@ -401,16 +401,17 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	}
 
 	agenticCh := runner.Run(ctx, RunInput{
-		RunID:           in.RunID,
-		SessionID:       in.SessionID,
-		AgentID:         in.AgentID,
-		UserMessage:     in.UserMessage,
-		SystemPrompt:    effectiveSystemPrompt,
-		TenantID:        in.TenantID,
-		PermissionRules: ParsePermissionRules(agentCfg.PermissionRules),
-		Elicitation:     elicHandler,
+		RunID:            in.RunID,
+		SessionID:        in.SessionID,
+		AgentID:          in.AgentID,
+		UserMessage:      in.UserMessage,
+		SystemPrompt:     effectiveSystemPrompt,
+		TenantID:         in.TenantID,
+		PermissionRules:  ParsePermissionRules(agentCfg.PermissionRules),
+		Elicitation:      elicHandler,
 		IsAdmin:          callerHasAdminRole(ctx),    // P-C298-1
 		EnableManagement: agentCfg.EnableManagement, // P-C184-2
+		SkillIDsSnapshot: in.SkillIDsSnapshot,       // P-C115-1: use snapshot if available
 	})
 
 	chatCh := make(chan chat.RunEvent, config.StreamBufferSize)

@@ -27,6 +27,9 @@ type SkillRepository interface {
 	SlugExists(ctx context.Context, slug string) (bool, error)
 	// ListByAgentID returns all skills linked to an agent via the agent_skill table.
 	ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]Skill, error)
+	// ListByIDs returns the skills with the given IDs, preserving the order of the
+	// IDs slice. Used to load a session's snapshotted skill bindings. P-C115-1.
+	ListByIDs(ctx context.Context, ids []uuid.UUID) ([]Skill, error)
 	// CountAgentBindings returns the number of agents that reference this skill via agent_skill.
 	// Used by Service.Delete to block deletion of skills that are still in use.
 	CountAgentBindings(ctx context.Context, skillID uuid.UUID) (int64, error)
@@ -252,6 +255,46 @@ func (r *Repository) ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]Sk
 	)
 	if err != nil {
 		return nil, fmt.Errorf("skill: list by agent: %w", err)
+	}
+	defer rows.Close()
+
+	var skills []Skill
+	for rows.Next() {
+		s, err := scanSkillFromRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		skills = append(skills, s)
+	}
+	if skills == nil {
+		skills = []Skill{}
+	}
+	return skills, rows.Err()
+}
+
+// ListByIDs returns the skills with the given IDs.
+// P-C115-1: used to load skills from a session's snapshotted bindings.
+func (r *Repository) ListByIDs(ctx context.Context, ids []uuid.UUID) ([]Skill, error) {
+	if len(ids) == 0 {
+		return []Skill{}, nil
+	}
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT id, name, slug, description, category, created_at, updated_at,
+		        instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint
+		 FROM skill
+		 WHERE id = ANY($1)
+		 ORDER BY name`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("skill: list by ids: %w", err)
 	}
 	defer rows.Close()
 

@@ -105,6 +105,7 @@ type ToolSchemaBuilder struct {
 	maxDepth           int
 	adminScope         bool // P-C298-1: gate agenthub_manage to admin callers only
 	enableManagement   bool // P-C184-2: gate agenthub_manage to agents with enable_management=true
+	skillIDsSnapshot   []uuid.UUID // P-C115-1: when set, use these IDs instead of querying by agentID
 	lastUserOnlySkills []skill.Skill
 	lastWarnings       []string
 }
@@ -161,6 +162,14 @@ func (b *ToolSchemaBuilder) WithEnableManagement(enabled bool) *ToolSchemaBuilde
 	return b
 }
 
+// WithSkillIDsSnapshot sets explicit skill IDs to load instead of querying by agentID.
+// P-C115-1: when set, Build() uses these IDs to ensure the tool set is fixed for
+// the lifetime of the session even if the agent's bindings change mid-conversation.
+func (b *ToolSchemaBuilder) WithSkillIDsSnapshot(ids []uuid.UUID) *ToolSchemaBuilder {
+	b.skillIDsSnapshot = ids
+	return b
+}
+
 // ToolBuildResult contains both the loaded and deferred tools from a Build call.
 type ToolBuildResult struct {
 	// Loaded contains tools whose full schema is sent to the LLM.
@@ -186,8 +195,16 @@ const DeferredToolThreshold = 15
 
 // Build returns the tool definitions for the given agent.
 func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLMTool, error) {
-	// 1. Load explicitly linked skills (legacy)
-	skills, err := b.skills.ListByAgentID(ctx, agentID)
+	// 1. Load explicitly linked skills.
+	// P-C115-1: when a skill snapshot is present, use those IDs instead of the
+	// agent's current bindings so the tool set stays fixed for the session.
+	var skills []skill.Skill
+	var err error
+	if len(b.skillIDsSnapshot) > 0 {
+		skills, err = b.skills.ListByIDs(ctx, b.skillIDsSnapshot)
+	} else {
+		skills, err = b.skills.ListByAgentID(ctx, agentID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("toolschema: list skills: %w", err)
 	}

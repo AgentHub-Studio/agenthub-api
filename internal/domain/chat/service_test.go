@@ -2,6 +2,7 @@ package chat_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -432,6 +433,62 @@ func TestRunSession_PassesSnapshotToRunner(t *testing.T) {
 	// The runner must have received the snapshot.
 	require.NotNil(t, runner.lastInput.SystemPromptSnapshot)
 	assert.Equal(t, snapshot, *runner.lastInput.SystemPromptSnapshot)
+}
+
+// TestCreateSession_SnapshotsSkillBindings verifies that skill IDs from the agent loader
+// are captured as a JSON snapshot in the session at creation time. P-C115-1.
+func TestCreateSession_SnapshotsSkillBindings(t *testing.T) {
+	repo := newMockRepo()
+	skillID1 := uuid.New()
+	skillID2 := uuid.New()
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		SystemPrompt: "You are helpful.",
+		Status:       "PUBLISHED",
+		SkillIDs:     []uuid.UUID{skillID1, skillID2},
+	}}
+	svc := chat.NewService(repo, nil).WithAgentLoader(loader)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	stored := repo.sessions[session.ID]
+	require.NotEmpty(t, stored.SkillBindingsSnapshot, "skill bindings snapshot must be stored")
+
+	var snap chat.SkillBindingsSnapshotData
+	require.NoError(t, json.Unmarshal(stored.SkillBindingsSnapshot, &snap))
+	assert.ElementsMatch(t, []uuid.UUID{skillID1, skillID2}, snap.SkillIDs)
+}
+
+// TestRunSession_PassesSkillSnapshotToRunner verifies that the runner receives
+// the skill IDs extracted from the session's snapshot. P-C115-1.
+func TestRunSession_PassesSkillSnapshotToRunner(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+
+	skillID := uuid.New()
+	snapData := chat.SkillBindingsSnapshotData{SkillIDs: []uuid.UUID{skillID}}
+	snapJSON, err := json.Marshal(snapData)
+	require.NoError(t, err)
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	repo.sessions[sessionID] = chat.ChatSession{
+		ID:                    sessionID,
+		AgentID:               &agentID,
+		Status:                chat.StatusActive,
+		SkillBindingsSnapshot: snapJSON,
+	}
+
+	svc := chat.NewService(repo, runner)
+	_, err = svc.RunSession(context.Background(), sessionID, "Hello", "tenant")
+	require.NoError(t, err)
+
+	assert.Equal(t, []uuid.UUID{skillID}, runner.lastInput.SkillIDsSnapshot,
+		"runner must receive the snapshotted skill IDs")
 }
 
 // TestRunSession_EmptyMessage_NoMessagePersisted verifies that when the user

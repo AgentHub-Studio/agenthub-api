@@ -129,10 +129,14 @@ func (r *postgresRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (
 
 	var s ChatSession
 	err = conn.QueryRow(ctx,
-		`SELECT id, agent_id, title, status, created_at, updated_at
+		`SELECT id, agent_id, title, status,
+		        system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot,
+		        created_at, updated_at
 		 FROM chat_session WHERE id = $1`,
 		id,
-	).Scan(&s.ID, &s.AgentID, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.ID, &s.AgentID, &s.Title, &s.Status,
+		&s.SystemPromptSnapshot, &s.ModelConfigSnapshot, &s.SkillBindingsSnapshot,
+		&s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatSession{}, ErrNotFound
@@ -156,9 +160,14 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s ChatSession) (
 	s.UpdatedAt = now
 
 	_, err = conn.Exec(ctx,
-		`INSERT INTO chat_session (id, agent_id, title, status, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		s.ID, s.AgentID, s.Title, s.Status, s.CreatedAt, s.UpdatedAt,
+		`INSERT INTO chat_session
+		 (id, agent_id, title, status,
+		  system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot,
+		  created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		s.ID, s.AgentID, s.Title, s.Status,
+		s.SystemPromptSnapshot, s.ModelConfigSnapshot, s.SkillBindingsSnapshot,
+		s.CreatedAt, s.UpdatedAt,
 	)
 	if err != nil {
 		return ChatSession{}, fmt.Errorf("chat: create session: %w", err)

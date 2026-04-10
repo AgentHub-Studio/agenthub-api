@@ -30,6 +30,9 @@ type AgentRunConfig struct {
 	// Status is the agent's lifecycle status. Used to reject runs for DRAFT/ARCHIVED agents.
 	// P-C178-1.
 	Status string
+	// SkillIDs are the IDs of skills bound to the agent at the time of loading.
+	// Captured at session creation for snapshotting (P-C115-1).
+	SkillIDs []uuid.UUID
 }
 
 // ErrAgentNotPublished is returned when an agent is not in PUBLISHED status.
@@ -64,6 +67,10 @@ type RunInput struct {
 	// the conversation even if the agent is updated between runs.
 	SystemPromptSnapshot *string
 	ModelConfigSnapshot  json.RawMessage
+	// SkillIDsSnapshot, when non-empty, contains the skill IDs captured at session
+	// creation time. The runner uses these IDs instead of the agent's current bindings
+	// so the tool set stays consistent throughout the conversation. P-C115-1.
+	SkillIDsSnapshot []uuid.UUID
 }
 
 // ElicitationResponder routes a user's elicitation response to the active run.
@@ -153,8 +160,8 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 
 	// P-C115-1 / P-C330-1: capture agent snapshot at session creation so that
-	// the persona and model config remain consistent throughout the conversation
-	// even if the agent is updated between turns.
+	// the persona, model config and skill bindings remain consistent throughout
+	// the conversation even if the agent is updated between turns.
 	if req.AgentID != nil && s.agentLoader != nil {
 		if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *req.AgentID); err == nil {
 			if agentCfg.SystemPrompt != "" {
@@ -163,6 +170,13 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			}
 			if len(agentCfg.ModelConfig) > 2 {
 				session.ModelConfigSnapshot = agentCfg.ModelConfig
+			}
+			// P-C115-1: snapshot skill bindings so the tool set is fixed for the session.
+			if len(agentCfg.SkillIDs) > 0 {
+				snapshotData := SkillBindingsSnapshotData{SkillIDs: agentCfg.SkillIDs}
+				if snapshotJSON, err := json.Marshal(snapshotData); err == nil {
+					session.SkillBindingsSnapshot = snapshotJSON
+				}
 			}
 		}
 		// Snapshot failure is non-fatal: session creation proceeds without snapshot.
@@ -306,6 +320,16 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		userMsgID = &persisted.ID
 	}
 
+	// P-C115-1: extract skill IDs from the session snapshot so the runner uses
+	// the same tool set that was active when the session was created.
+	var skillIDsSnapshot []uuid.UUID
+	if len(session.SkillBindingsSnapshot) > 2 {
+		var snap SkillBindingsSnapshotData
+		if err := json.Unmarshal(session.SkillBindingsSnapshot, &snap); err == nil {
+			skillIDsSnapshot = snap.SkillIDs
+		}
+	}
+
 	return s.runner.RunSession(ctx, RunInput{
 		SessionID:            sessionID,
 		AgentID:              *session.AgentID,
@@ -314,5 +338,6 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		UserMessageID:        userMsgID,
 		SystemPromptSnapshot: session.SystemPromptSnapshot,
 		ModelConfigSnapshot:  session.ModelConfigSnapshot,
+		SkillIDsSnapshot:     skillIDsSnapshot,
 	})
 }

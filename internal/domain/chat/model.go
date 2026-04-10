@@ -39,14 +39,22 @@ const (
 
 // ChatSession is the domain entity for a chat session.
 type ChatSession struct {
-	ID                   uuid.UUID       `db:"id"`
-	AgentID              *uuid.UUID      `db:"agent_id"`
-	Title                string          `db:"title"`
-	Status               ChatStatus      `db:"status"`
-	SystemPromptSnapshot *string         `db:"system_prompt_snapshot"` // P-C115-1: snapshot at session creation
-	ModelConfigSnapshot  json.RawMessage `db:"model_config_snapshot"`  // P-C330-1: snapshot at session creation
-	CreatedAt            time.Time       `db:"created_at"`
-	UpdatedAt            time.Time       `db:"updated_at"`
+	ID                    uuid.UUID       `db:"id"`
+	AgentID               *uuid.UUID      `db:"agent_id"`
+	Title                 string          `db:"title"`
+	Status                ChatStatus      `db:"status"`
+	SystemPromptSnapshot  *string         `db:"system_prompt_snapshot"`  // P-C115-1: snapshot at session creation
+	ModelConfigSnapshot   json.RawMessage `db:"model_config_snapshot"`   // P-C330-1: snapshot at session creation
+	SkillBindingsSnapshot json.RawMessage `db:"skill_bindings_snapshot"` // P-C115-1: skill IDs at session creation
+	ConfigHash            *string         `db:"config_hash"`             // P-C173-1: SHA-256 of modelConfig at last run
+	CreatedAt             time.Time       `db:"created_at"`
+	UpdatedAt             time.Time       `db:"updated_at"`
+}
+
+// SkillBindingsSnapshotData is the JSON structure stored in ChatSession.SkillBindingsSnapshot.
+// P-C115-1: ensures the same tool set is available across all runs of the session.
+type SkillBindingsSnapshotData struct {
+	SkillIDs []uuid.UUID `json:"skillIds"`
 }
 
 // MessageType represents the kind of chat message in the agentic loop.

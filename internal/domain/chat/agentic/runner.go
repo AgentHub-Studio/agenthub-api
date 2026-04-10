@@ -73,6 +73,11 @@ type RunInput struct {
 	// by the caller (chat.Service.RunSession). The runner skips its own persistence
 	// to avoid duplicates. P-C178-2.
 	UserMessageID *uuid.UUID
+
+	// SkillIDsSnapshot, when non-empty, contains the skill IDs captured at session
+	// creation. The toolBuilder uses these instead of the agent's current bindings
+	// so the tool set stays consistent throughout the conversation. P-C115-1.
+	SkillIDsSnapshot []uuid.UUID
 }
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
@@ -380,6 +385,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	toolBuilder.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
 	toolBuilder.WithAdminScope(in.IsAdmin)               // P-C298-1: gate agenthub_manage on admin role
 	toolBuilder.WithEnableManagement(in.EnableManagement) // P-C184-2: gate on agent opt-in flag
+	// P-C115-1: use skill snapshot IDs when available to ensure consistent tool set.
+	if len(in.SkillIDsSnapshot) > 0 {
+		toolBuilder.WithSkillIDsSnapshot(in.SkillIDsSnapshot)
+	}
 	toolResult, err := toolBuilder.BuildWithDeferred(ctx, in.AgentID)
 	if err != nil {
 		localEmitError("tool_schema_build", err)

@@ -148,7 +148,10 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	chatSvc := chat.NewService(chatRepo, sessionRunner)
 	if agentRepo != nil {
-		chatSvc = chatSvc.WithAgentLoader(&agentConfigAdapter{repo: agentRepo})
+		chatSvc = chatSvc.WithAgentLoader(&agentConfigAdapter{
+			repo:        agentRepo,
+			bindingRepo: agent.NewBindingRepository(pool),
+		})
 	}
 	chatHandler := chat.NewHandler(chatSvc, chatExecutor)
 	var docStorage document.StorageClient
@@ -428,7 +431,7 @@ func buildAgenticRunner(
 		nil, // MemoryBridge — requires Embedder, wired later
 		hookExecutor,
 		chatRepo,
-		&agentConfigAdapter{repo: agentRepo},
+		&agentConfigAdapter{repo: agentRepo, bindingRepo: agent.NewBindingRepository(pool)},
 		agentRepo,
 		concreteSkillRepo,
 		concreteToolRepo,
@@ -464,9 +467,10 @@ func buildDefaultChatModel() ai.ChatModel {
 	return nil
 }
 
-// agentConfigAdapter adapts agent.Repository to agentic.AgentConfigLoader.
+// agentConfigAdapter adapts agent.Repository to chat.AgentLoader.
 type agentConfigAdapter struct {
-	repo agent.Repository
+	repo        agent.Repository
+	bindingRepo agent.BindingRepository
 }
 
 func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (*chat.AgentRunConfig, error) {
@@ -480,12 +484,21 @@ func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (
 		systemPrompt = *ag.SystemPrompt
 	}
 
-	return &chat.AgentRunConfig{
+	cfg := &chat.AgentRunConfig{
 		ID:               ag.ID,
 		SystemPrompt:     systemPrompt,
 		ModelConfig:      ag.ModelConfig,
 		PermissionRules:  ag.PermissionRules,
 		EnableManagement: ag.EnableManagement,
 		Status:           string(ag.Status),
-	}, nil
+	}
+
+	// P-C115-1: include skill IDs so the chat service can snapshot them at session creation.
+	if a.bindingRepo != nil {
+		if skillIDs, err := a.bindingRepo.ListSkillIDs(ctx, id); err == nil {
+			cfg.SkillIDs = skillIDs
+		}
+	}
+
+	return cfg, nil
 }
