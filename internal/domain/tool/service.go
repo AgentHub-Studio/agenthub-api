@@ -97,10 +97,15 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 			return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
 		}
 	}
+	// P-C249-1: normalize SQL tool config — accept both datasourceId and datasource_id.
+	config := req.Config
+	if isSQLToolType(req.Type) {
+		config = normalizeDataSourceID(config)
+	}
 	t := Tool{
 		Name:        req.Name,
 		Type:        req.Type,
-		Config:      req.Config,
+		Config:      config,
 		InputSchema: req.InputSchema,
 		Description: req.Description,
 		Labels:      req.Labels,
@@ -152,6 +157,11 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.ReadOnly = *req.ReadOnly
 	}
 
+	// P-C249-1: normalize SQL tool config on update as well.
+	if isSQLToolType(existing.Type) {
+		existing.Config = normalizeDataSourceID(existing.Config)
+	}
+
 	// P-C220-1 / P-C221-1 / P-C254-1: re-validate URL when type or config changed.
 	// HTTP tools require a non-empty URL; reject updates that would leave it absent.
 	if existing.Type == ToolTypeHTTP {
@@ -184,6 +194,38 @@ func extractURLFromConfig(raw json.RawMessage) string {
 		return ""
 	}
 	return cfg.URL
+}
+
+// isSQLToolType returns true for SQL / DATABASE tool types.
+func isSQLToolType(t ToolType) bool {
+	return t == ToolTypeSQL || t == ToolTypeDatabase
+}
+
+// normalizeDataSourceID normalises camelCase `datasourceId` to snake_case `datasource_id`
+// in a SQL tool config blob. P-C249-1: the skill-runtime SQL executor expects
+// datasource_id; frontend / integrations may produce datasourceId.
+// Returns the original slice unchanged when the key is already absent or the
+// JSON cannot be parsed.
+func normalizeDataSourceID(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return raw
+	}
+	val, hasCamel := cfg["datasourceId"]
+	if !hasCamel {
+		return raw // nothing to do
+	}
+	// Move camelCase key to snake_case (keep both for compatibility).
+	cfg["datasource_id"] = val
+	delete(cfg, "datasourceId")
+	normalized, err := json.Marshal(cfg)
+	if err != nil {
+		return raw
+	}
+	return normalized
 }
 
 // Delete deletes a tool.

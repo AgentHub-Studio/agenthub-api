@@ -331,3 +331,60 @@ func TestToolService_NonHTTP_NoURLRequired(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+// --- TR-01-TASK-30: normalizar datasourceId → datasource_id (P-C249-1) ---
+
+// configKeys returns the top-level keys of a tool's Config (which is type any).
+func configKeys(t *testing.T, cfg any) map[string]bool {
+	t.Helper()
+	b, err := json.Marshal(cfg)
+	require.NoError(t, err)
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(b, &m))
+	keys := make(map[string]bool, len(m))
+	for k := range m {
+		keys[k] = true
+	}
+	return keys
+}
+
+func TestNormalizeDataSourceID_CamelCaseConvertedToSnakeCase(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "SQL Query",
+		Type:   tool.ToolTypeSQL,
+		Config: json.RawMessage(`{"datasourceId":"abc-123","sql":"SELECT 1"}`),
+	})
+	require.NoError(t, err)
+
+	keys := configKeys(t, created.Config)
+	assert.True(t, keys["datasource_id"], "snake_case key should be present")
+	assert.False(t, keys["datasourceId"], "camelCase key should be removed")
+}
+
+func TestNormalizeDataSourceID_AlreadySnakeCase_Unchanged(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "SQL Query 2",
+		Type:   tool.ToolTypeSQL,
+		Config: json.RawMessage(`{"datasource_id":"abc-123","sql":"SELECT 1"}`),
+	})
+	require.NoError(t, err)
+
+	keys := configKeys(t, created.Config)
+	assert.True(t, keys["datasource_id"])
+}
+
+func TestNormalizeDataSourceID_NonSQLToolNotTouched(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "Custom Tool",
+		Type:   tool.ToolTypeCustom,
+		Config: json.RawMessage(`{"datasourceId":"abc-123"}`),
+	})
+	require.NoError(t, err)
+
+	// Non-SQL tools should NOT be normalised — config returned as-is.
+	keys := configKeys(t, created.Config)
+	assert.True(t, keys["datasourceId"], "non-SQL tool config should be untouched")
+}
