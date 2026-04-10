@@ -41,7 +41,9 @@ func (r *pgBindingRepository) ListSkillIDs(ctx context.Context, agentID uuid.UUI
 	defer release()
 
 	rows, err := conn.Query(ctx,
-		`SELECT skill_id FROM agent_skill WHERE agent_id = $1 ORDER BY created_at`, agentID)
+		// P-C289-1: order by priority ASC so higher-priority skills appear first in
+		// the LLM system prompt, then by created_at for stable tie-breaking.
+		`SELECT skill_id FROM agent_skill WHERE agent_id = $1 ORDER BY priority ASC, created_at ASC`, agentID)
 	if err != nil {
 		return nil, fmt.Errorf("agent.ListSkillIDs: %w", err)
 	}
@@ -76,11 +78,16 @@ func (r *pgBindingRepository) SyncSkills(ctx context.Context, agentID uuid.UUID,
 		return fmt.Errorf("agent.SyncSkills: delete: %w", err)
 	}
 
-	for _, sid := range skillIDs {
+	// P-C289-1: use list index as priority so the caller's ordering is preserved.
+	for i, sid := range skillIDs {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO agent_skill (agent_id, skill_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-			agentID, sid,
+			`INSERT INTO agent_skill (agent_id, skill_id, priority) VALUES ($1, $2, $3)
+			 ON CONFLICT (agent_id, skill_id) DO UPDATE SET priority = EXCLUDED.priority`,
+			agentID, sid, i,
 		); err != nil {
+			if isForeignKeyViolation(err) {
+				return fmt.Errorf("skill not found: %s", sid)
+			}
 			return fmt.Errorf("agent.SyncSkills: insert %s: %w", sid, err)
 		}
 	}
