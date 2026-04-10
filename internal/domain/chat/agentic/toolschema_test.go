@@ -222,6 +222,94 @@ func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
 	assert.Contains(t, string(tools[4].InputSchema), `"type":"object"`)
 }
 
+// --- TR-01-TASK-20: all active tools exposed, no premature break (P-C175-2) ---
+
+// TestToolSchemaBuilder_Build_SkillWithMultipleTools_AllFlagsAggregated verifies that
+// removing the break causes flags from all active tools to be OR-combined.
+func TestToolSchemaBuilder_Build_SkillWithMultipleTools_AllFlagsAggregated(t *testing.T) {
+	skillID := uuid.New()
+	tool1ID := uuid.New()
+	tool2ID := uuid.New()
+
+	// Two active tools: first is not destructive, second is destructive.
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{
+			{ID: uuid.New(), SkillID: skillID, ToolID: tool1ID, IsActive: true},
+			{ID: uuid.New(), SkillID: skillID, ToolID: tool2ID, IsActive: true},
+		},
+		tools: []tool.Tool{
+			{ID: tool1ID, Name: "tool-a", Type: "HTTP", IsDestructive: false, ReadOnly: true},
+			{ID: tool2ID, Name: "tool-b", Type: "HTTP", IsDestructive: true, ReadOnly: false},
+		},
+	}
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: skillID, Name: "Multi Tool Skill", Slug: "multi-tool"},
+	}}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+		WithAdminScope(true).WithEnableManagement(true)
+	llmTools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	// The skill should appear as a single LLM tool (skills are the granularity, not individual tools).
+	var multiTool *agentic.LLMTool
+	for i := range llmTools {
+		if llmTools[i].Name == "multi-tool" {
+			multiTool = &llmTools[i]
+			break
+		}
+	}
+	require.NotNil(t, multiTool, "multi-tool skill must appear in tools[]")
+	// Both tools' flags should be aggregated: IsDestructive OR'd → true.
+	assert.True(t, multiTool.IsDestructive, "IsDestructive must be true after aggregating both tools")
+}
+
+// TestToolSchemaBuilder_Build_SkillWithMixedActiveInactive_OnlyActiveCount verifies
+// that inactive tools do not contribute flags.
+func TestToolSchemaBuilder_Build_SkillWithMixedActiveInactive_OnlyActiveContributes(t *testing.T) {
+	skillID := uuid.New()
+	tool1ID := uuid.New()
+	tool2ID := uuid.New()
+
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{
+			{ID: uuid.New(), SkillID: skillID, ToolID: tool1ID, IsActive: true},
+			{ID: uuid.New(), SkillID: skillID, ToolID: tool2ID, IsActive: false}, // inactive
+		},
+		tools: []tool.Tool{
+			{ID: tool1ID, Name: "active-tool", Type: "HTTP", IsDestructive: false, ReadOnly: true},
+			{ID: tool2ID, Name: "inactive-tool", Type: "HTTP", IsDestructive: true, ReadOnly: false},
+		},
+	}
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: skillID, Name: "Mixed Skill", Slug: "mixed-skill"},
+	}}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+		WithAdminScope(true).WithEnableManagement(true)
+	llmTools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	var mixedTool *agentic.LLMTool
+	for i := range llmTools {
+		if llmTools[i].Name == "mixed-skill" {
+			mixedTool = &llmTools[i]
+			break
+		}
+	}
+	require.NotNil(t, mixedTool, "mixed-skill must appear in tools[]")
+	// Only the active tool contributes: IsDestructive should remain false.
+	assert.False(t, mixedTool.IsDestructive, "inactive tool's IsDestructive must not propagate")
+}
+
 func TestToolSchemaBuilder_Build_PrefersDatabaseDescriptionOverStaticCatalog(t *testing.T) {
 	skillID := uuid.New()
 	toolID := uuid.New()

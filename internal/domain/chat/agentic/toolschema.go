@@ -468,7 +468,8 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 				if boundTools[i].IsSearchOrRead {
 					isSearchOrRead = true
 				}
-				break
+				// P-C175-2: no break — iterate all active tools so every tool's flags
+				// are aggregated and only the first explicit InputSchema wins.
 			}
 		}
 	}
