@@ -67,7 +67,13 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 		return uuid.Nil, fmt.Errorf("chat: check active run: %w", err)
 	} else if active {
 		staleThreshold := e.runTimeout
-		if !stale.StartedAt.IsZero() && time.Since(stale.StartedAt) > staleThreshold {
+		// P-C299-1: queued runs (StartedAt is zero) have been waiting in the RabbitMQ queue.
+		// Expire them after 2× the run timeout — if the queue has been stagnant that long,
+		// the worker is likely down. Active runs (StartedAt non-zero) expire at the normal threshold.
+		if stale.Status == ChatRunStatusQueued && time.Since(stale.CreatedAt) > 2*staleThreshold {
+			slog.Warn("chat: auto-expiring stale queued run (worker may be down)", "runId", stale.ID, "age", time.Since(stale.CreatedAt))
+			_ = e.repo.UpdateRunStatus(ctx, stale.ID, ChatRunStatusFailed, "")
+		} else if !stale.StartedAt.IsZero() && time.Since(stale.StartedAt) > staleThreshold {
 			slog.Warn("chat: auto-expiring orphaned active run", "runId", stale.ID, "age", time.Since(stale.StartedAt))
 			_ = e.repo.UpdateRunStatus(ctx, stale.ID, ChatRunStatusFailed, "")
 		} else {
@@ -75,11 +81,12 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 		}
 	}
 
-	// 1. Create Run in DB
+	// 1. Create Run in DB with 'queued' status (P-C299-1).
+	// The worker transitions to 'active' when it actually starts processing.
 	run, err := e.repo.CreateRun(ctx, ChatRun{
 		SessionID: sessionID,
 		TenantID:  tenantID,
-		Status:    ChatRunStatusActive,
+		Status:    ChatRunStatusQueued,
 	})
 	if err != nil {
 		return uuid.Nil, err
@@ -202,6 +209,10 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	cleanupCtx := baseCtx
 
 	slog.Info("chat: background run starting", "runId", task.RunID, "sessionId", task.SessionID, "tenant", task.TenantID)
+
+	// P-C299-1: transition from 'queued' → 'active' now that the worker has picked up the task.
+	// This lets polling clients distinguish "waiting in queue" from "actively processing".
+	_ = e.repo.UpdateRunStatus(ctx, task.RunID, ChatRunStatusActive, "")
 
 	// Since we are in a background worker, we don't have the original SSE stream.
 	// We just run the session and let the Runner handle persistence of messages.

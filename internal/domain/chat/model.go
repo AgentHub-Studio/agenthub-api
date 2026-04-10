@@ -11,6 +11,9 @@ import (
 // ErrNotFound is returned when a chat session or message cannot be found.
 var ErrNotFound = errors.New("chat: not found")
 
+// ErrRunAlreadyActive is returned when a concurrent run is already in progress for the session.
+var ErrRunAlreadyActive = errors.New("chat: a run is already in progress for this session")
+
 // ChatStatus represents the lifecycle status of a ChatSession.
 type ChatStatus string
 
@@ -23,6 +26,11 @@ const (
 type ChatRunStatus string
 
 const (
+	// P-C299-1: queued = published to RabbitMQ, not yet picked up by a worker.
+	// active = worker has started processing. This distinction prevents clients
+	// from seeing a run as "running" before the LLM loop has actually started,
+	// and allows the stale-detection threshold to apply only to truly started runs.
+	ChatRunStatusQueued    ChatRunStatus = "queued"
 	ChatRunStatusActive    ChatRunStatus = "active"
 	ChatRunStatusCompleted ChatRunStatus = "completed"
 	ChatRunStatusFailed    ChatRunStatus = "failed"
@@ -77,6 +85,7 @@ type ChatRun struct {
 	Metadata    json.RawMessage `db:"metadata"`
 	StartedAt   time.Time       `db:"started_at"`
 	CompletedAt *time.Time      `db:"completed_at"`
+	CreatedAt   time.Time       `db:"created_at"`
 }
 
 // ChatSessionResponse is the DTO for a chat session.
@@ -115,6 +124,13 @@ type ChatRunResponse struct {
 	Metadata    json.RawMessage `json:"metadata,omitempty"`
 	StartedAt   time.Time       `json:"startedAt"`
 	CompletedAt *time.Time      `json:"completedAt,omitempty"`
+}
+
+// ChatSessionListStamp is a lightweight signature for detecting list changes
+// without reloading the full session page on every poll cycle.
+type ChatSessionListStamp struct {
+	Count           int64     `json:"count"`
+	LatestUpdatedAt time.Time `json:"latestUpdatedAt"`
 }
 
 // SessionResponseFrom maps a ChatSession entity to a ChatSessionResponse DTO.

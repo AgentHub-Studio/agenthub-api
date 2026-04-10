@@ -18,6 +18,7 @@ import (
 // Repository defines the persistence interface for chat sessions and messages.
 type Repository interface {
 	FindSessions(ctx context.Context, req pagination.PageRequest) ([]ChatSession, int64, error)
+	GetSessionListStamp(ctx context.Context) (ChatSessionListStamp, error)
 	GetSessionByID(ctx context.Context, id uuid.UUID) (ChatSession, error)
 	CreateSession(ctx context.Context, s ChatSession) (ChatSession, error)
 	UpdateSessionStatus(ctx context.Context, id uuid.UUID, status ChatStatus) (ChatSession, error)
@@ -95,6 +96,25 @@ func (r *postgresRepository) FindSessions(ctx context.Context, req pagination.Pa
 	}
 
 	return items, total, nil
+}
+
+func (r *postgresRepository) GetSessionListStamp(ctx context.Context) (ChatSessionListStamp, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return ChatSessionListStamp{}, err
+	}
+	defer release()
+
+	var stamp ChatSessionListStamp
+	err = conn.QueryRow(ctx,
+		`SELECT COUNT(*), COALESCE(MAX(updated_at), 'epoch'::timestamptz)
+		 FROM chat_session`,
+	).Scan(&stamp.Count, &stamp.LatestUpdatedAt)
+	if err != nil {
+		return ChatSessionListStamp{}, fmt.Errorf("chat: session list stamp: %w", err)
+	}
+
+	return stamp, nil
 }
 
 func (r *postgresRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (ChatSession, error) {
@@ -455,18 +475,37 @@ func (r *postgresRepository) CreateRun(ctx context.Context, run ChatRun) (ChatRu
 	defer release()
 
 	run.ID = uuid.New()
-	run.StartedAt = time.Now().UTC()
 	if run.Status == "" {
 		run.Status = ChatRunStatusActive
 	}
+	// P-C299-1: only set StartedAt for runs that are immediately active.
+	// Queued runs have no started_at until the worker transitions them to active.
+	if run.Status != ChatRunStatusQueued {
+		run.StartedAt = time.Now().UTC()
+	}
 
-	_, err = conn.Exec(ctx,
-		`INSERT INTO chat_run (id, session_id, tenant_id, status, last_event_id, metadata, started_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		run.ID, run.SessionID, run.TenantID, run.Status, run.LastEventID, run.Metadata, run.StartedAt,
-	)
-	if err != nil {
-		return ChatRun{}, fmt.Errorf("chat: create run: %w", err)
+	// P-C299-1: for queued runs, omit started_at so DB default (NULL) is used.
+	// started_at is set by UpdateRunStatus when the worker transitions to active.
+	var execErr error
+	if run.Status == ChatRunStatusQueued {
+		_, execErr = conn.Exec(ctx,
+			`INSERT INTO chat_run (id, session_id, tenant_id, status, last_event_id, metadata, started_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, NULL)`,
+			run.ID, run.SessionID, run.TenantID, run.Status, run.LastEventID, run.Metadata,
+		)
+	} else {
+		_, execErr = conn.Exec(ctx,
+			`INSERT INTO chat_run (id, session_id, tenant_id, status, last_event_id, metadata, started_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			run.ID, run.SessionID, run.TenantID, run.Status, run.LastEventID, run.Metadata, run.StartedAt,
+		)
+	}
+	if execErr != nil {
+		// P-C99-1: uq_chat_run_session_active prevents two concurrent active runs per session.
+		if database.IsPgError(execErr, database.PgErrUniqueViolation) {
+			return ChatRun{}, ErrRunAlreadyActive
+		}
+		return ChatRun{}, fmt.Errorf("chat: create run: %w", execErr)
 	}
 
 	return run, nil
@@ -481,10 +520,10 @@ func (r *postgresRepository) GetRunByID(ctx context.Context, id uuid.UUID) (Chat
 
 	var run ChatRun
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at
+		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at, created_at
 		 FROM chat_run WHERE id = $1`,
 		id,
-	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt)
+	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt, &run.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatRun{}, ErrNotFound
@@ -504,11 +543,13 @@ func (r *postgresRepository) GetActiveRunBySession(ctx context.Context, sessionI
 
 	var run ChatRun
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at
-		 FROM chat_run WHERE session_id = $1 AND status = 'active'
-		 ORDER BY started_at DESC LIMIT 1`,
+		// P-C299-1: include 'queued' runs so that runs published to RabbitMQ but
+		// not yet started by a worker also block concurrent run creation.
+		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at, created_at
+		 FROM chat_run WHERE session_id = $1 AND status IN ('queued', 'active')
+		 ORDER BY created_at DESC LIMIT 1`,
 		sessionID,
-	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt)
+	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt, &run.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatRun{}, false, nil
@@ -526,10 +567,18 @@ func (r *postgresRepository) UpdateRunStatus(ctx context.Context, id uuid.UUID, 
 	}
 	defer release()
 
-	_, err = conn.Exec(ctx,
-		`UPDATE chat_run SET status = $1, last_event_id = $2 WHERE id = $3`,
-		status, lastEventID, id,
-	)
+	// P-C299-1: when transitioning queued → active, also set started_at.
+	if status == ChatRunStatusActive {
+		_, err = conn.Exec(ctx,
+			`UPDATE chat_run SET status = $1, last_event_id = $2, started_at = COALESCE(started_at, NOW()) WHERE id = $3`,
+			status, lastEventID, id,
+		)
+	} else {
+		_, err = conn.Exec(ctx,
+			`UPDATE chat_run SET status = $1, last_event_id = $2 WHERE id = $3`,
+			status, lastEventID, id,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("chat: update run status: %w", err)
 	}
