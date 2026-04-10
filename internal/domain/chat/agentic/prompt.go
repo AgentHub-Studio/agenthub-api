@@ -12,6 +12,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -503,3 +504,45 @@ const (
 	promptTemplateSlugUserInteractionPolicy = "agentic-user-interaction-policy"
 	promptTemplateSlugToolUsageInstructions = "agentic-tool-usage-instructions"
 )
+
+// SkillWithTools pairs a skill with its active tool implementations.
+// Used by FormatSkillInstructionsSection to filter orphaned skill instructions.
+type SkillWithTools struct {
+	Skill       skill.Skill
+	ActiveTools []tool.Tool
+}
+
+// FormatSkillInstructionsSection produces the skill instructions block for the system
+// prompt. Applies two P-C filters:
+//   - P-C152-2 / P-C159-1 / P-C168-1: skills with no active tools whose instructions
+//     reference a tool by name are omitted entirely to prevent LLM hallucination.
+//   - Behavioral instructions (no tool reference) are included even for orphaned skills.
+func FormatSkillInstructionsSection(skills []SkillWithTools) string {
+	var sb strings.Builder
+	for _, sw := range skills {
+		if sw.Skill.Instructions == "" {
+			continue
+		}
+		// If the skill has no active tools AND the instructions reference a tool
+		// by name, omit them to prevent the LLM from invoking a non-existent tool.
+		if len(sw.ActiveTools) == 0 && referencesToolByName(sw.Skill.Instructions) {
+			continue
+		}
+		sb.WriteString(sw.Skill.Instructions)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// referencesToolByName returns true when instructions appear to reference a specific
+// tool by name. Used to decide whether to omit orphaned skill instructions.
+// Heuristic: looks for common invocation phrases ("call the X", "use the X", etc.).
+func referencesToolByName(instructions string) bool {
+	lower := strings.ToLower(instructions)
+	for _, p := range []string{"call the ", "use the ", "invoke ", "using tool"} {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}

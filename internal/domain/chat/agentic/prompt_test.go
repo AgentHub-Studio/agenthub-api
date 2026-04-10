@@ -13,6 +13,8 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 // --- mocks ---
@@ -25,12 +27,20 @@ func (m *mockSkillLister) ListByAgentID(_ context.Context, _ uuid.UUID) ([]skill
 	return m.skills, nil
 }
 
+func (m *mockSkillLister) List(_ context.Context, _ *string, _ pagination.PageRequest) ([]skill.Skill, int64, error) {
+	return nil, 0, nil
+}
+
 type mockKBLister struct {
 	kbs []knowledgebase.KnowledgeBase
 }
 
 func (m *mockKBLister) ListByAgentID(_ context.Context, _ uuid.UUID) ([]knowledgebase.KnowledgeBase, error) {
 	return m.kbs, nil
+}
+
+func (m *mockKBLister) List(_ context.Context, _ pagination.PageRequest) ([]knowledgebase.KnowledgeBase, int64, error) {
+	return nil, 0, nil
 }
 
 type mockSummaryFinder struct {
@@ -317,4 +327,39 @@ func TestPromptBuilder_Build_FallsBackWhenPromptTemplateMissing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "## CRITICAL — User Input Policy")
 	assert.Contains(t, prompt, "## Tool Usage Instructions")
+}
+
+// --- TR-01-TASK-06: FormatSkillInstructionsSection (P-C152-2, P-C159-1, P-C168-1) ---
+
+// TestFormatSkillInstructions_SkillWithNoActiveTools_OmittedFromPrompt verifies that
+// a skill with no active tools whose instructions reference a tool name is omitted.
+func TestFormatSkillInstructions_SkillWithNoActiveTools_OmittedFromPrompt(t *testing.T) {
+	sw := agentic.SkillWithTools{
+		Skill:       skill.Skill{Instructions: "always call check_status tool"},
+		ActiveTools: []tool.Tool{}, // no active tools
+	}
+	result := agentic.FormatSkillInstructionsSection([]agentic.SkillWithTools{sw})
+	assert.Empty(t, result)
+}
+
+// TestFormatSkillInstructions_SkillWithActiveTools_Included verifies that a skill
+// with active tools always has its instructions included.
+func TestFormatSkillInstructions_SkillWithActiveTools_Included(t *testing.T) {
+	sw := agentic.SkillWithTools{
+		Skill:       skill.Skill{Instructions: "use this skill to answer questions"},
+		ActiveTools: []tool.Tool{{Name: "search"}},
+	}
+	result := agentic.FormatSkillInstructionsSection([]agentic.SkillWithTools{sw})
+	assert.Contains(t, result, "use this skill")
+}
+
+// TestFormatSkillInstructions_InstructionOnlySkillWithoutToolRef_Included verifies
+// that behavioral instructions (no tool reference) survive even without active tools.
+func TestFormatSkillInstructions_InstructionOnlySkillWithoutToolRef_Included(t *testing.T) {
+	sw := agentic.SkillWithTools{
+		Skill:       skill.Skill{Instructions: "always respond in Portuguese"},
+		ActiveTools: []tool.Tool{},
+	}
+	result := agentic.FormatSkillInstructionsSection([]agentic.SkillWithTools{sw})
+	assert.Contains(t, result, "Portuguese")
 }

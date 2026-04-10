@@ -160,15 +160,12 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 5) // agent + agenthub_manage + ask_user + memory_store (builtins) + empty-skill (skill)
-
-	assert.Equal(t, "agent", tools[0].Name)
-	assert.Equal(t, "agenthub_manage", tools[1].Name)
-	assert.Equal(t, "ask_user", tools[2].Name)
-	assert.Equal(t, "memory_store", tools[3].Name)
-	assert.Equal(t, "empty-skill", tools[4].Name)
-	// Should have a default empty schema for the skill.
-	assert.Contains(t, string(tools[4].InputSchema), `"type":"object"`)
+	// P-C62-1: skill without active tool bindings is excluded from tools[].
+	require.Len(t, tools, 4) // agent + agenthub_manage + ask_user + memory_store (builtins only)
+	for _, t := range tools {
+		assert.NotEqual(t, "empty-skill", t.Name,
+			"skill without active bindings must not appear in tools[]")
+	}
 }
 
 func TestToolSchemaBuilder_Build_NoSkillsNoKBs(t *testing.T) {
@@ -226,9 +223,11 @@ func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
 }
 
 func TestToolSchemaBuilder_Build_PrefersDatabaseDescriptionOverStaticCatalog(t *testing.T) {
+	skillID := uuid.New()
+	toolID := uuid.New()
 	skills := &mockSkillLister{skills: []skill.Skill{
 		{
-			ID:          uuid.New(),
+			ID:          skillID,
 			Name:        "Execute SQL",
 			Slug:        "execute-sql",
 			Description: "Custom DB description for SQL tool.",
@@ -236,7 +235,17 @@ func TestToolSchemaBuilder_Build_PrefersDatabaseDescriptionOverStaticCatalog(t *
 		},
 	}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), &mockKBLister{}).
+	// Give the skill an active binding so it appears in tools[] (P-C62-1).
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools:    []tool.Tool{{ID: toolID, Name: "sql-impl", Type: "SQL"}},
+	}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
 		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
@@ -266,13 +275,28 @@ func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
 }
 
 func TestToolSchemaBuilder_Build_SortedByPartition(t *testing.T) {
+	zebraID := uuid.New()
+	alphaID := uuid.New()
 	skills := &mockSkillLister{skills: []skill.Skill{
-		{ID: uuid.New(), Slug: "zebra-tool", Name: "Zebra", Description: "Z tool"},
-		{ID: uuid.New(), Slug: "alpha-tool", Name: "Alpha", Description: "A tool"},
+		{ID: zebraID, Slug: "zebra-tool", Name: "Zebra", Description: "Z tool"},
+		{ID: alphaID, Slug: "alpha-tool", Name: "Alpha", Description: "A tool"},
 	}}
 	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1"}}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs).
+	// Give each skill an active binding so they appear in tools[] (P-C62-1).
+	toolsMock := newMockToolsBySkill()
+	for _, id := range []uuid.UUID{zebraID, alphaID} {
+		toolID := uuid.New()
+		toolsMock.bySkill[id] = struct {
+			bindings []tool.SkillTool
+			tools    []tool.Tool
+		}{
+			bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: id, ToolID: toolID, IsActive: true}},
+			tools:    []tool.Tool{{ID: toolID, Name: "impl"}},
+		}
+	}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, kbs).
 		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
@@ -304,13 +328,28 @@ func TestToolSchemaBuilder_Build_SortedByPartition(t *testing.T) {
 }
 
 func TestToolSchemaBuilder_ReadOnlyFlag(t *testing.T) {
+	docID := uuid.New()
+	sqlID := uuid.New()
 	skills := &mockSkillLister{skills: []skill.Skill{
-		{ID: uuid.New(), Slug: "document-search", Name: "Doc Search", Description: "Search docs"},
-		{ID: uuid.New(), Slug: "execute-sql", Name: "SQL", Description: "Run SQL"},
+		{ID: docID, Slug: "document-search", Name: "Doc Search", Description: "Search docs"},
+		{ID: sqlID, Slug: "execute-sql", Name: "SQL", Description: "Run SQL"},
 	}}
 	kbs := &mockKBLister{}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs)
+	// Give each skill an active binding so it appears in tools[] (P-C62-1).
+	toolsMock := newMockToolsBySkill()
+	for _, id := range []uuid.UUID{docID, sqlID} {
+		toolID := uuid.New()
+		toolsMock.bySkill[id] = struct {
+			bindings []tool.SkillTool
+			tools    []tool.Tool
+		}{
+			bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: id, ToolID: toolID, IsActive: true}},
+			tools:    []tool.Tool{{ID: toolID, Name: "impl"}},
+		}
+	}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, kbs)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -327,14 +366,30 @@ func TestToolSchemaBuilder_ReadOnlyFlag(t *testing.T) {
 }
 
 func TestToolSchemaBuilder_Build_BuiltinsFormContiguousPrefix(t *testing.T) {
+	zebraID := uuid.New()
+	alphaID := uuid.New()
+	midID := uuid.New()
 	skills := &mockSkillLister{skills: []skill.Skill{
-		{ID: uuid.New(), Slug: "zebra-tool", Name: "Zebra", Description: "Z tool"},
-		{ID: uuid.New(), Slug: "alpha-tool", Name: "Alpha", Description: "A tool"},
-		{ID: uuid.New(), Slug: "mid-tool", Name: "Mid", Description: "M tool"},
+		{ID: zebraID, Slug: "zebra-tool", Name: "Zebra", Description: "Z tool"},
+		{ID: alphaID, Slug: "alpha-tool", Name: "Alpha", Description: "A tool"},
+		{ID: midID, Slug: "mid-tool", Name: "Mid", Description: "M tool"},
 	}}
 	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB1"}}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs).
+	// Give each skill an active binding so it appears in tools[] (P-C62-1).
+	toolsMock := newMockToolsBySkill()
+	for _, id := range []uuid.UUID{zebraID, alphaID, midID} {
+		toolID := uuid.New()
+		toolsMock.bySkill[id] = struct {
+			bindings []tool.SkillTool
+			tools    []tool.Tool
+		}{
+			bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: id, ToolID: toolID, IsActive: true}},
+			tools:    []tool.Tool{{ID: toolID, Name: "impl"}},
+		}
+	}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, kbs).
 		WithAdminScope(true).WithEnableManagement(true)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
@@ -364,12 +419,24 @@ func TestToolSchemaBuilder_Build_BuiltinsFormContiguousPrefix(t *testing.T) {
 }
 
 func TestToolSchemaBuilder_Build_BuiltinFlagIsSet(t *testing.T) {
+	customID := uuid.New()
 	skills := &mockSkillLister{skills: []skill.Skill{
-		{ID: uuid.New(), Slug: "custom-skill", Name: "Custom", Description: "User skill"},
+		{ID: customID, Slug: "custom-skill", Name: "Custom", Description: "User skill"},
 	}}
 	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{{Name: "KB"}}}
 
-	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), kbs)
+	// Give the skill an active binding so it appears in tools[] (P-C62-1).
+	toolsMock := newMockToolsBySkill()
+	toolID := uuid.New()
+	toolsMock.bySkill[customID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: customID, ToolID: toolID, IsActive: true}},
+		tools:    []tool.Tool{{ID: toolID, Name: "impl"}},
+	}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, kbs)
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
@@ -418,16 +485,15 @@ func TestToolSchemaBuilder_BuildWithDeferred_AboveThreshold(t *testing.T) {
 		sk := skill.Skill{ID: id, Name: slug, Slug: slug}
 		skills = append(skills, sk)
 
-		// Mark half of them as ShouldDefer via bound tool.
-		if i >= 10 {
-			toolID := uuid.New()
-			toolsMock.bySkill[id] = struct {
-				bindings []tool.SkillTool
-				tools    []tool.Tool
-			}{
-				bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: id, ToolID: toolID, IsActive: true}},
-				tools:    []tool.Tool{{ID: toolID, Name: slug + "-tool", ShouldDefer: true}},
-			}
+		toolID := uuid.New()
+		// All skills get active bindings (P-C62-1: skills without bindings are excluded).
+		// Mark the second half as ShouldDefer via bound tool.
+		toolsMock.bySkill[id] = struct {
+			bindings []tool.SkillTool
+			tools    []tool.Tool
+		}{
+			bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: id, ToolID: toolID, IsActive: true}},
+			tools:    []tool.Tool{{ID: toolID, Name: slug + "-tool", ShouldDefer: i >= 10}},
 		}
 	}
 
@@ -544,4 +610,55 @@ func TestBuildTools_ManagementExcludedWhenNoAdminScope(t *testing.T) {
 		assert.NotEqual(t, "agenthub_manage", tool.Name,
 			"agenthub_manage must not appear for non-admin callers even when enable_management=true")
 	}
+}
+
+// --- TR-01-TASK-06: orphaned skill instructions (P-C152-2, P-C159-1, P-C168-1) ---
+
+// TestBuildTools_InstructionOnlySkill_NotInToolArray verifies that a skill with
+// instructions but no active tool bindings is excluded from the LLM tools[] array.
+func TestBuildTools_InstructionOnlySkill_NotInToolArray(t *testing.T) {
+	skillID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{
+			ID:           skillID,
+			Name:         "Behavior Skill",
+			Slug:         "behavior-skill",
+			Instructions: "always call check_status tool",
+		},
+	}}
+
+	// Empty toolsBySkill = no active bindings → skill should be excluded.
+	builder := agentic.NewToolSchemaBuilder(skills, newMockToolsBySkill(), &mockKBLister{})
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	for _, tool := range tools {
+		assert.NotEqual(t, "behavior-skill", tool.Name,
+			"instruction-only skill with no active bindings must not appear in tools[]")
+	}
+}
+
+// TestBuildTools_SkillWithTools_InToolArray verifies that a skill with an active
+// tool binding does appear in the LLM tools[] array.
+func TestBuildTools_SkillWithTools_InToolArray(t *testing.T) {
+	skillID := uuid.New()
+	toolID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{ID: skillID, Name: "Search Skill", Slug: "search-skill"},
+	}}
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools:    []tool.Tool{{ID: toolID, Name: "web_search"}},
+	}
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{})
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	assert.Contains(t, toolNames(tools), "search-skill",
+		"skill with active binding must appear in tools[]")
 }
