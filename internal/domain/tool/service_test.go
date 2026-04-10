@@ -2,6 +2,7 @@ package tool_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -123,8 +124,9 @@ func (m *mockToolRepo) ListBySkill(_ context.Context, skillID uuid.UUID) ([]tool
 func TestToolService_Create_Success(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
 	created, err := svc.Create(context.Background(), tool.CreateRequest{
-		Name: "HTTP POST",
-		Type: "HTTP",
+		Name:   "HTTP POST",
+		Type:   "HTTP",
+		Config: json.RawMessage(`{"url":"https://api.example.com/endpoint"}`),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "HTTP POST", created.Name)
@@ -180,6 +182,7 @@ func TestToolService_Create_WithLabels(t *testing.T) {
 	created, err := svc.Create(context.Background(), tool.CreateRequest{
 		Name:   "Tagged Tool",
 		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"url":"https://api.example.com/v1"}`),
 		Labels: []string{"prod", "external"},
 	})
 	require.NoError(t, err)
@@ -187,21 +190,25 @@ func TestToolService_Create_WithLabels(t *testing.T) {
 }
 
 func TestToolService_Create_ValidTypes(t *testing.T) {
-	validTypes := []string{
-		tool.ToolTypeHTTP,
-		tool.ToolTypeSQL,
-		tool.ToolTypeDocumentSearch,
-		tool.ToolTypeCustom,
-		tool.ToolTypeBlockly,
-		tool.ToolTypeComposite,
-		tool.ToolTypeCode,
-		tool.ToolTypeDatabase,
-		tool.ToolTypeDocuments,
+	httpConfig := json.RawMessage(`{"url":"https://api.example.com/endpoint"}`)
+	validTypes := []struct {
+		typ    string
+		config json.RawMessage
+	}{
+		{tool.ToolTypeHTTP, httpConfig},
+		{tool.ToolTypeSQL, nil},
+		{tool.ToolTypeDocumentSearch, nil},
+		{tool.ToolTypeCustom, nil},
+		{tool.ToolTypeBlockly, nil},
+		{tool.ToolTypeComposite, nil},
+		{tool.ToolTypeCode, nil},
+		{tool.ToolTypeDatabase, nil},
+		{tool.ToolTypeDocuments, nil},
 	}
-	for _, tt := range validTypes {
-		t.Run(tt, func(t *testing.T) {
+	for _, tc := range validTypes {
+		t.Run(tc.typ, func(t *testing.T) {
 			svc := tool.NewService(newMockRepo())
-			_, err := svc.Create(context.Background(), tool.CreateRequest{Name: "T", Type: tt})
+			_, err := svc.Create(context.Background(), tool.CreateRequest{Name: "T", Type: tc.typ, Config: tc.config})
 			require.NoError(t, err)
 		})
 	}
@@ -212,7 +219,10 @@ func TestToolService_Create_ValidTypes(t *testing.T) {
 func TestPatchTool_OnlyDescriptionSent_TypePreserved(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
 	created, err := svc.Create(context.Background(), tool.CreateRequest{
-		Name: "my-tool", Type: tool.ToolTypeHTTP, Description: "original",
+		Name:        "my-tool",
+		Type:        tool.ToolTypeHTTP,
+		Description: "original",
+		Config:      json.RawMessage(`{"url":"https://api.example.com/endpoint"}`),
 	})
 	require.NoError(t, err)
 
@@ -262,11 +272,62 @@ func TestPatchTool_EmptyBody_NoChanges(t *testing.T) {
 
 func TestToolService_List_FilterByType(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
-	_, err := svc.Create(context.Background(), tool.CreateRequest{Name: "HTTP", Type: "HTTP"})
+	_, err := svc.Create(context.Background(), tool.CreateRequest{Name: "HTTP", Type: "HTTP", Config: json.RawMessage(`{"url":"https://api.example.com/v1"}`)})
 	require.NoError(t, err)
 	_, err = svc.Create(context.Background(), tool.CreateRequest{Name: "SQL", Type: "SQL"})
 	require.NoError(t, err)
 	page, err := svc.List(context.Background(), pagination.PageRequest{Page: 0, Size: 20}, "HTTP")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), page.TotalElements)
+}
+
+// --- TR-01-TASK-28: URL obrigatória em HTTP tools (P-C254-1) ---
+
+func TestToolService_Create_HTTPMissingURL_Rejected(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name: "No URL",
+		Type: tool.ToolTypeHTTP,
+		// Config has no "url" field.
+		Config: json.RawMessage(`{"method":"GET"}`),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "url")
+	assert.Contains(t, err.Error(), "required")
+}
+
+func TestToolService_Create_HTTPEmptyConfig_Rejected(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name: "No Config",
+		Type: tool.ToolTypeHTTP,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "url")
+}
+
+func TestToolService_Update_HTTPRemoveURL_Rejected(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "With URL",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"url":"https://api.example.com/v1"}`),
+	})
+	require.NoError(t, err)
+
+	// Update to remove the URL from config.
+	_, err = svc.Update(context.Background(), created.ID, tool.UpdateRequest{
+		Config: json.RawMessage(`{"method":"POST"}`),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "url")
+}
+
+func TestToolService_NonHTTP_NoURLRequired(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name: "SQL Tool",
+		Type: tool.ToolTypeSQL,
+	})
+	require.NoError(t, err)
 }

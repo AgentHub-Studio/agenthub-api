@@ -87,12 +87,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if !IsValidToolType(req.Type) {
 		return Response{}, fmt.Errorf("tool: unsupported type: %s", req.Type)
 	}
-	// P-C220-1 / P-C221-1: block SSRF — validate URL before persisting.
+	// P-C220-1 / P-C221-1 / P-C254-1: HTTP tools require a non-empty URL.
 	if req.Type == ToolTypeHTTP {
-		if u := extractURLFromConfig(req.Config); u != "" {
-			if err := ssrf.ValidateURL(u); err != nil {
-				return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
-			}
+		u := extractURLFromConfig(req.Config)
+		if u == "" {
+			return Response{}, fmt.Errorf("tool: url is required for HTTP tools")
+		}
+		if err := ssrf.ValidateURL(u); err != nil {
+			return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
 		}
 	}
 	t := Tool{
@@ -150,12 +152,15 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.ReadOnly = *req.ReadOnly
 	}
 
-	// P-C220-1 / P-C221-1: re-validate URL when type or config changed.
+	// P-C220-1 / P-C221-1 / P-C254-1: re-validate URL when type or config changed.
+	// HTTP tools require a non-empty URL; reject updates that would leave it absent.
 	if existing.Type == ToolTypeHTTP {
-		if u := extractURLFromConfig(existing.Config); u != "" {
-			if err := ssrf.ValidateURL(u); err != nil {
-				return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
-			}
+		u := extractURLFromConfig(existing.Config)
+		if u == "" {
+			return Response{}, fmt.Errorf("tool: url is required for HTTP tools")
+		}
+		if err := ssrf.ValidateURL(u); err != nil {
+			return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
 		}
 	}
 
