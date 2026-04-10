@@ -259,6 +259,16 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		return nil, fmt.Errorf("session runner: load agent: %w", err)
 	}
 
+	// P-C178-1: reject runs for agents that are not PUBLISHED.
+	switch agentCfg.Status {
+	case string(agent.StatusDraft):
+		return nil, fmt.Errorf("%w: agent %s is in DRAFT status", chat.ErrAgentNotPublished, in.AgentID)
+	case string(agent.StatusArchived):
+		return nil, fmt.Errorf("%w: agent %s", chat.ErrAgentArchived, in.AgentID)
+	case string(agent.StatusPublished), "": // empty = legacy records without status
+		// OK — proceed
+	}
+
 	config := RunConfigFromModelConfig(agentCfg.ModelConfig)
 	defaultCfg := DefaultRunConfig()
 

@@ -466,5 +466,6 @@ func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (
 		ModelConfig:      ag.ModelConfig,
 		PermissionRules:  ag.PermissionRules,
 		EnableManagement: ag.EnableManagement,
+		Status:           string(ag.Status),
 	}, nil
 }

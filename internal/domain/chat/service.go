@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,7 +26,16 @@ type AgentRunConfig struct {
 	// EnableManagement controls whether the agenthub_manage builtin tool is included.
 	// P-C184-2: both this flag AND the caller's admin role must be true.
 	EnableManagement bool
+	// Status is the agent's lifecycle status. Used to reject runs for DRAFT/ARCHIVED agents.
+	// P-C178-1.
+	Status string
 }
+
+// ErrAgentNotPublished is returned when an agent is not in PUBLISHED status.
+var ErrAgentNotPublished = errors.New("agent is not published")
+
+// ErrAgentArchived is returned when an agent has been archived.
+var ErrAgentArchived = errors.New("agent is archived and no longer accepts new sessions")
 
 // RunEvent is the envelope emitted by the agentic loop.
 // Defined here (in the chat package) to avoid an import cycle:
