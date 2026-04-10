@@ -39,12 +39,14 @@ const (
 
 // ChatSession is the domain entity for a chat session.
 type ChatSession struct {
-	ID        uuid.UUID  `db:"id"`
-	AgentID   *uuid.UUID `db:"agent_id"`
-	Title     string     `db:"title"`
-	Status    ChatStatus `db:"status"`
-	CreatedAt time.Time  `db:"created_at"`
-	UpdatedAt time.Time  `db:"updated_at"`
+	ID                   uuid.UUID       `db:"id"`
+	AgentID              *uuid.UUID      `db:"agent_id"`
+	Title                string          `db:"title"`
+	Status               ChatStatus      `db:"status"`
+	SystemPromptSnapshot *string         `db:"system_prompt_snapshot"` // P-C115-1: snapshot at session creation
+	ModelConfigSnapshot  json.RawMessage `db:"model_config_snapshot"`  // P-C330-1: snapshot at session creation
+	CreatedAt            time.Time       `db:"created_at"`
+	UpdatedAt            time.Time       `db:"updated_at"`
 }
 
 // MessageType represents the kind of chat message in the agentic loop.
@@ -135,7 +137,14 @@ type ChatSessionListStamp struct {
 
 // SessionResponseFrom maps a ChatSession entity to a ChatSessionResponse DTO.
 func SessionResponseFrom(s ChatSession) ChatSessionResponse {
-	return ChatSessionResponse(s)
+	return ChatSessionResponse{
+		ID:        s.ID,
+		AgentID:   s.AgentID,
+		Title:     s.Title,
+		Status:    s.Status,
+		CreatedAt: s.CreatedAt,
+		UpdatedAt: s.UpdatedAt,
+	}
 }
 
 // MessageResponseFrom maps a ChatMessage entity to a ChatMessageResponse DTO.

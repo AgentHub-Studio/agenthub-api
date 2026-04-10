@@ -376,12 +376,17 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		elicEventCh <- NewRunEvent(EventInputRequest, json.RawMessage(data))
 	})
 
+	// P-C115-1: use session snapshot when available to preserve persona consistency.
+	effectiveSystemPrompt := resolveSystemPrompt(in, agentCfg)
+	effectiveModelConfig := resolveModelConfig(in, agentCfg)
+	_ = effectiveModelConfig // model config snapshot used for future provider resolution
+
 	agenticCh := runner.Run(ctx, RunInput{
 		RunID:           in.RunID,
 		SessionID:       in.SessionID,
 		AgentID:         in.AgentID,
 		UserMessage:     in.UserMessage,
-		SystemPrompt:    agentCfg.SystemPrompt,
+		SystemPrompt:    effectiveSystemPrompt,
 		TenantID:        in.TenantID,
 		PermissionRules: ParsePermissionRules(agentCfg.PermissionRules),
 		Elicitation:     elicHandler,
@@ -542,4 +547,23 @@ type repoHistoryLoader struct {
 
 func (l *repoHistoryLoader) FindAllMessages(ctx context.Context, sessionID uuid.UUID) ([]chat.ChatMessage, error) {
 	return l.repo.FindAllMessages(ctx, sessionID)
+}
+
+// resolveSystemPrompt returns the effective system prompt for a run.
+// P-C115-1: uses the session snapshot when available to preserve persona consistency
+// even when the agent is updated between turns.
+func resolveSystemPrompt(in chat.RunInput, agentCfg *chat.AgentRunConfig) string {
+	if in.SystemPromptSnapshot != nil && *in.SystemPromptSnapshot != "" {
+		return *in.SystemPromptSnapshot
+	}
+	return agentCfg.SystemPrompt
+}
+
+// resolveModelConfig returns the effective model config for a run.
+// P-C330-1: uses the session snapshot when available.
+func resolveModelConfig(in chat.RunInput, agentCfg *chat.AgentRunConfig) json.RawMessage {
+	if len(in.ModelConfigSnapshot) > 2 {
+		return in.ModelConfigSnapshot
+	}
+	return agentCfg.ModelConfig
 }

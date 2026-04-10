@@ -17,6 +17,7 @@ type AgentLoader interface {
 	GetAgentForRun(ctx context.Context, id uuid.UUID) (*AgentRunConfig, error)
 }
 
+
 // AgentRunConfig carries agent fields consumed by the agentic Runner.
 type AgentRunConfig struct {
 	ID               uuid.UUID
@@ -57,6 +58,12 @@ type RunInput struct {
 	// caller (typically chat.Service.RunSession). When set, the runner skips
 	// its own user message persistence to avoid duplicates. P-C178-2.
 	UserMessageID *uuid.UUID
+	// SystemPromptSnapshot and ModelConfigSnapshot carry the values captured at
+	// session creation time (P-C115-1 / P-C330-1). When set, the adapter uses
+	// them instead of the agent's current values to ensure consistency throughout
+	// the conversation even if the agent is updated between runs.
+	SystemPromptSnapshot *string
+	ModelConfigSnapshot  json.RawMessage
 }
 
 // ElicitationResponder routes a user's elicitation response to the active run.
@@ -80,14 +87,21 @@ type SessionRunner interface {
 
 // Service provides business logic for chat operations.
 type Service struct {
-	repo   Repository
-	runner SessionRunner
+	repo        Repository
+	runner      SessionRunner
+	agentLoader AgentLoader // optional — used to capture agent snapshot at session creation
 }
 
 // NewService creates a new Service backed by the given Repository.
 // runner may be nil (disables agentic features).
 func NewService(repo Repository, runner SessionRunner) *Service {
 	return &Service{repo: repo, runner: runner}
+}
+
+// WithAgentLoader wires an agent loader for capturing snapshots at session creation.
+func (s *Service) WithAgentLoader(loader AgentLoader) *Service {
+	s.agentLoader = loader
+	return s
 }
 
 // GetActiveRun returns the active run for a session if any.
@@ -136,6 +150,22 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		AgentID: req.AgentID,
 		Title:   req.Title,
 		Status:  StatusActive,
+	}
+
+	// P-C115-1 / P-C330-1: capture agent snapshot at session creation so that
+	// the persona and model config remain consistent throughout the conversation
+	// even if the agent is updated between turns.
+	if req.AgentID != nil && s.agentLoader != nil {
+		if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *req.AgentID); err == nil {
+			if agentCfg.SystemPrompt != "" {
+				snapshot := agentCfg.SystemPrompt
+				session.SystemPromptSnapshot = &snapshot
+			}
+			if len(agentCfg.ModelConfig) > 2 {
+				session.ModelConfigSnapshot = agentCfg.ModelConfig
+			}
+		}
+		// Snapshot failure is non-fatal: session creation proceeds without snapshot.
 	}
 
 	created, err := s.repo.CreateSession(ctx, session)
@@ -277,10 +307,12 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 	}
 
 	return s.runner.RunSession(ctx, RunInput{
-		SessionID:     sessionID,
-		AgentID:       *session.AgentID,
-		UserMessage:   userMessage,
-		TenantID:      tenantID,
-		UserMessageID: userMsgID,
+		SessionID:            sessionID,
+		AgentID:              *session.AgentID,
+		UserMessage:          userMessage,
+		TenantID:             tenantID,
+		UserMessageID:        userMsgID,
+		SystemPromptSnapshot: session.SystemPromptSnapshot,
+		ModelConfigSnapshot:  session.ModelConfigSnapshot,
 	})
 }

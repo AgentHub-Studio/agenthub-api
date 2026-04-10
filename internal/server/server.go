@@ -146,7 +146,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		}()
 	}
 
-	chatHandler := chat.NewHandler(chat.NewService(chatRepo, sessionRunner), chatExecutor)
+	chatSvc := chat.NewService(chatRepo, sessionRunner)
+	if agentRepo != nil {
+		chatSvc = chatSvc.WithAgentLoader(&agentConfigAdapter{repo: agentRepo})
+	}
+	chatHandler := chat.NewHandler(chatSvc, chatExecutor)
 	var docStorage document.StorageClient
 	if cfg.MinIO.IsConfigured() {
 		ds, err := document.NewMinIOStorageClient(

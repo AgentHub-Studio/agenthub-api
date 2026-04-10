@@ -358,6 +358,78 @@ func TestRunSession_RunnerError_UserMessageStillPersisted(t *testing.T) {
 	assert.True(t, found, "user message must be in the repo even when runner returns an error")
 }
 
+// --- TR-01-TASK-16: session snapshot (P-C115-1, P-C330-1) ---
+
+// mockAgentLoader is a test double for chat.AgentLoader.
+type mockAgentLoader struct {
+	cfg *chat.AgentRunConfig
+	err error
+}
+
+func (m *mockAgentLoader) GetAgentForRun(_ context.Context, _ uuid.UUID) (*chat.AgentRunConfig, error) {
+	return m.cfg, m.err
+}
+
+func TestCreateSession_SnapshotsSystemPromptAtCreation(t *testing.T) {
+	repo := newMockRepo()
+	prompt := "You are ARIA, a helpful assistant."
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		SystemPrompt: prompt,
+		Status:       "PUBLISHED",
+	}}
+	svc := chat.NewService(repo, nil).WithAgentLoader(loader)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	// Verify snapshot was persisted through the repo by fetching the raw session.
+	stored := repo.sessions[session.ID]
+	require.NotNil(t, stored.SystemPromptSnapshot)
+	assert.Equal(t, prompt, *stored.SystemPromptSnapshot)
+}
+
+func TestCreateSession_NoLoader_NoSnapshot(t *testing.T) {
+	repo := newMockRepo()
+	svc := chat.NewService(repo, nil) // no agent loader wired
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	stored := repo.sessions[session.ID]
+	assert.Nil(t, stored.SystemPromptSnapshot, "no snapshot when loader is not wired")
+}
+
+func TestRunSession_PassesSnapshotToRunner(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+
+	snapshot := "You are ARIA."
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	repo.sessions[sessionID] = chat.ChatSession{
+		ID:                   sessionID,
+		AgentID:              &agentID,
+		Status:               chat.StatusActive,
+		SystemPromptSnapshot: &snapshot,
+	}
+
+	svc := chat.NewService(repo, runner)
+	_, err := svc.RunSession(context.Background(), sessionID, "Hello", "tenant")
+	require.NoError(t, err)
+
+	// The runner must have received the snapshot.
+	require.NotNil(t, runner.lastInput.SystemPromptSnapshot)
+	assert.Equal(t, snapshot, *runner.lastInput.SystemPromptSnapshot)
+}
+
 // TestRunSession_EmptyMessage_NoMessagePersisted verifies that when the user
 // sends an empty message no spurious record is written to the repository.
 func TestRunSession_EmptyMessage_NoMessagePersisted(t *testing.T) {
