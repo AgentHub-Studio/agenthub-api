@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -51,6 +52,10 @@ type Repository interface {
 	GetActiveRunBySession(ctx context.Context, sessionID uuid.UUID) (ChatRun, bool, error)
 	UpdateRunStatus(ctx context.Context, id uuid.UUID, status ChatRunStatus, lastEventID string) error
 	MarkRunCompleted(ctx context.Context, id uuid.UUID) error
+	// UpdateRunMetadata persists aggregated metrics collected during a run.
+	// Called from the runner's defer block so it fires on both success and failure.
+	// P-C325-2: metadata column was never populated.
+	UpdateRunMetadata(ctx context.Context, id uuid.UUID, metadata json.RawMessage) error
 }
 
 type postgresRepository struct {
@@ -614,6 +619,25 @@ func (r *postgresRepository) MarkRunCompleted(ctx context.Context, id uuid.UUID)
 		return fmt.Errorf("chat: mark run completed: %w", err)
 	}
 
+	return nil
+}
+
+// UpdateRunMetadata persists aggregated run metrics into chat_run.metadata.
+// P-C325-2: previously the metadata column was never populated.
+func (r *postgresRepository) UpdateRunMetadata(ctx context.Context, id uuid.UUID, metadata json.RawMessage) error {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	_, err = conn.Exec(ctx,
+		`UPDATE chat_run SET metadata = $1 WHERE id = $2`,
+		metadata, id,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: update run metadata: %w", err)
+	}
 	return nil
 }
 

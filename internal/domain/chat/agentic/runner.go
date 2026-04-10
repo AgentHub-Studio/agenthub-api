@@ -20,6 +20,12 @@ type MessagePersister interface {
 	CreateMessage(ctx context.Context, m chat.ChatMessage) (chat.ChatMessage, error)
 }
 
+// RunMetadataPersister is the subset of chat.Repository used to persist run metrics.
+// P-C325-2: populated via the runner's defer block on both success and failure.
+type RunMetadataPersister interface {
+	UpdateRunMetadata(ctx context.Context, id uuid.UUID, metadata json.RawMessage) error
+}
+
 // HistoryLoader loads the conversation history for a session.
 type HistoryLoader interface {
 	FindAllMessages(ctx context.Context, sessionID uuid.UUID) ([]chat.ChatMessage, error)
@@ -80,6 +86,22 @@ type RunInput struct {
 	SkillIDsSnapshot []uuid.UUID
 }
 
+// RunMetadata aggregates observability metrics collected during an agentic run.
+// Persisted into chat_run.metadata at run completion (success or failure). P-C325-2.
+type RunMetadata struct {
+	TotalTurns        int     `json:"totalTurns"`
+	TotalInputTokens  int     `json:"totalInputTokens"`
+	TotalOutputTokens int     `json:"totalOutputTokens"`
+	TotalCostUSD      float64 `json:"totalCostUSD"`
+	ModelUsed         string  `json:"modelUsed"`
+	ProviderUsed      string  `json:"providerUsed"`
+	FinishReason      string  `json:"finishReason"`
+	HadToolFailures   bool    `json:"hadToolFailures"`
+	ToolCallCount     int     `json:"toolCallCount"`
+	DurationMs        int64   `json:"durationMs"`
+	ErrorMessage      *string `json:"errorMessage,omitempty"`
+}
+
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
 type Runner struct {
 	chatModel       ai.ChatModel
@@ -90,22 +112,23 @@ type Runner struct {
 	mcpClient       MCPClientService
 	ctxManager      *ContextManager
 	memory          *MemoryBridge
-	persister       MessagePersister
-	history         HistoryLoader
-	toolExec        *StreamingToolExecutor
-	subtaskExec     *SubtaskExecutor
-	agentMailbox    *AgentMailbox
-	managementExec  *ManagementExecutor
-	denialTracker   *DenialTracker
-	turnEndHandlers []TurnEndHandler
-	runEndHandlers  []RunEndHandler
-	toolSummary     *ToolUseSummaryGenerator
-	memoryExtractor *SessionMemoryExtractor
-	cacheSafeSnap   *CacheSafeParamsSnapshot
-	progress        *RunProgressTracker
-	commands        *CommandRegistry
-	config          RunConfig
-	runID           uuid.UUID
+	persister          MessagePersister
+	metadataPersister  RunMetadataPersister // optional — nil for sub-runners
+	history            HistoryLoader
+	toolExec           *StreamingToolExecutor
+	subtaskExec        *SubtaskExecutor
+	agentMailbox       *AgentMailbox
+	managementExec     *ManagementExecutor
+	denialTracker      *DenialTracker
+	turnEndHandlers    []TurnEndHandler
+	runEndHandlers     []RunEndHandler
+	toolSummary        *ToolUseSummaryGenerator
+	memoryExtractor    *SessionMemoryExtractor
+	cacheSafeSnap      *CacheSafeParamsSnapshot
+	progress           *RunProgressTracker
+	commands           *CommandRegistry
+	config             RunConfig
+	runID              uuid.UUID
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -204,6 +227,13 @@ func (r *Runner) WithCacheSafeParamsSnapshot(snap *CacheSafeParamsSnapshot) *Run
 	return r
 }
 
+// WithMetadataPersister wires the repository used to persist run metrics after completion.
+// P-C325-2: only the root runner (not sub-runners) should call this.
+func (r *Runner) WithMetadataPersister(p RunMetadataPersister) *Runner {
+	r.metadataPersister = p
+	return r
+}
+
 // maxToolRetries is the maximum number of times a given tool may be called within
 // a single run. After this limit the runner returns a synthetic error result to the
 // LLM instead of executing the tool, preventing infinite tool-error retry loops.
@@ -259,6 +289,12 @@ func (r *Runner) Run(ctx context.Context, in RunInput) <-chan RunEvent {
 func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	// P-C57-3: initialise per-run tool retry counters.
 	rs := newRunState()
+
+	// P-C325-2: track metrics for run metadata persistence.
+	runStart := time.Now()
+	var runHadToolFailures bool
+	var runToolCallCount int
+	var runFinishReason string
 
 	// Track whether a clean EventRunComplete was emitted. If the loop exits
 	// via an error path (emitError + return) without emitting run_complete,
@@ -318,6 +354,36 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				CumulativeCacheReadTokens:     cumulativeCacheReadTokens,
 				CumulativeCacheCreationTokens: cumulativeCacheCreationTokens,
 			})
+		}
+		// P-C325-2: persist run metadata so observability tooling can query cost,
+		// latency and failure data without parsing SSE event streams.
+		if r.metadataPersister != nil && r.runID != uuid.Nil {
+			finishReason := runFinishReason
+			if finishReason == "" && lastRunError != nil {
+				finishReason = "error"
+			}
+			meta := RunMetadata{
+				TotalTurns:        turnIndex,
+				TotalInputTokens:  latestInputTokens,
+				TotalOutputTokens: totalOutputTokens,
+				TotalCostUSD:      totalCost,
+				ModelUsed:         r.config.Model,
+				ProviderUsed:      r.config.Provider,
+				FinishReason:      finishReason,
+				HadToolFailures:   runHadToolFailures,
+				ToolCallCount:     runToolCallCount,
+				DurationMs:        time.Since(runStart).Milliseconds(),
+			}
+			if lastRunError != nil {
+				errMsg := lastRunError.Message
+				meta.ErrorMessage = &errMsg
+			}
+			if metaJSON, err := json.Marshal(meta); err == nil {
+				persistCtx := context.WithoutCancel(ctx)
+				if err := r.metadataPersister.UpdateRunMetadata(persistCtx, r.runID, metaJSON); err != nil {
+					slog.Warn("runner: failed to persist run metadata", "error", err, "runID", r.runID)
+				}
+			}
 		}
 	}()
 
@@ -854,6 +920,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		}
 
 		// 5d. Check finish reason.
+		runFinishReason = finishReason // P-C325-2: track last finish reason for metadata
 		switch finishReason {
 		case "stop":
 			// LLM produced a final response — reset the P-G1 error guard.
@@ -1010,6 +1077,15 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					"too many tool denials (%d total) — LLM appears stuck in a permission loop",
 					totalDenials))
 				return
+			}
+
+			// P-C325-2: count tool calls and detect failures for run metadata.
+			runToolCallCount += len(toolResults)
+			for _, r2 := range toolResults {
+				if r2.Error != nil {
+					runHadToolFailures = true
+					break
+				}
 			}
 
 			// Persist and append tool results to history.

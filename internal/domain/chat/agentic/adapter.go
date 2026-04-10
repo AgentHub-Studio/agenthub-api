@@ -333,6 +333,8 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		a.hookExecutor,
 		config,
 	)
+	// P-C325-2: wire metadata persister so run metrics are recorded on completion.
+	runner.WithMetadataPersister(a.repo)
 	if a.agentRepo != nil {
 		// Pass skill.NewService as skillDeleter so delete operations enforce binding checks. P-C185-1.
 		managementExec := NewManagementExecutor(a.agentRepo, a.skillRepo, skill.NewService(a.skillRepo), a.toolRepo, a.mcpRepo)

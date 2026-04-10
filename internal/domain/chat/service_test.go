@@ -164,6 +164,10 @@ func (m *mockChatRepo) MarkRunCompleted(_ context.Context, _ uuid.UUID) error {
 	return nil
 }
 
+func (m *mockChatRepo) UpdateRunMetadata(_ context.Context, _ uuid.UUID, _ json.RawMessage) error {
+	return nil
+}
+
 func TestChatService_CreateSession_Success(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
 	agentID := uuid.New()
