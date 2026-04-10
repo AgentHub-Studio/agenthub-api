@@ -24,12 +24,13 @@ type Service interface {
 }
 
 type service struct {
-	repo Repository
+	repo        Repository
+	bindingRepo BindingRepository
 }
 
 // NewService creates a new agent Service.
-func NewService(repo Repository) Service {
-	return &service{repo: repo}
+func NewService(repo Repository, bindingRepo BindingRepository) Service {
+	return &service{repo: repo, bindingRepo: bindingRepo}
 }
 
 func (s *service) List(ctx context.Context, status AgentStatus, req pagination.PageRequest) (pagination.Page[AgentResponse], error) {
@@ -49,12 +50,21 @@ func (s *service) Get(ctx context.Context, id uuid.UUID) (AgentResponse, error) 
 	if err != nil {
 		return AgentResponse{}, err
 	}
-	return ResponseFrom(a), nil
+	resp := ResponseFrom(a)
+	if skillIDs, err := s.bindingRepo.ListSkillIDs(ctx, id); err == nil {
+		resp.SkillIDs = skillIDs
+	}
+	return resp, nil
 }
 
 func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResponse, error) {
 	if req.Name == "" {
 		return AgentResponse{}, fmt.Errorf("name is required")
+	}
+	// P-C97-1: reject invalid modelConfig at creation time so the agent is never
+	// stored in a broken state (e.g. maxIterations=-5 makes the loop exit immediately).
+	if err := validateModelConfig(req.ModelConfig); err != nil {
+		return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidModelConfig, err)
 	}
 	slug := req.Slug
 	if slug == "" {
@@ -80,7 +90,17 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if err != nil {
 		return AgentResponse{}, err
 	}
-	return ResponseFrom(created), nil
+	resp := ResponseFrom(created)
+	// Link skills provided in the creation request (P-C60-1 fix).
+	if len(req.SkillIDs) > 0 {
+		if syncErr := s.bindingRepo.SyncSkills(ctx, created.ID, req.SkillIDs); syncErr != nil {
+			// Roll back by deleting the just-created agent so the caller sees a clean failure.
+			_ = s.repo.Delete(ctx, created.ID)
+			return AgentResponse{}, fmt.Errorf("%w: %w", ErrInvalidSkillIDs, syncErr)
+		}
+		resp.SkillIDs = req.SkillIDs
+	}
+	return resp, nil
 }
 
 func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentRequest) (AgentResponse, error) {
@@ -101,6 +121,9 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		a.SystemPrompt = req.SystemPrompt
 	}
 	if len(req.ModelConfig) > 0 {
+		if err := validateModelConfig(req.ModelConfig); err != nil {
+			return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidModelConfig, err)
+		}
 		a.ModelConfig = req.ModelConfig
 	}
 	if len(req.PermissionRules) > 0 {
@@ -113,7 +136,16 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	if err != nil {
 		return AgentResponse{}, err
 	}
-	return ResponseFrom(updated), nil
+	resp := ResponseFrom(updated)
+	if req.SkillIDs != nil {
+		if syncErr := s.bindingRepo.SyncSkills(ctx, id, req.SkillIDs); syncErr != nil {
+			return AgentResponse{}, syncErr
+		}
+		resp.SkillIDs = req.SkillIDs
+	} else if skillIDs, err := s.bindingRepo.ListSkillIDs(ctx, id); err == nil {
+		resp.SkillIDs = skillIDs
+	}
+	return resp, nil
 }
 
 func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
@@ -162,6 +194,52 @@ func (s *service) Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest
 		return AgentResponse{}, err
 	}
 	return ResponseFrom(created), nil
+}
+
+// validateModelConfig checks that modelConfig contains valid JSON and that
+// numeric fields are within safe ranges. Returns nil when raw is empty.
+// P-C97-1: prevents agents with broken model_config from being stored.
+// P-C294-2: validates provider/model consistency — if one is set, both must be.
+func validateModelConfig(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	// Must be a valid JSON object (not a string, array, etc.)
+	var mc struct {
+		Provider      string   `json:"provider"`
+		Model         string   `json:"model"`
+		MaxIterations *int     `json:"maxIterations"`
+		MaxTokens     *int     `json:"maxTokens"`
+		ContextWindow *int     `json:"contextWindow"`
+		MaxDepth      *int     `json:"maxDepth"`
+		Temperature   *float64 `json:"temperature"`
+	}
+	if err := json.Unmarshal(raw, &mc); err != nil {
+		return fmt.Errorf("must be a valid JSON object")
+	}
+	// P-C294-2: provider and model are a pair — both or neither.
+	if mc.Provider != "" && mc.Model == "" {
+		return fmt.Errorf("model is required when provider is specified")
+	}
+	if mc.Model != "" && mc.Provider == "" {
+		return fmt.Errorf("provider is required when model is specified")
+	}
+	if mc.MaxIterations != nil && *mc.MaxIterations <= 0 {
+		return fmt.Errorf("maxIterations must be a positive integer (got %d)", *mc.MaxIterations)
+	}
+	if mc.MaxTokens != nil && *mc.MaxTokens <= 0 {
+		return fmt.Errorf("maxTokens must be a positive integer (got %d)", *mc.MaxTokens)
+	}
+	if mc.ContextWindow != nil && *mc.ContextWindow <= 0 {
+		return fmt.Errorf("contextWindow must be a positive integer (got %d)", *mc.ContextWindow)
+	}
+	if mc.MaxDepth != nil && *mc.MaxDepth < 0 {
+		return fmt.Errorf("maxDepth must be a non-negative integer (got %d)", *mc.MaxDepth)
+	}
+	if mc.Temperature != nil && (*mc.Temperature < 0 || *mc.Temperature > 2.0) {
+		return fmt.Errorf("temperature must be between 0.0 and 2.0 (got %g)", *mc.Temperature)
+	}
+	return nil
 }
 
 // toSlug converts a name to a kebab-case slug.
