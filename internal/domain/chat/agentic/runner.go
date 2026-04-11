@@ -2412,6 +2412,11 @@ func defaultThinkingBudget(maxTokens int) int {
 func friendlyRunErrorMessage(code, rawMsg string) string {
 	switch code {
 	case "llm_call", "stream_consume":
+		// P-C252-1: distinguish timeout from unavailable — both produce errors but need
+		// different user guidance (retry simpler request vs retry later).
+		if strings.Contains(rawMsg, "deadline exceeded") || strings.Contains(rawMsg, "context deadline") || strings.Contains(rawMsg, "timeout") {
+			return "O modelo de IA demorou muito para responder (timeout). Tente novamente com uma solicitação mais simples ou em alguns instantes."
+		}
 		if strings.Contains(rawMsg, "401") || strings.Contains(rawMsg, "authentication") || strings.Contains(rawMsg, "Unauthorized") {
 			return "Não foi possível chamar o modelo de IA: credenciais inválidas ou expiradas. Verifique a chave de API nas configurações."
 		}
