@@ -11,12 +11,15 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
-// BindingRepository manages agent_skill and agent_knowledge_base join tables.
+// BindingRepository manages agent_skill, agent_knowledge_base, and agent_mcp_server join tables.
 type BindingRepository interface {
 	ListSkillIDs(ctx context.Context, agentID uuid.UUID) ([]uuid.UUID, error)
 	SyncSkills(ctx context.Context, agentID uuid.UUID, skillIDs []uuid.UUID) error
 	ListKnowledgeBaseIDs(ctx context.Context, agentID uuid.UUID) ([]uuid.UUID, error)
 	SyncKnowledgeBases(ctx context.Context, agentID uuid.UUID, kbIDs []uuid.UUID) error
+	// P-C253-1: per-agent MCP server bindings
+	ListMCPServerIDs(ctx context.Context, agentID uuid.UUID) ([]uuid.UUID, error)
+	SyncMCPServers(ctx context.Context, agentID uuid.UUID, mcpServerIDs []uuid.UUID) error
 }
 
 type pgBindingRepository struct {
@@ -145,6 +148,64 @@ func (r *pgBindingRepository) SyncKnowledgeBases(ctx context.Context, agentID uu
 			agentID, kbID,
 		); err != nil {
 			return fmt.Errorf("agent.SyncKnowledgeBases: insert %s: %w", kbID, err)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// ListMCPServerIDs returns the IDs of MCP servers bound to the given agent.
+// P-C253-1: agent-level MCP binding.
+func (r *pgBindingRepository) ListMCPServerIDs(ctx context.Context, agentID uuid.UUID) ([]uuid.UUID, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("agent.ListMCPServerIDs: acquire: %w", err)
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT mcp_server_id FROM agent_mcp_server WHERE agent_id = $1 ORDER BY created_at`, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("agent.ListMCPServerIDs: %w", err)
+	}
+	defer rows.Close()
+
+	ids := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("agent.ListMCPServerIDs scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// SyncMCPServers replaces all MCP server bindings for the given agent.
+// P-C253-1: agent-level MCP binding.
+func (r *pgBindingRepository) SyncMCPServers(ctx context.Context, agentID uuid.UUID, mcpServerIDs []uuid.UUID) error {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("agent.SyncMCPServers: acquire: %w", err)
+	}
+	defer release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("agent.SyncMCPServers: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `DELETE FROM agent_mcp_server WHERE agent_id = $1`, agentID); err != nil {
+		return fmt.Errorf("agent.SyncMCPServers: delete: %w", err)
+	}
+
+	for _, mcpID := range mcpServerIDs {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO agent_mcp_server (agent_id, mcp_server_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			agentID, mcpID,
+		); err != nil {
+			return fmt.Errorf("agent.SyncMCPServers: insert %s: %w", mcpID, err)
 		}
 	}
 

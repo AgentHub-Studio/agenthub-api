@@ -27,12 +27,16 @@ func NewBindingHandler(agentRepo Repository, bindingRepo BindingRepository) *Bin
 	return &BindingHandler{agentRepo: agentRepo, bindingRepo: bindingRepo}
 }
 
-// RegisterBindingRoutes mounts binding routes under /api/agents/{id}/skills and /api/agents/{id}/knowledge-bases.
+// RegisterBindingRoutes mounts binding routes under /api/agents/{id}/skills,
+// /api/agents/{id}/knowledge-bases, and /api/agents/{id}/mcp-servers.
 func (h *BindingHandler) RegisterBindingRoutes(r chi.Router) {
 	r.Get("/api/agents/{id}/skills", h.listSkills)
 	r.Put("/api/agents/{id}/skills", h.syncSkills)
 	r.Get("/api/agents/{id}/knowledge-bases", h.listKnowledgeBases)
 	r.Put("/api/agents/{id}/knowledge-bases", h.syncKnowledgeBases)
+	// P-C253-1: per-agent MCP server bindings
+	r.Get("/api/agents/{id}/mcp-servers", h.listMCPServers)
+	r.Put("/api/agents/{id}/mcp-servers", h.syncMCPServers)
 }
 
 func (h *BindingHandler) parseAndValidateAgentID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -123,6 +127,44 @@ func (h *BindingHandler) syncKnowledgeBases(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ids, err := h.bindingRepo.ListKnowledgeBaseIDs(r.Context(), agentID)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, ids)
+}
+
+func (h *BindingHandler) listMCPServers(w http.ResponseWriter, r *http.Request) {
+	agentID, ok := h.parseAndValidateAgentID(w, r)
+	if !ok {
+		return
+	}
+	ids, err := h.bindingRepo.ListMCPServerIDs(r.Context(), agentID)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, ids)
+}
+
+func (h *BindingHandler) syncMCPServers(w http.ResponseWriter, r *http.Request) {
+	agentID, ok := h.parseAndValidateAgentID(w, r)
+	if !ok {
+		return
+	}
+	var req syncIDsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.IDs == nil {
+		req.IDs = []uuid.UUID{}
+	}
+	if err := h.bindingRepo.SyncMCPServers(r.Context(), agentID, req.IDs); err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ids, err := h.bindingRepo.ListMCPServerIDs(r.Context(), agentID)
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return

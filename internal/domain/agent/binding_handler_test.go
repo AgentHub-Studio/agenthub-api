@@ -19,14 +19,16 @@ import (
 
 // mockBindingRepo implements agent.BindingRepository for handler tests.
 type mockBindingRepo struct {
-	skills map[uuid.UUID][]uuid.UUID
-	kbs    map[uuid.UUID][]uuid.UUID
+	skills     map[uuid.UUID][]uuid.UUID
+	kbs        map[uuid.UUID][]uuid.UUID
+	mcpServers map[uuid.UUID][]uuid.UUID
 }
 
 func newMockBindingRepo() *mockBindingRepo {
 	return &mockBindingRepo{
-		skills: make(map[uuid.UUID][]uuid.UUID),
-		kbs:    make(map[uuid.UUID][]uuid.UUID),
+		skills:     make(map[uuid.UUID][]uuid.UUID),
+		kbs:        make(map[uuid.UUID][]uuid.UUID),
+		mcpServers: make(map[uuid.UUID][]uuid.UUID),
 	}
 }
 
@@ -53,6 +55,19 @@ func (m *mockBindingRepo) ListKnowledgeBaseIDs(_ context.Context, agentID uuid.U
 
 func (m *mockBindingRepo) SyncKnowledgeBases(_ context.Context, agentID uuid.UUID, kbIDs []uuid.UUID) error {
 	m.kbs[agentID] = kbIDs
+	return nil
+}
+
+func (m *mockBindingRepo) ListMCPServerIDs(_ context.Context, agentID uuid.UUID) ([]uuid.UUID, error) {
+	ids := m.mcpServers[agentID]
+	if ids == nil {
+		return []uuid.UUID{}, nil
+	}
+	return ids, nil
+}
+
+func (m *mockBindingRepo) SyncMCPServers(_ context.Context, agentID uuid.UUID, mcpServerIDs []uuid.UUID) error {
+	m.mcpServers[agentID] = mcpServerIDs
 	return nil
 }
 
@@ -244,4 +259,67 @@ func TestBindingHandler_InvalidAgentID(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- TR-01-TASK-34: MCP server binding endpoints (P-C253-1) ---
+
+func TestBindingHandler_ListMCPServers_Empty(t *testing.T) {
+	r, repo, _ := setupBindingHandler()
+	agentID := seedBindingAgent(repo)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+agentID.String()+"/mcp-servers", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var ids []uuid.UUID
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &ids))
+	assert.Empty(t, ids)
+}
+
+func TestBindingHandler_SyncMCPServers_Success(t *testing.T) {
+	r, repo, _ := setupBindingHandler()
+	agentID := seedBindingAgent(repo)
+
+	mcpID1 := uuid.New()
+	mcpID2 := uuid.New()
+	body, _ := json.Marshal(map[string]any{"ids": []string{mcpID1.String(), mcpID2.String()}})
+	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+agentID.String()+"/mcp-servers", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var ids []uuid.UUID
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &ids))
+	assert.Len(t, ids, 2)
+}
+
+func TestBindingHandler_SyncMCPServers_AgentNotFound(t *testing.T) {
+	r, _, _ := setupBindingHandler()
+
+	body, _ := json.Marshal(map[string]any{"ids": []string{}})
+	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+uuid.New().String()+"/mcp-servers", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestBindingHandler_SyncMCPServers_ClearAll(t *testing.T) {
+	r, repo, bindingRepo := setupBindingHandler()
+	agentID := seedBindingAgent(repo)
+	bindingRepo.mcpServers[agentID] = []uuid.UUID{uuid.New()}
+
+	body, _ := json.Marshal(map[string]any{"ids": []string{}})
+	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+agentID.String()+"/mcp-servers", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var ids []uuid.UUID
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &ids))
+	assert.Empty(t, ids)
 }

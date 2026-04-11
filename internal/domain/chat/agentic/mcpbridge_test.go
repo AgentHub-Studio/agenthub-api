@@ -218,3 +218,55 @@ func TestMCPToolBridge_Execute_LatencyTracked(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, result.LatencyMs, int64(0))
 }
+
+// --- TR-01-TASK-34: MCPToolBridge server-level filtering (P-C253-1) ---
+
+func TestMCPToolBridge_WithAllowedServerNames_FiltersUnbound(t *testing.T) {
+	client := &mockMCPClient{
+		tools: []agentic.MCPToolInfo{
+			{ServerName: "github", Name: "list_repos"},
+			{ServerName: "slack", Name: "send_message"},
+			{ServerName: "fs", Name: "read_file"},
+		},
+	}
+
+	bridge := agentic.NewMCPToolBridge(client, "t")
+	bridge.WithAllowedServerNames([]string{"github", "fs"})
+
+	tools, err := bridge.ListTools(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, tools, 2)
+	assert.Equal(t, "mcp__github__list_repos", tools[0].Name)
+	assert.Equal(t, "mcp__fs__read_file", tools[1].Name)
+}
+
+func TestMCPToolBridge_WithAllowedServerNames_EmptyAllowsAll(t *testing.T) {
+	client := &mockMCPClient{
+		tools: []agentic.MCPToolInfo{
+			{ServerName: "github", Name: "list_repos"},
+			{ServerName: "slack", Name: "send_message"},
+		},
+	}
+
+	bridge := agentic.NewMCPToolBridge(client, "t")
+	bridge.WithAllowedServerNames(nil)
+
+	tools, err := bridge.ListTools(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, tools, 2)
+}
+
+func TestMCPToolBridge_WithAllowedServerNames_AllFiltered(t *testing.T) {
+	client := &mockMCPClient{
+		tools: []agentic.MCPToolInfo{
+			{ServerName: "github", Name: "list_repos"},
+		},
+	}
+
+	bridge := agentic.NewMCPToolBridge(client, "t")
+	bridge.WithAllowedServerNames([]string{"slack"})
+
+	tools, err := bridge.ListTools(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tools)
+}

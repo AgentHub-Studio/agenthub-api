@@ -32,8 +32,9 @@ type MCPClientService interface {
 // MCPToolBridge adapts MCP tools into the agentic loop as LLMTool definitions
 // and routes tool_call executions to the MCP client runtime.
 type MCPToolBridge struct {
-	mcpClient MCPClientService
-	tenantID  string
+	mcpClient      MCPClientService
+	tenantID       string
+	allowedServers map[string]bool // nil = no filter (all servers allowed); P-C253-1
 }
 
 // NewMCPToolBridge creates a bridge for the given tenant.
@@ -44,8 +45,22 @@ func NewMCPToolBridge(mcpClient MCPClientService, tenantID string) *MCPToolBridg
 	}
 }
 
+// WithAllowedServerNames restricts MCP tools to the named servers only.
+// P-C253-1: agent-level MCP binding — called when the agent has a bound MCP server list.
+func (b *MCPToolBridge) WithAllowedServerNames(names []string) {
+	if len(names) == 0 {
+		b.allowedServers = nil
+		return
+	}
+	b.allowedServers = make(map[string]bool, len(names))
+	for _, n := range names {
+		b.allowedServers[n] = true
+	}
+}
+
 // ListTools fetches all MCP tools and converts them into LLMTool format.
 // Tool names follow the Claude Code convention: mcp__{serverName}__{toolName}.
+// When allowedServers is set, only tools from those servers are returned.
 func (b *MCPToolBridge) ListTools(ctx context.Context) ([]LLMTool, error) {
 	infos, err := b.mcpClient.ListTools(ctx, b.tenantID)
 	if err != nil {
@@ -54,6 +69,10 @@ func (b *MCPToolBridge) ListTools(ctx context.Context) ([]LLMTool, error) {
 
 	tools := make([]LLMTool, 0, len(infos))
 	for _, info := range infos {
+		// P-C253-1: skip tools from servers not in the agent's binding list.
+		if b.allowedServers != nil && !b.allowedServers[info.ServerName] {
+			continue
+		}
 		name := FormatMCPToolName(info.ServerName, info.Name)
 		desc := info.Description
 		if desc == "" {

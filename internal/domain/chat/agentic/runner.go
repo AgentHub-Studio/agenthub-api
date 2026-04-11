@@ -84,6 +84,11 @@ type RunInput struct {
 	// creation. The toolBuilder uses these instead of the agent's current bindings
 	// so the tool set stays consistent throughout the conversation. P-C115-1.
 	SkillIDsSnapshot []uuid.UUID
+
+	// MCPServerNamesSnapshot, when non-empty, contains the MCP server names bound to
+	// the agent at session creation. Only tools from servers in this list are exposed
+	// to the LLM. P-C253-1: agent-level MCP filtering.
+	MCPServerNamesSnapshot []string
 }
 
 // RunMetadata aggregates observability metrics collected during an agentic run.
@@ -473,6 +478,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 	if r.mcpClient != nil {
 		bridge := NewMCPToolBridge(r.mcpClient, in.TenantID)
+		// P-C253-1: filter MCP tools to only those from bound servers.
+		if len(in.MCPServerNamesSnapshot) > 0 {
+			bridge.WithAllowedServerNames(in.MCPServerNamesSnapshot)
+		}
 		toolBuilder.WithMCPBridge(bridge)
 		if r.toolExec != nil {
 			r.toolExec.WithMCPBridge(bridge)

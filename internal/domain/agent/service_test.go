@@ -96,6 +96,12 @@ func (m *mockNoopBindingRepo) ListKnowledgeBaseIDs(_ context.Context, _ uuid.UUI
 func (m *mockNoopBindingRepo) SyncKnowledgeBases(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
 	return nil
 }
+func (m *mockNoopBindingRepo) ListMCPServerIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (m *mockNoopBindingRepo) SyncMCPServers(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
+	return nil
+}
 
 func newMockAgentSvc() agent.Service {
 	return agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
