@@ -99,8 +99,9 @@ func (m *mockSkillRepo) CountAgentBindings(_ context.Context, _ uuid.UUID) (int6
 func TestSkillService_Create_AutoSlug(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	s, err := svc.Create(context.Background(), skill.CreateRequest{
-		Name:     "Send Email",
-		Category: "communication",
+		Name:         "Send Email",
+		Category:     "communication",
+		Instructions: "Send an email to the specified address.",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "send-email", s.Slug)
@@ -110,8 +111,9 @@ func TestSkillService_Create_AutoSlug(t *testing.T) {
 func TestSkillService_Create_SlugKebabCase(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	s, err := svc.Create(context.Background(), skill.CreateRequest{
-		Name:     "Document Search",
-		Category: "rag",
+		Name:         "Document Search",
+		Category:     "rag",
+		Instructions: "Search documents for the given query.",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "document-search", s.Slug)
@@ -128,9 +130,10 @@ func TestSkillService_Create_InputSchemaObjectPassthrough(t *testing.T) {
 func TestSkillService_Create_CustomSlug(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	s, err := svc.Create(context.Background(), skill.CreateRequest{
-		Name:     "Document Search",
-		Slug:     "doc-search",
-		Category: "rag",
+		Name:         "Document Search",
+		Slug:         "doc-search",
+		Category:     "rag",
+		Instructions: "Search documents.",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "doc-search", s.Slug)
@@ -144,7 +147,7 @@ func TestSkillService_GetByID_NotFound(t *testing.T) {
 
 func TestSkillService_Update_Success(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
-	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Old", Category: "misc"})
+	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Old", Category: "misc", Instructions: "Do something."})
 	require.NoError(t, err)
 	updated, err := svc.Update(context.Background(), created.ID, skill.UpdateRequest{Name: "New", Category: "misc"})
 	require.NoError(t, err)
@@ -153,7 +156,7 @@ func TestSkillService_Update_Success(t *testing.T) {
 
 func TestSkillService_Delete_Success(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
-	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Temp", Category: "misc"})
+	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Temp", Category: "misc", Instructions: "Do something."})
 	require.NoError(t, err)
 	err = svc.Delete(context.Background(), created.ID)
 	require.NoError(t, err)
@@ -162,10 +165,90 @@ func TestSkillService_Delete_Success(t *testing.T) {
 func TestSkillService_List(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	for _, name := range []string{"Skill A", "Skill B", "Skill C"} {
-		_, err := svc.Create(context.Background(), skill.CreateRequest{Name: name, Category: "misc"})
+		_, err := svc.Create(context.Background(), skill.CreateRequest{Name: name, Category: "misc", Instructions: "Do something."})
 		require.NoError(t, err)
 	}
 	page, err := svc.List(context.Background(), nil, pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), page.TotalElements)
+}
+
+// --- ACT-F3-04: rejeitar skill inerte (DX-01-J) ---
+
+func TestSkillService_Create_InertSkill_Rejected(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:     "Empty Skill",
+		Category: "misc",
+		// No instructions, no AllowedTools — completely inert
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, skill.ErrSkillInert)
+}
+
+func TestSkillService_Create_WithInstructions_Accepted(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         "Instructed Skill",
+		Category:     "misc",
+		Instructions: "Guide the LLM to do something useful.",
+	})
+	require.NoError(t, err)
+}
+
+func TestSkillService_Create_WithAllowedTools_NoInstructions_Accepted(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         "Tool Skill",
+		Category:     "misc",
+		AllowedTools: []string{"http_get"},
+	})
+	require.NoError(t, err)
+}
+
+func TestSkillService_Create_WhitespaceInstructions_TreatedAsEmpty(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         "Whitespace Skill",
+		Category:     "misc",
+		Instructions: "   \t\n  ", // whitespace only — DX-01-H
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, skill.ErrSkillInert)
+}
+
+// --- ACT-F3-05: limite de tamanho de instructions (32K) ---
+
+func TestSkillService_Create_InstructionsTooLong(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	bigInstructions := string(make([]byte, 32001))
+	_, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         "Big Skill",
+		Category:     "misc",
+		Instructions: bigInstructions,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum length")
+}
+
+func TestSkillService_Create_InstructionsAtLimit_Accepted(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	// Exactly 32000 non-whitespace chars should be accepted.
+	instructions := string(make([]byte, 32000))
+	for i := range instructions {
+		instructions = instructions[:i] + "x" + instructions[i+1:]
+		break
+	}
+	instructions = "x" + string(make([]byte, 31999))
+	// Fill with printable chars
+	buf := make([]byte, 32000)
+	for i := range buf {
+		buf[i] = 'x'
+	}
+	_, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         "At Limit Skill",
+		Category:     "misc",
+		Instructions: string(buf),
+	})
+	require.NoError(t, err)
 }

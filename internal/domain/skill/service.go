@@ -16,6 +16,10 @@ import (
 // more agents still reference it. P-C185-1: management executor must not bypass this check.
 var ErrSkillBoundToAgents = errors.New("skill: cannot delete — skill is bound to one or more agents")
 
+// ErrSkillInert is returned when a skill has neither instructions nor allowed tools
+// and would have no effect when bound to an agent. DX-01-J (ACT-F3-04).
+var ErrSkillInert = errors.New("skill: this skill has no instructions or tools and will have no effect")
+
 // Deleter is a narrow interface for delete-with-binding-protection.
 // Implemented by *Service; used by ManagementExecutor to ensure the service
 // layer is called instead of the repository directly.
@@ -48,6 +52,22 @@ func (s *Service) List(ctx context.Context, category *string, req pagination.Pag
 
 // Create creates a new skill, auto-generating the slug if not provided.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, error) {
+	// DX-01-H: normalize whitespace-only instructions so they don't appear as
+	// non-empty but produce no LLM guidance.
+	req.Instructions = strings.TrimSpace(req.Instructions)
+
+	// ACT-F3-05: enforce maximum instructions size (32K chars).
+	const maxInstructionsChars = 32000
+	if len(req.Instructions) > maxInstructionsChars {
+		return Response{}, fmt.Errorf("skill: instructions exceeds maximum length of %d chars (got %d)", maxInstructionsChars, len(req.Instructions))
+	}
+
+	// DX-01-J (ACT-F3-04): reject skills that are completely inert — no instructions
+	// AND no tool restrictions means binding this skill to an agent has no effect.
+	if req.Instructions == "" && len(req.AllowedTools) == 0 {
+		return Response{}, ErrSkillInert
+	}
+
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)

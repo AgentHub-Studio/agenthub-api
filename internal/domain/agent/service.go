@@ -80,9 +80,17 @@ func (s *service) Get(ctx context.Context, id uuid.UUID) (AgentResponse, error) 
 	return resp, nil
 }
 
+// maxSystemPromptChars is the maximum allowed length for an agent's system prompt.
+// ACT-F3-05 (P-C182-3, P-C150-2): large prompts consume context window and slow LLM responses.
+const maxSystemPromptChars = 10000
+
 func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResponse, error) {
 	if req.Name == "" {
 		return AgentResponse{}, fmt.Errorf("name is required")
+	}
+	// ACT-F3-05: enforce maximum system prompt size.
+	if req.SystemPrompt != nil && len(*req.SystemPrompt) > maxSystemPromptChars {
+		return AgentResponse{}, fmt.Errorf("%w: systemPrompt exceeds maximum length of %d chars (got %d)", ErrInvalidRequest, maxSystemPromptChars, len(*req.SystemPrompt))
 	}
 	// P-C249-2: reject modelConfig nested inside the config field. Clients must
 	// send modelConfig at the root level of the request body.
@@ -147,6 +155,10 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	// P-C249-2: same guard as Create — reject nested modelConfig.
 	if hasNestedModelConfig(req.Config) {
 		return AgentResponse{}, fmt.Errorf("%w: modelConfig must be at the root of the request body, not inside config", ErrInvalidRequest)
+	}
+	// ACT-F3-05: enforce maximum system prompt size on update.
+	if req.SystemPrompt != nil && len(*req.SystemPrompt) > maxSystemPromptChars {
+		return AgentResponse{}, fmt.Errorf("%w: systemPrompt exceeds maximum length of %d chars (got %d)", ErrInvalidRequest, maxSystemPromptChars, len(*req.SystemPrompt))
 	}
 	a, err := s.repo.FindByID(ctx, id)
 	if err != nil {

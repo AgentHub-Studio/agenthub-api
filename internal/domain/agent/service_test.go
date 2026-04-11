@@ -787,3 +787,56 @@ func TestUpdate_ClearKnowledgeBaseIDs(t *testing.T) {
 	assert.Empty(t, resp.KnowledgeBaseIDs)
 	assert.Empty(t, binding.kbIDs)
 }
+
+// --- ACT-F3-05: limite de tamanho do systemPrompt (P-C182-3) ---
+
+func ptrStr(s string) *string { return &s }
+
+func TestCreate_SystemPromptTooLong_ReturnsError(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	bigPrompt := string(make([]byte, 10001))
+	for i := range bigPrompt {
+		bigPrompt = bigPrompt[:i] + "x" + bigPrompt[i+1:]
+		break
+	}
+	buf := make([]byte, 10001)
+	for i := range buf {
+		buf[i] = 'x'
+	}
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name:         "Agent",
+		SystemPrompt: ptrStr(string(buf)),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "systemPrompt exceeds")
+}
+
+func TestCreate_SystemPromptAtLimit_Accepted(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	buf := make([]byte, 10000)
+	for i := range buf {
+		buf[i] = 'x'
+	}
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name:         "Agent",
+		SystemPrompt: ptrStr(string(buf)),
+	})
+	require.NoError(t, err)
+}
+
+func TestUpdate_SystemPromptTooLong_ReturnsError(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	require.NoError(t, err)
+
+	buf := make([]byte, 10001)
+	for i := range buf {
+		buf[i] = 'x'
+	}
+	_, err = svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{
+		SystemPrompt: ptrStr(string(buf)),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+}
