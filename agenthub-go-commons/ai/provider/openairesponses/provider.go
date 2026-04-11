@@ -331,9 +331,23 @@ func (p *Provider) consumeStream(resp *http.Response, ch chan<- ai.StreamChunk) 
 			return
 
 		case "error":
-			var errData rError
-			if err := json.Unmarshal([]byte(data), &errData); err == nil {
-				ch <- ai.StreamChunk{Error: fmt.Errorf("openai-responses: %s: %s", errData.Code, errData.Message)}
+			// The Responses API error event wraps the error under an "error" key:
+			// {"type":"error","error":{"type":"...","code":"...","message":"..."}}
+			var envelope struct {
+				Code    string  `json:"code"`
+				Message string  `json:"message"`
+				Error   *rError `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(data), &envelope); err == nil {
+				code, msg := envelope.Code, envelope.Message
+				if envelope.Error != nil {
+					code, msg = envelope.Error.Code, envelope.Error.Message
+				}
+				if code == "" && msg == "" {
+					ch <- ai.StreamChunk{Error: fmt.Errorf("openai-responses: unknown error: %s", data)}
+				} else {
+					ch <- ai.StreamChunk{Error: fmt.Errorf("openai-responses: %s: %s", code, msg)}
+				}
 			} else {
 				ch <- ai.StreamChunk{Error: fmt.Errorf("openai-responses: unknown error: %s", data)}
 			}
