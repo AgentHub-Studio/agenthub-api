@@ -69,7 +69,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	resp, err := h.svc.Get(r.Context(), id)
+	resp, err := h.svc.GetWithReadiness(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "agent not found")

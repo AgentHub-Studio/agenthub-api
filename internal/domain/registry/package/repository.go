@@ -155,6 +155,69 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// Search performs a full-text ILIKE search on name, slug, and description
+// across PUBLIC packages. An optional pkgType filter restricts the results.
+// This is the backend for GET /api/registry/search?q=...&type=...
+func (r *Repository) Search(ctx context.Context, query string, pkgType *string, req pagination.PageRequest) ([]Package, int64, error) {
+	pattern := "%" + query + "%"
+	var total int64
+	var err error
+
+	if pkgType != nil && *pkgType != "" {
+		err = r.pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM public.package_registry
+			  WHERE visibility = 'PUBLIC' AND type = $1
+			    AND (name ILIKE $2 OR slug ILIKE $2 OR description ILIKE $2)`,
+			*pkgType, pattern,
+		).Scan(&total)
+	} else {
+		err = r.pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM public.package_registry
+			  WHERE visibility = 'PUBLIC'
+			    AND (name ILIKE $1 OR slug ILIKE $1 OR description ILIKE $1)`,
+			pattern,
+		).Scan(&total)
+	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("package: search count: %w", err)
+	}
+
+	var rows pgx.Rows
+	if pkgType != nil && *pkgType != "" {
+		rows, err = r.pool.Query(ctx,
+			`SELECT id, name, slug, COALESCE(description,''), type, visibility,
+			        author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at
+			   FROM public.package_registry
+			  WHERE visibility = 'PUBLIC' AND type = $1
+			    AND (name ILIKE $2 OR slug ILIKE $2 OR description ILIKE $2)
+			  ORDER BY download_count DESC, created_at DESC
+			  LIMIT $3 OFFSET $4`,
+			*pkgType, pattern, req.Size, req.Offset(),
+		)
+	} else {
+		rows, err = r.pool.Query(ctx,
+			`SELECT id, name, slug, COALESCE(description,''), type, visibility,
+			        author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at
+			   FROM public.package_registry
+			  WHERE visibility = 'PUBLIC'
+			    AND (name ILIKE $1 OR slug ILIKE $1 OR description ILIKE $1)
+			  ORDER BY download_count DESC, created_at DESC
+			  LIMIT $2 OFFSET $3`,
+			pattern, req.Size, req.Offset(),
+		)
+	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("package: search: %w", err)
+	}
+	defer rows.Close()
+
+	pkgs, err := scanRows(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return pkgs, total, nil
+}
+
 // UpdateLatestVersion updates the latest_version field after a new version is published.
 func (r *Repository) UpdateLatestVersion(ctx context.Context, id uuid.UUID, version string) error {
 	const query = `UPDATE public.package_registry SET latest_version = $2, updated_at = NOW() WHERE id = $1`

@@ -39,6 +39,12 @@ type Skill struct {
 	// Example: "<agent_id> [focus]".
 	// Inspired by Claude Code's BundledSkillDefinition.argumentHint.
 	ArgumentHint *string `db:"argument_hint"`
-	CreatedAt    time.Time `db:"created_at"`
-	UpdatedAt    time.Time `db:"updated_at"`
+	// ShouldDefer controls skill-level progressive disclosure.
+	// When true, the entire skill is withheld from the initial tool list and
+	// requires a tool_search round-trip to load. This is the 3rd layer of
+	// disclosure (after tool-level deferral and the DeferredToolThreshold).
+	// Inspired by Claude Code's ShouldDefer flag applied at the skill level.
+	ShouldDefer bool      `db:"should_defer"`
+	CreatedAt   time.Time `db:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at"`
 }

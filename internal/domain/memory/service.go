@@ -35,13 +35,20 @@ func (s *Service) Upsert(ctx context.Context, agentID uuid.UUID, key string, req
 		memType = MemoryTypeGeneral
 	}
 
+	scope := MemoryScope(req.Scope)
+	if scope == "" {
+		scope = MemoryScopeAgent
+	}
+
 	m := AgentMemory{
-		AgentID:    agentID,
-		UserID:     req.UserID,
-		Key:        key,
-		Value:      req.Value,
-		MemoryType: memType,
-		Embedding:  req.Embedding,
+		AgentID:     agentID,
+		UserID:      req.UserID,
+		Key:         key,
+		Value:       req.Value,
+		MemoryType:  memType,
+		Scope:       scope,
+		ExecutionID: req.ExecutionID,
+		Embedding:   req.Embedding,
 	}
 
 	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
@@ -66,7 +73,7 @@ func (s *Service) Recall(ctx context.Context, agentID uuid.UUID, req RecallReque
 		limit = 5
 	}
 
-	items, err := s.repo.Recall(ctx, agentID, req.UserID, req.Embedding, limit)
+	items, err := s.repo.Recall(ctx, agentID, req.UserID, req.Embedding, limit, req.Scope, req.ExecutionID)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +137,12 @@ func (s *Service) Stats(ctx context.Context, agentID uuid.UUID) (MemoryStats, er
 	}
 
 	return MemoryStats{Total: total, ByType: byType}, nil
+}
+
+// DistillExecutionMemories promotes all execution-scoped memories to workflow scope.
+// Call this at the end of a run to make ephemeral knowledge available to future executions.
+func (s *Service) DistillExecutionMemories(ctx context.Context, agentID uuid.UUID, executionID uuid.UUID) error {
+	return s.repo.DistillExecutionMemories(ctx, agentID, executionID)
 }
 
 // BulkUpsert imports multiple memory entries at once.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -22,9 +23,15 @@ type skillService interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 }
 
+// skillExporter is a narrow interface for SKILL.md export, backed by the repository.
+type skillExporter interface {
+	GetByID(ctx context.Context, id uuid.UUID) (Skill, error)
+}
+
 // Handler exposes skill HTTP endpoints.
 type Handler struct {
-	svc skillService
+	svc  skillService
+	repo skillExporter
 }
 
 // NewHandler creates a new Handler.
@@ -32,14 +39,23 @@ func NewHandler(svc skillService) *Handler {
 	return &Handler{svc: svc}
 }
 
+// WithRepository attaches the raw repository for operations that need the full
+// Skill model (e.g. SKILL.md export which requires the unexported fields).
+func (h *Handler) WithRepository(repo skillExporter) *Handler {
+	h.repo = repo
+	return h
+}
+
 // RegisterRoutes mounts skill routes on the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/skills", h.list)
 	r.Post("/api/skills", h.create)
+	r.Post("/api/skills/import-skillmd", h.importSkillMD)
 	r.Get("/api/skills/{id}", h.getByID)
 	r.Put("/api/skills/{id}", h.update)
 	r.Patch("/api/skills/{id}", h.update)
 	r.Delete("/api/skills/{id}", h.delete)
+	r.Get("/api/skills/{id}/skillmd", h.exportSkillMD)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -134,4 +150,58 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.NoContent(w)
+}
+
+// exportSkillMD serializes a skill to the portable SKILL.md format.
+// GET /api/skills/{id}/skillmd
+func (h *Handler) exportSkillMD(w http.ResponseWriter, r *http.Request) {
+	if h.repo == nil {
+		respond.Error(w, http.StatusNotImplemented, "skillmd export not configured")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	sk, err := h.repo.GetByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "skill not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	content := SerializeSkillMD(sk)
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+sk.Slug+`.skill.md"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(content))
+}
+
+// importSkillMD parses a SKILL.md body and creates a new skill.
+// POST /api/skills/import-skillmd
+// Content-Type: text/markdown or application/octet-stream
+func (h *Handler) importSkillMD(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB limit
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	req, err := ParseSkillMD(string(body))
+	if err != nil {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	resp, err := h.svc.Create(r.Context(), req)
+	if err != nil {
+		if errors.Is(err, ErrSkillInert) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusCreated, resp)
 }

@@ -56,6 +56,16 @@ func (m *mockInstallRepo) Uninstall(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (m *mockInstallRepo) SetHydrated(_ context.Context, id uuid.UUID) error {
+	i, ok := m.data[id]
+	if !ok {
+		return installation.ErrNotFound
+	}
+	i.Hydrated = true
+	m.data[id] = i
+	return nil
+}
+
 // Tests
 
 func TestInstallService_Install_Success(t *testing.T) {

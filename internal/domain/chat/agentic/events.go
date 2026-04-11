@@ -34,6 +34,10 @@ const (
 	// EventWarning is a non-fatal advisory emitted when a recoverable issue is
 	// detected during a run (e.g. a skill with no tools, an unavailable KB).
 	EventWarning RunEventType = "warning"
+	// EventCanvasUpdate is emitted when the agent produces rich visual output
+	// (markdown, HTML table, JSON) intended for display in the canvas panel.
+	// The frontend renders this in a sandboxed panel alongside the chat.
+	EventCanvasUpdate RunEventType = "canvas_update"
 )
 
 // ToolUseSummaryData carries a human-readable summary of a completed tool batch.
@@ -270,4 +274,31 @@ type UiFormPayloadDto struct {
 type WarningData struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// CanvasFormat identifies the format of content sent to the canvas panel.
+type CanvasFormat string
+
+const (
+	// CanvasFormatMarkdown renders the content as rich markdown with syntax
+	// highlighting for code blocks.
+	CanvasFormatMarkdown CanvasFormat = "markdown"
+	// CanvasFormatHTML renders sanitized HTML inside a sandboxed iframe.
+	CanvasFormatHTML CanvasFormat = "html"
+	// CanvasFormatTable renders structured tabular data as an interactive table.
+	// The content field must be valid JSON: {"columns":[...],"rows":[[...]]}.
+	CanvasFormatTable CanvasFormat = "table"
+)
+
+// CanvasUpdateData is the payload for EventCanvasUpdate.
+// Emitted when the agent renders rich visual content to the canvas panel.
+type CanvasUpdateData struct {
+	// ID uniquely identifies this canvas artifact. When the same ID is re-emitted,
+	// the frontend replaces the previous content (live update).
+	ID      string       `json:"id"`
+	Title   string       `json:"title,omitempty"`
+	Format  CanvasFormat `json:"format"`
+	Content string       `json:"content"`
+	// Exportable indicates that the content can be downloaded (CSV, HTML, etc.).
+	Exportable bool `json:"exportable,omitempty"`
 }

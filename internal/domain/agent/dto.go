@@ -21,12 +21,15 @@ type AgentResponse struct {
 	ModelConfig      json.RawMessage `json:"modelConfig,omitempty"`
 	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
 	Config           json.RawMessage `json:"config"`
-	EnableManagement    bool            `json:"enableManagement"`
-	SkillIDs            []uuid.UUID     `json:"skillIds,omitempty"`
+	EnableManagement bool        `json:"enableManagement"`
+	SkillIDs         []uuid.UUID `json:"skillIds,omitempty"`
 	// KnowledgeBaseIDs lists the knowledge bases bound to this agent. P-C285-1.
-	KnowledgeBaseIDs    []uuid.UUID     `json:"knowledgeBaseIds,omitempty"`
-	CreatedAt           time.Time       `json:"createdAt"`
-	UpdatedAt           time.Time       `json:"updatedAt"`
+	KnowledgeBaseIDs []uuid.UUID `json:"knowledgeBaseIds,omitempty"`
+	// Readiness is the computed configuration quality score. Populated by GetWithReadiness.
+	// Absent (null) when retrieved via List (for performance — avoids N+1 queries).
+	Readiness *ReadinessScore `json:"readiness,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
 }
 
 // ResponseFrom converts an Agent entity to AgentResponse.

@@ -20,6 +20,9 @@ type BindingRepository interface {
 	// P-C253-1: per-agent MCP server bindings
 	ListMCPServerIDs(ctx context.Context, agentID uuid.UUID) ([]uuid.UUID, error)
 	SyncMCPServers(ctx context.Context, agentID uuid.UUID, mcpServerIDs []uuid.UUID) error
+	// GetSkillTokenBudgets returns the token_budget overrides from agent_skill for each
+	// skill bound to the given agent. Nil values indicate no budget limit.
+	GetSkillTokenBudgets(ctx context.Context, agentID uuid.UUID) (map[uuid.UUID]*int, error)
 }
 
 type pgBindingRepository struct {
@@ -179,6 +182,34 @@ func (r *pgBindingRepository) ListMCPServerIDs(ctx context.Context, agentID uuid
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// GetSkillTokenBudgets returns the token_budget column from agent_skill for each
+// skill bound to the given agent. Nil values indicate no budget limit for that skill.
+func (r *pgBindingRepository) GetSkillTokenBudgets(ctx context.Context, agentID uuid.UUID) (map[uuid.UUID]*int, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("agent.GetSkillTokenBudgets: acquire: %w", err)
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT skill_id, token_budget FROM agent_skill WHERE agent_id = $1`, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("agent.GetSkillTokenBudgets: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[uuid.UUID]*int)
+	for rows.Next() {
+		var skillID uuid.UUID
+		var budget *int
+		if err := rows.Scan(&skillID, &budget); err != nil {
+			return nil, fmt.Errorf("agent.GetSkillTokenBudgets scan: %w", err)
+		}
+		result[skillID] = budget
+	}
+	return result, rows.Err()
 }
 
 // SyncMCPServers replaces all MCP server bindings for the given agent.

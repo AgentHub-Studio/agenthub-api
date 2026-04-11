@@ -14,11 +14,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/abtest"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agenttemplate"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/analytics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/approval"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/channel"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/core"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
+	chatTask "github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chatsession"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
@@ -41,6 +48,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/search"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/settings"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skilleval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/user"
@@ -96,11 +104,18 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	settingsHandler := settings.NewHandler(settings.NewService(settingsRepo))
 	llmpresetHandler := llmpreset.NewHandler(llmpreset.NewService(llmpreset.NewRepository(pool)))
 	agentRepo := agent.NewRepository(pool)
-	agentHandler := agent.NewHandler(agent.NewService(agentRepo, agent.NewBindingRepository(pool)))
-	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionService(agentRepo, agent.NewVersionRepository(pool)))
-	agentBindingHandler := agent.NewBindingHandler(agentRepo, agent.NewBindingRepository(pool))
 	skillRepo := skill.NewRepository(pool)
-	skillHandler := skill.NewHandler(skill.NewService(skillRepo))
+	agentBindingRepo := agent.NewBindingRepository(pool)
+	agentSvc := agent.NewService(agentRepo, agentBindingRepo, skillRepo)
+	agentHandler := agent.NewHandler(agentSvc)
+	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionService(agentRepo, agent.NewVersionRepository(pool)))
+	agentBindingHandler := agent.NewBindingHandler(agentRepo, agentBindingRepo)
+	skillSvc := skill.NewService(skillRepo)
+	skillHandler := skill.NewHandler(skillSvc).WithRepository(skillRepo)
+	agentBundleHandler := agent.NewBundleHandler(
+		agent.NewExporter(agentSvc, skillRepo, agentBindingRepo),
+		agent.NewImporter(agentSvc, skillSvc, agentBindingRepo),
+	)
 	datasourceSvc := datasource.NewService(datasource.NewRepository(pool))
 	toolRepo := tool.NewRepository(pool)
 	toolSvc := tool.NewService(toolRepo).
@@ -109,6 +124,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	toolHandler := tool.NewHandler(toolSvc)
 	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool)))
 	promptTemplateHandler := prompttemplate.NewHandler(prompttemplate.NewService(prompttemplate.NewRepository(pool)))
+	agentTemplateSvc := agenttemplate.NewService(agenttemplate.NewRepository(pool)).WithAgentCreator(agentSvc)
+	agentTemplateHandler := agenttemplate.NewHandler(agentTemplateSvc)
+	analyticsHandler := analytics.NewHandler(analytics.NewService(analytics.NewPostgresStore(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
 	oauthSvc := oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey)
@@ -131,10 +149,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		vpnSvc,
 	).WithHTTPManagement(skill.NewService(skillRepo), toolSvc, integration.NewRepository(pool)))
 	kbRepo := knowledgebase.NewRepository(pool)
+	coreToolLoader := core.NewCoreToolLoader(pool)
 
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
-	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc))
+	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo)
 
 	var chatExecutor *chat.AsyncExecutor
 	if cfg.RabbitMQURL != "" {
@@ -153,7 +172,33 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			bindingRepo: agent.NewBindingRepository(pool),
 		})
 	}
-	chatHandler := chat.NewHandler(chatSvc, chatExecutor)
+	permAuditRepo := agentic.NewPermissionAuditRepository(pool)
+	chatHandler := chat.NewHandler(chatSvc, chatExecutor).
+		WithTaskRepository(chatTask.NewRepository(pool)).
+		WithPermissionAuditReader(&permissionAuditReaderAdapter{repo: permAuditRepo})
+
+	// Channel adapter registry — adapters registered here handle inbound platform events.
+	channelRegistry := channel.NewRegistry()
+	channelRegistry.Register(channel.ChannelTypeSlack, &channel.SlackAdapter{})
+	channelRegistry.Register(channel.ChannelTypeTelegram, &channel.TelegramAdapter{})
+	channelRegistry.Register(channel.ChannelTypeDiscord, &channel.DiscordAdapter{})
+	channelRegistry.Register(channel.ChannelTypeCustom, &channel.CustomAdapter{})
+	channelSvc := channel.NewService(channel.NewRepository(pool), channelRegistry).
+		WithDispatcher(&chatAgentDispatcher{chatSvc: chatSvc})
+	channelHandler := channel.NewHandler(channelSvc)
+
+	// A/B Testing — route sessions to challenger agent versions.
+	abtestHandler := abtest.NewHandler(abtest.NewService(abtest.NewRepository(pool)))
+
+	// Device Node Network — MCP-discoverable devices and agent bindings.
+	deviceHandler := device.NewHandler(device.NewService(device.NewRepository(pool)))
+
+	// Skill Evaluation Framework — runner wired with a no-op evaluator by default.
+	// Production callers can inject a concrete Evaluator via the skilleval.Runner.
+	skillevalRepo := skilleval.NewRepository(pool)
+	skillevalRunner := skilleval.NewRunner(skillevalRepo, &noopSkillEvaluator{}, nil)
+	skillevalSvc := skilleval.NewService(skillevalRepo).WithRunner(skillevalRunner)
+	skillevalHandler := skilleval.NewHandler(skillevalSvc)
 	var docStorage document.StorageClient
 	if cfg.MinIO.IsConfigured() {
 		ds, err := document.NewMinIOStorageClient(
@@ -190,6 +235,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(kbRepo))
 	mcpHandler := mcp.NewHandler(mcpSvc)
 	approvalHandler := approval.NewHandler(approval.NewService(approval.NewRepository(pool)))
+	coreAgentLoader := core.NewCoreAgentLoader(pool)
+	coreHandler := core.NewHandler(coreAgentLoader)
 
 	// Marketplace handlers.
 	mkplListingHandler := mkplListing.NewHandler(mkplListing.NewService(mkplListing.NewRepository(pool)))
@@ -249,6 +296,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		webhookHandler.RegisterPublicRoutes(r)
 		regPackageHandler.RegisterPublicRoutes(r)
 		regInstallationHandler.RegisterPublicRoutes(r)
+		channelHandler.RegisterPublicRoutes(r)
 	})
 
 	// Protected routes — JWT required.
@@ -262,10 +310,17 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		agentHandler.RegisterRoutes(r)
 		agentVersionHandler.RegisterVersionRoutes(r)
 		agentBindingHandler.RegisterBindingRoutes(r)
+		agentBundleHandler.RegisterBundleRoutes(r)
 		skillHandler.RegisterRoutes(r)
 		toolHandler.RegisterRoutes(r)
 		memoryHandler.RegisterRoutes(r)
 		promptTemplateHandler.RegisterRoutes(r)
+		agentTemplateHandler.RegisterRoutes(r)
+		channelHandler.RegisterRoutes(r)
+		abtestHandler.RegisterRoutes(r)
+		deviceHandler.RegisterRoutes(r)
+		skillevalHandler.RegisterRoutes(r)
+		analyticsHandler.RegisterRoutes(r)
 		executionHandler.RegisterRoutes(r)
 		webhookHandler.RegisterRoutes(r)
 		r.Mount("/api/oauth-credentials", oauthHandler.Routes())
@@ -287,6 +342,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		integrationHandler.RegisterRoutes(r)
 		mcpHandler.RegisterRoutes(r)
 		approvalHandler.RegisterRoutes(r)
+		coreHandler.RegisterRoutes(r)
 		// Marketplace
 		mkplListingHandler.RegisterRoutes(r)
 		mkplReviewHandler.RegisterRoutes(r)
@@ -392,6 +448,8 @@ func buildAgenticRunner(
 	settingsRepo settings.Repository,
 	mcpRepo mcp.Repository,
 	integSvc *integration.Service,
+	coreToolLoader *core.CoreToolLoader,
+	bindingRepo agent.BindingRepository,
 ) chat.SessionRunner {
 	// Build an env-based fallback for agents that have no provider configured.
 	// This keeps backward-compatibility with existing deployments that set env vars.
@@ -409,7 +467,9 @@ func buildAgenticRunner(
 	promptTemplateRepo := prompttemplate.NewRepository(pool)
 	promptBuilder := agentic.NewPromptBuilder(skillRepo, kbRepo, chatRepo, agentic.DefaultPromptConfig()).
 		WithPromptTemplateResolver(&promptTemplateAdapter{repo: promptTemplateRepo})
-	toolSchemaBuilder := agentic.NewToolSchemaBuilder(skillRepo, toolRepo, kbRepo)
+	toolSchemaBuilder := agentic.NewToolSchemaBuilder(skillRepo, toolRepo, kbRepo).
+		WithCoreToolProvider(&coreToolAdapter{loader: coreToolLoader}).
+		WithTokenBudgetProvider(&skillTokenBudgetAdapter{repo: bindingRepo})
 	ctxManager := agentic.NewContextManager()
 	hookRepo := agentic.NewHookRepository(pool)
 	hookExecutor := agentic.NewHookExecutor(hookRepo)
@@ -443,6 +503,9 @@ func buildAgenticRunner(
 	if cfg.LLMCallTimeoutSecs > 0 {
 		adapter.WithLLMCallTimeout(time.Duration(cfg.LLMCallTimeoutSecs) * time.Second)
 	}
+
+	// Wire permission audit logger so every permission decision is persisted.
+	adapter.WithPermissionAuditLogger(agentic.NewPermissionAuditRepository(pool))
 
 	return adapter
 }
@@ -501,4 +564,120 @@ func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (
 	}
 
 	return cfg, nil
+}
+
+// coreToolAdapter adapts core.CoreToolLoader to agentic.CoreToolProvider.
+// Converts CoreTool structs to LLMTool definitions with a minimal input schema.
+type coreToolAdapter struct {
+	loader *core.CoreToolLoader
+}
+
+// skillTokenBudgetAdapter adapts agent.BindingRepository to agentic.SkillTokenBudgetProvider.
+type skillTokenBudgetAdapter struct {
+	repo agent.BindingRepository
+}
+
+func (a *skillTokenBudgetAdapter) GetSkillTokenBudgets(ctx context.Context, agentID uuid.UUID) (map[uuid.UUID]*int, error) {
+	return a.repo.GetSkillTokenBudgets(ctx, agentID)
+}
+
+// permissionAuditReaderAdapter bridges agentic.PermissionAuditRepository to chat.PermissionAuditReader.
+type permissionAuditReaderAdapter struct {
+	repo *agentic.PermissionAuditRepository
+}
+
+func (a *permissionAuditReaderAdapter) ListBySession(ctx context.Context, sessionID uuid.UUID, limit int) ([]chat.PermissionAuditEntryResponse, error) {
+	entries, err := a.repo.ListBySession(ctx, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]chat.PermissionAuditEntryResponse, 0, len(entries))
+	for _, e := range entries {
+		resp := chat.PermissionAuditEntryResponse{
+			SessionID:    e.SessionID.String(),
+			ToolName:     e.ToolName,
+			Decision:     string(e.Decision),
+			MatchedRule:  e.MatchedRule,
+			InputSnippet: e.InputSnippet,
+			CreatedAt:    e.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		}
+		if e.RunID != nil {
+			s := e.RunID.String()
+			resp.RunID = &s
+		}
+		out = append(out, resp)
+	}
+	return out, nil
+}
+
+func (a *coreToolAdapter) LoadCoreTools(ctx context.Context) ([]agentic.LLMTool, error) {
+	tools, err := a.loader.LoadAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]agentic.LLMTool, 0, len(tools))
+	for _, t := range tools {
+		inputSchema := json.RawMessage(`{"type":"object","properties":{}}`)
+		// Attempt to extract a richer schema from the tool config when available.
+		if len(t.Config) > 2 {
+			var cfg struct {
+				InputSchema json.RawMessage `json:"inputSchema"`
+			}
+			if err := json.Unmarshal(t.Config, &cfg); err == nil && len(cfg.InputSchema) > 2 {
+				inputSchema = cfg.InputSchema
+			}
+		}
+		result = append(result, agentic.LLMTool{
+			Name:        t.Slug,
+			Description: t.Description,
+			InputSchema: inputSchema,
+		})
+	}
+	return result, nil
+}
+
+// chatAgentDispatcher implements channel.AgentDispatcher by delegating to chat.Service.
+// It creates a transient session bound to the given agent, runs the agentic loop,
+// drains all SSE events, and returns the final assistant text.
+type chatAgentDispatcher struct {
+	chatSvc *chat.Service
+}
+
+func (d *chatAgentDispatcher) Dispatch(ctx context.Context, agentID uuid.UUID, userText, tenantID string) (string, error) {
+	// Create a transient session for this inbound message.
+	session, err := d.chatSvc.CreateSession(ctx, chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "inbound-" + agentID.String()[:8],
+	})
+	if err != nil {
+		return "", fmt.Errorf("channel dispatch: create session: %w", err)
+	}
+
+	events, err := d.chatSvc.RunSession(ctx, session.ID, userText, tenantID)
+	if err != nil {
+		return "", fmt.Errorf("channel dispatch: run session: %w", err)
+	}
+
+	// Drain events and collect assistant text deltas.
+	var textBuf []byte
+	for ev := range events {
+		if ev.Type == "text_delta" {
+			var delta struct {
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(ev.Data, &delta); err == nil {
+				textBuf = append(textBuf, delta.Content...)
+			}
+		}
+	}
+	return string(textBuf), nil
+}
+
+// noopSkillEvaluator is the default skilleval.Evaluator used at startup.
+// It returns empty output for every input, causing all cases to fail gracefully.
+// Replace with a real evaluator that calls the agentic runner when ready.
+type noopSkillEvaluator struct{}
+
+func (e *noopSkillEvaluator) Evaluate(_ context.Context, _ uuid.UUID, _ string) (skilleval.EvalOutput, error) {
+	return skilleval.EvalOutput{}, nil
 }

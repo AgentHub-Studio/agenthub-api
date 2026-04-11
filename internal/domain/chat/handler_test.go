@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -548,4 +549,93 @@ func TestGetRun_NoLookupConfigured(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+// --- IMPROVEMENT-TASK-03: task list endpoints ---
+
+// mockHandlerTaskRepo is a simple in-memory task.Repository for handler tests.
+type mockHandlerTaskRepo struct {
+	tasks []task.Task
+}
+
+func (m *mockHandlerTaskRepo) CreateTask(_ context.Context, t task.Task) error {
+	m.tasks = append(m.tasks, t)
+	return nil
+}
+func (m *mockHandlerTaskRepo) UpdateTask(_ context.Context, _ task.Task) error { return nil }
+func (m *mockHandlerTaskRepo) GetTask(_ context.Context, _ string) (task.Task, error) {
+	return task.Task{}, nil
+}
+func (m *mockHandlerTaskRepo) ListBySession(_ context.Context, _ uuid.UUID, req pagination.PageRequest) ([]task.Task, int64, error) {
+	return m.tasks, int64(len(m.tasks)), nil
+}
+func (m *mockHandlerTaskRepo) CreateNotification(_ context.Context, _ task.Notification) error {
+	return nil
+}
+func (m *mockHandlerTaskRepo) ListNotificationsByTask(_ context.Context, _ string) ([]task.Notification, error) {
+	return nil, nil
+}
+
+var _ task.Repository = (*mockHandlerTaskRepo)(nil)
+
+func setupChatWithTasks(repo task.Repository) (*chi.Mux, *mockChatSvc) {
+	svc := newMockChatSvc()
+	h := chat.NewHandler(svc, nil).WithTaskRepository(repo)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r, svc
+}
+
+func TestHandler_GetTasks_200(t *testing.T) {
+	sessionID := uuid.New()
+	repo := &mockHandlerTaskRepo{
+		tasks: []task.Task{
+			{ID: "task-1", SessionID: sessionID, Status: "pending", Phase: "research"},
+			{ID: "task-2", SessionID: sessionID, Status: "completed", Phase: "implementation"},
+		},
+	}
+	r, _ := setupChatWithTasks(repo)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/tasks", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var page pagination.Page[task.Task]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	assert.Equal(t, int64(2), page.TotalElements)
+}
+
+func TestHandler_GetTasks_InvalidSessionID_Returns400(t *testing.T) {
+	repo := &mockHandlerTaskRepo{}
+	r, _ := setupChatWithTasks(repo)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/not-a-uuid/tasks", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandler_GetTasks_NoRepo_Returns501(t *testing.T) {
+	r, _ := setupChat() // handler without task repo
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+uuid.New().String()+"/tasks", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotImplemented, w.Code)
+}
+
+func TestHandler_GetTaskNotifications_200(t *testing.T) {
+	sessionID := uuid.New()
+	repo := &mockHandlerTaskRepo{}
+	r, _ := setupChatWithTasks(repo)
+
+	url := "/api/chat/sessions/" + sessionID.String() + "/tasks/task-1/notifications"
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
 }

@@ -71,6 +71,10 @@ func (m *mockBindingRepo) SyncMCPServers(_ context.Context, agentID uuid.UUID, m
 	return nil
 }
 
+func (m *mockBindingRepo) GetSkillTokenBudgets(_ context.Context, _ uuid.UUID) (map[uuid.UUID]*int, error) {
+	return map[uuid.UUID]*int{}, nil
+}
+
 // mockBindingAgentRepo implements agent.Repository for binding handler tests (only FindByID needed).
 type mockBindingAgentRepo struct {
 	agents map[uuid.UUID]agent.Agent

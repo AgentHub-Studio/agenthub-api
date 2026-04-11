@@ -97,6 +97,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		ContextMode:            req.ContextMode,
 		WhenToUse:              req.WhenToUse,
 		ArgumentHint:           req.ArgumentHint,
+		ShouldDefer:            req.ShouldDefer,
 	}
 	created, err := s.repo.Create(ctx, sk)
 	if err != nil {
@@ -115,7 +116,22 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (Response, error) {
 }
 
 // Update updates a skill.
+// Applies the same instruction-size and inert-skill guards as Create.
 func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Response, error) {
+	// DX-01-H: normalize whitespace-only instructions.
+	req.Instructions = strings.TrimSpace(req.Instructions)
+
+	// ACT-F3-05: enforce maximum instructions size (32K chars).
+	const maxInstructionsChars = 32000
+	if len(req.Instructions) > maxInstructionsChars {
+		return Response{}, fmt.Errorf("skill: instructions exceeds maximum length of %d chars (got %d)", maxInstructionsChars, len(req.Instructions))
+	}
+
+	// DX-01-J (ACT-F3-04): reject inert skill updates — no instructions AND no tool restrictions.
+	if req.Instructions == "" && len(req.AllowedTools) == 0 {
+		return Response{}, ErrSkillInert
+	}
+
 	sk, err := s.repo.Update(ctx, id, req)
 	if err != nil {
 		return Response{}, err

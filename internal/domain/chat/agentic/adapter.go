@@ -73,6 +73,9 @@ type SessionRunnerAdapter struct {
 	// elicitation manages a registry of active ElicitationHandlers keyed by
 	// session ID so that HTTP respond calls can be routed to the correct run.
 	elicitation elicitationRegistry
+
+	// permAudit, when set, records permission decisions for every tool call.
+	permAudit PermissionAuditLogger
 }
 
 // elicitationRegistry maps active session runs to their ElicitationHandlers.
@@ -194,6 +197,13 @@ func (a *SessionRunnerAdapter) WithMCPClient(client MCPClientService) *SessionRu
 // Zero means "keep the RunConfig default (5 minutes)".
 func (a *SessionRunnerAdapter) WithLLMCallTimeout(d time.Duration) *SessionRunnerAdapter {
 	a.llmCallTimeout = d
+	return a
+}
+
+// WithPermissionAuditLogger wires a permission audit logger so every permission
+// decision during a run is persisted to the permission_audit_log table.
+func (a *SessionRunnerAdapter) WithPermissionAuditLogger(logger PermissionAuditLogger) *SessionRunnerAdapter {
+	a.permAudit = logger
 	return a
 }
 
@@ -414,6 +424,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		IsAdmin:          callerHasAdminRole(ctx),    // P-C298-1
 		EnableManagement: agentCfg.EnableManagement, // P-C184-2
 		SkillIDsSnapshot: in.SkillIDsSnapshot,       // P-C115-1: use snapshot if available
+		PermissionAudit:  a.permAudit,
 	})
 
 	chatCh := make(chan chat.RunEvent, config.StreamBufferSize)

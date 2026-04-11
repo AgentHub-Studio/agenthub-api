@@ -1,13 +1,17 @@
 package agentic
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 )
 
 // WorkerIdentity identifies a worker agent in a coordinator swarm.
@@ -93,11 +97,20 @@ const (
 
 // CoordinatorState manages the distributed state of a coordinator swarm.
 // Thread-safe for concurrent worker access.
+// When a task.Repository is injected via WithRepository, state mutations are
+// written through to the database. Persistence failures are logged but never
+// block execution — the in-memory state remains authoritative during the run.
 type CoordinatorState struct {
 	mu            sync.RWMutex
 	tasks         map[string]*CoordinatorTask
 	workers       map[string]*WorkerIdentity
 	notifications []TaskNotification
+	// sessionID is used as the foreign key when persisting tasks.
+	sessionID uuid.UUID
+	// repo is optional — nil means no persistence (in-memory only).
+	repo task.Repository
+	// ctx is used for repository calls; set via WithContext.
+	ctx context.Context
 }
 
 // NewCoordinatorState creates an empty coordinator state.
@@ -105,7 +118,22 @@ func NewCoordinatorState() *CoordinatorState {
 	return &CoordinatorState{
 		tasks:   make(map[string]*CoordinatorTask),
 		workers: make(map[string]*WorkerIdentity),
+		ctx:     context.Background(),
 	}
+}
+
+// WithRepository injects a task.Repository for write-through persistence.
+// The sessionID is used as the parent key for all persisted tasks.
+func (s *CoordinatorState) WithRepository(repo task.Repository, sessionID uuid.UUID) *CoordinatorState {
+	s.repo = repo
+	s.sessionID = sessionID
+	return s
+}
+
+// WithContext sets the context used for repository calls (carries tenant/auth info).
+func (s *CoordinatorState) WithContext(ctx context.Context) *CoordinatorState {
+	s.ctx = ctx
+	return s
 }
 
 // RegisterWorker adds a worker to the swarm.
@@ -116,18 +144,36 @@ func (s *CoordinatorState) RegisterWorker(worker WorkerIdentity) {
 }
 
 // CreateTask creates a new coordinator task and returns its ID.
+// If a repository is configured, the task is also persisted asynchronously.
 func (s *CoordinatorState) CreateTask(description string, phase TaskPhase, dependsOn []string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	id := uuid.New().String()
-	s.tasks[id] = &CoordinatorTask{
+	now := time.Now()
+	t := &CoordinatorTask{
 		ID:          id,
 		Description: description,
 		Status:      TaskStatusPending,
 		Phase:       phase,
 		DependsOn:   dependsOn,
-		CreatedAt:   time.Now(),
+		CreatedAt:   now,
+	}
+	s.tasks[id] = t
+
+	if s.repo != nil {
+		rec := task.Task{
+			ID:          id,
+			SessionID:   s.sessionID,
+			Description: description,
+			Status:      string(TaskStatusPending),
+			Phase:       string(phase),
+			DependsOn:   dependsOn,
+			CreatedAt:   now,
+		}
+		if err := s.repo.CreateTask(s.ctx, rec); err != nil {
+			slog.Warn("coordinator: failed to persist task", "taskID", id, "err", err)
+		}
 	}
 	return id
 }
@@ -137,12 +183,19 @@ func (s *CoordinatorState) AssignTask(taskID, workerID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	task, ok := s.tasks[taskID]
+	t, ok := s.tasks[taskID]
 	if !ok {
 		return fmt.Errorf("task %s not found", taskID)
 	}
-	task.AssignedTo = workerID
-	task.Status = TaskStatusInProgress
+	t.AssignedTo = workerID
+	t.Status = TaskStatusInProgress
+
+	if s.repo != nil {
+		rec := task.Task{ID: taskID, Status: string(TaskStatusInProgress), AssignedTo: workerID}
+		if err := s.repo.UpdateTask(s.ctx, rec); err != nil {
+			slog.Warn("coordinator: failed to update task assignment", "taskID", taskID, "err", err)
+		}
+	}
 	return nil
 }
 
@@ -151,13 +204,20 @@ func (s *CoordinatorState) CompleteTask(taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	task, ok := s.tasks[taskID]
+	t, ok := s.tasks[taskID]
 	if !ok {
 		return fmt.Errorf("task %s not found", taskID)
 	}
-	task.Status = TaskStatusCompleted
+	t.Status = TaskStatusCompleted
 	now := time.Now()
-	task.CompletedAt = &now
+	t.CompletedAt = &now
+
+	if s.repo != nil {
+		rec := task.Task{ID: taskID, Status: string(TaskStatusCompleted), AssignedTo: t.AssignedTo, CompletedAt: &now}
+		if err := s.repo.UpdateTask(s.ctx, rec); err != nil {
+			slog.Warn("coordinator: failed to persist task completion", "taskID", taskID, "err", err)
+		}
+	}
 	return nil
 }
 
@@ -166,21 +226,46 @@ func (s *CoordinatorState) FailTask(taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	task, ok := s.tasks[taskID]
+	t, ok := s.tasks[taskID]
 	if !ok {
 		return fmt.Errorf("task %s not found", taskID)
 	}
-	task.Status = TaskStatusFailed
+	t.Status = TaskStatusFailed
 	now := time.Now()
-	task.CompletedAt = &now
+	t.CompletedAt = &now
+
+	if s.repo != nil {
+		rec := task.Task{ID: taskID, Status: string(TaskStatusFailed), AssignedTo: t.AssignedTo, CompletedAt: &now}
+		if err := s.repo.UpdateTask(s.ctx, rec); err != nil {
+			slog.Warn("coordinator: failed to persist task failure", "taskID", taskID, "err", err)
+		}
+	}
 	return nil
 }
 
 // AddNotification records a task notification from a worker.
+// If a repository is configured, the notification is also persisted.
 func (s *CoordinatorState) AddNotification(notification TaskNotification) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notifications = append(s.notifications, notification)
+
+	if s.repo != nil && notification.TaskID != "" {
+		rec := task.Notification{
+			ID:         uuid.New().String(),
+			TaskID:     notification.TaskID,
+			WorkerID:   notification.WorkerID,
+			WorkerName: notification.WorkerName,
+			Status:     string(notification.Status),
+			Summary:    notification.Summary,
+			Findings:   notification.Findings,
+			Error:      notification.Error,
+			CreatedAt:  notification.Timestamp,
+		}
+		if err := s.repo.CreateNotification(s.ctx, rec); err != nil {
+			slog.Warn("coordinator: failed to persist notification", "taskID", notification.TaskID, "err", err)
+		}
+	}
 }
 
 // PendingNotifications returns and clears unprocessed notifications.

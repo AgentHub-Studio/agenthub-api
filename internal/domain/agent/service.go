@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -36,6 +37,9 @@ func stripHTML(s string) string {
 type Service interface {
 	List(ctx context.Context, status AgentStatus, q string, req pagination.PageRequest) (pagination.Page[AgentResponse], error)
 	Get(ctx context.Context, id uuid.UUID) (AgentResponse, error)
+	// GetWithReadiness returns an agent with its computed ReadinessScore attached.
+	// Used by GET /api/agents/:id so the frontend can surface actionable feedback.
+	GetWithReadiness(ctx context.Context, id uuid.UUID) (AgentResponse, error)
 	Create(ctx context.Context, req CreateAgentRequest) (AgentResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateAgentRequest) (AgentResponse, error)
 	Delete(ctx context.Context, id uuid.UUID) error
@@ -50,11 +54,12 @@ type Service interface {
 type service struct {
 	repo        Repository
 	bindingRepo BindingRepository
+	skillRepo   skill.SkillRepository
 }
 
 // NewService creates a new agent Service.
-func NewService(repo Repository, bindingRepo BindingRepository) Service {
-	return &service{repo: repo, bindingRepo: bindingRepo}
+func NewService(repo Repository, bindingRepo BindingRepository, skillRepo skill.SkillRepository) Service {
+	return &service{repo: repo, bindingRepo: bindingRepo, skillRepo: skillRepo}
 }
 
 func (s *service) List(ctx context.Context, status AgentStatus, q string, req pagination.PageRequest) (pagination.Page[AgentResponse], error) {
@@ -82,6 +87,42 @@ func (s *service) Get(ctx context.Context, id uuid.UUID) (AgentResponse, error) 
 		resp.KnowledgeBaseIDs = kbIDs
 	}
 	return resp, nil
+}
+
+// GetWithReadiness returns the agent with its computed ReadinessScore attached.
+// The score reflects the current binding state (skills + tools).
+func (s *service) GetWithReadiness(ctx context.Context, id uuid.UUID) (AgentResponse, error) {
+	a, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return AgentResponse{}, err
+	}
+	resp := ResponseFrom(a)
+	var skillIDs []uuid.UUID
+	if ids, err := s.bindingRepo.ListSkillIDs(ctx, id); err == nil {
+		skillIDs = ids
+		resp.SkillIDs = skillIDs
+	}
+	if kbIDs, err := s.bindingRepo.ListKnowledgeBaseIDs(ctx, id); err == nil {
+		resp.KnowledgeBaseIDs = kbIDs
+	}
+	if score, err := s.agentReadiness(ctx, a, skillIDs); err == nil {
+		resp.Readiness = &score
+	}
+	return resp, nil
+}
+
+// agentReadiness computes ReadinessScore for agent a given its current skill bindings.
+// activeToolCount is fetched from the skill repository for the provided skillIDs.
+func (s *service) agentReadiness(ctx context.Context, a Agent, skillIDs []uuid.UUID) (ReadinessScore, error) {
+	activeToolCount := 0
+	if len(skillIDs) > 0 {
+		count, err := s.skillRepo.CountActiveToolsForSkills(ctx, skillIDs)
+		if err != nil {
+			return ReadinessScore{}, fmt.Errorf("agent: readiness: count tools: %w", err)
+		}
+		activeToolCount = count
+	}
+	return ComputeReadiness(a, len(skillIDs), activeToolCount), nil
 }
 
 // maxSystemPromptChars is the maximum allowed length for an agent's system prompt.
@@ -248,8 +289,24 @@ func (s *service) Publish(ctx context.Context, id uuid.UUID) (AgentResponse, err
 	if err != nil {
 		return AgentResponse{}, err
 	}
-	if err := validatePublish(current); err != nil {
+	if err := validatePublishStatus(current); err != nil {
 		return AgentResponse{}, err
+	}
+	// Readiness gate: require at least STANDARD (score ≥ 60) to publish.
+	skillIDs, err := s.bindingRepo.ListSkillIDs(ctx, id)
+	if err != nil {
+		return AgentResponse{}, fmt.Errorf("agent: publish: list skills: %w", err)
+	}
+	score, err := s.agentReadiness(ctx, current, skillIDs)
+	if err != nil {
+		return AgentResponse{}, err
+	}
+	const minPublishScore = 60
+	if score.Score < minPublishScore {
+		return AgentResponse{}, fmt.Errorf(
+			"%w: readiness score %d/%d (level: %s) — address the failing checks before publishing",
+			ErrInvalidRequest, score.Score, minPublishScore, score.Level,
+		)
 	}
 	a, err := s.repo.UpdateStatus(ctx, id, StatusPublished)
 	if err != nil {
@@ -258,14 +315,14 @@ func (s *service) Publish(ctx context.Context, id uuid.UUID) (AgentResponse, err
 	return ResponseFrom(a), nil
 }
 
-// validatePublish checks that an agent meets the minimum requirements to be published.
+// validatePublishStatus checks that the agent's current status allows publishing.
 // P-C278-1: only DRAFT agents can be published; ARCHIVED agents require an explicit
 // status reset first (no direct archive→publish path exists); already PUBLISHED agents
 // are rejected to avoid duplicate publishes.
-func validatePublish(a Agent) error {
+func validatePublishStatus(a Agent) error {
 	switch a.Status {
 	case StatusDraft:
-		// allowed — minimum field check below
+		// allowed — readiness check follows in service.Publish
 	case StatusPublished:
 		return fmt.Errorf("%w: agent is already published", ErrInvalidStatusTransition)
 	case StatusArchived:

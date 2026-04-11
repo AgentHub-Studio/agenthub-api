@@ -33,6 +33,9 @@ type SkillRepository interface {
 	// CountAgentBindings returns the number of agents that reference this skill via agent_skill.
 	// Used by Service.Delete to block deletion of skills that are still in use.
 	CountAgentBindings(ctx context.Context, skillID uuid.UUID) (int64, error)
+	// CountActiveToolsForSkills returns the total number of active skill_tool entries
+	// across all provided skill IDs. Used for publish readiness checks.
+	CountActiveToolsForSkills(ctx context.Context, skillIDs []uuid.UUID) (int, error)
 }
 
 // Repository handles persistence for skills.
@@ -68,7 +71,7 @@ func (r *Repository) List(ctx context.Context, category *string, req pagination.
 	}
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, name, slug, description, category, created_at, updated_at, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint
+		`SELECT id, name, slug, description, category, created_at, updated_at, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint, should_defer
 		 FROM skill
 		 WHERE ($1::text IS NULL OR category = $1)
 		 ORDER BY name
@@ -101,10 +104,10 @@ func (r *Repository) Create(ctx context.Context, s Skill) (Skill, error) {
 	defer release()
 
 	row := conn.QueryRow(ctx,
-		`INSERT INTO skill (name, slug, description, category, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		 RETURNING id, name, slug, description, category, created_at, updated_at, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint`,
-		s.Name, s.Slug, s.Description, s.Category, s.Instructions, s.AllowedTools, s.DisableModelInvocation, s.ContextMode, s.WhenToUse, s.ArgumentHint,
+		`INSERT INTO skill (name, slug, description, category, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint, should_defer)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 RETURNING id, name, slug, description, category, created_at, updated_at, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint, should_defer`,
+		s.Name, s.Slug, s.Description, s.Category, s.Instructions, s.AllowedTools, s.DisableModelInvocation, s.ContextMode, s.WhenToUse, s.ArgumentHint, s.ShouldDefer,
 	)
 	return scanSkill(row)
 }
@@ -119,7 +122,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (Skill, error) {
 	defer release()
 
 	row := conn.QueryRow(ctx,
-		`SELECT id, name, slug, description, category, created_at, updated_at, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint
+		`SELECT id, name, slug, description, category, created_at, updated_at, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint, should_defer
 		 FROM skill WHERE id=$1`, id,
 	)
 	s, err := scanSkill(row)
@@ -142,10 +145,10 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, req UpdateRequest
 	defer release()
 
 	row := conn.QueryRow(ctx,
-		`UPDATE skill SET name=$1, description=$2, category=$3, instructions=$4, allowed_tools=$5, disable_model_invocation=$6, context_mode=$7, when_to_use=$8, argument_hint=$9, updated_at=NOW()
-		 WHERE id=$10
-		 RETURNING id, name, slug, description, category, created_at, updated_at, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint`,
-		req.Name, req.Description, req.Category, req.Instructions, req.AllowedTools, req.DisableModelInvocation, req.ContextMode, req.WhenToUse, req.ArgumentHint, id,
+		`UPDATE skill SET name=$1, description=$2, category=$3, instructions=$4, allowed_tools=$5, disable_model_invocation=$6, context_mode=$7, when_to_use=$8, argument_hint=$9, should_defer=$10, updated_at=NOW()
+		 WHERE id=$11
+		 RETURNING id, name, slug, description, category, created_at, updated_at, instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint, should_defer`,
+		req.Name, req.Description, req.Category, req.Instructions, req.AllowedTools, req.DisableModelInvocation, req.ContextMode, req.WhenToUse, req.ArgumentHint, req.ShouldDefer, id,
 	)
 	s, err := scanSkill(row)
 	if err != nil {
@@ -210,12 +213,36 @@ func (r *Repository) CountAgentBindings(ctx context.Context, skillID uuid.UUID) 
 	return count, nil
 }
 
+// CountActiveToolsForSkills returns the total number of active skill_tool entries
+// across all provided skill IDs. Returns 0 when skillIDs is empty.
+func (r *Repository) CountActiveToolsForSkills(ctx context.Context, skillIDs []uuid.UUID) (int, error) {
+	if len(skillIDs) == 0 {
+		return 0, nil
+	}
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
+	var count int
+	err = conn.QueryRow(ctx,
+		`SELECT COUNT(*) FROM skill_tool WHERE skill_id = ANY($1)`,
+		skillIDs,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("skill: count active tools: %w", err)
+	}
+	return count, nil
+}
+
 // --- scan helpers ---
 
 func scanSkill(row pgx.Row) (Skill, error) {
 	var s Skill
 	var instructions *string
-	if err := row.Scan(&s.ID, &s.Name, &s.Slug, &s.Description, &s.Category, &s.CreatedAt, &s.UpdatedAt, &instructions, &s.AllowedTools, &s.DisableModelInvocation, &s.ContextMode, &s.WhenToUse, &s.ArgumentHint); err != nil {
+	if err := row.Scan(&s.ID, &s.Name, &s.Slug, &s.Description, &s.Category, &s.CreatedAt, &s.UpdatedAt, &instructions, &s.AllowedTools, &s.DisableModelInvocation, &s.ContextMode, &s.WhenToUse, &s.ArgumentHint, &s.ShouldDefer); err != nil {
 		return Skill{}, fmt.Errorf("skill: scan: %w", err)
 	}
 	if instructions != nil {
@@ -227,7 +254,7 @@ func scanSkill(row pgx.Row) (Skill, error) {
 func scanSkillFromRows(rows pgx.Rows) (Skill, error) {
 	var s Skill
 	var instructions *string
-	if err := rows.Scan(&s.ID, &s.Name, &s.Slug, &s.Description, &s.Category, &s.CreatedAt, &s.UpdatedAt, &instructions, &s.AllowedTools, &s.DisableModelInvocation, &s.ContextMode, &s.WhenToUse, &s.ArgumentHint); err != nil {
+	if err := rows.Scan(&s.ID, &s.Name, &s.Slug, &s.Description, &s.Category, &s.CreatedAt, &s.UpdatedAt, &instructions, &s.AllowedTools, &s.DisableModelInvocation, &s.ContextMode, &s.WhenToUse, &s.ArgumentHint, &s.ShouldDefer); err != nil {
 		return Skill{}, fmt.Errorf("skill: scan: %w", err)
 	}
 	if instructions != nil {
@@ -248,7 +275,7 @@ func (r *Repository) ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]Sk
 	rows, err := conn.Query(ctx,
 		// P-C340-1 (ACT-F3-18): order by binding priority ASC then name for deterministic
 		// skill ordering in the system prompt. Skills with lower priority values appear first.
-		`SELECT s.id, s.name, s.slug, s.description, s.category, s.created_at, s.updated_at, s.instructions, s.allowed_tools, s.disable_model_invocation, s.context_mode, s.when_to_use, s.argument_hint
+		`SELECT s.id, s.name, s.slug, s.description, s.category, s.created_at, s.updated_at, s.instructions, s.allowed_tools, s.disable_model_invocation, s.context_mode, s.when_to_use, s.argument_hint, s.should_defer
 		 FROM skill s
 		 INNER JOIN agent_skill ags ON ags.skill_id = s.id
 		 WHERE ags.agent_id = $1
@@ -289,7 +316,7 @@ func (r *Repository) ListByIDs(ctx context.Context, ids []uuid.UUID) ([]Skill, e
 
 	rows, err := conn.Query(ctx,
 		`SELECT id, name, slug, description, category, created_at, updated_at,
-		        instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint
+		        instructions, allowed_tools, disable_model_invocation, context_mode, when_to_use, argument_hint, should_defer
 		 FROM skill
 		 WHERE id = ANY($1)
 		 ORDER BY name`,

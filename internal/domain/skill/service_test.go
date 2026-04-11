@@ -96,6 +96,10 @@ func (m *mockSkillRepo) CountAgentBindings(_ context.Context, _ uuid.UUID) (int6
 	return 0, nil
 }
 
+func (m *mockSkillRepo) CountActiveToolsForSkills(_ context.Context, ids []uuid.UUID) (int, error) {
+	return 0, nil
+}
+
 func TestSkillService_Create_AutoSlug(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	s, err := svc.Create(context.Background(), skill.CreateRequest{
@@ -149,9 +153,49 @@ func TestSkillService_Update_Success(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Old", Category: "misc", Instructions: "Do something."})
 	require.NoError(t, err)
-	updated, err := svc.Update(context.Background(), created.ID, skill.UpdateRequest{Name: "New", Category: "misc"})
+	updated, err := svc.Update(context.Background(), created.ID, skill.UpdateRequest{Name: "New", Category: "misc", Instructions: "Do something updated."})
 	require.NoError(t, err)
 	assert.Equal(t, "New", updated.Name)
+}
+
+// --- IMPROVEMENT-TASK-01: validação de instructions no Update ---
+
+func TestSkillService_Update_InertSkill_Rejected(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Skill", Category: "misc", Instructions: "Do something."})
+	require.NoError(t, err)
+
+	// Attempt to clear instructions without providing AllowedTools.
+	_, err = svc.Update(context.Background(), created.ID, skill.UpdateRequest{Name: "Skill", Instructions: ""})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, skill.ErrSkillInert)
+}
+
+func TestSkillService_Update_AllowedToolsNoInstructions_Accepted(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Skill", Category: "misc", Instructions: "Guide."})
+	require.NoError(t, err)
+
+	// AllowedTools without instructions is valid (tool-restriction-only skill).
+	_, err = svc.Update(context.Background(), created.ID, skill.UpdateRequest{
+		Name:         "Skill",
+		AllowedTools: []string{"http_get"},
+	})
+	require.NoError(t, err)
+}
+
+func TestSkillService_Update_InstructionsTooLong_Rejected(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Skill", Category: "misc", Instructions: "Guide."})
+	require.NoError(t, err)
+
+	buf := make([]byte, 32001)
+	for i := range buf {
+		buf[i] = 'x'
+	}
+	_, err = svc.Update(context.Background(), created.ID, skill.UpdateRequest{Name: "Skill", Instructions: string(buf)})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum length")
 }
 
 func TestSkillService_Delete_Success(t *testing.T) {

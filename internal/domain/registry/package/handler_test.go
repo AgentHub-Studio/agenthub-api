@@ -110,6 +110,16 @@ func (m *mockPkgSvc) Delete(_ context.Context, id uuid.UUID, tenantID string) er
 	return nil
 }
 
+func (m *mockPkgSvc) Search(_ context.Context, query string, pkgType *string, req pagination.PageRequest) (pagination.Page[pkg.PackageResponse], error) {
+	var items []pkg.PackageResponse
+	for _, p := range m.data {
+		if p.Visibility == pkg.PackageVisibilityPublic {
+			items = append(items, pkg.ResponseFrom(p))
+		}
+	}
+	return pagination.NewPage(items, int64(len(items)), req), nil
+}
+
 func setupPkgHandler() (*chi.Mux, *mockPkgSvc) {
 	svc := newMockPkgSvc()
 	h := pkg.NewHandler(svc)

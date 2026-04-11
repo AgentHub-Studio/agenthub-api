@@ -94,6 +94,16 @@ func (m *mockPkgRepo) UpdateLatestVersion(_ context.Context, id uuid.UUID, versi
 	return nil
 }
 
+func (m *mockPkgRepo) Search(_ context.Context, query string, pkgType *string, req pagination.PageRequest) ([]pkg.Package, int64, error) {
+	var out []pkg.Package
+	for _, p := range m.data {
+		if p.Visibility == pkg.PackageVisibilityPublic {
+			out = append(out, p)
+		}
+	}
+	return out, int64(len(out)), nil
+}
+
 // Tests
 
 func TestPkgService_Create_Success(t *testing.T) {

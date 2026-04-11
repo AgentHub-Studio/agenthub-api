@@ -1,0 +1,1 @@
+ALTER TABLE agent_skill ADD COLUMN IF NOT EXISTS token_budget INTEGER;

@@ -92,6 +92,25 @@ type LLMTool struct {
 	// IsSearchOrRead marks tools whose results auto-collapse in the UI.
 	// Inspired by Claude Code's Tool.ts isSearchOrReadCommand().
 	IsSearchOrRead bool `json:"-"` // not sent to LLM
+	// TokenBudget is an optional per-skill token budget (in output tokens) set
+	// on the agent_skill binding. When non-nil, the runner tracks cumulative
+	// output tokens for this tool's skill and refuses further calls once the
+	// budget is exhausted.
+	TokenBudget *int `json:"-"` // not sent to LLM
+}
+
+// SkillTokenBudgetProvider returns per-agent-skill token budget overrides.
+// The returned map keys are skill IDs; nil value means no budget limit.
+// Used to populate LLMTool.TokenBudget for enforcement in the runner.
+type SkillTokenBudgetProvider interface {
+	GetSkillTokenBudgets(ctx context.Context, agentID uuid.UUID) (map[uuid.UUID]*int, error)
+}
+
+// CoreToolProvider loads platform-managed tools from the global ah_core schema.
+// Implementations are non-fatal: they must return (nil, nil) when the schema
+// does not exist (e.g. fresh deployments, tests without the schema).
+type CoreToolProvider interface {
+	LoadCoreTools(ctx context.Context) ([]LLMTool, error)
 }
 
 // ToolSchemaBuilder converts the skills/tools linked to an agent into LLMTool
@@ -101,6 +120,8 @@ type ToolSchemaBuilder struct {
 	tools              ToolsBySkillLister
 	kbs                KBLister
 	mcpBridge          *MCPToolBridge
+	coreTools          CoreToolProvider
+	tokenBudgets       SkillTokenBudgetProvider
 	currentDepth       int
 	maxDepth           int
 	adminScope         bool // P-C298-1: gate agenthub_manage to admin callers only
@@ -117,6 +138,7 @@ func NewToolSchemaBuilder(skills SkillLister, tools ToolsBySkillLister, kbs KBLi
 
 // Clone returns a shallow copy so per-run state (depth, MCP bridge, cached skill
 // subsets) can be mutated without racing other concurrent runs.
+// coreTools is intentionally shared — it is stateless and safe for concurrent reads.
 func (b *ToolSchemaBuilder) Clone() *ToolSchemaBuilder {
 	if b == nil {
 		return nil
@@ -133,6 +155,21 @@ func (b *ToolSchemaBuilder) Clone() *ToolSchemaBuilder {
 // alongside internal skills in the tool definitions sent to the LLM.
 func (b *ToolSchemaBuilder) WithMCPBridge(bridge *MCPToolBridge) *ToolSchemaBuilder {
 	b.mcpBridge = bridge
+	return b
+}
+
+// WithCoreToolProvider attaches a provider for platform-managed tools from the
+// ah_core schema. When set, core tools are appended to the tool list after
+// tenant skills and MCP tools.
+func (b *ToolSchemaBuilder) WithCoreToolProvider(p CoreToolProvider) *ToolSchemaBuilder {
+	b.coreTools = p
+	return b
+}
+
+// WithTokenBudgetProvider attaches a provider for per-agent-skill token budgets.
+// When set, Build() populates LLMTool.TokenBudget for enforcement by the runner.
+func (b *ToolSchemaBuilder) WithTokenBudgetProvider(p SkillTokenBudgetProvider) *ToolSchemaBuilder {
+	b.tokenBudgets = p
 	return b
 }
 
@@ -232,6 +269,12 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 		}
 	}
 
+	// Load per-skill token budgets for this agent (optional).
+	var budgetMap map[uuid.UUID]*int
+	if b.tokenBudgets != nil {
+		budgetMap, _ = b.tokenBudgets.GetSkillTokenBudgets(ctx, agentID)
+	}
+
 	var tools []LLMTool
 	var userOnlySkills []skill.Skill
 	for _, sk := range skills {
@@ -251,6 +294,17 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 		// and listing them as tools causes the LLM to invoke them → "skill not found".
 		if !callable {
 			continue
+		}
+		// Skill-level ShouldDefer (3rd progressive disclosure layer): if the skill
+		// itself is marked should_defer, set the flag regardless of bound tool flags.
+		if sk.ShouldDefer {
+			t.ShouldDefer = true
+		}
+		// Populate per-skill token budget from the agent_skill binding.
+		if budgetMap != nil {
+			if budget, ok := budgetMap[sk.ID]; ok {
+				t.TokenBudget = budget
+			}
 		}
 		tools = append(tools, t)
 	}
@@ -300,6 +354,10 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// Builtin: ask_user — always available; lets the LLM request structured input from the user.
 	tools = append(tools, askUserTool())
 
+	// Builtins: canvas_update, canvas_feedback, canvas_export_table — always available.
+	// These tools render rich visual content in the canvas panel alongside the chat.
+	tools = append(tools, canvasUpdateTool(), canvasFeedbackTool(), canvasExportTableTool())
+
 	// Builtin: agent — available when depth < maxDepth (enables sub-agent spawning).
 	if b.currentDepth < b.maxDepth {
 		tools = append(tools, agentTool(b.maxDepth-b.currentDepth))
@@ -332,6 +390,29 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 			b.lastWarnings = append(b.lastWarnings, summarizeMCPErrors(mcpErr.Error())...)
 		}
 		tools = append(tools, mcpTools...)
+	}
+
+	// Core tools — platform-managed tools from ah_core schema, available to all agents.
+	// Non-fatal: provider returns nil when ah_core schema does not exist.
+	if b.coreTools != nil {
+		coreList, coreErr := b.coreTools.LoadCoreTools(ctx)
+		if coreErr != nil {
+			slog.WarnContext(ctx, "agentic: failed to load core tools", "error", coreErr)
+		} else {
+			for _, ct := range coreList {
+				// Skip if a tenant skill with the same slug was already loaded.
+				duplicate := false
+				for _, existing := range tools {
+					if existing.Name == ct.Name {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					tools = append(tools, ct)
+				}
+			}
+		}
 	}
 
 	if tools == nil {

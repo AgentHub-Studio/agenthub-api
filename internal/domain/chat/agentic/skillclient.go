@@ -68,9 +68,13 @@ type skillExecRequest struct {
 }
 
 type skillExecContext struct {
-	TenantID  string `json:"tenantId"`
-	AgentID   string `json:"agentId,omitempty"`
-	SessionID string `json:"sessionId,omitempty"`
+	TenantID    string `json:"tenantId"`
+	AgentID     string `json:"agentId,omitempty"`
+	SessionID   string `json:"sessionId,omitempty"`
+	// CallerToken is the raw Bearer JWT of the authenticated user.
+	// When populated, the skill-runtime uses it to execute tools configured with
+	// use_caller_token=true (e.g. ah_core platform tools) in the caller's context.
+	CallerToken string `json:"callerToken,omitempty"`
 }
 
 // skillExecResponse is the response from the skill-runtime.
@@ -93,12 +97,18 @@ func (c *SkillRuntimeClient) Execute(ctx context.Context, slug string, input jso
 		inputMap = map[string]any{}
 	}
 
+	// Propagate the caller's JWT so the skill-runtime can use it for tools
+	// configured with use_caller_token=true (e.g. ah_core platform tools).
+	// This is always forwarded regardless of whether a service token is used for
+	// the Authorization header — the two tokens serve different purposes.
+	callerToken := tenant.TokenFromContext(ctx)
 	body := skillExecRequest{
 		Input: inputMap,
 		Context: skillExecContext{
-			TenantID:  tenantID,
-			AgentID:   agentID,
-			SessionID: sessionID,
+			TenantID:    tenantID,
+			AgentID:     agentID,
+			SessionID:   sessionID,
+			CallerToken: callerToken,
 		},
 	}
 

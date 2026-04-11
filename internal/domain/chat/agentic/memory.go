@@ -80,15 +80,22 @@ func DefaultMemoryBridgeConfig() MemoryBridgeConfig {
 	}
 }
 
+// MemoryDistiller promotes execution-scoped memories to workflow scope.
+type MemoryDistiller interface {
+	DistillExecutionMemories(ctx context.Context, agentID uuid.UUID, executionID uuid.UUID) error
+}
+
 // MemoryBridge connects the agentic loop with the memory subsystem.
 // It handles recall (injecting relevant memories into the system prompt)
 // and store (persisting new memories discovered during conversation).
 type MemoryBridge struct {
-	embedder  Embedder
-	recaller  MemoryRecaller
-	upserter  MemoryUpserter
-	evaluator MemoryEvaluator
-	config    MemoryBridgeConfig
+	embedder    Embedder
+	recaller    MemoryRecaller
+	upserter    MemoryUpserter
+	evaluator   MemoryEvaluator
+	distiller   MemoryDistiller
+	config      MemoryBridgeConfig
+	executionID *uuid.UUID // when set, memories are scoped to this execution
 }
 
 // NewMemoryBridge creates a MemoryBridge with the given dependencies.
@@ -108,6 +115,19 @@ func NewMemoryBridge(
 	}
 }
 
+// WithDistiller sets the distiller used to promote execution memories at run end.
+func (mb *MemoryBridge) WithDistiller(d MemoryDistiller) *MemoryBridge {
+	mb.distiller = d
+	return mb
+}
+
+// WithExecutionID tags all memories written during this run as execution-scoped,
+// enabling fine-grained distillation at the end of the execution.
+func (mb *MemoryBridge) WithExecutionID(id uuid.UUID) *MemoryBridge {
+	mb.executionID = &id
+	return mb
+}
+
 // --- Recall ---
 
 // Recall retrieves relevant memories for the given user message and formats
@@ -124,10 +144,15 @@ func (mb *MemoryBridge) Recall(ctx context.Context, agentID uuid.UUID, userMessa
 		return "", fmt.Errorf("memory bridge: embed: %w", err)
 	}
 
-	results, err := mb.recaller.Recall(ctx, agentID, memory.RecallRequest{
-		Embedding: embedding,
-		Limit:     mb.config.RecallLimit,
-	})
+	recallReq := memory.RecallRequest{
+		Embedding:   embedding,
+		Limit:       mb.config.RecallLimit,
+		ExecutionID: mb.executionID,
+	}
+	// When running within an execution context, include both agent-scope memories
+	// and execution-scope memories so the runner has full context.
+	// (No explicit scope filter means all scopes are recalled.)
+	results, err := mb.recaller.Recall(ctx, agentID, recallReq)
 	if err != nil {
 		return "", fmt.Errorf("memory bridge: recall: %w", err)
 	}
@@ -262,11 +287,18 @@ func (mb *MemoryBridge) MaybeStore(ctx context.Context, agentID uuid.UUID, turnI
 
 		memType := m.resolvedType()
 
+		scope := "agent"
+		if mb.executionID != nil {
+			scope = "execution"
+		}
+
 		// P-C333-1 (ACT-F3-10): normalize key before persisting.
 		_, err = mb.upserter.Upsert(ctx, agentID, normalizeKey(m.Key), memory.UpsertMemoryRequest{
-			Value:      valueJSON,
-			MemoryType: memType,
-			Embedding:  embedding,
+			Value:       valueJSON,
+			MemoryType:  memType,
+			Scope:       scope,
+			ExecutionID: mb.executionID,
+			Embedding:   embedding,
 		})
 		if err != nil {
 			continue
@@ -334,15 +366,32 @@ func (mb *MemoryBridge) Store(ctx context.Context, agentID uuid.UUID, content, c
 		}
 	}
 
+	scope := "agent"
+	if mb.executionID != nil {
+		scope = "execution"
+	}
+
 	_, err = mb.upserter.Upsert(ctx, agentID, key, memory.UpsertMemoryRequest{
-		Value:      valueJSON,
-		MemoryType: category,
-		Embedding:  embedding,
+		Value:       valueJSON,
+		MemoryType:  category,
+		Scope:       scope,
+		ExecutionID: mb.executionID,
+		Embedding:   embedding,
 	})
 	if err != nil {
 		return fmt.Sprintf("Failed to store memory: %v", err)
 	}
 	return "Memory stored successfully."
+}
+
+// DistillExecution promotes all execution-scoped memories to workflow scope.
+// Should be called at the end of a successful execution run.
+// No-ops if no distiller is configured or no executionID was set.
+func (mb *MemoryBridge) DistillExecution(ctx context.Context, agentID uuid.UUID) error {
+	if mb.distiller == nil || mb.executionID == nil {
+		return nil
+	}
+	return mb.distiller.DistillExecutionMemories(ctx, agentID, *mb.executionID)
 }
 
 // TurnMessage is a simplified message representation for memory evaluation.

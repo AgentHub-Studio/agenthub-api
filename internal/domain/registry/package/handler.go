@@ -23,6 +23,7 @@ type packageService interface {
 	Create(ctx context.Context, req CreatePackageRequest, tenantID string) (PackageResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdatePackageRequest, tenantID string) (PackageResponse, error)
 	Delete(ctx context.Context, id uuid.UUID, tenantID string) error
+	Search(ctx context.Context, query string, pkgType *string, req pagination.PageRequest) (pagination.Page[PackageResponse], error)
 }
 
 // Handler exposes the HTTP interface for the package registry.
@@ -38,6 +39,7 @@ func NewHandler(svc packageService) *Handler {
 // RegisterPublicRoutes mounts read-only routes that require no authentication.
 func (h *Handler) RegisterPublicRoutes(r chi.Router) {
 	r.Get("/api/packages", h.listPublic)
+	r.Get("/api/packages/search", h.search)
 	r.Get("/api/packages/{id}", h.getByID)
 	r.Get("/api/packages/slug/{slug}", h.getBySlug)
 }
@@ -196,6 +198,26 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// search godoc — GET /api/packages/search?q=...&type=...
+func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		apierror.Write(w, http.StatusBadRequest, "q parameter is required")
+		return
+	}
+	var pkgType *string
+	if t := r.URL.Query().Get("type"); t != "" {
+		pkgType = &t
+	}
+	req := pagination.ParsePageRequest(r)
+	page, err := h.svc.Search(r.Context(), q, pkgType, req)
+	if err != nil {
+		apierror.Write(w, http.StatusInternalServerError, "failed to search packages")
+		return
+	}
+	apierror.WriteJSON(w, http.StatusOK, page)
 }
 
 // tenantFromContext extracts the tenant ID from the request context.

@@ -22,6 +22,7 @@ type packageRepo interface {
 	Create(ctx context.Context, p Package) (Package, error)
 	Update(ctx context.Context, id uuid.UUID, name, description, visibility string) (Package, error)
 	Delete(ctx context.Context, id uuid.UUID) error
+	Search(ctx context.Context, query string, pkgType *string, req pagination.PageRequest) ([]Package, int64, error)
 }
 
 // Service implements business logic for the package registry.
@@ -146,6 +147,20 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID, tenantID string) err
 		return &ForbiddenError{Message: "not the package owner"}
 	}
 	return s.repo.Delete(ctx, id)
+}
+
+// Search performs a text search across PUBLIC packages by name, slug, and description.
+// An optional type filter restricts results to a specific package type.
+func (s *Service) Search(ctx context.Context, query string, pkgType *string, req pagination.PageRequest) (pagination.Page[PackageResponse], error) {
+	pkgs, total, err := s.repo.Search(ctx, query, pkgType, req)
+	if err != nil {
+		return pagination.Page[PackageResponse]{}, fmt.Errorf("service: search packages: %w", err)
+	}
+	responses := make([]PackageResponse, 0, len(pkgs))
+	for _, p := range pkgs {
+		responses = append(responses, ResponseFrom(p))
+	}
+	return pagination.NewPage(responses, total, req), nil
 }
 
 func validateCreate(req CreatePackageRequest) error {

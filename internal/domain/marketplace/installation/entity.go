@@ -26,6 +26,7 @@ type Installation struct {
 	PackageID      uuid.UUID
 	PackageVersion string
 	Status         InstallStatus
+	Hydrated       bool
 	InstalledAt    time.Time
 }
 
@@ -36,6 +37,7 @@ type InstallResponse struct {
 	PackageID      uuid.UUID     `json:"packageId"`
 	PackageVersion string        `json:"packageVersion"`
 	Status         InstallStatus `json:"status"`
+	Hydrated       bool          `json:"hydrated"`
 	InstalledAt    time.Time     `json:"installedAt"`
 }
 

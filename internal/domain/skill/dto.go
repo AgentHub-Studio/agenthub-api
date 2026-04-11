@@ -18,6 +18,7 @@ type CreateRequest struct {
 	ContextMode            string   `json:"contextMode"`
 	WhenToUse              *string  `json:"whenToUse"`
 	ArgumentHint           *string  `json:"argumentHint"`
+	ShouldDefer            bool     `json:"shouldDefer"`
 }
 
 // UpdateRequest is the payload for updating a skill.
@@ -31,6 +32,7 @@ type UpdateRequest struct {
 	ContextMode            string   `json:"contextMode"`
 	WhenToUse              *string  `json:"whenToUse"`
 	ArgumentHint           *string  `json:"argumentHint"`
+	ShouldDefer            bool     `json:"shouldDefer"`
 }
 
 // Response is the JSON representation of a Skill.
@@ -46,6 +48,7 @@ type Response struct {
 	ContextMode            string    `json:"contextMode"`
 	WhenToUse              *string   `json:"whenToUse"`
 	ArgumentHint           *string   `json:"argumentHint"`
+	ShouldDefer            bool      `json:"shouldDefer"`
 	CreatedAt              time.Time `json:"createdAt"`
 	UpdatedAt              time.Time `json:"updatedAt"`
 }
@@ -64,6 +67,7 @@ func ResponseFrom(s Skill) Response {
 		ContextMode:            s.ContextMode,
 		WhenToUse:              s.WhenToUse,
 		ArgumentHint:           s.ArgumentHint,
+		ShouldDefer:            s.ShouldDefer,
 		CreatedAt:              s.CreatedAt,
 		UpdatedAt:              s.UpdatedAt,
 	}

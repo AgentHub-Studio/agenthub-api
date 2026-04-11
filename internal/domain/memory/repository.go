@@ -26,8 +26,12 @@ type MemoryRepository interface {
 	DeleteByKey(ctx context.Context, agentID uuid.UUID, userID *string, key string) error
 	ClearByAgent(ctx context.Context, agentID uuid.UUID) error
 	// Recall returns the top-N most semantically similar memories via pgvector cosine distance.
+	// scope and executionID are optional — pass empty string / nil to skip filtering.
 	// It also updates last_accessed_at for each returned entry.
-	Recall(ctx context.Context, agentID uuid.UUID, userID *string, embedding []float32, limit int) ([]AgentMemory, error)
+	Recall(ctx context.Context, agentID uuid.UUID, userID *string, embedding []float32, limit int, scope string, executionID *uuid.UUID) ([]AgentMemory, error)
+	// DistillExecutionMemories promotes all execution-scoped memories for the given execution
+	// to workflow scope (clearing execution_id), enabling cross-run knowledge sharing.
+	DistillExecutionMemories(ctx context.Context, agentID uuid.UUID, executionID uuid.UUID) error
 	// SearchByText returns memories matching a text pattern in key or value.
 	SearchByText(ctx context.Context, agentID uuid.UUID, query string, limit int) ([]AgentMemory, error)
 	// CountByType returns memory counts grouped by memory_type for the given agent.
@@ -45,8 +49,8 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 }
 
 // columns shared by all SELECT statements.
-const memoryColumns = `id, agent_id, user_id, key, value, memory_type, embedding::text,
-	last_accessed_at, expires_at, created_at, updated_at`
+const memoryColumns = `id, agent_id, user_id, key, value, memory_type, scope, execution_id,
+	embedding::text, last_accessed_at, expires_at, created_at, updated_at`
 
 // ListByAgent returns all memory entries for the given agent, optionally filtered by userID.
 func (r *Repository) ListByAgent(ctx context.Context, agentID uuid.UUID, userID *string) ([]AgentMemory, error) {
@@ -93,24 +97,32 @@ func (r *Repository) Upsert(ctx context.Context, m AgentMemory) (AgentMemory, er
 		memType = string(MemoryTypeGeneral)
 	}
 
+	scope := string(m.Scope)
+	if scope == "" {
+		scope = string(MemoryScopeAgent)
+	}
+
 	query := `
-		INSERT INTO agent_memory (agent_id, user_id, key, value, memory_type, embedding, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6::vector, $7)
+		INSERT INTO agent_memory (agent_id, user_id, key, value, memory_type, scope, execution_id, embedding, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9)
 		ON CONFLICT (agent_id, user_id, key) DO UPDATE
 		   SET value = EXCLUDED.value,
 		       memory_type = EXCLUDED.memory_type,
+		       scope = EXCLUDED.scope,
+		       execution_id = EXCLUDED.execution_id,
 		       embedding = EXCLUDED.embedding,
 		       expires_at = EXCLUDED.expires_at,
 		       updated_at = NOW()
 		RETURNING ` + memoryColumns
 
-	row := conn.QueryRow(ctx, query, m.AgentID, m.UserID, m.Key, m.Value, memType, embeddingExpr, m.ExpiresAt)
+	row := conn.QueryRow(ctx, query, m.AgentID, m.UserID, m.Key, m.Value, memType, scope, m.ExecutionID, embeddingExpr, m.ExpiresAt)
 	return scanRow(row)
 }
 
 // Recall returns the top-N memories closest to the given embedding vector using pgvector cosine distance.
 // Each recalled entry has its last_accessed_at updated as a side effect.
-func (r *Repository) Recall(ctx context.Context, agentID uuid.UUID, userID *string, embedding []float32, limit int) ([]AgentMemory, error) {
+// scope and executionID are optional filters; pass empty string / nil to skip.
+func (r *Repository) Recall(ctx context.Context, agentID uuid.UUID, userID *string, embedding []float32, limit int, scope string, executionID *uuid.UUID) ([]AgentMemory, error) {
 	if len(embedding) == 0 {
 		return nil, fmt.Errorf("memory: recall requires a non-empty embedding")
 	}
@@ -128,6 +140,7 @@ func (r *Repository) Recall(ctx context.Context, agentID uuid.UUID, userID *stri
 	vec := float32SliceToVector(embedding)
 
 	// Select top-N by cosine distance and update last_accessed_at atomically.
+	// Scope and execution_id filters are optional ($5, $6).
 	query := `
 		WITH recalled AS (
 			SELECT id
@@ -135,6 +148,8 @@ func (r *Repository) Recall(ctx context.Context, agentID uuid.UUID, userID *stri
 			 WHERE agent_id = $1
 			   AND ($2::VARCHAR IS NULL OR user_id = $2)
 			   AND embedding IS NOT NULL
+			   AND ($5::TEXT IS NULL OR scope = $5)
+			   AND ($6::UUID IS NULL OR execution_id = $6)
 			 ORDER BY embedding <=> $3::vector
 			 LIMIT $4
 		)
@@ -144,7 +159,11 @@ func (r *Repository) Recall(ctx context.Context, agentID uuid.UUID, userID *stri
 		 WHERE m.id = recalled.id
 		RETURNING ` + memoryColumns
 
-	rows, err := conn.Query(ctx, query, agentID, userID, vec, limit)
+	var scopeArg interface{}
+	if scope != "" {
+		scopeArg = scope
+	}
+	rows, err := conn.Query(ctx, query, agentID, userID, vec, limit, scopeArg, executionID)
 	if err != nil {
 		return nil, fmt.Errorf("memory: recall: %w", err)
 	}
@@ -235,6 +254,31 @@ func (r *Repository) ListByAgentAndType(ctx context.Context, agentID uuid.UUID, 
 	return scanRows(rows)
 }
 
+// DistillExecutionMemories promotes all execution-scoped memories for the given execution
+// to workflow scope by updating scope='workflow' and clearing execution_id.
+func (r *Repository) DistillExecutionMemories(ctx context.Context, agentID uuid.UUID, executionID uuid.UUID) error {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	_, err = conn.Exec(ctx, `
+		UPDATE agent_memory
+		   SET scope        = 'workflow',
+		       execution_id = NULL,
+		       updated_at   = NOW()
+		 WHERE agent_id     = $1
+		   AND execution_id = $2
+		   AND scope        = 'execution'`,
+		agentID, executionID)
+	if err != nil {
+		return fmt.Errorf("memory: distill execution: %w", err)
+	}
+	return nil
+}
+
 // SearchByText returns memories matching a text pattern in key or value.
 func (r *Repository) SearchByText(ctx context.Context, agentID uuid.UUID, query string, limit int) ([]AgentMemory, error) {
 	if limit <= 0 {
@@ -297,9 +341,9 @@ func scanRow(row pgx.Row) (AgentMemory, error) {
 	var m AgentMemory
 	var embText *string
 	var expiresAt *time.Time
-	var memType string
-	err := row.Scan(&m.ID, &m.AgentID, &m.UserID, &m.Key, &m.Value, &memType, &embText,
-		&m.LastAccessedAt, &expiresAt, &m.CreatedAt, &m.UpdatedAt)
+	var memType, scope string
+	err := row.Scan(&m.ID, &m.AgentID, &m.UserID, &m.Key, &m.Value, &memType, &scope, &m.ExecutionID,
+		&embText, &m.LastAccessedAt, &expiresAt, &m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentMemory{}, ErrNotFound
 	}
@@ -307,6 +351,7 @@ func scanRow(row pgx.Row) (AgentMemory, error) {
 		return AgentMemory{}, fmt.Errorf("memory: scan: %w", err)
 	}
 	m.MemoryType = MemoryType(memType)
+	m.Scope = MemoryScope(scope)
 	m.ExpiresAt = expiresAt
 	if embText != nil {
 		m.Embedding = vectorTextToFloat32Slice(*embText)
@@ -320,12 +365,13 @@ func scanRows(rows pgx.Rows) ([]AgentMemory, error) {
 		var m AgentMemory
 		var embText *string
 		var expiresAt *time.Time
-		var memType string
-		if err := rows.Scan(&m.ID, &m.AgentID, &m.UserID, &m.Key, &m.Value, &memType, &embText,
-			&m.LastAccessedAt, &expiresAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		var memType, scope string
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.UserID, &m.Key, &m.Value, &memType, &scope, &m.ExecutionID,
+			&embText, &m.LastAccessedAt, &expiresAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("memory: scan row: %w", err)
 		}
 		m.MemoryType = MemoryType(memType)
+		m.Scope = MemoryScope(scope)
 		m.ExpiresAt = expiresAt
 		if embText != nil {
 			m.Embedding = vectorTextToFloat32Slice(*embText)

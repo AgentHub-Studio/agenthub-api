@@ -15,6 +15,7 @@ type InstallRepository interface {
 	FindByID(ctx context.Context, id uuid.UUID) (Installation, error)
 	Create(ctx context.Context, i Installation) (Installation, error)
 	Uninstall(ctx context.Context, id uuid.UUID) error
+	SetHydrated(ctx context.Context, id uuid.UUID) error
 }
 
 // Service implements business logic for marketplace installations.

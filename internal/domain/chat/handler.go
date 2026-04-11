@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -38,13 +39,31 @@ type RunLookup interface {
 	GetRunByID(ctx context.Context, id uuid.UUID) (ChatRun, error)
 }
 
+// PermissionAuditReader reads permission audit entries for a session.
+type PermissionAuditReader interface {
+	ListBySession(ctx context.Context, sessionID uuid.UUID, limit int) ([]PermissionAuditEntryResponse, error)
+}
+
+// PermissionAuditEntryResponse is the HTTP response shape for one audit entry.
+type PermissionAuditEntryResponse struct {
+	SessionID    string  `json:"sessionId"`
+	RunID        *string `json:"runId,omitempty"`
+	ToolName     string  `json:"toolName"`
+	Decision     string  `json:"decision"`
+	MatchedRule  string  `json:"matchedRule,omitempty"`
+	InputSnippet string  `json:"inputSnippet,omitempty"`
+	CreatedAt    string  `json:"createdAt"`
+}
+
 // Handler handles HTTP requests for chat sessions and messages.
 type Handler struct {
-	svc            chatService
-	executor       *AsyncExecutor
-	runLookup      RunLookup // nil when executor is nil (tests without DB)
-	bgRegistry     *BackgroundRunRegistry
-	bufferRegistry *RunEventBufferRegistry
+	svc              chatService
+	executor         *AsyncExecutor
+	runLookup        RunLookup // nil when executor is nil (tests without DB)
+	bgRegistry       *BackgroundRunRegistry
+	bufferRegistry   *RunEventBufferRegistry
+	taskRepo         task.Repository // nil means task endpoints return 501
+	permAuditReader  PermissionAuditReader // nil means endpoint returns 501
 }
 
 // NewHandler creates a new Handler.
@@ -58,6 +77,18 @@ func NewHandler(svc chatService, executor *AsyncExecutor) *Handler {
 	if executor != nil {
 		h.runLookup = executor
 	}
+	return h
+}
+
+// WithTaskRepository injects a task.Repository for the task listing endpoints.
+func (h *Handler) WithTaskRepository(repo task.Repository) *Handler {
+	h.taskRepo = repo
+	return h
+}
+
+// WithPermissionAuditReader injects a reader for the permission audit log endpoint.
+func (h *Handler) WithPermissionAuditReader(reader PermissionAuditReader) *Handler {
+	h.permAuditReader = reader
 	return h
 }
 
@@ -84,6 +115,9 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/chat/sessions/{id}/run/{runId}/resume", h.resumeSession)
 	r.Post("/api/chat/sessions/{id}/elicitation/{requestId}/respond", h.respondElicitation)
 	r.Get("/api/chat/runs/{id}", h.getRun)
+	r.Get("/api/chat/sessions/{id}/tasks", h.listTasks)
+	r.Get("/api/chat/sessions/{id}/tasks/{taskId}/notifications", h.listTaskNotifications)
+	r.Get("/api/chat/sessions/{id}/permission-audit", h.listPermissionAudit)
 }
 
 func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -591,6 +625,71 @@ func (h *Handler) respondElicitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.NoContent(w)
+}
+
+// listTasks handles GET /api/chat/sessions/{id}/tasks.
+// Returns a paginated list of coordinator tasks for the session.
+func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
+	if h.taskRepo == nil {
+		respond.Error(w, http.StatusNotImplemented, "task persistence not configured")
+		return
+	}
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	req := pagination.ParsePageRequest(r)
+	tasks, total, err := h.taskRepo.ListBySession(r.Context(), sessionID, req)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "failed to list tasks")
+		return
+	}
+	respond.JSON(w, http.StatusOK, pagination.NewPage(tasks, total, req))
+}
+
+// listTaskNotifications handles GET /api/chat/sessions/{id}/tasks/{taskId}/notifications.
+// Returns all worker notifications for the given task.
+func (h *Handler) listTaskNotifications(w http.ResponseWriter, r *http.Request) {
+	if h.taskRepo == nil {
+		respond.Error(w, http.StatusNotImplemented, "task persistence not configured")
+		return
+	}
+	if _, err := uuid.Parse(chi.URLParam(r, "id")); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	taskID := chi.URLParam(r, "taskId")
+	if taskID == "" {
+		respond.Error(w, http.StatusBadRequest, "taskId is required")
+		return
+	}
+	notifications, err := h.taskRepo.ListNotificationsByTask(r.Context(), taskID)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "failed to list notifications")
+		return
+	}
+	respond.JSON(w, http.StatusOK, notifications)
+}
+
+// listPermissionAudit handles GET /api/chat/sessions/{id}/permission-audit.
+// Returns the most recent permission decisions for the session.
+func (h *Handler) listPermissionAudit(w http.ResponseWriter, r *http.Request) {
+	if h.permAuditReader == nil {
+		respond.Error(w, http.StatusNotImplemented, "permission audit not configured")
+		return
+	}
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	entries, err := h.permAuditReader.ListBySession(r.Context(), sessionID, 0)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "failed to list permission audit")
+		return
+	}
+	respond.JSON(w, http.StatusOK, entries)
 }
 
 // filterReplayableEvents drops stale input_request events that have already been

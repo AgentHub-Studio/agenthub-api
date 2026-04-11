@@ -19,6 +19,18 @@ const (
 	MemoryTypeGeneral   MemoryType = "general"
 )
 
+// MemoryScope controls the lifetime and visibility of a memory entry.
+type MemoryScope string
+
+const (
+	// MemoryScopeAgent is the default scope — persists across all sessions for the agent.
+	MemoryScopeAgent MemoryScope = "agent"
+	// MemoryScopeWorkflow is shared across all executions of a given workflow.
+	MemoryScopeWorkflow MemoryScope = "workflow"
+	// MemoryScopeExecution is ephemeral — tied to a single execution run.
+	MemoryScopeExecution MemoryScope = "execution"
+)
+
 const (
 	// relevanceDecayLambda controls how fast relevance decays over time.
 	// With lambda=0.01, relevance halves in ~69 hours (~3 days).
@@ -27,17 +39,19 @@ const (
 
 // AgentMemory represents a persisted memory entry for an agent.
 type AgentMemory struct {
-	ID             uuid.UUID  `json:"id"`
-	AgentID        uuid.UUID  `json:"agentId"`
-	UserID         *string    `json:"userId,omitempty"`
-	Key            string     `json:"key"`
-	Value          []byte     `json:"value"` // raw JSONB
-	MemoryType     MemoryType `json:"memoryType"`
-	Embedding      []float32  `json:"embedding,omitempty"`
-	LastAccessedAt time.Time  `json:"lastAccessedAt"`
-	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	ID             uuid.UUID   `json:"id"`
+	AgentID        uuid.UUID   `json:"agentId"`
+	UserID         *string     `json:"userId,omitempty"`
+	Key            string      `json:"key"`
+	Value          []byte      `json:"value"` // raw JSONB
+	MemoryType     MemoryType  `json:"memoryType"`
+	Scope          MemoryScope `json:"scope"`
+	ExecutionID    *uuid.UUID  `json:"executionId,omitempty"`
+	Embedding      []float32   `json:"embedding,omitempty"`
+	LastAccessedAt time.Time   `json:"lastAccessedAt"`
+	ExpiresAt      *time.Time  `json:"expiresAt,omitempty"`
+	CreatedAt      time.Time   `json:"createdAt"`
+	UpdatedAt      time.Time   `json:"updatedAt"`
 }
 
 // RelevanceScore computes a time-decayed relevance score.

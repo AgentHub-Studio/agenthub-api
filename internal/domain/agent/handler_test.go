@@ -128,6 +128,14 @@ func (m *mockAgentSvc) Clone(_ context.Context, id uuid.UUID, req agent.CloneAge
 	return clone, nil
 }
 
+func (m *mockAgentSvc) GetWithReadiness(_ context.Context, id uuid.UUID) (agent.AgentResponse, error) {
+	a, ok := m.agents[id]
+	if !ok {
+		return agent.AgentResponse{}, agent.ErrNotFound
+	}
+	return a, nil
+}
+
 func setupAgent() (*chi.Mux, *mockAgentSvc) {
 	svc := newMockSvc()
 	h := agent.NewHandler(svc)

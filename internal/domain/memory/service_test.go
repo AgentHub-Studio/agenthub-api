@@ -75,7 +75,7 @@ func (m *mockRepo) ClearByAgent(_ context.Context, agentID uuid.UUID) error {
 	return nil
 }
 
-func (m *mockRepo) Recall(_ context.Context, agentID uuid.UUID, _ *string, _ []float32, limit int) ([]memory.AgentMemory, error) {
+func (m *mockRepo) Recall(_ context.Context, agentID uuid.UUID, _ *string, _ []float32, limit int, _ string, _ *uuid.UUID) ([]memory.AgentMemory, error) {
 	var out []memory.AgentMemory
 	for _, e := range m.entries {
 		if e.AgentID == agentID && len(e.Embedding) > 0 {
@@ -87,6 +87,17 @@ func (m *mockRepo) Recall(_ context.Context, agentID uuid.UUID, _ *string, _ []f
 		}
 	}
 	return out, nil
+}
+
+func (m *mockRepo) DistillExecutionMemories(_ context.Context, agentID uuid.UUID, executionID uuid.UUID) error {
+	for k, e := range m.entries {
+		if e.AgentID == agentID && e.ExecutionID != nil && *e.ExecutionID == executionID {
+			e.Scope = memory.MemoryScopeWorkflow
+			e.ExecutionID = nil
+			m.entries[k] = e
+		}
+	}
+	return nil
 }
 
 func (m *mockRepo) ListByAgentAndType(_ context.Context, agentID uuid.UUID, _ *string, memType memory.MemoryType) ([]memory.AgentMemory, error) {
@@ -205,4 +216,44 @@ func TestAgentMemory_RelevanceScore_Decays(t *testing.T) {
 
 	assert.Greater(t, recent.RelevanceScore(), old.RelevanceScore())
 	assert.InDelta(t, 1.0, recent.RelevanceScore(), 0.01)
+}
+
+func TestMemoryService_Upsert_ExecutionScope(t *testing.T) {
+	svc := memory.NewService(newMockRepo())
+	agentID := uuid.New()
+	execID := uuid.New()
+
+	val := json.RawMessage(`"execution-scoped value"`)
+	m, err := svc.Upsert(context.Background(), agentID, "exec-fact", memory.UpsertMemoryRequest{
+		Value:       val,
+		Scope:       "execution",
+		ExecutionID: &execID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, memory.MemoryScopeExecution, m.Scope)
+	assert.Equal(t, &execID, m.ExecutionID)
+}
+
+func TestMemoryService_DistillExecutionMemories(t *testing.T) {
+	repo := newMockRepo()
+	svc := memory.NewService(repo)
+	agentID := uuid.New()
+	execID := uuid.New()
+
+	// Store an execution-scoped memory.
+	_, err := svc.Upsert(context.Background(), agentID, "exec-insight", memory.UpsertMemoryRequest{
+		Value:       json.RawMessage(`"discovered during run"`),
+		Scope:       "execution",
+		ExecutionID: &execID,
+	})
+	require.NoError(t, err)
+
+	// Distill: execution → workflow scope.
+	require.NoError(t, svc.DistillExecutionMemories(context.Background(), agentID, execID))
+
+	// The entry should now be workflow-scoped with no executionID.
+	e, err := svc.GetByKey(context.Background(), agentID, nil, "exec-insight")
+	require.NoError(t, err)
+	assert.Equal(t, memory.MemoryScopeWorkflow, e.Scope)
+	assert.Nil(t, e.ExecutionID)
 }

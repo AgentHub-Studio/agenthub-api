@@ -89,6 +89,10 @@ type RunInput struct {
 	// the agent at session creation. Only tools from servers in this list are exposed
 	// to the LLM. P-C253-1: agent-level MCP filtering.
 	MCPServerNamesSnapshot []string
+
+	// PermissionAudit, when set, records each permission decision to the audit log.
+	// When nil, decisions are silently skipped (no-op).
+	PermissionAudit PermissionAuditLogger
 }
 
 // RunMetadata aggregates observability metrics collected during an agentic run.
@@ -1955,6 +1959,7 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 						denialCount = rec.Count
 					}
 				}
+				r.logPermissionDecision(ctx, in, tc.Function.Name, tc.Function.Arguments, AuditDecisionDeny)
 				ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
 					ID:          tc.ID,
 					Name:        tc.Function.Name,
@@ -1965,19 +1970,42 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 				continue
 
 			case PermissionConfirm:
-				errMsg := fmt.Sprintf("Tool '%s' requires confirmation but running in automated mode.", tc.Function.Name)
-				results[i] = ToolExecResult{Error: &errMsg}
-
-				// Track as denial too — confirm in automated mode is effectively a deny.
-				if r.denialTracker != nil {
-					r.denialTracker.RecordDenial(tc.Function.Name, tc.Function.Arguments)
+				// When an ElicitationSubmitter is wired, ask the user in real time.
+				// When not wired (automated mode), escalate and treat as deny.
+				if in.Elicitation != nil {
+					approved := r.askConsentViaElicitation(ctx, in, tc.Function.Name, tc.Function.Arguments)
+					if approved {
+						r.logPermissionDecision(ctx, in, tc.Function.Name, tc.Function.Arguments, AuditDecisionConfirmApproved)
+						// Fall through — tool is allowed.
+					} else {
+						errMsg := fmt.Sprintf("Tool '%s' was not approved by the user.", tc.Function.Name)
+						results[i] = ToolExecResult{Error: &errMsg}
+						r.logPermissionDecision(ctx, in, tc.Function.Name, tc.Function.Arguments, AuditDecisionConfirmDenied)
+						if r.denialTracker != nil {
+							r.denialTracker.RecordDenial(tc.Function.Name, tc.Function.Arguments)
+						}
+						ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
+							ID:     tc.ID,
+							Name:   tc.Function.Name,
+							Reason: errMsg,
+						})
+						continue
+					}
+				} else {
+					errMsg := fmt.Sprintf("Tool '%s' requires confirmation but running in automated mode.", tc.Function.Name)
+					results[i] = ToolExecResult{Error: &errMsg}
+					r.logPermissionDecision(ctx, in, tc.Function.Name, tc.Function.Arguments, AuditDecisionConfirmEscalated)
+					// Track as denial too — confirm in automated mode is effectively a deny.
+					if r.denialTracker != nil {
+						r.denialTracker.RecordDenial(tc.Function.Name, tc.Function.Arguments)
+					}
+					ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
+						ID:     tc.ID,
+						Name:   tc.Function.Name,
+						Reason: errMsg,
+					})
+					continue
 				}
-				ch <- NewRunEvent(EventToolDenied, ToolDeniedData{
-					ID:     tc.ID,
-					Name:   tc.Function.Name,
-					Reason: errMsg,
-				})
-				continue
 			}
 		}
 
@@ -2108,6 +2136,29 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
 				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
 			})
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
+			})
+			continue
+		}
+
+		// Canvas builtins — canvas_update, canvas_feedback, canvas_export_table.
+		// Intercepted locally: emits EventCanvasUpdate or EventInputRequest without
+		// hitting skill-runtime. Enables rich visual output in the chat canvas panel.
+		if IsCanvasToolCall(tc.Function.Name) {
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+			})
+			var result ToolExecResult
+			switch tc.Function.Name {
+			case canvasUpdateName:
+				result = HandleCanvasUpdate(tc.ID, json.RawMessage(tc.Function.Arguments), ch)
+			case canvasFeedbackName:
+				result = HandleCanvasFeedback(tc.ID, json.RawMessage(tc.Function.Arguments), ch)
+			case canvasExportName:
+				result = HandleCanvasExportTable(tc.ID, json.RawMessage(tc.Function.Arguments), ch)
+			}
+			results[i] = result
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
 			})
@@ -2487,4 +2538,44 @@ func friendlyRunErrorMessage(code, rawMsg string) string {
 	default:
 		return fmt.Sprintf("Não foi possível completar a solicitação. Tente novamente. (código: %s)", code)
 	}
+}
+
+// logPermissionDecision writes a permission audit entry if the logger is configured.
+// Non-fatal: errors are silently discarded to avoid interrupting the agentic loop.
+func (r *Runner) logPermissionDecision(ctx context.Context, in RunInput, toolName, toolInput string, decision PermissionAuditDecision) {
+	if in.PermissionAudit == nil {
+		return
+	}
+	entry := PermissionAuditEntry{
+		SessionID:    in.SessionID,
+		RunID:        &in.RunID,
+		ToolName:     toolName,
+		Decision:     decision,
+		InputSnippet: toolInput,
+	}
+	_ = in.PermissionAudit.LogDecision(ctx, entry)
+}
+
+// askConsentViaElicitation presents a confirmation prompt to the user and returns
+// true if the user approved the tool call, false otherwise.
+// Uses the ElicitationSubmitter to block until the user responds.
+func (r *Runner) askConsentViaElicitation(ctx context.Context, in RunInput, toolName, toolInput string) bool {
+	requestID := "consent-" + toolName + "-" + r.runID.String()
+	snippet := truncateInput(toolInput, 300)
+
+	question := AskUserQuestion{
+		ID:       "consent",
+		Question: fmt.Sprintf("Permit tool '%s' to run?\n\nInput preview:\n%s", toolName, snippet),
+		Type:     "confirm",
+	}
+
+	params := ElicitationParams{
+		Mode:          ElicitationModeForm,
+		Message:       fmt.Sprintf("Tool '%s' requires your approval before executing.", toolName),
+		ElicitationID: requestID,
+		Questions:     []AskUserQuestion{question},
+	}
+
+	result := in.Elicitation.Submit(ctx, "", requestID, params)
+	return result.Action == ElicitationAccept
 }

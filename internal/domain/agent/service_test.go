@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -120,8 +121,50 @@ func (m *mockNoopBindingRepo) SyncMCPServers(_ context.Context, _ uuid.UUID, _ [
 	return nil
 }
 
+func (m *mockNoopBindingRepo) GetSkillTokenBudgets(_ context.Context, _ uuid.UUID) (map[uuid.UUID]*int, error) {
+	return map[uuid.UUID]*int{}, nil
+}
+
+// mockNoopSkillRepo is a no-op skill.SkillRepository for unit tests.
+// CountActiveToolsForSkills returns 0 by default (no active tools).
+type mockNoopSkillRepo struct {
+	activeTools int // configurable for readiness tests
+}
+
+func (m *mockNoopSkillRepo) List(_ context.Context, _ *string, _ pagination.PageRequest) ([]skill.Skill, int64, error) {
+	return nil, 0, nil
+}
+func (m *mockNoopSkillRepo) Create(_ context.Context, s skill.Skill) (skill.Skill, error) {
+	return s, nil
+}
+func (m *mockNoopSkillRepo) GetByID(_ context.Context, _ uuid.UUID) (skill.Skill, error) {
+	return skill.Skill{}, skill.ErrNotFound
+}
+func (m *mockNoopSkillRepo) Update(_ context.Context, _ uuid.UUID, _ skill.UpdateRequest) (skill.Skill, error) {
+	return skill.Skill{}, nil
+}
+func (m *mockNoopSkillRepo) Delete(_ context.Context, _ uuid.UUID) error { return nil }
+func (m *mockNoopSkillRepo) SlugExists(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+func (m *mockNoopSkillRepo) ListByAgentID(_ context.Context, _ uuid.UUID) ([]skill.Skill, error) {
+	return nil, nil
+}
+func (m *mockNoopSkillRepo) ListByIDs(_ context.Context, _ []uuid.UUID) ([]skill.Skill, error) {
+	return nil, nil
+}
+func (m *mockNoopSkillRepo) CountAgentBindings(_ context.Context, _ uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (m *mockNoopSkillRepo) CountActiveToolsForSkills(_ context.Context, ids []uuid.UUID) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	return m.activeTools, nil
+}
+
 func newMockAgentSvc() agent.Service {
-	return agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	return agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 }
 
 func TestAgentService_Create_Success(t *testing.T) {
@@ -154,7 +197,7 @@ func TestAgentService_Get_NotFound(t *testing.T) {
 
 func TestAgentService_Update_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Old Name"})
 	require.NoError(t, err)
 
@@ -166,7 +209,7 @@ func TestAgentService_Update_Success(t *testing.T) {
 
 func TestAgentService_Delete_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
 	err = svc.Delete(context.Background(), created.ID)
@@ -181,8 +224,8 @@ func TestAgentService_Delete_NotFound(t *testing.T) {
 
 func TestAgentService_Publish_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
-	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	created, err := svc.Create(context.Background(), fullyReadyAgentRequest())
 	require.NoError(t, err)
 	published, err := svc.Publish(context.Background(), created.ID)
 	require.NoError(t, err)
@@ -191,7 +234,7 @@ func TestAgentService_Publish_Success(t *testing.T) {
 
 func TestAgentService_Archive_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
 	archived, err := svc.Archive(context.Background(), created.ID)
@@ -201,7 +244,7 @@ func TestAgentService_Archive_Success(t *testing.T) {
 
 func TestAgentService_Clone_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Original"})
 	require.NoError(t, err)
 	cloned, err := svc.Clone(context.Background(), created.ID, agent.CloneAgentRequest{Name: "Clone"})
@@ -212,7 +255,7 @@ func TestAgentService_Clone_Success(t *testing.T) {
 
 func TestAgentService_List(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	for i := 0; i < 3; i++ {
 		_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 			Name: "Agent " + string(rune('A'+i)),
@@ -228,7 +271,7 @@ func TestAgentService_List(t *testing.T) {
 
 func TestAgentService_List_FilterByQ_Name(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 
 	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Invoice Agent", Description: "handles invoices"})
 	require.NoError(t, err)
@@ -243,7 +286,7 @@ func TestAgentService_List_FilterByQ_Name(t *testing.T) {
 
 func TestAgentService_List_FilterByQ_Description(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 
 	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Bot A", Description: "handles billing tasks"})
 	require.NoError(t, err)
@@ -258,7 +301,7 @@ func TestAgentService_List_FilterByQ_Description(t *testing.T) {
 
 func TestAgentService_List_FilterByQ_NoMatch(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 
 	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Alpha"})
 	require.NoError(t, err)
@@ -271,7 +314,7 @@ func TestAgentService_List_FilterByQ_NoMatch(t *testing.T) {
 
 func TestAgentService_List_FilterByQ_EmptyReturnsAll(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 
 	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Alpha"})
 	require.NoError(t, err)
@@ -336,7 +379,7 @@ func TestCreateAgent_EmptyModelConfig_Accepted(t *testing.T) {
 
 func TestUpdateAgent_InvalidProvider_ReturnsError(t *testing.T) {
 	repo := newMockRepo()
-	svc := agent.NewService(repo, &mockNoopBindingRepo{})
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
 
@@ -362,6 +405,18 @@ func TestCreateAgent_AllSupportedProviders_Accepted(t *testing.T) {
 }
 
 func mustJSON(s string) json.RawMessage { return json.RawMessage(s) }
+
+// fullyReadyAgentRequest returns a CreateAgentRequest that achieves ReadinessScore ≥ 60
+// (name=10 + description=10 + system_prompt=10 + provider=20 + instructions=20 = 70).
+func fullyReadyAgentRequest() agent.CreateAgentRequest {
+	sp := "You are a helpful assistant."
+	return agent.CreateAgentRequest{
+		Name:         "Ready Agent",
+		Description:  "A fully configured agent",
+		SystemPrompt: &sp,
+		ModelConfig:  mustJSON(`{"provider":"openai","model":"gpt-4o"}`),
+	}
+}
 
 // --- VersionService tests ---
 
@@ -554,7 +609,7 @@ func TestVersionService_GetLatestPublished(t *testing.T) {
 // --- TR-01-TASK-31: rejeitar config.modelConfig aninhado (P-C249-2) ---
 
 func TestCreate_NestedModelConfig_Rejected(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 		Name:   "Bad Agent",
 		Config: json.RawMessage(`{"modelConfig":{"provider":"openai","model":"gpt-4o"}}`),
@@ -565,7 +620,7 @@ func TestCreate_NestedModelConfig_Rejected(t *testing.T) {
 }
 
 func TestCreate_NestedModelConfig_ConfigWithOtherFields_Rejected(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 		Name:   "Also Bad",
 		Config: json.RawMessage(`{"someKey":"value","modelConfig":{"provider":"anthropic","model":"claude-3"}}`),
@@ -575,7 +630,7 @@ func TestCreate_NestedModelConfig_ConfigWithOtherFields_Rejected(t *testing.T) {
 }
 
 func TestCreate_ConfigWithoutModelConfig_Accepted(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 		Name:   "Good Agent",
 		Config: json.RawMessage(`{"timeout":30,"retries":3}`),
@@ -584,7 +639,7 @@ func TestCreate_ConfigWithoutModelConfig_Accepted(t *testing.T) {
 }
 
 func TestUpdate_NestedModelConfig_Rejected(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
 
@@ -598,8 +653,8 @@ func TestUpdate_NestedModelConfig_Rejected(t *testing.T) {
 // --- TR-01-TASK-37: validações mínimas antes de publicar (P-C278-1) ---
 
 func TestPublish_DraftAgent_Succeeds(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
-	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "My Agent"})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	created, err := svc.Create(context.Background(), fullyReadyAgentRequest())
 	require.NoError(t, err)
 	require.Equal(t, "DRAFT", created.Status)
 
@@ -609,8 +664,8 @@ func TestPublish_DraftAgent_Succeeds(t *testing.T) {
 }
 
 func TestPublish_AlreadyPublished_ReturnsError(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
-	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	created, _ := svc.Create(context.Background(), fullyReadyAgentRequest())
 	_, err := svc.Publish(context.Background(), created.ID)
 	require.NoError(t, err)
 
@@ -621,8 +676,8 @@ func TestPublish_AlreadyPublished_ReturnsError(t *testing.T) {
 }
 
 func TestPublish_ArchivedAgent_ReturnsError(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
-	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	created, _ := svc.Create(context.Background(), fullyReadyAgentRequest())
 	_, err := svc.Publish(context.Background(), created.ID)
 	require.NoError(t, err)
 	_, err = svc.Archive(context.Background(), created.ID)
@@ -635,16 +690,97 @@ func TestPublish_ArchivedAgent_ReturnsError(t *testing.T) {
 }
 
 func TestPublish_NotFound_ReturnsNotFoundError(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	_, err := svc.Publish(context.Background(), uuid.New())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, agent.ErrNotFound)
 }
 
+// --- IMPROVEMENT-TASK-01: Readiness Scoring & Validation Gates ---
+
+func TestComputeReadiness_FullyReady_Returns70(t *testing.T) {
+	sp := "You are a helpful assistant."
+	a := agent.Agent{
+		ID:           uuid.New(),
+		Name:         "My Agent",
+		Description:  "Does stuff",
+		SystemPrompt: &sp,
+		ModelConfig:  mustJSON(`{"provider":"openai","model":"gpt-4o"}`),
+	}
+	// no bound skills or active tools
+	score := agent.ComputeReadiness(a, 0, 0)
+	assert.Equal(t, 70, score.Score)
+	assert.Equal(t, agent.ReadinessStandard, score.Level)
+}
+
+func TestComputeReadiness_WithSkillsAndTools_Returns100(t *testing.T) {
+	sp := "You are a helpful assistant."
+	a := agent.Agent{
+		ID:           uuid.New(),
+		Name:         "My Agent",
+		Description:  "Does stuff",
+		SystemPrompt: &sp,
+		ModelConfig:  mustJSON(`{"provider":"openai","model":"gpt-4o"}`),
+	}
+	score := agent.ComputeReadiness(a, 1, 1)
+	assert.Equal(t, 100, score.Score)
+	assert.Equal(t, agent.ReadinessProduction, score.Level)
+}
+
+func TestComputeReadiness_NameOnly_Returns10_INCOMPLETE(t *testing.T) {
+	a := agent.Agent{ID: uuid.New(), Name: "My Agent"}
+	score := agent.ComputeReadiness(a, 0, 0)
+	assert.Equal(t, 10, score.Score)
+	assert.Equal(t, agent.ReadinessIncomplete, score.Level)
+}
+
+func TestComputeReadiness_Empty_Returns0(t *testing.T) {
+	a := agent.Agent{ID: uuid.New()}
+	score := agent.ComputeReadiness(a, 0, 0)
+	assert.Equal(t, 0, score.Score)
+	assert.Equal(t, agent.ReadinessIncomplete, score.Level)
+}
+
+func TestPublish_LowReadiness_Rejected(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	// Agent with only a name — score 10, below 60.
+	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Incomplete Agent"})
+	require.NoError(t, err)
+
+	_, err = svc.Publish(context.Background(), created.ID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "readiness score")
+}
+
+func TestGetWithReadiness_ReturnsScore(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	sp := "You are a helpful assistant."
+	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name:         "My Agent",
+		Description:  "Does stuff",
+		SystemPrompt: &sp,
+		ModelConfig:  mustJSON(`{"provider":"openai","model":"gpt-4o"}`),
+	})
+	require.NoError(t, err)
+
+	resp, err := svc.GetWithReadiness(context.Background(), created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Readiness)
+	assert.Equal(t, 70, resp.Readiness.Score)
+	assert.Equal(t, string(agent.ReadinessStandard), string(resp.Readiness.Level))
+}
+
+func TestGetWithReadiness_NotFound_ReturnsError(t *testing.T) {
+	svc := newMockAgentSvc()
+	_, err := svc.GetWithReadiness(context.Background(), uuid.New())
+	require.ErrorIs(t, err, agent.ErrNotFound)
+}
+
 // --- TR-01-TASK-38: sanitizar HTML em campos de texto (P-C280-1) ---
 
 func TestCreate_StripHTMLFromName(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 		Name: "<script>alert('xss')</script>My Agent",
 	})
@@ -653,7 +789,7 @@ func TestCreate_StripHTMLFromName(t *testing.T) {
 }
 
 func TestCreate_StripHTMLFromDescription(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 		Name:        "Agent",
 		Description: `<b>Bold</b> description with <a href="evil">link</a>`,
@@ -663,7 +799,7 @@ func TestCreate_StripHTMLFromDescription(t *testing.T) {
 }
 
 func TestUpdate_StripHTMLFromName(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Clean"})
 
 	malicious := `<img src=x onerror="alert(1)">Updated`
@@ -673,7 +809,7 @@ func TestUpdate_StripHTMLFromName(t *testing.T) {
 }
 
 func TestUpdate_StripHTMLFromDescription(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 
 	desc := "<p>Hello <strong>world</strong></p>"
@@ -683,7 +819,7 @@ func TestUpdate_StripHTMLFromDescription(t *testing.T) {
 }
 
 func TestCreate_PlainTextName_Unchanged(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "My Normal Agent"})
 	require.NoError(t, err)
 	assert.Equal(t, "My Normal Agent", resp.Name)
@@ -718,10 +854,14 @@ func (m *mockTrackingBindingRepo) SyncMCPServers(_ context.Context, _ uuid.UUID,
 	return nil
 }
 
+func (m *mockTrackingBindingRepo) GetSkillTokenBudgets(_ context.Context, _ uuid.UUID) (map[uuid.UUID]*int, error) {
+	return map[uuid.UUID]*int{}, nil
+}
+
 func TestCreate_WithKnowledgeBaseIDs_BindingsCreated(t *testing.T) {
 	repo := newMockRepo()
 	binding := &mockTrackingBindingRepo{}
-	svc := agent.NewService(repo, binding)
+	svc := agent.NewService(repo, binding, &mockNoopSkillRepo{})
 
 	kb1, kb2 := uuid.New(), uuid.New()
 	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{
@@ -744,7 +884,7 @@ func TestGet_ReturnsKnowledgeBaseIDs(t *testing.T) {
 	repo := newMockRepo()
 	kb1 := uuid.New()
 	binding := &mockTrackingBindingRepo{kbIDs: []uuid.UUID{kb1}}
-	svc := agent.NewService(repo, binding)
+	svc := agent.NewService(repo, binding, &mockNoopSkillRepo{})
 
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
@@ -757,7 +897,7 @@ func TestGet_ReturnsKnowledgeBaseIDs(t *testing.T) {
 func TestUpdate_WithKnowledgeBaseIDs_UpdatesBindings(t *testing.T) {
 	repo := newMockRepo()
 	binding := &mockTrackingBindingRepo{}
-	svc := agent.NewService(repo, binding)
+	svc := agent.NewService(repo, binding, &mockNoopSkillRepo{})
 
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
@@ -775,7 +915,7 @@ func TestUpdate_WithoutKnowledgeBaseIDs_ReturnsExisting(t *testing.T) {
 	repo := newMockRepo()
 	kb1 := uuid.New()
 	binding := &mockTrackingBindingRepo{kbIDs: []uuid.UUID{kb1}}
-	svc := agent.NewService(repo, binding)
+	svc := agent.NewService(repo, binding, &mockNoopSkillRepo{})
 
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
@@ -791,7 +931,7 @@ func TestUpdate_ClearKnowledgeBaseIDs(t *testing.T) {
 	repo := newMockRepo()
 	kb1 := uuid.New()
 	binding := &mockTrackingBindingRepo{kbIDs: []uuid.UUID{kb1}}
-	svc := agent.NewService(repo, binding)
+	svc := agent.NewService(repo, binding, &mockNoopSkillRepo{})
 
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
@@ -810,7 +950,7 @@ func TestUpdate_ClearKnowledgeBaseIDs(t *testing.T) {
 func ptrStr(s string) *string { return &s }
 
 func TestCreate_SystemPromptTooLong_ReturnsError(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	bigPrompt := string(make([]byte, 10001))
 	for i := range bigPrompt {
 		bigPrompt = bigPrompt[:i] + "x" + bigPrompt[i+1:]
@@ -830,7 +970,7 @@ func TestCreate_SystemPromptTooLong_ReturnsError(t *testing.T) {
 }
 
 func TestCreate_SystemPromptAtLimit_Accepted(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	buf := make([]byte, 10000)
 	for i := range buf {
 		buf[i] = 'x'
@@ -843,7 +983,7 @@ func TestCreate_SystemPromptAtLimit_Accepted(t *testing.T) {
 }
 
 func TestUpdate_SystemPromptTooLong_ReturnsError(t *testing.T) {
-	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
 	require.NoError(t, err)
 
