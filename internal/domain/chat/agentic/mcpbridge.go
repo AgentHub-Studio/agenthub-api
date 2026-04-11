@@ -327,3 +327,89 @@ func (c *CachedMCPClient) Invalidate(tenantID string) {
 func (c *CachedMCPClient) CallTool(ctx context.Context, tenantID, serverName, toolName string, input json.RawMessage) (json.RawMessage, error) {
 	return c.inner.CallTool(ctx, tenantID, serverName, toolName, input)
 }
+
+// --- CircuitBreakerMCPClient ---
+
+// CircuitBreakerMCPClient wraps an MCPClientService and tracks consecutive
+// failures per MCP server. After maxFailures consecutive errors from a server,
+// that server is disabled and its tools are excluded from subsequent ListTools
+// responses. The failure count resets on a successful CallTool.
+// P-C275-1: auto-disable of MCP servers after 3 consecutive failures.
+type CircuitBreakerMCPClient struct {
+	inner       MCPClientService
+	maxFailures int
+	mu          sync.Mutex
+	failures    map[string]int  // key: serverName → consecutive failure count
+	disabled    map[string]bool // key: serverName → whether server is tripped
+}
+
+// NewCircuitBreakerMCPClient creates a new circuit breaker wrapper.
+// maxFailures is the number of consecutive tool-call errors before a server is disabled.
+// If maxFailures <= 0, the default of 3 is used.
+func NewCircuitBreakerMCPClient(inner MCPClientService, maxFailures int) *CircuitBreakerMCPClient {
+	if maxFailures <= 0 {
+		maxFailures = 3
+	}
+	return &CircuitBreakerMCPClient{
+		inner:       inner,
+		maxFailures: maxFailures,
+		failures:    make(map[string]int),
+		disabled:    make(map[string]bool),
+	}
+}
+
+// ListTools returns only tools from servers that have not been tripped.
+func (c *CircuitBreakerMCPClient) ListTools(ctx context.Context, tenantID string) ([]MCPToolInfo, error) {
+	all, err := c.inner.ListTools(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make([]MCPToolInfo, 0, len(all))
+	for _, tool := range all {
+		if !c.disabled[tool.ServerName] {
+			out = append(out, tool)
+		}
+	}
+	return out, nil
+}
+
+// CallTool forwards the call and tracks consecutive failures per server.
+// On success the failure counter for the server is reset.
+// Once maxFailures is reached, the server is disabled.
+func (c *CircuitBreakerMCPClient) CallTool(ctx context.Context, tenantID, serverName, toolName string, input json.RawMessage) (json.RawMessage, error) {
+	result, err := c.inner.CallTool(ctx, tenantID, serverName, toolName, input)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err != nil {
+		c.failures[serverName]++
+		if c.failures[serverName] >= c.maxFailures {
+			c.disabled[serverName] = true
+		}
+	} else {
+		// Reset on success.
+		c.failures[serverName] = 0
+	}
+
+	return result, err
+}
+
+// IsDisabled reports whether the given server has been auto-disabled.
+func (c *CircuitBreakerMCPClient) IsDisabled(serverName string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.disabled[serverName]
+}
+
+// Reset clears the circuit breaker state for all servers (for testing or admin reset).
+func (c *CircuitBreakerMCPClient) Reset(serverName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.failures, serverName)
+	delete(c.disabled, serverName)
+}

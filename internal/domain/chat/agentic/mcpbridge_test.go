@@ -344,3 +344,82 @@ func TestCachedMCPClient_CallToolNotCached(t *testing.T) {
 	// Both calls reached the inner client (last call was tool2).
 	assert.Equal(t, "tool2", inner.lastCallTool, "CallTool should forward directly")
 }
+
+// --- TR-01-TASK-36: CircuitBreakerMCPClient auto-disable (P-C275-1) ---
+
+func TestCircuitBreaker_DisablesAfterMaxFailures(t *testing.T) {
+	inner := &mockMCPClient{
+		tools:   []agentic.MCPToolInfo{{ServerName: "flaky", Name: "do_thing"}},
+		callErr: fmt.Errorf("connection refused"),
+	}
+	cb := agentic.NewCircuitBreakerMCPClient(inner, 3)
+
+	for i := 0; i < 3; i++ {
+		_, _ = cb.CallTool(context.Background(), "tenant", "flaky", "do_thing", nil)
+	}
+
+	assert.True(t, cb.IsDisabled("flaky"), "server should be disabled after 3 failures")
+}
+
+func TestCircuitBreaker_NotDisabledBefore3Failures(t *testing.T) {
+	inner := &mockMCPClient{callErr: fmt.Errorf("error")}
+	cb := agentic.NewCircuitBreakerMCPClient(inner, 3)
+
+	_, _ = cb.CallTool(context.Background(), "tenant", "flaky", "tool", nil)
+	_, _ = cb.CallTool(context.Background(), "tenant", "flaky", "tool", nil)
+
+	assert.False(t, cb.IsDisabled("flaky"), "2 failures should not trip the breaker")
+}
+
+func TestCircuitBreaker_SuccessResetsCounter(t *testing.T) {
+	callCount := 0
+	inner := &mockMCPClient{}
+	cb := agentic.NewCircuitBreakerMCPClient(inner, 3)
+
+	// 2 failures, then success, then 2 more failures — should not trip.
+	inner.callErr = fmt.Errorf("err")
+	_, _ = cb.CallTool(context.Background(), "tenant", "server", "tool", nil)
+	_, _ = cb.CallTool(context.Background(), "tenant", "server", "tool", nil)
+	inner.callErr = nil
+	inner.callResp = []byte(`"ok"`)
+	_, _ = cb.CallTool(context.Background(), "tenant", "server", "tool", nil) // reset
+	_ = callCount
+	inner.callErr = fmt.Errorf("err")
+	_, _ = cb.CallTool(context.Background(), "tenant", "server", "tool", nil)
+	_, _ = cb.CallTool(context.Background(), "tenant", "server", "tool", nil)
+
+	assert.False(t, cb.IsDisabled("server"), "counter should have been reset by the successful call")
+}
+
+func TestCircuitBreaker_DisabledServerFilteredFromListTools(t *testing.T) {
+	inner := &mockMCPClient{
+		tools: []agentic.MCPToolInfo{
+			{ServerName: "good", Name: "tool_a"},
+			{ServerName: "flaky", Name: "tool_b"},
+		},
+		callErr: fmt.Errorf("err"),
+	}
+	cb := agentic.NewCircuitBreakerMCPClient(inner, 3)
+
+	for i := 0; i < 3; i++ {
+		_, _ = cb.CallTool(context.Background(), "tenant", "flaky", "tool_b", nil)
+	}
+
+	tools, err := cb.ListTools(context.Background(), "tenant")
+	require.NoError(t, err)
+	assert.Len(t, tools, 1, "disabled server's tools should be excluded")
+	assert.Equal(t, "good", tools[0].ServerName)
+}
+
+func TestCircuitBreaker_Reset_ReEnablesServer(t *testing.T) {
+	inner := &mockMCPClient{callErr: fmt.Errorf("err")}
+	cb := agentic.NewCircuitBreakerMCPClient(inner, 3)
+
+	for i := 0; i < 3; i++ {
+		_, _ = cb.CallTool(context.Background(), "tenant", "flaky", "tool", nil)
+	}
+	require.True(t, cb.IsDisabled("flaky"))
+
+	cb.Reset("flaky")
+	assert.False(t, cb.IsDisabled("flaky"), "Reset should re-enable the server")
+}
