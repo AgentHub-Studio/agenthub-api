@@ -74,6 +74,9 @@ func (s *service) Get(ctx context.Context, id uuid.UUID) (AgentResponse, error) 
 	if skillIDs, err := s.bindingRepo.ListSkillIDs(ctx, id); err == nil {
 		resp.SkillIDs = skillIDs
 	}
+	if kbIDs, err := s.bindingRepo.ListKnowledgeBaseIDs(ctx, id); err == nil {
+		resp.KnowledgeBaseIDs = kbIDs
+	}
 	return resp, nil
 }
 
@@ -129,6 +132,14 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 		}
 		resp.SkillIDs = req.SkillIDs
 	}
+	// P-C285-1: link knowledge bases provided in the creation request.
+	if len(req.KnowledgeBaseIDs) > 0 {
+		if syncErr := s.bindingRepo.SyncKnowledgeBases(ctx, created.ID, req.KnowledgeBaseIDs); syncErr != nil {
+			_ = s.repo.Delete(ctx, created.ID)
+			return AgentResponse{}, fmt.Errorf("invalid knowledge base IDs: %w", syncErr)
+		}
+		resp.KnowledgeBaseIDs = req.KnowledgeBaseIDs
+	}
 	return resp, nil
 }
 
@@ -182,6 +193,15 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		resp.SkillIDs = req.SkillIDs
 	} else if skillIDs, err := s.bindingRepo.ListSkillIDs(ctx, id); err == nil {
 		resp.SkillIDs = skillIDs
+	}
+	// P-C285-1: sync knowledge base bindings when KnowledgeBaseIDs is explicitly provided.
+	if req.KnowledgeBaseIDs != nil {
+		if syncErr := s.bindingRepo.SyncKnowledgeBases(ctx, id, req.KnowledgeBaseIDs); syncErr != nil {
+			return AgentResponse{}, syncErr
+		}
+		resp.KnowledgeBaseIDs = req.KnowledgeBaseIDs
+	} else if kbIDs, err := s.bindingRepo.ListKnowledgeBaseIDs(ctx, id); err == nil {
+		resp.KnowledgeBaseIDs = kbIDs
 	}
 	return resp, nil
 }

@@ -671,3 +671,119 @@ func TestCreate_PlainTextName_Unchanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "My Normal Agent", resp.Name)
 }
+
+// --- TR-01-TASK-40: persistir knowledgeBaseIds no agente (P-C285-1) ---
+
+// mockTrackingBindingRepo tracks sync calls for skills and knowledge bases.
+type mockTrackingBindingRepo struct {
+	skillIDs []uuid.UUID
+	kbIDs    []uuid.UUID
+}
+
+func (m *mockTrackingBindingRepo) ListSkillIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	return m.skillIDs, nil
+}
+func (m *mockTrackingBindingRepo) SyncSkills(_ context.Context, _ uuid.UUID, ids []uuid.UUID) error {
+	m.skillIDs = ids
+	return nil
+}
+func (m *mockTrackingBindingRepo) ListKnowledgeBaseIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	return m.kbIDs, nil
+}
+func (m *mockTrackingBindingRepo) SyncKnowledgeBases(_ context.Context, _ uuid.UUID, ids []uuid.UUID) error {
+	m.kbIDs = ids
+	return nil
+}
+func (m *mockTrackingBindingRepo) ListMCPServerIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (m *mockTrackingBindingRepo) SyncMCPServers(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
+	return nil
+}
+
+func TestCreate_WithKnowledgeBaseIDs_BindingsCreated(t *testing.T) {
+	repo := newMockRepo()
+	binding := &mockTrackingBindingRepo{}
+	svc := agent.NewService(repo, binding)
+
+	kb1, kb2 := uuid.New(), uuid.New()
+	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name:             "KB Agent",
+		KnowledgeBaseIDs: []uuid.UUID{kb1, kb2},
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []uuid.UUID{kb1, kb2}, resp.KnowledgeBaseIDs)
+	assert.ElementsMatch(t, []uuid.UUID{kb1, kb2}, binding.kbIDs)
+}
+
+func TestCreate_WithoutKnowledgeBaseIDs_NoBindings(t *testing.T) {
+	svc := newMockAgentSvc()
+	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "No KB"})
+	require.NoError(t, err)
+	assert.Empty(t, resp.KnowledgeBaseIDs)
+}
+
+func TestGet_ReturnsKnowledgeBaseIDs(t *testing.T) {
+	repo := newMockRepo()
+	kb1 := uuid.New()
+	binding := &mockTrackingBindingRepo{kbIDs: []uuid.UUID{kb1}}
+	svc := agent.NewService(repo, binding)
+
+	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	require.NoError(t, err)
+
+	got, err := svc.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []uuid.UUID{kb1}, got.KnowledgeBaseIDs)
+}
+
+func TestUpdate_WithKnowledgeBaseIDs_UpdatesBindings(t *testing.T) {
+	repo := newMockRepo()
+	binding := &mockTrackingBindingRepo{}
+	svc := agent.NewService(repo, binding)
+
+	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	require.NoError(t, err)
+
+	kb1 := uuid.New()
+	resp, err := svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{
+		KnowledgeBaseIDs: []uuid.UUID{kb1},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []uuid.UUID{kb1}, resp.KnowledgeBaseIDs)
+	assert.Equal(t, []uuid.UUID{kb1}, binding.kbIDs)
+}
+
+func TestUpdate_WithoutKnowledgeBaseIDs_ReturnsExisting(t *testing.T) {
+	repo := newMockRepo()
+	kb1 := uuid.New()
+	binding := &mockTrackingBindingRepo{kbIDs: []uuid.UUID{kb1}}
+	svc := agent.NewService(repo, binding)
+
+	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	require.NoError(t, err)
+
+	// Update without providing KnowledgeBaseIDs — existing bindings should be returned.
+	newName := "Renamed"
+	resp, err := svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{Name: &newName})
+	require.NoError(t, err)
+	assert.Equal(t, []uuid.UUID{kb1}, resp.KnowledgeBaseIDs)
+}
+
+func TestUpdate_ClearKnowledgeBaseIDs(t *testing.T) {
+	repo := newMockRepo()
+	kb1 := uuid.New()
+	binding := &mockTrackingBindingRepo{kbIDs: []uuid.UUID{kb1}}
+	svc := agent.NewService(repo, binding)
+
+	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	require.NoError(t, err)
+
+	// Send empty slice to clear all KB bindings.
+	resp, err := svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{
+		KnowledgeBaseIDs: []uuid.UUID{},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, resp.KnowledgeBaseIDs)
+	assert.Empty(t, binding.kbIDs)
+}

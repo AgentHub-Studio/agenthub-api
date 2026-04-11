@@ -21,10 +21,12 @@ type AgentResponse struct {
 	ModelConfig      json.RawMessage `json:"modelConfig,omitempty"`
 	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
 	Config           json.RawMessage `json:"config"`
-	EnableManagement bool            `json:"enableManagement"`
-	SkillIDs         []uuid.UUID     `json:"skillIds,omitempty"`
-	CreatedAt        time.Time       `json:"createdAt"`
-	UpdatedAt        time.Time       `json:"updatedAt"`
+	EnableManagement    bool            `json:"enableManagement"`
+	SkillIDs            []uuid.UUID     `json:"skillIds,omitempty"`
+	// KnowledgeBaseIDs lists the knowledge bases bound to this agent. P-C285-1.
+	KnowledgeBaseIDs    []uuid.UUID     `json:"knowledgeBaseIds,omitempty"`
+	CreatedAt           time.Time       `json:"createdAt"`
+	UpdatedAt           time.Time       `json:"updatedAt"`
 }
 
 // ResponseFrom converts an Agent entity to AgentResponse.
@@ -67,21 +69,23 @@ type CreateAgentRequest struct {
 	ModelConfig      json.RawMessage `json:"modelConfig,omitempty"`
 	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
 	Config           json.RawMessage `json:"config,omitempty"`
-	EnableManagement bool            `json:"enableManagement,omitempty"`
-	SkillIDs         []uuid.UUID     `json:"skillIds,omitempty"`
+	EnableManagement    bool            `json:"enableManagement,omitempty"`
+	SkillIDs            []uuid.UUID     `json:"skillIds,omitempty"`
+	KnowledgeBaseIDs    []uuid.UUID     `json:"knowledgeBaseIds,omitempty"` // P-C285-1
 }
 
 // UpdateAgentRequest is the JSON body for partial agent updates.
 type UpdateAgentRequest struct {
-	Name             *string         `json:"name,omitempty"`
-	Slug             *string         `json:"slug,omitempty"`
-	Description      *string         `json:"description,omitempty"`
-	SystemPrompt     *string         `json:"systemPrompt,omitempty"`
-	ModelConfig      json.RawMessage `json:"modelConfig,omitempty"`
-	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
-	Config           json.RawMessage `json:"config,omitempty"`
-	EnableManagement *bool           `json:"enableManagement,omitempty"`
-	SkillIDs         []uuid.UUID     `json:"skillIds,omitempty"`
+	Name                *string         `json:"name,omitempty"`
+	Slug                *string         `json:"slug,omitempty"`
+	Description         *string         `json:"description,omitempty"`
+	SystemPrompt        *string         `json:"systemPrompt,omitempty"`
+	ModelConfig         json.RawMessage `json:"modelConfig,omitempty"`
+	PermissionRules     json.RawMessage `json:"permissionRules,omitempty"`
+	Config              json.RawMessage `json:"config,omitempty"`
+	EnableManagement    *bool           `json:"enableManagement,omitempty"`
+	SkillIDs            []uuid.UUID     `json:"skillIds,omitempty"`
+	KnowledgeBaseIDs    []uuid.UUID     `json:"knowledgeBaseIds,omitempty"` // P-C285-1
 }
 
 // CloneAgentRequest is the JSON body for cloning an agent.
