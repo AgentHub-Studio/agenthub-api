@@ -64,7 +64,7 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	// P-C249-2: reject modelConfig nested inside the config field. Clients must
 	// send modelConfig at the root level of the request body.
 	if hasNestedModelConfig(req.Config) {
-		return AgentResponse{}, fmt.Errorf("modelConfig must be at the root of the request body, not inside config")
+		return AgentResponse{}, fmt.Errorf("%w: modelConfig must be at the root of the request body, not inside config", ErrInvalidRequest)
 	}
 	// P-C97-1: reject invalid modelConfig at creation time so the agent is never
 	// stored in a broken state (e.g. maxIterations=-5 makes the loop exit immediately).
@@ -112,7 +112,7 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentRequest) (AgentResponse, error) {
 	// P-C249-2: same guard as Create — reject nested modelConfig.
 	if hasNestedModelConfig(req.Config) {
-		return AgentResponse{}, fmt.Errorf("modelConfig must be at the root of the request body, not inside config")
+		return AgentResponse{}, fmt.Errorf("%w: modelConfig must be at the root of the request body, not inside config", ErrInvalidRequest)
 	}
 	a, err := s.repo.FindByID(ctx, id)
 	if err != nil {

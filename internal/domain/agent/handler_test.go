@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -19,7 +20,8 @@ import (
 
 // mockAgentSvc implements agent.Service for handler tests.
 type mockAgentSvc struct {
-	agents map[uuid.UUID]agent.AgentResponse
+	agents    map[uuid.UUID]agent.AgentResponse
+	updateErr error // if set, Update returns this error
 }
 
 func newMockSvc() *mockAgentSvc {
@@ -54,6 +56,9 @@ func (m *mockAgentSvc) Create(_ context.Context, req agent.CreateAgentRequest) (
 }
 
 func (m *mockAgentSvc) Update(_ context.Context, id uuid.UUID, req agent.UpdateAgentRequest) (agent.AgentResponse, error) {
+	if m.updateErr != nil {
+		return agent.AgentResponse{}, m.updateErr
+	}
 	a, ok := m.agents[id]
 	if !ok {
 		return agent.AgentResponse{}, agent.ErrNotFound
@@ -338,4 +343,54 @@ func TestAgentHandler_Archive_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// --- TR-01-TASK-32: mapeamento de erros de validação para 422 (P-C249-3) ---
+
+func TestAgentHandler_Update_ValidationError_Returns422(t *testing.T) {
+	r, svc := setupAgent()
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Agent"}
+	svc.updateErr = fmt.Errorf("%w: invalid model config", agent.ErrInvalidModelConfig)
+
+	name := "new name"
+	body, _ := json.Marshal(agent.UpdateAgentRequest{Name: &name})
+	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func TestAgentHandler_Update_SkillIDsError_Returns422(t *testing.T) {
+	r, svc := setupAgent()
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Agent"}
+	svc.updateErr = fmt.Errorf("%w: skill not found", agent.ErrInvalidSkillIDs)
+
+	name := "new name"
+	body, _ := json.Marshal(agent.UpdateAgentRequest{Name: &name})
+	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func TestAgentHandler_Update_NestedModelConfig_Returns422(t *testing.T) {
+	r, svc := setupAgent()
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Agent"}
+	svc.updateErr = fmt.Errorf("%w: nested config", agent.ErrInvalidRequest)
+
+	name := "new name"
+	body, _ := json.Marshal(agent.UpdateAgentRequest{Name: &name})
+	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }

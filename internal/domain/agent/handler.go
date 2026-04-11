@@ -96,6 +96,10 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return
 		}
+		if isValidationError(err) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -328,4 +332,15 @@ func (h *VersionHandler) publishVersion(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
+}
+
+// isValidationError returns true for errors that should map to HTTP 422.
+// P-C249-3: invalid model config, unsupported provider, invalid skill IDs,
+// invalid request body, and nested-modelConfig errors are user-input problems.
+func isValidationError(err error) bool {
+	return errors.Is(err, ErrInvalidModelConfig) ||
+		errors.Is(err, ErrInvalidSkillIDs) ||
+		errors.Is(err, ErrSlugConflict) ||
+		errors.Is(err, ErrUnsupportedProvider) ||
+		errors.Is(err, ErrInvalidRequest)
 }

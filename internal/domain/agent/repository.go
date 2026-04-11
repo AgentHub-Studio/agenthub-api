@@ -27,6 +27,10 @@ var ErrInvalidModelConfig = errors.New("agent: invalid model config")
 // ErrInvalidSkillIDs is returned when one or more skill IDs do not exist.
 var ErrInvalidSkillIDs = errors.New("agent: invalid skill IDs")
 
+// ErrInvalidRequest is returned for user-supplied request body validation errors
+// that should map to HTTP 422 (e.g. nested modelConfig, missing required fields).
+var ErrInvalidRequest = errors.New("agent: invalid request")
+
 // Repository defines persistence operations for Agent.
 type Repository interface {
 	FindAll(ctx context.Context, status AgentStatus, q string, req pagination.PageRequest) ([]Agent, int64, error)
