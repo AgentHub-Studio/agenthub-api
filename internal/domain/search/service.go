@@ -152,6 +152,14 @@ func (r *pgRepository) SearchKnowledgeBases(ctx context.Context, tenantID, query
 	return r.searchTable(ctx, tenantID, "knowledge_base", "knowledge_base", query, limit)
 }
 
+// tablesWithStatus lists entity tables that have a `status` column.
+// P-C179-4 (ACT-F3-08): skill and tool tables do not have status; selecting
+// it without qualification causes "column status does not exist" at runtime.
+var tablesWithStatus = map[string]bool{
+	"agent":          true,
+	"knowledge_base": true,
+}
+
 // searchTable queries a single table using full-text search (ts_rank) for queries >= 3 chars,
 // falling back to case-insensitive ILIKE for shorter queries.
 // Results are ranked by relevance descending.
@@ -162,6 +170,12 @@ func (r *pgRepository) searchTable(ctx context.Context, tenantID, table, resourc
 	}
 	defer release()
 
+	// P-C179-4: only select status when the table has the column.
+	statusExpr := "''"
+	if tablesWithStatus[table] {
+		statusExpr = "COALESCE(" + table + ".status::text,'')"
+	}
+
 	var (
 		sqlStr string
 		args   []any
@@ -171,7 +185,7 @@ func (r *pgRepository) searchTable(ctx context.Context, tenantID, table, resourc
 		// Full-text search with relevance ranking.
 		// plainto_tsquery handles arbitrary input safely (no operator injection).
 		sqlStr = fmt.Sprintf(
-			`SELECT id::text, name, COALESCE(description,''), COALESCE(status::text,''), COALESCE(slug,'')
+			`SELECT id::text, name, COALESCE(description,''), %s, COALESCE(slug,'')
 			 FROM %s
 			 WHERE to_tsvector('portuguese', name || ' ' || COALESCE(description,''))
 			       @@ plainto_tsquery('portuguese', $1)
@@ -180,19 +194,19 @@ func (r *pgRepository) searchTable(ctx context.Context, tenantID, table, resourc
 			     plainto_tsquery('portuguese', $1)
 			 ) DESC
 			 LIMIT $2`,
-			table,
+			statusExpr, table,
 		)
 		args = []any{query, limit}
 	} else {
 		// Short query fallback: ILIKE ordered alphabetically.
 		pattern := "%" + query + "%"
 		sqlStr = fmt.Sprintf(
-			`SELECT id::text, name, COALESCE(description,''), COALESCE(status::text,''), COALESCE(slug,'')
+			`SELECT id::text, name, COALESCE(description,''), %s, COALESCE(slug,'')
 			 FROM %s
 			 WHERE name ILIKE $1 OR description ILIKE $1
 			 ORDER BY name ASC
 			 LIMIT $2`,
-			table,
+			statusExpr, table,
 		)
 		args = []any{pattern, limit}
 	}
