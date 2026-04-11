@@ -15,8 +15,9 @@ import (
 
 // SkillRuntimeClient calls the skill-runtime service to execute tools.
 type SkillRuntimeClient struct {
-	baseURL string
-	client  *http.Client
+	baseURL      string
+	serviceToken string // P-C282-1: service account token for runner→skill-runtime auth
+	client       *http.Client
 }
 
 // NewSkillRuntimeClient creates a client pointing at the given skill-runtime base URL.
@@ -31,6 +32,15 @@ func NewSkillRuntimeClient(baseURL string) *SkillRuntimeClient {
 			Timeout: 60 * time.Second, // outer safety net; per-call uses ctx deadline
 		},
 	}
+}
+
+// WithServiceToken configures a service account token that the client uses for
+// all requests to the skill-runtime. When set, the user's context token is NOT
+// forwarded, preventing privilege escalation.
+// P-C282-1: runner must authenticate to skill-runtime with its own service identity.
+func (c *SkillRuntimeClient) WithServiceToken(token string) *SkillRuntimeClient {
+	c.serviceToken = token
+	return c
 }
 
 // ToolExecResult holds the response from a tool execution.
@@ -98,7 +108,12 @@ func (c *SkillRuntimeClient) Execute(ctx context.Context, slug string, input jso
 		return nil, fmt.Errorf("skillclient: new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if tok := tenant.TokenFromContext(ctx); tok != "" {
+	// P-C282-1: prefer service account token over user token.
+	// When a service token is configured, it is used exclusively — the user's JWT
+	// is never forwarded to the skill-runtime to avoid privilege escalation.
+	if c.serviceToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	} else if tok := tenant.TokenFromContext(ctx); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 

@@ -202,3 +202,46 @@ func TestNewSkillRuntimeClient_DefaultURL(t *testing.T) {
 	// Can't directly access baseURL, but we can verify it doesn't panic.
 	assert.NotNil(t, client)
 }
+
+// --- TR-01-TASK-39: service account token para runner→skill-runtime (P-C282-1) ---
+
+func TestSkillRuntimeClient_ServiceToken_UsedInsteadOfUserToken(t *testing.T) {
+	var receivedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": "ok"})
+	}))
+	defer server.Close()
+
+	// Context carries user token, but service token should take priority.
+	client := agentic.NewSkillRuntimeClient(server.URL).WithServiceToken("svc-token-abc")
+	_, err := client.Execute(context.Background(), "skill", json.RawMessage(`{}`), "t", "", "")
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer svc-token-abc", receivedAuth,
+		"service token should be used instead of user token")
+}
+
+func TestSkillRuntimeClient_NoServiceToken_UsesContextToken(t *testing.T) {
+	var receivedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": "ok"})
+	}))
+	defer server.Close()
+
+	// No service token configured.
+	client := agentic.NewSkillRuntimeClient(server.URL)
+	_, err := client.Execute(context.Background(), "skill", json.RawMessage(`{}`), "t", "", "")
+	require.NoError(t, err)
+
+	// No token in context and no service token → no Authorization header.
+	assert.Empty(t, receivedAuth, "no auth header when neither token is set")
+}
+
+func TestSkillRuntimeClient_WithServiceToken_IsChainable(t *testing.T) {
+	client := agentic.NewSkillRuntimeClient("http://localhost:8083").WithServiceToken("my-token")
+	assert.NotNil(t, client)
+}
