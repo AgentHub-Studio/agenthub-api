@@ -246,11 +246,13 @@ func (r *Repository) ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]Sk
 	defer release()
 
 	rows, err := conn.Query(ctx,
+		// P-C340-1 (ACT-F3-18): order by binding priority ASC then name for deterministic
+		// skill ordering in the system prompt. Skills with lower priority values appear first.
 		`SELECT s.id, s.name, s.slug, s.description, s.category, s.created_at, s.updated_at, s.instructions, s.allowed_tools, s.disable_model_invocation, s.context_mode, s.when_to_use, s.argument_hint
 		 FROM skill s
 		 INNER JOIN agent_skill ags ON ags.skill_id = s.id
 		 WHERE ags.agent_id = $1
-		 ORDER BY s.name`,
+		 ORDER BY ags.priority ASC, s.name ASC`,
 		agentID,
 	)
 	if err != nil {
