@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,14 +11,36 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 )
 
+// ImpactAssessor counts agents that inherit the default provider and would be
+// affected by a defaultProvider change.
+type ImpactAssessor interface {
+	CountPublishedWithoutProvider(ctx context.Context) (int64, error)
+}
+
+// ProviderImpactResponse describes how many agents would be affected by
+// a change to the tenant-wide default LLM provider.
+type ProviderImpactResponse struct {
+	// AffectedAgents is the number of PUBLISHED agents that inherit the default
+	// provider and would be re-routed to the new provider after the change.
+	AffectedAgents int64 `json:"affectedAgents"`
+}
+
 // Handler holds HTTP handlers for the settings domain.
 type Handler struct {
-	svc Service
+	svc      Service
+	assessor ImpactAssessor // optional — nil disables the provider-impact endpoint
 }
 
 // NewHandler creates a new settings Handler.
 func NewHandler(svc Service) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithImpactAssessor attaches an impact assessor to the handler, enabling
+// GET /api/settings/provider-impact (ACT-F3-14).
+func (h *Handler) WithImpactAssessor(a ImpactAssessor) *Handler {
+	h.assessor = a
+	return h
 }
 
 // RegisterProtectedRoutes mounts authenticated settings routes onto r.
@@ -35,6 +58,9 @@ func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
 	r.Get("/api/settings/openrouter/models", h.listOpenRouterModels)
 	r.Get("/api/settings/openrouter/embedding-models", h.listOpenRouterEmbeddingModels)
 	r.Post("/api/settings/smtp/test", h.testSmtp)
+
+	// Provider-impact preview (ACT-F3-14 / P-C337-1).
+	r.Get("/api/settings/provider-impact", h.providerImpact)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +113,21 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// providerImpact returns how many PUBLISHED agents would be affected by a
+// change to the tenant-wide defaultProvider setting.
+func (h *Handler) providerImpact(w http.ResponseWriter, r *http.Request) {
+	if h.assessor == nil {
+		httputil.JSON(w, http.StatusOK, ProviderImpactResponse{AffectedAgents: 0})
+		return
+	}
+	count, err := h.assessor.CountPublishedWithoutProvider(r.Context())
+	if err != nil {
+		httputil.InternalServerError(w, "failed to assess provider impact")
+		return
+	}
+	httputil.JSON(w, http.StatusOK, ProviderImpactResponse{AffectedAgents: count})
 }
 
 func (h *Handler) listProviders(w http.ResponseWriter, _ *http.Request) {

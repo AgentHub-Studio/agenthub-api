@@ -51,6 +51,10 @@ func (s *stubAgentRepo) UpdateStatus(_ context.Context, id uuid.UUID, _ agent.Ag
 	return s.agents[id], nil
 }
 
+func (s *stubAgentRepo) CountPublishedWithoutProvider(_ context.Context) (int64, error) {
+	return 0, nil
+}
+
 func TestAgentConfigAdapter_GetAgentForRun_Success(t *testing.T) {
 	agentID := uuid.New()
 	systemPrompt := "You are a helpful assistant."

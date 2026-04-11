@@ -44,6 +44,10 @@ type Repository interface {
 	Update(ctx context.Context, a Agent) (Agent, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	UpdateStatus(ctx context.Context, id uuid.UUID, status AgentStatus) (Agent, error)
+	// CountPublishedWithoutProvider returns the number of PUBLISHED agents whose
+	// model_config does not explicitly set a provider. These agents would be affected
+	// by a change to the tenant-wide defaultProvider setting (ACT-F3-14).
+	CountPublishedWithoutProvider(ctx context.Context) (int64, error)
 }
 
 type pgRepository struct {
@@ -296,6 +300,30 @@ func (r *pgRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status Ag
 		return Agent{}, fmt.Errorf("agent.UpdateStatus: %w", err)
 	}
 	return a, nil
+}
+
+// CountPublishedWithoutProvider returns the count of PUBLISHED agents that have no
+// explicit provider in model_config (i.e. provider is absent, null, or empty string).
+// These agents inherit the tenant-wide defaultProvider and would be affected by changing it.
+func (r *pgRepository) CountPublishedWithoutProvider(ctx context.Context) (int64, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
+	var count int64
+	err = conn.QueryRow(ctx, `
+		SELECT COUNT(*) FROM agent
+		WHERE status = 'PUBLISHED'
+		  AND (model_config IS NULL
+		       OR model_config->>'provider' IS NULL
+		       OR model_config->>'provider' = '')
+	`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("agent.CountPublishedWithoutProvider: %w", err)
+	}
+	return count, nil
 }
 
 func isUniqueViolation(err error) bool {

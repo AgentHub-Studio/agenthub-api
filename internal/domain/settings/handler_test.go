@@ -145,3 +145,51 @@ func TestSettingsHandler_Delete_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
+
+// mockImpactAssessor implements impactAssessor for handler tests.
+type mockImpactAssessor struct {
+	count int64
+	err   error
+}
+
+func (m *mockImpactAssessor) CountPublishedWithoutProvider(_ context.Context) (int64, error) {
+	return m.count, m.err
+}
+
+func setupSettingsWithAssessor(assessor settings.ImpactAssessor) (*chi.Mux, *mockSettingsSvc) {
+	svc := &mockSettingsSvc{data: make(map[string]settings.SettingResponse)}
+	h := settings.NewHandler(svc).WithImpactAssessor(assessor)
+	r := chi.NewRouter()
+	h.RegisterProtectedRoutes(r)
+	return r, svc
+}
+
+// TestSettingsHandler_ProviderImpact_WithAssessor verifies the endpoint returns
+// the count from the assessor (ACT-F3-14).
+func TestSettingsHandler_ProviderImpact_WithAssessor(t *testing.T) {
+	assessor := &mockImpactAssessor{count: 7}
+	r, _ := setupSettingsWithAssessor(assessor)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/provider-impact", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp settings.ProviderImpactResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, int64(7), resp.AffectedAgents)
+}
+
+// TestSettingsHandler_ProviderImpact_NoAssessor returns zero when no assessor is set.
+func TestSettingsHandler_ProviderImpact_NoAssessor(t *testing.T) {
+	r, _ := setupSettings()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/provider-impact", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp settings.ProviderImpactResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, int64(0), resp.AffectedAgents)
+}

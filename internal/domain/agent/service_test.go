@@ -81,6 +81,23 @@ func (m *mockAgentRepo) UpdateStatus(_ context.Context, id uuid.UUID, status age
 	return a, nil
 }
 
+func (m *mockAgentRepo) CountPublishedWithoutProvider(_ context.Context) (int64, error) {
+	var count int64
+	for _, a := range m.data {
+		if a.Status == agent.StatusPublished {
+			if len(a.ModelConfig) == 0 {
+				count++
+				continue
+			}
+			var mc map[string]interface{}
+			if json.Unmarshal(a.ModelConfig, &mc) != nil || mc["provider"] == nil || mc["provider"] == "" {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
 // mockNoopBindingRepo is a no-op BindingRepository for service unit tests.
 type mockNoopBindingRepo struct{}
 

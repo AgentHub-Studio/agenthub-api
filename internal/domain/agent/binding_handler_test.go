@@ -114,6 +114,10 @@ func (m *mockBindingAgentRepo) UpdateStatus(_ context.Context, id uuid.UUID, sta
 	return a, nil
 }
 
+func (m *mockBindingAgentRepo) CountPublishedWithoutProvider(_ context.Context) (int64, error) {
+	return 0, nil
+}
+
 func setupBindingHandler() (*chi.Mux, *mockBindingAgentRepo, *mockBindingRepo) {
 	agentRepo := newMockAgentRepo()
 	bindingRepo := newMockBindingRepo()
