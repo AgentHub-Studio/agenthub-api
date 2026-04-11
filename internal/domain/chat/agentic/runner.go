@@ -2033,7 +2033,12 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
 				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
 			})
-			result := in.Elicitation.Submit(ctx, "", tc.ID, elicParams)
+			// P-C131-3 (ACT-F3-01): use a separate 24h timeout while waiting for user
+			// input so that the run's 15-min processing timeout doesn't expire during
+			// elicitation. The parent context is still checked for cancellation.
+			elicitCtx, elicitCancel := context.WithTimeout(context.Background(), 24*time.Hour)
+			result := in.Elicitation.Submit(elicitCtx, "", tc.ID, elicParams)
+			elicitCancel()
 			slog.Info("agentic: ask_user Submit returned", "toolCallID", tc.ID, "action", result.Action, "contentKeys", mapKeys(result.Content), "ctxErr", ctx.Err())
 			var output json.RawMessage
 			if result.Action == ElicitationCancel || result.Action == ElicitationDecline {
