@@ -577,3 +577,49 @@ func TestUpdate_NestedModelConfig_Rejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "modelConfig")
 }
+
+// --- TR-01-TASK-37: validações mínimas antes de publicar (P-C278-1) ---
+
+func TestPublish_DraftAgent_Succeeds(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "My Agent"})
+	require.NoError(t, err)
+	require.Equal(t, "DRAFT", created.Status)
+
+	resp, err := svc.Publish(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "PUBLISHED", resp.Status)
+}
+
+func TestPublish_AlreadyPublished_ReturnsError(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	_, err := svc.Publish(context.Background(), created.ID)
+	require.NoError(t, err)
+
+	// Try publishing again.
+	_, err = svc.Publish(context.Background(), created.ID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidStatusTransition)
+}
+
+func TestPublish_ArchivedAgent_ReturnsError(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+	_, err := svc.Publish(context.Background(), created.ID)
+	require.NoError(t, err)
+	_, err = svc.Archive(context.Background(), created.ID)
+	require.NoError(t, err)
+
+	// Try publishing an archived agent.
+	_, err = svc.Publish(context.Background(), created.ID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidStatusTransition)
+}
+
+func TestPublish_NotFound_ReturnsNotFoundError(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	_, err := svc.Publish(context.Background(), uuid.New())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrNotFound)
+}

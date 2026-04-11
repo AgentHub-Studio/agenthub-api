@@ -31,6 +31,11 @@ var ErrInvalidSkillIDs = errors.New("agent: invalid skill IDs")
 // that should map to HTTP 422 (e.g. nested modelConfig, missing required fields).
 var ErrInvalidRequest = errors.New("agent: invalid request")
 
+// ErrInvalidStatusTransition is returned when a publish/archive operation is not
+// allowed from the agent's current status. Maps to HTTP 422.
+// P-C278-1: minimum validation before publish.
+var ErrInvalidStatusTransition = errors.New("agent: invalid status transition")
+
 // Repository defines persistence operations for Agent.
 type Repository interface {
 	FindAll(ctx context.Context, status AgentStatus, q string, req pagination.PageRequest) ([]Agent, int64, error)

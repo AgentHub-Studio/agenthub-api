@@ -20,8 +20,9 @@ import (
 
 // mockAgentSvc implements agent.Service for handler tests.
 type mockAgentSvc struct {
-	agents    map[uuid.UUID]agent.AgentResponse
-	updateErr error // if set, Update returns this error
+	agents     map[uuid.UUID]agent.AgentResponse
+	updateErr  error // if set, Update returns this error
+	publishErr error // if set, Publish returns this error
 }
 
 func newMockSvc() *mockAgentSvc {
@@ -79,6 +80,9 @@ func (m *mockAgentSvc) Delete(_ context.Context, id uuid.UUID) error {
 }
 
 func (m *mockAgentSvc) Publish(_ context.Context, id uuid.UUID) (agent.AgentResponse, error) {
+	if m.publishErr != nil {
+		return agent.AgentResponse{}, m.publishErr
+	}
 	a, ok := m.agents[id]
 	if !ok {
 		return agent.AgentResponse{}, agent.ErrNotFound
@@ -393,4 +397,28 @@ func TestAgentHandler_Update_NestedModelConfig_Returns422(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+// --- TR-01-TASK-37: publish validation (P-C278-1) ---
+
+func TestAgentHandler_Publish_InvalidStatusTransition_Returns422(t *testing.T) {
+	r, svc := setupAgent()
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Published Agent", Status: string(agent.StatusPublished)}
+	svc.publishErr = fmt.Errorf("%w: agent is already published", agent.ErrInvalidStatusTransition)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/"+id.String()+"/publish", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func TestAgentHandler_Publish_InvalidID_Returns400(t *testing.T) {
+	r, _ := setupAgent()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/not-valid/publish", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }

@@ -135,6 +135,10 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return
 		}
+		if isValidationError(err) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -342,5 +346,6 @@ func isValidationError(err error) bool {
 		errors.Is(err, ErrInvalidSkillIDs) ||
 		errors.Is(err, ErrSlugConflict) ||
 		errors.Is(err, ErrUnsupportedProvider) ||
-		errors.Is(err, ErrInvalidRequest)
+		errors.Is(err, ErrInvalidRequest) ||
+		errors.Is(err, ErrInvalidStatusTransition)
 }

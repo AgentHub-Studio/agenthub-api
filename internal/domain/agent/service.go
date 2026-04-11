@@ -166,11 +166,40 @@ func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
 }
 
 func (s *service) Publish(ctx context.Context, id uuid.UUID) (AgentResponse, error) {
+	// P-C278-1: validate agent state before publishing.
+	current, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return AgentResponse{}, err
+	}
+	if err := validatePublish(current); err != nil {
+		return AgentResponse{}, err
+	}
 	a, err := s.repo.UpdateStatus(ctx, id, StatusPublished)
 	if err != nil {
 		return AgentResponse{}, err
 	}
 	return ResponseFrom(a), nil
+}
+
+// validatePublish checks that an agent meets the minimum requirements to be published.
+// P-C278-1: only DRAFT agents can be published; ARCHIVED agents require an explicit
+// status reset first (no direct archive→publish path exists); already PUBLISHED agents
+// are rejected to avoid duplicate publishes.
+func validatePublish(a Agent) error {
+	switch a.Status {
+	case StatusDraft:
+		// allowed — minimum field check below
+	case StatusPublished:
+		return fmt.Errorf("%w: agent is already published", ErrInvalidStatusTransition)
+	case StatusArchived:
+		return fmt.Errorf("%w: archived agents cannot be published directly", ErrInvalidStatusTransition)
+	default:
+		return fmt.Errorf("%w: unknown status %q", ErrInvalidStatusTransition, a.Status)
+	}
+	if a.Name == "" {
+		return fmt.Errorf("%w: agent name is required before publishing", ErrInvalidRequest)
+	}
+	return nil
 }
 
 func (s *service) Archive(ctx context.Context, id uuid.UUID) (AgentResponse, error) {
