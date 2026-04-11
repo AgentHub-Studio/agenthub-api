@@ -54,6 +54,17 @@ type chatRequest struct {
 	Tools       []ai.Tool    `json:"tools,omitempty"`
 }
 
+type toolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type toolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function toolCallFunction `json:"function"`
+}
+
 type chatChoice struct {
 	Message      ai.Message `json:"message"`
 	FinishReason string     `json:"finish_reason"`
@@ -187,8 +198,11 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 
 			var event struct {
 				Choices []struct {
-					Delta        ai.Message `json:"delta"`
-					FinishReason string     `json:"finish_reason"`
+					Delta struct {
+						Content   *string     `json:"content"`
+						ToolCalls []toolCall  `json:"tool_calls"`
+					} `json:"delta"`
+					FinishReason *string `json:"finish_reason"`
 				} `json:"choices"`
 			}
 			if err := json.Unmarshal([]byte(payload), &event); err != nil {
@@ -199,10 +213,25 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 				continue
 			}
 			c := event.Choices[0]
-			ch <- ai.StreamChunk{
-				Delta:        c.Delta.Content,
-				FinishReason: c.FinishReason,
+			chunk := ai.StreamChunk{}
+			if c.Delta.Content != nil {
+				chunk.Delta = *c.Delta.Content
 			}
+			if len(c.Delta.ToolCalls) > 0 {
+				tc := c.Delta.ToolCalls[0]
+				chunk.ToolCallDelta = &ai.ToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					Function: ai.ToolFunction{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				}
+			}
+			if c.FinishReason != nil {
+				chunk.FinishReason = *c.FinishReason
+			}
+			ch <- chunk
 		}
 	}()
 
