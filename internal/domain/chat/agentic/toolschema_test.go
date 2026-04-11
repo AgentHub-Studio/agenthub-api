@@ -900,3 +900,12 @@ func TestBuildTools_NoInputSchema_DerivedFromConfig(t *testing.T) {
 	// Derived schema should contain "city" from URL template.
 	assert.Contains(t, string(tools[idx].InputSchema), `"city"`, "schema must be derived from URL template")
 }
+
+// TestMemoryStoreTool_DescriptionContainsDisclaimer verifies the TTL/hallucination
+// disclaimer is present in the memory_store tool description (ACT-F3-17 / P-C339-1).
+func TestMemoryStoreTool_DescriptionContainsDisclaimer(t *testing.T) {
+	tool := agentic.ExportedMemoryStoreTool()
+	assert.Contains(t, tool.Description, "IMPORTANT")
+	assert.Contains(t, tool.Description, "expire")
+	assert.Contains(t, tool.Description, "fabricate")
+}

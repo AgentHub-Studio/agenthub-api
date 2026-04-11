@@ -661,17 +661,26 @@ func documentSearchTool(kbs []knowledgebase.KnowledgeBase) LLMTool {
 }
 
 // memoryStoreTool returns the builtin memory_store tool definition.
+// P-C339-1 (ACT-F3-17): description includes TTL notice and hallucination disclaimer
+// so the LLM does not claim to remember things it has not explicitly stored.
 func memoryStoreTool() LLMTool {
 	return LLMTool{
-		Name:        "memory_store",
-		Builtin:     true,
-		Description: "Store a piece of information for long-term recall across sessions. Use this to remember important facts, preferences, or decisions the user shares.",
+		Name:    "memory_store",
+		Builtin: true,
+		Description: `Store a piece of information for long-term recall across sessions.
+Use this to remember important facts, preferences, or decisions the user shares.
+
+IMPORTANT:
+- Only store information the user has EXPLICITLY told you — never infer or fabricate facts.
+- Stored memories are best-effort; they may expire or be evicted over time.
+- Do NOT claim to "remember" something unless you actually called this tool in a prior turn.
+- Confirm to the user when you have stored something (e.g. "I've saved that preference.").`,
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"content": {
 					"type": "string",
-					"description": "The information to remember"
+					"description": "The exact information to remember, as stated by the user"
 				},
 				"category": {
 					"type": "string",
