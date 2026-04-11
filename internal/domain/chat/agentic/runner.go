@@ -1522,6 +1522,12 @@ func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID) ([]ai.Mes
 		return nil, "", fmt.Errorf("runner: load history: %w", err)
 	}
 
+	// DX-01-M (ACT-F3-06): sliding-window cap — keep only the most recent N messages
+	// to prevent enormous prompts in long-running sessions.
+	if r.config.MaxHistoryMessages > 0 && len(chatMsgs) > r.config.MaxHistoryMessages {
+		chatMsgs = chatMsgs[len(chatMsgs)-r.config.MaxHistoryMessages:]
+	}
+
 	// Time-based tool result eviction: if the session has been idle longer
 	// than the cache TTL, clear old tool results before they waste tokens
 	// on the now-cold cache miss. Fire before the request, not after.

@@ -148,6 +148,12 @@ type RunConfig struct {
 	// LRU cache. Cacheable tools (read-only, idempotent) have their results cached
 	// to avoid redundant re-execution. Default 64. Set to 0 to disable caching.
 	ToolCacheCapacity int `json:"toolCacheCapacity"`
+
+	// MaxHistoryMessages is the maximum number of messages loaded from history.
+	// When the session has more messages than this limit, only the most recent N
+	// are used (sliding window). Default 200. Zero means no limit.
+	// DX-01-M (ACT-F3-06): prevents enormous prompts for long-running sessions.
+	MaxHistoryMessages int `json:"maxHistoryMessages"`
 }
 
 // RunGates captures immutable, pre-computed boolean flags and derived values
@@ -219,6 +225,7 @@ func DefaultRunConfig() RunConfig {
 		StallThreshold:             45 * time.Second,
 		ToolCacheCapacity:          64,
 		DenialEscalationThreshold: 3,
+		MaxHistoryMessages:        200,
 	}
 }
 

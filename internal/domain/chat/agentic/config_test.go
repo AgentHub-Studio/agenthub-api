@@ -79,6 +79,7 @@ func TestDefaultRunConfig_NewFields(t *testing.T) {
 	assert.Equal(t, 0.0, cfg.MaxBudgetUSD, "default budget should be 0 (no limit)")
 	assert.Equal(t, 50000, cfg.MaxToolResultChars)
 	assert.Equal(t, 5, cfg.RetryMaxAttempts)
+	assert.Equal(t, 200, cfg.MaxHistoryMessages, "default history window should be 200")
 }
 
 func TestRunConfigFromModelConfig_NewFieldsOverride(t *testing.T) {

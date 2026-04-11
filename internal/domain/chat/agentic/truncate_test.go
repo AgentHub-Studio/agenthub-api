@@ -1,11 +1,17 @@
 package agentic
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 )
 
 // Tests for truncateToolResult (ACT-F2-27: structured truncation marker).
@@ -62,4 +68,75 @@ func TestTruncate_VerySmallMax_NoNegativeSlice(t *testing.T) {
 		out := truncateToolResult(result, 5)
 		assert.Contains(t, string(out.Output), "TRUNCATED")
 	})
+}
+
+// --- ACT-F3-06: sliding window de histórico (DX-01-M) ---
+
+// mockHistoryLoader implements HistoryLoader and MessagePersister for tests.
+type mockHistoryLoader struct {
+	msgs []chat.ChatMessage
+}
+
+func (m *mockHistoryLoader) FindAllMessages(_ context.Context, _ uuid.UUID) ([]chat.ChatMessage, error) {
+	return m.msgs, nil
+}
+
+func (m *mockHistoryLoader) CreateMessage(_ context.Context, msg chat.ChatMessage) (chat.ChatMessage, error) {
+	msg.ID = uuid.New()
+	m.msgs = append(m.msgs, msg)
+	return msg, nil
+}
+
+func makeChatMessages(n int) []chat.ChatMessage {
+	msgs := make([]chat.ChatMessage, n)
+	for i := range msgs {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		msgs[i] = chat.ChatMessage{
+			ID:        uuid.New(),
+			Role:      role,
+			Content:   "message",
+			CreatedAt: time.Now(),
+		}
+	}
+	return msgs
+}
+
+func TestLoadHistory_SlidingWindow_TruncatesOldMessages(t *testing.T) {
+	cfg := DefaultRunConfig()
+	cfg.MaxHistoryMessages = 5
+
+	history := &mockHistoryLoader{msgs: makeChatMessages(10)}
+	runner := &Runner{config: cfg, history: history}
+
+	msgs, _, err := runner.loadHistory(context.Background(), uuid.New())
+	require.NoError(t, err)
+	// After filtering (no system/compact messages in mock), should have ≤ 5 messages.
+	assert.LessOrEqual(t, len(msgs), 5)
+}
+
+func TestLoadHistory_BelowLimit_ReturnsAll(t *testing.T) {
+	cfg := DefaultRunConfig()
+	cfg.MaxHistoryMessages = 200
+
+	history := &mockHistoryLoader{msgs: makeChatMessages(4)}
+	runner := &Runner{config: cfg, history: history}
+
+	msgs, _, err := runner.loadHistory(context.Background(), uuid.New())
+	require.NoError(t, err)
+	assert.Equal(t, 4, len(msgs))
+}
+
+func TestLoadHistory_ZeroLimit_NoTruncation(t *testing.T) {
+	cfg := DefaultRunConfig()
+	cfg.MaxHistoryMessages = 0 // no limit
+
+	history := &mockHistoryLoader{msgs: makeChatMessages(300)}
+	runner := &Runner{config: cfg, history: history}
+
+	msgs, _, err := runner.loadHistory(context.Background(), uuid.New())
+	require.NoError(t, err)
+	assert.Equal(t, 300, len(msgs))
 }
