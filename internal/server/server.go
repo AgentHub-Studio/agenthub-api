@@ -98,7 +98,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	})
 
 	// Instantiate domain handlers.
-	tenantHandler := tenant.NewHandler(tenant.NewService(tenant.NewRepository(pool), provisioner))
+	presetSeeder := llmpreset.NewSeeder(pool)
+	tenantHandler := tenant.NewHandler(tenant.NewService(tenant.NewRepository(pool), provisioner, presetSeeder))
 	userHandler := user.NewHandler(user.NewService(keycloakClient))
 	settingsRepo := settings.NewRepository(pool)
 	settingsHandler := settings.NewHandler(settings.NewService(settingsRepo))

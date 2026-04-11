@@ -15,13 +15,23 @@ import (
 // Up applies all pending migrations from migrationsPath to the given schema.
 // migrationsPath is a filesystem path e.g. "migrations/public".
 // ErrNoChange is not treated as an error.
-func Up(ctx context.Context, pool *pgxpool.Pool, schema, migrationsPath string) error {
+//
+// When migrationsTable is empty, "schema_migrations" is used (default).
+// Callers that run multiple independent migration sequences against the same
+// schema (e.g. tenant schemas + ah_core seed migrations) MUST pass a distinct
+// table name to avoid version tracking conflicts.
+func Up(ctx context.Context, pool *pgxpool.Pool, schema, migrationsPath string, opts ...string) error {
+	migrationsTable := "schema_migrations"
+	if len(opts) > 0 && opts[0] != "" {
+		migrationsTable = opts[0]
+	}
+
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
 
 	driver, err := postgres.WithInstance(db, &postgres.Config{
 		SchemaName:      schema,
-		MigrationsTable: "schema_migrations",
+		MigrationsTable: migrationsTable,
 	})
 	if err != nil {
 		return fmt.Errorf("migrate: create driver for schema %q: %w", schema, err)

@@ -10,4 +10,4 @@ VALUES
     ('GPT-4o Mini',           'openai',     'gpt-4o-mini',                4096, 0.7, TRUE),
     ('OpenRouter GPT-OSS-20b','openrouter', 'openai/gpt-oss-20b',         4096, 0.7, FALSE),
     ('Llama 3.3 70B (Ollama)','ollama',     'llama3.3:70b',               4096, 0.7, FALSE)
-ON CONFLICT (name) DO NOTHING;
+ON CONFLICT (tenant_id, name) DO NOTHING;

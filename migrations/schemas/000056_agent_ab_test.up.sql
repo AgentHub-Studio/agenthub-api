@@ -1,7 +1,24 @@
 -- Agent A/B Test: routes a fraction of sessions to an alternate agent version.
 -- Stored in ah_{tenantID}.agent_ab_test — no tenant_id column.
 
-CREATE TABLE agent_ab_test (
+-- Ensure agent_version exists (was missing from earlier migrations).
+CREATE TABLE IF NOT EXISTS agent_version (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id        UUID        NOT NULL REFERENCES agent(id) ON DELETE CASCADE,
+    version_number  INT         NOT NULL,
+    status          VARCHAR(20) NOT NULL DEFAULT 'DRAFT',
+    description     TEXT        NOT NULL DEFAULT '',
+    definition_json JSONB,
+    config_json     JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    published_at    TIMESTAMPTZ,
+    UNIQUE (agent_id, version_number)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_version_agent  ON agent_version(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_version_status ON agent_version(status);
+
+CREATE TABLE IF NOT EXISTS agent_ab_test (
     id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     agent_id      UUID        NOT NULL REFERENCES agent(id) ON DELETE CASCADE,
     name          VARCHAR(255) NOT NULL,
@@ -22,7 +39,7 @@ CREATE TABLE agent_ab_test (
 );
 
 -- Records each session's variant assignment for later analysis.
-CREATE TABLE agent_ab_assignment (
+CREATE TABLE IF NOT EXISTS agent_ab_assignment (
     id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     test_id    UUID        NOT NULL REFERENCES agent_ab_test(id) ON DELETE CASCADE,
     session_id UUID        NOT NULL,
@@ -31,7 +48,7 @@ CREATE TABLE agent_ab_assignment (
     assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_ab_test_agent_id  ON agent_ab_test(agent_id);
-CREATE INDEX idx_ab_test_status    ON agent_ab_test(status);
-CREATE INDEX idx_ab_assignment_test ON agent_ab_assignment(test_id);
-CREATE INDEX idx_ab_assignment_session ON agent_ab_assignment(session_id);
+CREATE INDEX IF NOT EXISTS idx_ab_test_agent_id  ON agent_ab_test(agent_id);
+CREATE INDEX IF NOT EXISTS idx_ab_test_status    ON agent_ab_test(status);
+CREATE INDEX IF NOT EXISTS idx_ab_assignment_test ON agent_ab_assignment(test_id);
+CREATE INDEX IF NOT EXISTS idx_ab_assignment_session ON agent_ab_assignment(session_id);

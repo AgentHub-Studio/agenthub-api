@@ -51,7 +51,10 @@ func main() {
 	// Apply ah_core schema migrations (global, runs once).
 	// Non-fatal: if the migration directory does not exist in this build, skip.
 	slog.Info("running ah_core schema migrations")
-	if err := commonsmigrate.Up(ctx, pool, "ah_core", "/migrations/ah_core"); err != nil {
+	// "ah_core_seed_migrations" is a separate tracking table so that the ah_core
+	// seed migrations (tools/skills/agents) do not conflict with the tenant
+	// schema_migrations table that MigrateAllTenants manages for ah_core.
+	if err := commonsmigrate.Up(ctx, pool, "ah_core", "/migrations/ah_core", "ah_core_seed_migrations"); err != nil {
 		slog.Warn("ah_core migrations skipped or failed — platform tools may be unavailable", "err", err)
 	}
 

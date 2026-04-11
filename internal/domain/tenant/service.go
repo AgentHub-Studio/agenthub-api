@@ -22,6 +22,7 @@ type Service interface {
 type service struct {
 	repo               Repository
 	provisioningClient ProvisioningClient
+	presetSeeder       PresetSeeder
 }
 
 // ProvisioningClient is a placeholder interface for Keycloak realm provisioning.
@@ -30,9 +31,14 @@ type ProvisioningClient interface {
 	ProvisionRealm(ctx context.Context, tenantID string, tenantName string) error
 }
 
+// PresetSeeder seeds default LLM presets for a newly-created tenant.
+type PresetSeeder interface {
+	SeedDefaults(ctx context.Context, tenantID string) error
+}
+
 // NewService creates a new tenant Service.
-func NewService(repo Repository, pc ProvisioningClient) Service {
-	return &service{repo: repo, provisioningClient: pc}
+func NewService(repo Repository, pc ProvisioningClient, ps PresetSeeder) Service {
+	return &service{repo: repo, provisioningClient: pc, presetSeeder: ps}
 }
 
 func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantResponse, error) {
@@ -62,6 +68,11 @@ func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantRe
 			_ = s.repo.UpdateStatus(ctx, created.ID, StatusProvisioningFailed)
 			created.Status = StatusProvisioningFailed
 		}
+	}
+
+	// Seed default LLM presets; non-fatal — log only.
+	if s.presetSeeder != nil {
+		_ = s.presetSeeder.SeedDefaults(ctx, created.ID)
 	}
 
 	return ResponseFrom(created), nil
