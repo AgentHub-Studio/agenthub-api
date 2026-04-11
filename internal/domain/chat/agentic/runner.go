@@ -1855,13 +1855,19 @@ func resolveToolResultLimit(toolName string, toolLimits map[string]int, globalMa
 
 // truncateToolResult truncates the output if it exceeds maxChars.
 // Returns the result unmodified if maxChars is 0 or output is within limit.
+// When truncated, appends a structured marker so the LLM knows the data is
+// incomplete and can inform the user. P-C125-1, P-C150-2 (ACT-F2-27).
 func truncateToolResult(result ToolExecResult, maxChars int) ToolExecResult {
 	if maxChars <= 0 || len(result.Output) <= maxChars {
 		return result
 	}
 	originalLen := len(result.Output)
-	note := fmt.Sprintf("\n[truncated from %d chars]", originalLen)
-	result.Output = append(result.Output[:maxChars-len(note)], []byte(note)...)
+	note := fmt.Sprintf("\n[TRUNCATED: showing first %d of %d chars — full result available on request]", maxChars, originalLen)
+	shown := maxChars - len(note)
+	if shown < 0 {
+		shown = 0
+	}
+	result.Output = append(result.Output[:shown], []byte(note)...)
 	return result
 }
 
