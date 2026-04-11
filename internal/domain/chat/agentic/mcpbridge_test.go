@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -269,4 +270,77 @@ func TestMCPToolBridge_WithAllowedServerNames_AllFiltered(t *testing.T) {
 	tools, err := bridge.ListTools(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, tools)
+}
+
+// --- TR-01-TASK-35: CachedMCPClient 60s TTL (P-C274-1) ---
+
+type countingMCPClient struct {
+	mockMCPClient
+	listCalls int
+}
+
+func (m *countingMCPClient) ListTools(ctx context.Context, tenantID string) ([]agentic.MCPToolInfo, error) {
+	m.listCalls++
+	return m.mockMCPClient.ListTools(ctx, tenantID)
+}
+
+func TestCachedMCPClient_CachesListTools(t *testing.T) {
+	inner := &countingMCPClient{
+		mockMCPClient: mockMCPClient{
+			tools: []agentic.MCPToolInfo{{ServerName: "github", Name: "list_repos"}},
+		},
+	}
+	cached := agentic.NewCachedMCPClient(inner, 5*time.Second)
+
+	_, err := cached.ListTools(context.Background(), "tenant-a")
+	require.NoError(t, err)
+	_, err = cached.ListTools(context.Background(), "tenant-a")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, inner.listCalls, "second call should hit cache")
+}
+
+func TestCachedMCPClient_SeparateCachePerTenant(t *testing.T) {
+	inner := &countingMCPClient{
+		mockMCPClient: mockMCPClient{
+			tools: []agentic.MCPToolInfo{{ServerName: "fs", Name: "read"}},
+		},
+	}
+	cached := agentic.NewCachedMCPClient(inner, 5*time.Second)
+
+	_, _ = cached.ListTools(context.Background(), "tenant-a")
+	_, _ = cached.ListTools(context.Background(), "tenant-b")
+
+	assert.Equal(t, 2, inner.listCalls, "each tenant should be cached independently")
+}
+
+func TestCachedMCPClient_Invalidate_ForcesRefresh(t *testing.T) {
+	inner := &countingMCPClient{
+		mockMCPClient: mockMCPClient{
+			tools: []agentic.MCPToolInfo{{ServerName: "fs", Name: "read"}},
+		},
+	}
+	cached := agentic.NewCachedMCPClient(inner, 5*time.Second)
+
+	_, _ = cached.ListTools(context.Background(), "tenant-a")
+	cached.Invalidate("tenant-a")
+	_, _ = cached.ListTools(context.Background(), "tenant-a")
+
+	assert.Equal(t, 2, inner.listCalls, "invalidate should force fresh fetch")
+}
+
+func TestCachedMCPClient_CallToolNotCached(t *testing.T) {
+	inner := &countingMCPClient{
+		mockMCPClient: mockMCPClient{
+			callResp: []byte(`"ok"`),
+		},
+	}
+	cached := agentic.NewCachedMCPClient(inner, 5*time.Second)
+
+	// CallTool should forward directly to the inner client (no caching).
+	_, _ = cached.CallTool(context.Background(), "tenant", "server", "tool", nil)
+	_, _ = cached.CallTool(context.Background(), "tenant", "server", "tool2", nil)
+
+	// Both calls reached the inner client (last call was tool2).
+	assert.Equal(t, "tool2", inner.lastCallTool, "CallTool should forward directly")
 }

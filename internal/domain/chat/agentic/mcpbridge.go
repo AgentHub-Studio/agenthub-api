@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -257,4 +258,72 @@ func (c *HTTPMCPClient) CallTool(ctx context.Context, tenantID, serverName, tool
 	}
 
 	return result.Output, nil
+}
+
+// --- CachedMCPClient ---
+
+// mcpToolCacheEntry holds a cached ListTools result with an expiry timestamp.
+type mcpToolCacheEntry struct {
+	tools     []MCPToolInfo
+	expiresAt time.Time
+}
+
+// CachedMCPClient wraps an MCPClientService and caches ListTools results per tenant.
+// CallTool is always forwarded without caching (side effects must not be cached).
+// P-C274-1: 60s TTL prevents hammering the mcp-client-runtime on every LLM turn.
+type CachedMCPClient struct {
+	inner MCPClientService
+	ttl   time.Duration
+	mu    sync.Mutex
+	cache map[string]mcpToolCacheEntry // key: tenantID
+}
+
+// NewCachedMCPClient wraps inner with a tool-listing cache of the given TTL.
+// If ttl is zero, 60 seconds is used.
+func NewCachedMCPClient(inner MCPClientService, ttl time.Duration) *CachedMCPClient {
+	if ttl <= 0 {
+		ttl = 60 * time.Second
+	}
+	return &CachedMCPClient{
+		inner: inner,
+		ttl:   ttl,
+		cache: make(map[string]mcpToolCacheEntry),
+	}
+}
+
+// ListTools returns cached results if still fresh, otherwise fetches from the wrapped client.
+func (c *CachedMCPClient) ListTools(ctx context.Context, tenantID string) ([]MCPToolInfo, error) {
+	c.mu.Lock()
+	entry, ok := c.cache[tenantID]
+	c.mu.Unlock()
+
+	if ok && time.Now().Before(entry.expiresAt) {
+		return entry.tools, nil
+	}
+
+	tools, err := c.inner.ListTools(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.cache[tenantID] = mcpToolCacheEntry{
+		tools:     tools,
+		expiresAt: time.Now().Add(c.ttl),
+	}
+	c.mu.Unlock()
+
+	return tools, nil
+}
+
+// Invalidate removes the cached entry for the given tenant, forcing a fresh fetch next time.
+func (c *CachedMCPClient) Invalidate(tenantID string) {
+	c.mu.Lock()
+	delete(c.cache, tenantID)
+	c.mu.Unlock()
+}
+
+// CallTool is forwarded directly to the underlying client (no caching).
+func (c *CachedMCPClient) CallTool(ctx context.Context, tenantID, serverName, toolName string, input json.RawMessage) (json.RawMessage, error) {
+	return c.inner.CallTool(ctx, tenantID, serverName, toolName, input)
 }
