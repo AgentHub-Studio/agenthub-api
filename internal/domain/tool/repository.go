@@ -21,6 +21,9 @@ var ErrNotFound = errors.New("tool: not found")
 // ErrAlreadyBound is returned when a tool is already bound to a skill.
 var ErrAlreadyBound = errors.New("tool: already bound to skill")
 
+// ErrDuplicateName is returned when a tool with the same name already exists (P-C338-1).
+var ErrDuplicateName = errors.New("tool: a tool with this name already exists")
+
 // ToolRepository defines the persistence interface for Tool.
 type ToolRepository interface {
 	List(ctx context.Context, req pagination.PageRequest, toolType string) ([]Tool, int64, error)
@@ -138,7 +141,14 @@ func (r *Repository) Create(ctx context.Context, t Tool) (Tool, error) {
 		t.ShouldDefer, t.IsDestructive, t.SearchHint, t.AlwaysLoad,
 		t.ConcurrencySafe, t.MaxResultChars, t.InterruptBehavior, t.IsSearchOrRead,
 	)
-	return scanTool(row)
+	result, err := scanTool(row)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return Tool{}, ErrDuplicateName
+		}
+	}
+	return result, err
 }
 
 // GetByID returns a tool by ID.
@@ -205,6 +215,10 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, t Tool) (Tool, er
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Tool{}, ErrNotFound
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return Tool{}, ErrDuplicateName
 		}
 		return Tool{}, err
 	}

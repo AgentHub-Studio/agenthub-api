@@ -1,0 +1,1 @@
+ALTER TABLE tool DROP CONSTRAINT IF EXISTS uq_tool_name;

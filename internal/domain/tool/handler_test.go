@@ -19,8 +19,10 @@ import (
 
 // mockToolSvc satisfies the private toolService interface in tool.Handler.
 type mockToolSvc struct {
-	tools    map[uuid.UUID]tool.Response
-	bindings map[uuid.UUID][]tool.SkillToolResponse
+	tools                map[uuid.UUID]tool.Response
+	bindings             map[uuid.UUID][]tool.SkillToolResponse
+	createForceDuplicate string    // if non-empty, Create returns ErrDuplicateName for this name
+	updateForceDuplicate uuid.UUID // if non-zero, Update returns ErrDuplicateName for this ID
 }
 
 func newMockToolSvc() *mockToolSvc {
@@ -39,6 +41,9 @@ func (m *mockToolSvc) List(_ context.Context, req pagination.PageRequest, _ stri
 }
 
 func (m *mockToolSvc) Create(_ context.Context, req tool.CreateRequest) (tool.Response, error) {
+	if m.createForceDuplicate != "" && req.Name == m.createForceDuplicate {
+		return tool.Response{}, tool.ErrDuplicateName
+	}
 	id := uuid.New()
 	resp := tool.Response{ID: id, Name: req.Name, Type: req.Type, Description: req.Description}
 	m.tools[id] = resp
@@ -54,6 +59,9 @@ func (m *mockToolSvc) GetByID(_ context.Context, id uuid.UUID) (tool.Response, e
 }
 
 func (m *mockToolSvc) Update(_ context.Context, id uuid.UUID, req tool.UpdateRequest) (tool.Response, error) {
+	if m.updateForceDuplicate != uuid.Nil && id == m.updateForceDuplicate {
+		return tool.Response{}, tool.ErrDuplicateName
+	}
 	t, ok := m.tools[id]
 	if !ok {
 		return tool.Response{}, tool.ErrNotFound
@@ -375,4 +383,44 @@ func TestToolHandler_UnbindFromSkill_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestToolHandler_Create_DuplicateName verifies that duplicate name returns 422
+// with a user-friendly error (P-C338-1 / ACT-F3-15).
+func TestToolHandler_Create_DuplicateName(t *testing.T) {
+	r, svc := setupTool()
+	// Pre-seed a tool with the same name so mock returns ErrDuplicateName.
+	existingID := uuid.New()
+	svc.tools[existingID] = tool.Response{ID: existingID, Name: "duplicate-tool", Type: "HTTP"}
+
+	body, _ := json.Marshal(tool.CreateRequest{Name: "duplicate-tool", Type: "HTTP", Config: json.RawMessage(`{"url":"http://example.com"}`)})
+	req := httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Override Create to return ErrDuplicateName for this name.
+	svc.createForceDuplicate = "duplicate-tool"
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Contains(t, resp["error"], "already exists")
+}
+
+// TestToolHandler_Update_DuplicateName verifies that renaming to an existing tool name returns 422.
+func TestToolHandler_Update_DuplicateName(t *testing.T) {
+	r, svc := setupTool()
+	id := uuid.New()
+	svc.tools[id] = tool.Response{ID: id, Name: "original-tool", Type: "HTTP"}
+	svc.updateForceDuplicate = id
+
+	name := "duplicate-tool"
+	body, _ := json.Marshal(tool.UpdateRequest{Name: &name})
+	req := httptest.NewRequest(http.MethodPatch, "/api/tools/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }

@@ -97,6 +97,11 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.Create(r.Context(), req)
 	if err != nil {
+		if errors.Is(err, ErrDuplicateName) {
+			// P-C338-1 (ACT-F3-15): return 422 with friendly message for duplicate names.
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -136,6 +141,10 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "tool not found")
+			return
+		}
+		if errors.Is(err, ErrDuplicateName) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
