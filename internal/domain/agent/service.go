@@ -4,12 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+// htmlDangerousPattern matches dangerous HTML elements including their content.
+// These are stripped completely (tag + content) because their inner text is executable.
+var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
+
+// htmlTagPattern matches any remaining HTML tag including attributes.
+var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
+
+// stripHTML removes all HTML from s.
+// Dangerous elements (script, style, etc.) are removed including their content.
+// Other tags are stripped but their text content is preserved.
+// P-C280-1: prevents stored XSS in name/description fields.
+func stripHTML(s string) string {
+	// Step 1: remove dangerous elements including their inner text.
+	s = htmlDangerousPattern.ReplaceAllString(s, "")
+	// Step 2: strip remaining HTML tags, keeping their text content.
+	s = htmlTagPattern.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
 
 // Service defines business logic operations for Agent.
 type Service interface {
@@ -71,6 +91,9 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if err := validateModelConfig(req.ModelConfig); err != nil {
 		return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidModelConfig, err)
 	}
+	// P-C280-1: strip HTML from user-supplied text fields before persisting.
+	req.Name = stripHTML(req.Name)
+	req.Description = stripHTML(req.Description)
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)
@@ -119,13 +142,15 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		return AgentResponse{}, err
 	}
 	if req.Name != nil {
-		a.Name = *req.Name
+		// P-C280-1: strip HTML from user-supplied text fields.
+		a.Name = stripHTML(*req.Name)
 	}
 	if req.Slug != nil {
 		a.Slug = *req.Slug
 	}
 	if req.Description != nil {
-		a.Description = *req.Description
+		// P-C280-1: strip HTML from user-supplied text fields.
+		a.Description = stripHTML(*req.Description)
 	}
 	if req.SystemPrompt != nil {
 		a.SystemPrompt = req.SystemPrompt

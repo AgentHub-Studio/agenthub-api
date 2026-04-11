@@ -623,3 +623,51 @@ func TestPublish_NotFound_ReturnsNotFoundError(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, agent.ErrNotFound)
 }
+
+// --- TR-01-TASK-38: sanitizar HTML em campos de texto (P-C280-1) ---
+
+func TestCreate_StripHTMLFromName(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name: "<script>alert('xss')</script>My Agent",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "My Agent", resp.Name)
+}
+
+func TestCreate_StripHTMLFromDescription(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name:        "Agent",
+		Description: `<b>Bold</b> description with <a href="evil">link</a>`,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Bold description with link", resp.Description)
+}
+
+func TestUpdate_StripHTMLFromName(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Clean"})
+
+	malicious := `<img src=x onerror="alert(1)">Updated`
+	resp, err := svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{Name: &malicious})
+	require.NoError(t, err)
+	assert.Equal(t, "Updated", resp.Name)
+}
+
+func TestUpdate_StripHTMLFromDescription(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent"})
+
+	desc := "<p>Hello <strong>world</strong></p>"
+	resp, err := svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{Description: &desc})
+	require.NoError(t, err)
+	assert.Equal(t, "Hello world", resp.Description)
+}
+
+func TestCreate_PlainTextName_Unchanged(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{})
+	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "My Normal Agent"})
+	require.NoError(t, err)
+	assert.Equal(t, "My Normal Agent", resp.Name)
+}
