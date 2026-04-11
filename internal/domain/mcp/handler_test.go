@@ -34,6 +34,16 @@ func (m *mockMCPSvc) List(_ context.Context) ([]mcp.McpServerConfigResponse, err
 	return items, nil
 }
 
+func (m *mockMCPSvc) ListAutoStart(_ context.Context) ([]mcp.McpServerConfigResponse, error) {
+	var items []mcp.McpServerConfigResponse
+	for _, c := range m.configs {
+		if c.AutoStart {
+			items = append(items, c)
+		}
+	}
+	return items, nil
+}
+
 func (m *mockMCPSvc) Create(_ context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error) {
 	id := uuid.New()
 	resp := mcp.McpServerConfigResponse{
@@ -164,4 +174,39 @@ func TestMCPHandler_Delete_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// Bootstrap endpoint tests (ACT-F3-12 / P-C351-1).
+
+func TestMCPHandler_Bootstrap_ReturnsAutoStartConfigs(t *testing.T) {
+	r, svc := setupMCP()
+	id := uuid.New()
+	svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "auto", AutoStart: true}
+	otherID := uuid.New()
+	svc.configs[otherID] = mcp.McpServerConfigResponse{ID: otherID, Name: "manual", AutoStart: false}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs/bootstrap", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var items []mcp.McpServerConfigResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&items))
+	require.Len(t, items, 1)
+	assert.Equal(t, "auto", items[0].Name)
+}
+
+func TestMCPHandler_Bootstrap_EmptyWhenNoAutoStart(t *testing.T) {
+	r, svc := setupMCP()
+	id := uuid.New()
+	svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "manual", AutoStart: false}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs/bootstrap", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var items []mcp.McpServerConfigResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&items))
+	assert.Len(t, items, 0)
 }

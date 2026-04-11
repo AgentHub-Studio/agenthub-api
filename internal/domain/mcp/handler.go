@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -16,6 +17,7 @@ import (
 // mcpService defines the methods used by Handler.
 type mcpService interface {
 	List(ctx context.Context) ([]McpServerConfigResponse, error)
+	ListAutoStart(ctx context.Context) ([]McpServerConfigResponse, error)
 	Create(ctx context.Context, req CreateRequest) (McpServerConfigResponse, error)
 	GetByID(ctx context.Context, id uuid.UUID) (McpServerConfigResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (McpServerConfigResponse, error)
@@ -45,6 +47,9 @@ func NewHandler(svc mcpService) *Handler {
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/mcp-server-configs", h.list)
 	r.Post("/api/mcp-server-configs", h.create)
+	// Bootstrap endpoint: requires mcp-client-runtime role (P-C351-1 / ACT-F3-12).
+	// Returns all auto-start configs for the runtime service to load at startup.
+	r.With(middleware.RequireRole("mcp-client-runtime")).Get("/api/mcp-server-configs/bootstrap", h.bootstrap)
 	r.Get("/api/mcp-server-configs/{id}", h.getByID)
 	r.Put("/api/mcp-server-configs/{id}", h.update)
 	r.Patch("/api/mcp-server-configs/{id}", h.update)
@@ -207,6 +212,17 @@ func (h *Handler) listTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.JSON(w, http.StatusOK, resp)
+}
+
+// bootstrap returns all auto-start configs for the mcp-client-runtime service.
+// Protected by RequireRole("mcp-client-runtime") — only service accounts may call this.
+func (h *Handler) bootstrap(w http.ResponseWriter, r *http.Request) {
+	items, err := h.svc.ListAutoStart(r.Context())
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "failed to load bootstrap configs")
+		return
+	}
+	respond.JSON(w, http.StatusOK, items)
 }
 
 func (h *Handler) getConnectURL(w http.ResponseWriter, r *http.Request) {
