@@ -33,6 +33,10 @@ type Repository interface {
 	// (slug='agenthub-assistant', PUBLISHED). Falls back to any PUBLISHED agent.
 	// Returns nil, nil when no published agent exists.
 	FindDefaultAgentID(ctx context.Context) (*uuid.UUID, error)
+	// FindAgentsForRouting returns all PUBLISHED agents with lightweight routing
+	// metadata (id, name, slug, description). Used by the smart agent router to
+	// pick the best agent for a given user message without loading full configs.
+	FindAgentsForRouting(ctx context.Context) ([]AgentRoutingInfo, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	FindMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) ([]ChatMessage, int64, error)
 	CreateMessage(ctx context.Context, m ChatMessage) (ChatMessage, error)
@@ -292,6 +296,35 @@ func (r *postgresRepository) FindDefaultAgentID(ctx context.Context) (*uuid.UUID
 		return nil, fmt.Errorf("chat: find default agent: %w", err)
 	}
 	return &id, nil
+}
+
+func (r *postgresRepository) FindAgentsForRouting(ctx context.Context) ([]AgentRoutingInfo, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT id, name, slug, COALESCE(description, '')
+		 FROM agent
+		 WHERE status = 'PUBLISHED'
+		 ORDER BY (slug = 'agenthub-assistant') DESC, created_at ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("chat: find agents for routing: %w", err)
+	}
+	defer rows.Close()
+
+	var agents []AgentRoutingInfo
+	for rows.Next() {
+		var a AgentRoutingInfo
+		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Description); err != nil {
+			return nil, fmt.Errorf("chat: scan routing agent: %w", err)
+		}
+		agents = append(agents, a)
+	}
+	return agents, rows.Err()
 }
 
 func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) ([]ChatMessage, int64, error) {

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -291,17 +293,17 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		return nil, fmt.Errorf("chat service: get session: %w", err)
 	}
 	if session.AgentID == nil {
-		defaultID, err := s.repo.FindDefaultAgentID(ctx)
+		routed, err := s.routeAgent(ctx, userMessage)
 		if err != nil {
-			return nil, fmt.Errorf("chat service: find default agent: %w", err)
+			return nil, fmt.Errorf("chat service: route agent: %w", err)
 		}
-		if defaultID == nil {
+		if routed == nil {
 			return nil, fmt.Errorf("chat service: session has no agent and no published agent exists")
 		}
-		if err := s.repo.UpdateSessionAgent(ctx, sessionID, *defaultID); err != nil {
-			return nil, fmt.Errorf("chat service: bind default agent: %w", err)
+		if err := s.repo.UpdateSessionAgent(ctx, sessionID, *routed); err != nil {
+			return nil, fmt.Errorf("chat service: bind routed agent: %w", err)
 		}
-		session.AgentID = defaultID
+		session.AgentID = routed
 	}
 
 	// P-C178-2: persist user message BEFORE starting the run so it is never lost
@@ -340,4 +342,93 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		ModelConfigSnapshot:  session.ModelConfigSnapshot,
 		SkillIDsSnapshot:     skillIDsSnapshot,
 	})
+}
+
+// routeAgent selects the best published agent for the given user message.
+// When only one agent exists it is returned immediately. When multiple agents
+// are available, each is scored by keyword overlap between the user message
+// and the agent's name + description. The highest-scoring agent wins; ties
+// are broken by the natural ordering returned by FindAgentsForRouting
+// (agenthub-assistant slug first, then oldest created_at).
+func (s *Service) routeAgent(ctx context.Context, userMessage string) (*uuid.UUID, error) {
+	agents, err := s.repo.FindAgentsForRouting(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(agents) == 0 {
+		return nil, nil
+	}
+	if len(agents) == 1 {
+		id := agents[0].ID
+		return &id, nil
+	}
+
+	best := selectBestAgent(agents, userMessage)
+	return &best, nil
+}
+
+// selectBestAgent scores each agent by the number of tokens from the user
+// message that appear in the agent's name or description (case-insensitive).
+// Returns the ID of the highest-scoring agent; falls back to the first entry
+// (which FindAgentsForRouting orders as agenthub-assistant first).
+func selectBestAgent(agents []AgentRoutingInfo, userMessage string) uuid.UUID {
+	tokens := tokenize(userMessage)
+	if len(tokens) == 0 {
+		return agents[0].ID
+	}
+
+	bestIdx := 0
+	bestScore := -1
+
+	for i, a := range agents {
+		corpus := strings.ToLower(a.Name + " " + a.Description)
+		score := 0
+		for _, tok := range tokens {
+			if strings.Contains(corpus, tok) {
+				score++
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+
+	return agents[bestIdx].ID
+}
+
+// tokenize splits text into lowercase alphabetic tokens of at least 3 chars,
+// filtering out common stop words that carry no routing signal.
+func tokenize(text string) []string {
+	stop := map[string]bool{
+		"the": true, "a": true, "an": true, "and": true, "or": true,
+		"is": true, "it": true, "to": true, "of": true, "in": true,
+		"for": true, "on": true, "with": true, "me": true, "my": true,
+		"can": true, "you": true, "how": true, "what": true, "that": true,
+		"por": true, "para": true, "que": true, "com": true, "uma": true,
+		"um": true, "de": true, "do": true, "da": true, "em": true,
+	}
+
+	var tokens []string
+	current := strings.Builder{}
+
+	flush := func() {
+		if current.Len() >= 3 {
+			tok := current.String()
+			if !stop[tok] {
+				tokens = append(tokens, tok)
+			}
+		}
+		current.Reset()
+	}
+
+	for _, r := range strings.ToLower(text) {
+		if unicode.IsLetter(r) {
+			current.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return tokens
 }

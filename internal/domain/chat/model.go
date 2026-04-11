@@ -188,6 +188,15 @@ type PendingElicitationInfo struct {
 	CreatedAt time.Time       `json:"createdAt"`
 }
 
+// AgentRoutingInfo carries lightweight agent metadata used by the smart router
+// to select the best agent for a given user message without loading full configs.
+type AgentRoutingInfo struct {
+	ID          uuid.UUID
+	Name        string
+	Slug        string
+	Description string
+}
+
 // CreateMessageRequest is the payload for adding a message to a session.
 type CreateMessageRequest struct {
 	Role         string          `json:"role"`

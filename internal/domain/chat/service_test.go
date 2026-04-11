@@ -143,6 +143,10 @@ func (m *mockChatRepo) FindDefaultAgentID(_ context.Context) (*uuid.UUID, error)
 	return nil, nil
 }
 
+func (m *mockChatRepo) FindAgentsForRouting(_ context.Context) ([]chat.AgentRoutingInfo, error) {
+	return nil, nil
+}
+
 func (m *mockChatRepo) CreateRun(_ context.Context, r chat.ChatRun) (chat.ChatRun, error) {
 	r.ID = uuid.New()
 	return r, nil
