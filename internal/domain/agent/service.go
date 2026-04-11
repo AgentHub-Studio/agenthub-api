@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -38,6 +39,9 @@ type Service interface {
 	Create(ctx context.Context, req CreateAgentRequest) (AgentResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateAgentRequest) (AgentResponse, error)
 	Delete(ctx context.Context, id uuid.UUID) error
+	// BulkDelete deletes multiple agents by ID. Returns the count of successfully deleted agents.
+	// Partial success is allowed — agents that do not exist are silently skipped (ACT-F3-19).
+	BulkDelete(ctx context.Context, ids []uuid.UUID) (int, error)
 	Publish(ctx context.Context, id uuid.UUID) (AgentResponse, error)
 	Archive(ctx context.Context, id uuid.UUID) (AgentResponse, error)
 	Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest) (AgentResponse, error)
@@ -220,6 +224,22 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 
 func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repo.Delete(ctx, id)
+}
+
+// BulkDelete deletes agents by their IDs, silently skipping those not found.
+// Returns the number of agents successfully deleted.
+func (s *service) BulkDelete(ctx context.Context, ids []uuid.UUID) (int, error) {
+	deleted := 0
+	for _, id := range ids {
+		if err := s.repo.Delete(ctx, id); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue // not found — skip silently
+			}
+			return deleted, fmt.Errorf("agent: bulk delete: %w", err)
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 func (s *service) Publish(ctx context.Context, id uuid.UUID) (AgentResponse, error) {

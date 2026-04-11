@@ -79,6 +79,17 @@ func (m *mockAgentSvc) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (m *mockAgentSvc) BulkDelete(_ context.Context, ids []uuid.UUID) (int, error) {
+	count := 0
+	for _, id := range ids {
+		if _, ok := m.agents[id]; ok {
+			delete(m.agents, id)
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (m *mockAgentSvc) Publish(_ context.Context, id uuid.UUID) (agent.AgentResponse, error) {
 	if m.publishErr != nil {
 		return agent.AgentResponse{}, m.publishErr
@@ -421,4 +432,56 @@ func TestAgentHandler_Publish_InvalidID_Returns400(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// Bulk delete tests (ACT-F3-19 / P-C341-1).
+
+func TestAgentHandler_BulkDelete_Success(t *testing.T) {
+	r, svc := setupAgent()
+	id1 := uuid.New()
+	id2 := uuid.New()
+	svc.agents[id1] = agent.AgentResponse{ID: id1, Name: "a1"}
+	svc.agents[id2] = agent.AgentResponse{ID: id2, Name: "a2"}
+
+	body, _ := json.Marshal(map[string]interface{}{"ids": []uuid.UUID{id1, id2}})
+	req := httptest.NewRequest(http.MethodDelete, "/api/agents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]int
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, 2, resp["deleted"])
+	assert.NotContains(t, svc.agents, id1)
+	assert.NotContains(t, svc.agents, id2)
+}
+
+func TestAgentHandler_BulkDelete_EmptyIDs_Returns400(t *testing.T) {
+	r, _ := setupAgent()
+	body, _ := json.Marshal(map[string]interface{}{"ids": []uuid.UUID{}})
+	req := httptest.NewRequest(http.MethodDelete, "/api/agents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAgentHandler_BulkDelete_PartialSuccess_SkipsNotFound(t *testing.T) {
+	r, svc := setupAgent()
+	existingID := uuid.New()
+	missingID := uuid.New()
+	svc.agents[existingID] = agent.AgentResponse{ID: existingID, Name: "exists"}
+
+	body, _ := json.Marshal(map[string]interface{}{"ids": []uuid.UUID{existingID, missingID}})
+	req := httptest.NewRequest(http.MethodDelete, "/api/agents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]int
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, 1, resp["deleted"])
 }

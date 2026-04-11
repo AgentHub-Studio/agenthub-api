@@ -26,6 +26,8 @@ func NewHandler(svc Service) *Handler {
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/agents", h.list)
 	r.Post("/api/agents", h.create)
+	// ACT-F3-19: bulk delete via DELETE /api/agents with a JSON body {"ids":[...]}.
+	r.Delete("/api/agents", h.bulkDelete)
 	r.Get("/api/agents/{id}", h.get)
 	r.Put("/api/agents/{id}", h.update)
 	r.Patch("/api/agents/{id}", h.update) // PATCH delegates to the same handler — all fields are optional
@@ -121,6 +123,29 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.NoContent(w)
+}
+
+// bulkDelete handles DELETE /api/agents with a JSON body {"ids": ["uuid1", "uuid2"]}.
+// Returns 200 with {"deleted": N} where N is the count of agents successfully deleted.
+// Agents not found are silently skipped (idempotent). P-C341-1 (ACT-F3-19).
+func (h *Handler) bulkDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []uuid.UUID `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.IDs) == 0 {
+		respond.Error(w, http.StatusBadRequest, "ids must not be empty")
+		return
+	}
+	count, err := h.svc.BulkDelete(r.Context(), req.IDs)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, map[string]int{"deleted": count})
 }
 
 func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
