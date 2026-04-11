@@ -325,8 +325,9 @@ func TestMemoryBridge_MaybeStore_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, stored)
 	assert.Len(t, upserter.calls, 2)
-	assert.Equal(t, "preferred_language", upserter.calls[0].Key)
-	assert.Equal(t, "project_tech", upserter.calls[1].Key)
+	// P-C333-1 (ACT-F3-10): keys are normalized — underscores become hyphens.
+	assert.Equal(t, "preferred-language", upserter.calls[0].Key)
+	assert.Equal(t, "project-tech", upserter.calls[1].Key)
 }
 
 func TestMemoryBridge_MaybeStore_RateLimited(t *testing.T) {

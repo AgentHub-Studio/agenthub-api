@@ -262,7 +262,8 @@ func (mb *MemoryBridge) MaybeStore(ctx context.Context, agentID uuid.UUID, turnI
 
 		memType := m.resolvedType()
 
-		_, err = mb.upserter.Upsert(ctx, agentID, m.Key, memory.UpsertMemoryRequest{
+		// P-C333-1 (ACT-F3-10): normalize key before persisting.
+		_, err = mb.upserter.Upsert(ctx, agentID, normalizeKey(m.Key), memory.UpsertMemoryRequest{
 			Value:      valueJSON,
 			MemoryType: memType,
 			Embedding:  embedding,
@@ -280,6 +281,36 @@ func (mb *MemoryBridge) MaybeStore(ctx context.Context, agentID uuid.UUID, turnI
 // This is the low-level path invoked by the memory_store builtin tool when
 // the LLM explicitly requests a value to be remembered.
 // Returns a human-readable status message suitable for the tool result.
+// normalizeKey converts a raw memory key to a canonical lowercase-with-hyphens form.
+// P-C333-1 (ACT-F3-10): consistent key normalization prevents duplicate entries
+// from case variations (e.g. "UserPrefs" vs "user-prefs").
+func normalizeKey(k string) string {
+	if k == "" {
+		return "general"
+	}
+	// Lowercase, replace non-alphanumeric runs with a single hyphen.
+	var b strings.Builder
+	prevHyphen := true
+	for _, r := range strings.ToLower(k) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevHyphen = false
+		} else if !prevHyphen {
+			b.WriteRune('-')
+			prevHyphen = true
+		}
+	}
+	result := strings.TrimRight(b.String(), "-")
+	if result == "" {
+		result = "general"
+	}
+	// Truncate to 100 chars max.
+	if len(result) > 100 {
+		result = result[:100]
+	}
+	return result
+}
+
 func (mb *MemoryBridge) Store(ctx context.Context, agentID uuid.UUID, content, category string) string {
 	if mb.upserter == nil {
 		return "Memory storage is not available for this agent."
@@ -288,15 +319,8 @@ func (mb *MemoryBridge) Store(ctx context.Context, agentID uuid.UUID, content, c
 		return "Nothing to store: content is empty."
 	}
 
-	// Use a key derived from category+content to allow idempotent upserts.
-	key := category
-	if key == "" {
-		key = "general"
-	}
-	// Truncate key to a safe length.
-	if len(key) > 64 {
-		key = key[:64]
-	}
+	// P-C333-1 (ACT-F3-10): normalize key before persisting.
+	key := normalizeKey(category)
 
 	valueJSON, err := json.Marshal(content)
 	if err != nil {
