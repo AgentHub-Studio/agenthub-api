@@ -54,6 +54,11 @@ type ToolExecResult struct {
 	// EventToolResult to the SSE channel. The main loop skips re-emission
 	// to avoid duplicate tool_result events.
 	EmittedToStream bool `json:"-"`
+	// SubtaskTokens and SubtaskCostUSD carry the aggregate token/cost consumed
+	// by a sub-agent run. Set by SubtaskExecutor so the parent runner can roll
+	// up these values into its own totals (ACT-F3-13 / P-C336-1).
+	SubtaskTokens  int     `json:"-"`
+	SubtaskCostUSD float64 `json:"-"`
 }
 
 // skillExecRequest is the body sent to the skill-runtime.

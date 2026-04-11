@@ -1089,11 +1089,19 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			}
 
 			// P-C325-2: count tool calls and detect failures for run metadata.
+			// P-C336-1 (ACT-F3-13): aggregate sub-agent token/cost into parent run totals.
 			runToolCallCount += len(toolResults)
 			for _, r2 := range toolResults {
 				if r2.Error != nil {
 					runHadToolFailures = true
-					break
+				}
+				// Roll up sub-agent resource usage so RunComplete and RunMetadata
+				// reflect the full cost of the run including nested agents.
+				if r2.SubtaskTokens > 0 {
+					totalTokens += r2.SubtaskTokens
+				}
+				if r2.SubtaskCostUSD > 0 {
+					totalCost += r2.SubtaskCostUSD
 				}
 			}
 

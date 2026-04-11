@@ -268,19 +268,24 @@ func (s *SubtaskExecutor) Execute(
 		Error:       childErr,
 	})
 
+	output, _ := json.Marshal(subtaskResult)
 	if childErr != nil {
-		output, _ := json.Marshal(subtaskResult)
 		return ToolExecResult{
-			Output:    output,
-			Error:     childErr,
-			LatencyMs: latency,
+			Output:         output,
+			Error:          childErr,
+			LatencyMs:      latency,
+			// P-C336-1 (ACT-F3-13): propagate sub-agent metrics to parent runner.
+			SubtaskTokens:  totalTokens,
+			SubtaskCostUSD: childCost,
 		}
 	}
 
-	output, _ := json.Marshal(subtaskResult)
 	return ToolExecResult{
-		Output:    output,
-		LatencyMs: latency,
+		Output:         output,
+		LatencyMs:      latency,
+		// P-C336-1 (ACT-F3-13): propagate sub-agent metrics to parent runner.
+		SubtaskTokens:  totalTokens,
+		SubtaskCostUSD: childCost,
 	}
 }
 

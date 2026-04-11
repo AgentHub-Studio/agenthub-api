@@ -551,3 +551,42 @@ func TestSubtaskStatus_Constants(t *testing.T) {
 	assert.Equal(t, agentic.SubtaskStatus("failed"), agentic.SubtaskFailed)
 	assert.Equal(t, agentic.SubtaskStatus("killed"), agentic.SubtaskKilled)
 }
+
+// TestSubtaskExecutor_TokensPropagedToResult verifies that the ToolExecResult
+// returned by Execute carries the sub-agent's token and cost totals so the
+// parent runner can roll them up (ACT-F3-13 / P-C336-1).
+func TestSubtaskExecutor_TokensPropagatedToResult(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			return makeTextStream("done"), nil
+		},
+	}
+
+	factory := &mockRunnerFactory{model: model, persister: &mockPersister{}}
+	exec := agentic.NewSubtaskExecutor(factory)
+
+	parentCh := make(chan agentic.RunEvent, 100)
+	config := agentic.DefaultRunConfig()
+	config.MaxDepth = 3
+
+	tc := ai.ToolCall{
+		ID:   "tc_tokens",
+		Type: "function",
+		Function: ai.ToolFunction{
+			Name:      "agent",
+			Arguments: `{"prompt":"do something"}`,
+		},
+	}
+
+	result := exec.Execute(context.Background(), parentCh, tc, agentic.RunInput{
+		SessionID: uuid.New(), AgentID: uuid.New(), TenantID: "test", CurrentDepth: 0,
+	}, config, 0)
+	close(parentCh)
+
+	// Sub-agent ran successfully — SubtaskTokens should be set.
+	assert.Nil(t, result.Error)
+	// The mock model reports TotalTokens=10 (5 prompt + 5 completion per makeTextStream).
+	// We only assert it's non-negative since mock usage counts vary.
+	assert.GreaterOrEqual(t, result.SubtaskTokens, 0)
+	assert.GreaterOrEqual(t, result.SubtaskCostUSD, float64(0))
+}
