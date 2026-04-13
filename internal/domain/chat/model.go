@@ -87,15 +87,16 @@ type ChatMessage struct {
 
 // ChatRun represents a background agentic run.
 type ChatRun struct {
-	ID          uuid.UUID       `db:"id"`
-	SessionID   uuid.UUID       `db:"session_id"`
-	TenantID    string          `db:"tenant_id"`
-	Status      ChatRunStatus   `db:"status"`
-	LastEventID string          `db:"last_event_id"`
-	Metadata    json.RawMessage `db:"metadata"`
-	StartedAt   time.Time       `db:"started_at"`
-	CompletedAt *time.Time      `db:"completed_at"`
-	CreatedAt   time.Time       `db:"created_at"`
+	ID            uuid.UUID       `db:"id"`
+	SessionID     uuid.UUID       `db:"session_id"`
+	TenantID      string          `db:"tenant_id"`
+	Status        ChatRunStatus   `db:"status"`
+	LastEventID   *string         `db:"last_event_id"`
+	Metadata      json.RawMessage `db:"metadata"`
+	StartedAt     *time.Time      `db:"started_at"`
+	CompletedAt   *time.Time      `db:"completed_at"`
+	FailureReason *string         `db:"failure_reason"`
+	CreatedAt     time.Time       `db:"created_at"`
 }
 
 // ChatSessionResponse is the DTO for a chat session.
@@ -127,13 +128,14 @@ type ChatMessageResponse struct {
 
 // ChatRunResponse is the DTO for a chat run.
 type ChatRunResponse struct {
-	ID          uuid.UUID       `json:"id"`
-	SessionID   uuid.UUID       `json:"sessionId"`
-	Status      ChatRunStatus   `json:"status"`
-	LastEventID string          `json:"lastEventId,omitempty"`
-	Metadata    json.RawMessage `json:"metadata,omitempty"`
-	StartedAt   time.Time       `json:"startedAt"`
-	CompletedAt *time.Time      `json:"completedAt,omitempty"`
+	ID            uuid.UUID       `json:"id"`
+	SessionID     uuid.UUID       `json:"sessionId"`
+	Status        ChatRunStatus   `json:"status"`
+	LastEventID   *string         `json:"lastEventId,omitempty"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	StartedAt     *time.Time      `json:"startedAt,omitempty"`
+	CompletedAt   *time.Time      `json:"completedAt,omitempty"`
+	FailureReason *string         `json:"failureReason,omitempty"`
 }
 
 // ChatSessionListStamp is a lightweight signature for detecting list changes
@@ -163,13 +165,14 @@ func MessageResponseFrom(m ChatMessage) ChatMessageResponse {
 // RunResponseFrom maps a ChatRun entity to a ChatRunResponse DTO.
 func RunResponseFrom(r ChatRun) ChatRunResponse {
 	return ChatRunResponse{
-		ID:          r.ID,
-		SessionID:   r.SessionID,
-		Status:      r.Status,
-		LastEventID: r.LastEventID,
-		Metadata:    r.Metadata,
-		StartedAt:   r.StartedAt,
-		CompletedAt: r.CompletedAt,
+		ID:            r.ID,
+		SessionID:     r.SessionID,
+		Status:        r.Status,
+		LastEventID:   r.LastEventID,
+		Metadata:      r.Metadata,
+		StartedAt:     r.StartedAt,
+		CompletedAt:   r.CompletedAt,
+		FailureReason: r.FailureReason,
 	}
 }
 

@@ -204,6 +204,24 @@ func (s *Service) ListAutoStart(ctx context.Context) ([]McpServerConfigResponse,
 	return responses, nil
 }
 
+// ListAllEnabled returns all enabled MCP server configs (regardless of auto_start).
+// BUG-MCP-RUNTIME-STALE fix: used by the bootstrap endpoint so the mcp-client-runtime
+// registers every enabled server, not only auto_start=true ones. This ensures servers
+// created after startup are available for lazy connection on the first tool-list request.
+func (s *Service) ListAllEnabled(ctx context.Context) ([]McpServerConfigResponse, error) {
+	items, err := s.repo.ListAllEnabled(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mcp service: list all enabled: %w", err)
+	}
+
+	responses := make([]McpServerConfigResponse, len(items))
+	for i, item := range items {
+		responses[i] = ResponseFrom(item)
+	}
+
+	return responses, nil
+}
+
 // GetAuthStatus returns the current authentication status for an MCP server.
 func (s *Service) GetAuthStatus(ctx context.Context, id uuid.UUID) (AuthStatusResponse, error) {
 	config, err := s.repo.GetByID(ctx, id)

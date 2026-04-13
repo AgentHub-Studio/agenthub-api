@@ -127,11 +127,42 @@ func matchesPermissionPattern(pattern, toolName, toolInput string) bool {
 		return true
 	}
 
-	// Match input pattern as substring (case-insensitive).
-	return strings.Contains(
-		strings.ToLower(toolInput),
-		strings.ToLower(inputPattern),
-	)
+	// Match input pattern as whole-word substring (case-insensitive).
+	// We require the match to be at a word boundary so that a pattern like
+	// "DELETE" does not falsely match inputs containing "deleted" or "is_deleted".
+	// A word boundary here means the character immediately before and after the
+	// match (if any) must be a non-alphanumeric, non-underscore character.
+	return containsWholeWord(strings.ToLower(toolInput), strings.ToLower(inputPattern))
+}
+
+// containsWholeWord reports whether s contains pattern at a word boundary.
+// A word boundary is defined as a position where the adjacent characters (if any)
+// are not alphanumeric or underscore — consistent with SQL keyword matching.
+func containsWholeWord(s, pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	patLen := len(pattern)
+	for i := 0; i <= len(s)-patLen; i++ {
+		if s[i:i+patLen] != pattern {
+			continue
+		}
+		// Check left boundary.
+		if i > 0 && isWordChar(rune(s[i-1])) {
+			continue
+		}
+		// Check right boundary.
+		if i+patLen < len(s) && isWordChar(rune(s[i+patLen])) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// isWordChar returns true for characters that are part of a word (letters, digits, underscore).
+func isWordChar(c rune) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
 // parsePattern splits "tool(input)" into ("tool", "input").

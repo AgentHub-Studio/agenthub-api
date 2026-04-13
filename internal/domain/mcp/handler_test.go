@@ -44,6 +44,16 @@ func (m *mockMCPSvc) ListAutoStart(_ context.Context) ([]mcp.McpServerConfigResp
 	return items, nil
 }
 
+func (m *mockMCPSvc) ListAllEnabled(_ context.Context) ([]mcp.McpServerConfigResponse, error) {
+	var items []mcp.McpServerConfigResponse
+	for _, c := range m.configs {
+		if c.Enabled {
+			items = append(items, c)
+		}
+	}
+	return items, nil
+}
+
 func (m *mockMCPSvc) Create(_ context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error) {
 	id := uuid.New()
 	resp := mcp.McpServerConfigResponse{
@@ -178,12 +188,20 @@ func TestMCPHandler_Delete_NotFound(t *testing.T) {
 
 // Bootstrap endpoint tests (ACT-F3-12 / P-C351-1).
 
-func TestMCPHandler_Bootstrap_ReturnsAutoStartConfigs(t *testing.T) {
+// BUG-MCP-RUNTIME-STALE fix: bootstrap now returns all enabled configs (not just auto_start=true).
+// Servers with auto_start=false but enabled=true are also registered so agents can reach them.
+
+func TestMCPHandler_Bootstrap_ReturnsAllEnabledConfigs(t *testing.T) {
 	r, svc := setupMCP()
-	id := uuid.New()
-	svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "auto", AutoStart: true}
-	otherID := uuid.New()
-	svc.configs[otherID] = mcp.McpServerConfigResponse{ID: otherID, Name: "manual", AutoStart: false}
+	// enabled=true, auto_start=true — must appear.
+	id1 := uuid.New()
+	svc.configs[id1] = mcp.McpServerConfigResponse{ID: id1, Name: "auto-enabled", AutoStart: true, Enabled: true}
+	// enabled=true, auto_start=false — must also appear (BUG-MCP-RUNTIME-STALE fix).
+	id2 := uuid.New()
+	svc.configs[id2] = mcp.McpServerConfigResponse{ID: id2, Name: "manual-enabled", AutoStart: false, Enabled: true}
+	// enabled=false — must NOT appear.
+	id3 := uuid.New()
+	svc.configs[id3] = mcp.McpServerConfigResponse{ID: id3, Name: "disabled", AutoStart: true, Enabled: false}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs/bootstrap", nil)
 	w := httptest.NewRecorder()
@@ -192,14 +210,20 @@ func TestMCPHandler_Bootstrap_ReturnsAutoStartConfigs(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	var items []mcp.McpServerConfigResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&items))
-	require.Len(t, items, 1)
-	assert.Equal(t, "auto", items[0].Name)
+	require.Len(t, items, 2)
+	names := make(map[string]bool)
+	for _, it := range items {
+		names[it.Name] = true
+	}
+	assert.True(t, names["auto-enabled"])
+	assert.True(t, names["manual-enabled"])
+	assert.False(t, names["disabled"])
 }
 
-func TestMCPHandler_Bootstrap_EmptyWhenNoAutoStart(t *testing.T) {
+func TestMCPHandler_Bootstrap_EmptyWhenAllDisabled(t *testing.T) {
 	r, svc := setupMCP()
 	id := uuid.New()
-	svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "manual", AutoStart: false}
+	svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "disabled", AutoStart: true, Enabled: false}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs/bootstrap", nil)
 	w := httptest.NewRecorder()

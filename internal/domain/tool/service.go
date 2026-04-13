@@ -81,20 +81,21 @@ func (s *Service) ListLabels(ctx context.Context) ([]string, error) {
 
 // Create creates a new tool.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, error) {
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
-		return Response{}, fmt.Errorf("tool: name is required")
+		return Response{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
 	if !IsValidToolType(req.Type) {
-		return Response{}, fmt.Errorf("tool: unsupported type: %s", req.Type)
+		return Response{}, fmt.Errorf("%w: unsupported type: %s", ErrValidation, req.Type)
 	}
 	// P-C220-1 / P-C221-1 / P-C254-1: HTTP tools require a non-empty URL.
 	if req.Type == ToolTypeHTTP {
 		u := extractURLFromConfig(req.Config)
 		if u == "" {
-			return Response{}, fmt.Errorf("tool: url is required for HTTP tools")
+			return Response{}, fmt.Errorf("%w: url is required for HTTP tools", ErrValidation)
 		}
 		if err := ssrf.ValidateURL(u); err != nil {
-			return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
+			return Response{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
 		}
 	}
 	// P-C249-1: normalize SQL tool config — accept both datasourceId and datasource_id.
@@ -113,6 +114,18 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	created, err := s.repo.Create(ctx, t)
 	if err != nil {
 		return Response{}, err
+	}
+	// Auto-bind to skill if skillId was provided in the request.
+	if req.SkillID != nil && *req.SkillID != uuid.Nil {
+		active := true
+		if _, bindErr := s.repo.BindToSkill(ctx, *req.SkillID, BindRequest{
+			ToolID:   created.ID,
+			Priority: 0,
+			IsActive: &active,
+		}); bindErr != nil {
+			// Non-fatal: tool was created; log and continue.
+			_ = bindErr
+		}
 	}
 	return ResponseFrom(created), nil
 }
@@ -167,10 +180,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	if existing.Type == ToolTypeHTTP {
 		u := extractURLFromConfig(existing.Config)
 		if u == "" {
-			return Response{}, fmt.Errorf("tool: url is required for HTTP tools")
+			return Response{}, fmt.Errorf("%w: url is required for HTTP tools", ErrValidation)
 		}
 		if err := ssrf.ValidateURL(u); err != nil {
-			return Response{}, fmt.Errorf("tool: invalid URL (%w)", err)
+			return Response{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
 		}
 	}
 

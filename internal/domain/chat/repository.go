@@ -56,6 +56,9 @@ type Repository interface {
 	GetActiveRunBySession(ctx context.Context, sessionID uuid.UUID) (ChatRun, bool, error)
 	UpdateRunStatus(ctx context.Context, id uuid.UUID, status ChatRunStatus, lastEventID string) error
 	MarkRunCompleted(ctx context.Context, id uuid.UUID) error
+	// MarkRunFailed transitions a run to failed status and records the human-readable
+	// reason so callers (frontend, API consumers) can surface a meaningful error.
+	MarkRunFailed(ctx context.Context, id uuid.UUID, reason string) error
 	// UpdateRunMetadata persists aggregated metrics collected during a run.
 	// Called from the runner's defer block so it fires on both success and failure.
 	// P-C325-2: metadata column was never populated.
@@ -531,7 +534,8 @@ func (r *postgresRepository) CreateRun(ctx context.Context, run ChatRun) (ChatRu
 	// P-C299-1: only set StartedAt for runs that are immediately active.
 	// Queued runs have no started_at until the worker transitions them to active.
 	if run.Status != ChatRunStatusQueued {
-		run.StartedAt = time.Now().UTC()
+		now := time.Now().UTC()
+		run.StartedAt = &now
 	}
 
 	// P-C299-1: for queued runs, omit started_at so DB default (NULL) is used.
@@ -570,10 +574,10 @@ func (r *postgresRepository) GetRunByID(ctx context.Context, id uuid.UUID) (Chat
 
 	var run ChatRun
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at, created_at
+		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at, failure_reason, created_at
 		 FROM chat_run WHERE id = $1`,
 		id,
-	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt, &run.CreatedAt)
+	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt, &run.FailureReason, &run.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatRun{}, ErrNotFound
@@ -595,11 +599,11 @@ func (r *postgresRepository) GetActiveRunBySession(ctx context.Context, sessionI
 	err = conn.QueryRow(ctx,
 		// P-C299-1: include 'queued' runs so that runs published to RabbitMQ but
 		// not yet started by a worker also block concurrent run creation.
-		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at, created_at
+		`SELECT id, session_id, tenant_id, status, last_event_id, metadata, started_at, completed_at, failure_reason, created_at
 		 FROM chat_run WHERE session_id = $1 AND status IN ('queued', 'active')
 		 ORDER BY created_at DESC LIMIT 1`,
 		sessionID,
-	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt, &run.CreatedAt)
+	).Scan(&run.ID, &run.SessionID, &run.TenantID, &run.Status, &run.LastEventID, &run.Metadata, &run.StartedAt, &run.CompletedAt, &run.FailureReason, &run.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatRun{}, false, nil
@@ -652,6 +656,25 @@ func (r *postgresRepository) MarkRunCompleted(ctx context.Context, id uuid.UUID)
 		return fmt.Errorf("chat: mark run completed: %w", err)
 	}
 
+	return nil
+}
+
+// MarkRunFailed transitions a run to failed status and records the failure reason.
+func (r *postgresRepository) MarkRunFailed(ctx context.Context, id uuid.UUID, reason string) error {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	now := time.Now().UTC()
+	_, err = conn.Exec(ctx,
+		`UPDATE chat_run SET status = $1, completed_at = $2, failure_reason = $3 WHERE id = $4`,
+		ChatRunStatusFailed, now, reason, id,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: mark run failed: %w", err)
+	}
 	return nil
 }
 

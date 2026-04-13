@@ -3,6 +3,7 @@ package knowledgebase
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -45,6 +46,7 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (KnowledgeBaseRespo
 
 // Create creates a new knowledge base.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseResponse, error) {
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name is required")
 	}
@@ -74,10 +76,11 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 
 	if req.Name != nil {
-		if *req.Name == "" {
+		trimmed := strings.TrimSpace(*req.Name)
+		if trimmed == "" {
 			return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name cannot be empty")
 		}
-		existing.Name = *req.Name
+		existing.Name = trimmed
 	}
 	if req.Description != nil {
 		existing.Description = *req.Description

@@ -348,6 +348,137 @@ func TestHookEventConstants(t *testing.T) {
 	assert.Equal(t, HookEvent("run_end"), HookRunEnd)
 }
 
+// TestPromptHook_TemplateSubstitution verifies that {{.ToolName}}, {{.AgentID}},
+// etc. are actually substituted in the template. BUG-HOOK-TEMPLATE: previously
+// the template was returned as a raw string without execution.
+func TestPromptHook_TemplateSubstitution(t *testing.T) {
+	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	repo := &stubHookRepo{
+		hooks: []AgentHook{
+			{
+				ID:       uuid.New(),
+				AgentID:  agentID,
+				Event:    HookPostToolUse,
+				HookType: HookTypePrompt,
+				Config:   json.RawMessage(`{"template":"Tool {{.ToolName}} was called by agent {{.AgentID}}"}`),
+				Enabled:  true,
+			},
+		},
+	}
+	exec := NewHookExecutor(repo)
+
+	results := exec.Execute(context.Background(), HookPayload{
+		Event:    HookPostToolUse,
+		AgentID:  agentID.String(),
+		ToolName: "memory_store",
+	})
+	require.Len(t, results, 1)
+	assert.Equal(t, "Tool memory_store was called by agent 00000000-0000-0000-0000-000000000001", results[0].Inject)
+	assert.Nil(t, results[0].Error)
+}
+
+// TestPromptHook_StaticTemplate_NoSubstitution verifies that templates without
+// {{...}} actions are returned unchanged (backward-compatible).
+func TestPromptHook_StaticTemplate_NoSubstitution(t *testing.T) {
+	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	repo := &stubHookRepo{
+		hooks: []AgentHook{
+			{
+				ID:       uuid.New(),
+				AgentID:  agentID,
+				Event:    HookPostToolUse,
+				HookType: HookTypePrompt,
+				Config:   json.RawMessage(`{"template":"COMPLIANCE HOOK FIRED: Tool execution logged."}`),
+				Enabled:  true,
+			},
+		},
+	}
+	exec := NewHookExecutor(repo)
+
+	results := exec.Execute(context.Background(), HookPayload{
+		Event:    HookPostToolUse,
+		AgentID:  agentID.String(),
+		ToolName: "memory_store",
+	})
+	require.Len(t, results, 1)
+	assert.Equal(t, "COMPLIANCE HOOK FIRED: Tool execution logged.", results[0].Inject)
+}
+
+// TestExecuteTurnEnd_ReturnsInjectTexts verifies that turn-end hooks surface their
+// inject texts via the return value. BUG-HOOK-TURNEND-INJECT: previously the
+// inject field was discarded; only Error was checked.
+func TestExecuteTurnEnd_ReturnsInjectTexts(t *testing.T) {
+	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	repo := &stubHookRepo{
+		hooks: []AgentHook{
+			{
+				ID:       uuid.New(),
+				AgentID:  agentID,
+				Event:    HookTurnEnd,
+				HookType: HookTypePrompt,
+				Config:   json.RawMessage(`{"template":"TURN-END: turn {{.TurnIndex}} completed"}`),
+				Enabled:  true,
+			},
+		},
+	}
+	exec := NewHookExecutor(repo)
+
+	injects := exec.ExecuteTurnEnd(context.Background(), TurnEndPayload{
+		Event:     HookTurnEnd,
+		AgentID:   agentID.String(),
+		SessionID: uuid.New().String(),
+		TurnIndex: 3,
+	}, nil)
+
+	require.Len(t, injects, 1)
+	assert.Equal(t, "TURN-END: turn 3 completed", injects[0])
+}
+
+// TestExecuteTurnEnd_EmptyInjectWhenNoHooks verifies no inject texts are returned
+// when no turn-end hooks are registered.
+func TestExecuteTurnEnd_EmptyInjectWhenNoHooks(t *testing.T) {
+	exec := NewHookExecutor(&stubHookRepo{})
+	injects := exec.ExecuteTurnEnd(context.Background(), TurnEndPayload{
+		Event:     HookTurnEnd,
+		AgentID:   uuid.New().String(),
+		SessionID: uuid.New().String(),
+	}, nil)
+	assert.Empty(t, injects)
+}
+
+// TestExecuteRunEnd_ReturnsInjectTexts verifies that run-end hook inject texts
+// are returned so the runner can persist them as audit notes.
+// Previously ExecuteRunEnd was void and discarded all inject content.
+func TestExecuteRunEnd_ReturnsInjectTexts(t *testing.T) {
+	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	repo := &stubHookRepo{
+		hooks: []AgentHook{
+			{
+				ID:       uuid.New(),
+				AgentID:  agentID,
+				Event:    HookRunEnd,
+				HookType: HookTypePrompt,
+				Config:   json.RawMessage(`{"template":"RUN-END: {{.TotalTurns}} turns, {{.TotalTokens}} tokens, ${{.TotalCostUSD}}"}`),
+				Enabled:  true,
+			},
+		},
+	}
+	exec := NewHookExecutor(repo)
+
+	injects := exec.ExecuteRunEnd(context.Background(), RunEndPayload{
+		Event:       HookRunEnd,
+		AgentID:     agentID.String(),
+		SessionID:   uuid.New().String(),
+		TotalTurns:  5,
+		TotalTokens: 2500,
+		TotalCost:   0.025,
+	}, nil)
+
+	require.Len(t, injects, 1)
+	assert.Contains(t, injects[0], "5 turns")
+	assert.Contains(t, injects[0], "2500 tokens")
+}
+
 // --- stubs ---
 
 // stubHookRepo is an in-memory hook repository for testing.

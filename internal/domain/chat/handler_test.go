@@ -498,7 +498,7 @@ func TestGetRun_Success(t *testing.T) {
 			ID:        runID,
 			SessionID: sessionID,
 			Status:    chat.ChatRunStatusCompleted,
-			StartedAt: now,
+			StartedAt: &now,
 		},
 	}}
 	r, _ := setupChatWithRuns(rl)

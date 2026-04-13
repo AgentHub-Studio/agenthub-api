@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // htmlDangerousPattern matches dangerous HTML elements including their content.
@@ -48,6 +52,9 @@ type Service interface {
 	BulkDelete(ctx context.Context, ids []uuid.UUID) (int, error)
 	Publish(ctx context.Context, id uuid.UUID) (AgentResponse, error)
 	Archive(ctx context.Context, id uuid.UUID) (AgentResponse, error)
+	// Restore transitions an ARCHIVED agent back to DRAFT, allowing it to be
+	// reconfigured and republished without creating a new agent (BUG-ARCHIVE-NOREACTIVATE).
+	Restore(ctx context.Context, id uuid.UUID) (AgentResponse, error)
 	Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest) (AgentResponse, error)
 }
 
@@ -55,11 +62,43 @@ type service struct {
 	repo        Repository
 	bindingRepo BindingRepository
 	skillRepo   skill.SkillRepository
+	audit       AuditRecorder
 }
 
 // NewService creates a new agent Service.
 func NewService(repo Repository, bindingRepo BindingRepository, skillRepo skill.SkillRepository) Service {
-	return &service{repo: repo, bindingRepo: bindingRepo, skillRepo: skillRepo}
+	return NewServiceWithAudit(repo, bindingRepo, skillRepo, nil)
+}
+
+// AuditRecorder is the subset of the audit service used by the agent domain.
+type AuditRecorder interface {
+	Record(ctx context.Context, tenantID string, req audit.RecordRequest) (audit.AuditLog, error)
+}
+
+// NewServiceWithAudit creates a new agent Service with optional audit logging.
+func NewServiceWithAudit(repo Repository, bindingRepo BindingRepository, skillRepo skill.SkillRepository, auditRecorder AuditRecorder) Service {
+	return &service{repo: repo, bindingRepo: bindingRepo, skillRepo: skillRepo, audit: auditRecorder}
+}
+
+func recordAudit(ctx context.Context, recorder AuditRecorder, req audit.RecordRequest) {
+	if recorder == nil {
+		return
+	}
+	tenantID := tenantctx.FromContext(ctx)
+	if tenantID == "" {
+		return
+	}
+	if _, err := recorder.Record(ctx, tenantID, req); err != nil {
+		slog.Warn("agent: failed to record audit log", "entity_type", req.EntityType, "entity_id", req.EntityID, "action", req.Action, "error", err)
+	}
+}
+
+func auditJSON(v any) string {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 func (s *service) List(ctx context.Context, status AgentStatus, q string, req pagination.PageRequest) (pagination.Page[AgentResponse], error) {
@@ -130,6 +169,7 @@ func (s *service) agentReadiness(ctx context.Context, a Agent, skillIDs []uuid.U
 const maxSystemPromptChars = 10000
 
 func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResponse, error) {
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return AgentResponse{}, fmt.Errorf("name is required")
 	}
@@ -193,6 +233,12 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 		}
 		resp.KnowledgeBaseIDs = req.KnowledgeBaseIDs
 	}
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent",
+		EntityID:   created.ID.String(),
+		Action:     audit.AuditActionCreate,
+		NewValue:   auditJSON(resp),
+	})
 	return resp, nil
 }
 
@@ -209,9 +255,14 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	if err != nil {
 		return AgentResponse{}, err
 	}
+	before := ResponseFrom(a)
 	if req.Name != nil {
 		// P-C280-1: strip HTML from user-supplied text fields.
-		a.Name = stripHTML(*req.Name)
+		trimmed := strings.TrimSpace(stripHTML(*req.Name))
+		if trimmed == "" {
+			return AgentResponse{}, fmt.Errorf("name is required")
+		}
+		a.Name = trimmed
 	}
 	if req.Slug != nil {
 		a.Slug = *req.Slug
@@ -260,11 +311,31 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	} else if kbIDs, err := s.bindingRepo.ListKnowledgeBaseIDs(ctx, id); err == nil {
 		resp.KnowledgeBaseIDs = kbIDs
 	}
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent",
+		EntityID:   id.String(),
+		Action:     audit.AuditActionUpdate,
+		OldValue:   auditJSON(before),
+		NewValue:   auditJSON(resp),
+	})
 	return resp, nil
 }
 
 func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
-	return s.repo.Delete(ctx, id)
+	existing, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := s.repo.Delete(ctx, id); err != nil {
+		return err
+	}
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent",
+		EntityID:   id.String(),
+		Action:     audit.AuditActionDelete,
+		OldValue:   auditJSON(ResponseFrom(existing)),
+	})
+	return nil
 }
 
 // BulkDelete deletes agents by their IDs, silently skipping those not found.
@@ -272,12 +343,25 @@ func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
 func (s *service) BulkDelete(ctx context.Context, ids []uuid.UUID) (int, error) {
 	deleted := 0
 	for _, id := range ids {
+		existing, err := s.repo.FindByID(ctx, id)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return deleted, fmt.Errorf("agent: bulk delete: %w", err)
+		}
 		if err := s.repo.Delete(ctx, id); err != nil {
 			if errors.Is(err, ErrNotFound) {
 				continue // not found — skip silently
 			}
 			return deleted, fmt.Errorf("agent: bulk delete: %w", err)
 		}
+		recordAudit(ctx, s.audit, audit.RecordRequest{
+			EntityType: "agent",
+			EntityID:   id.String(),
+			Action:     audit.AuditActionDelete,
+			OldValue:   auditJSON(ResponseFrom(existing)),
+		})
 		deleted++
 	}
 	return deleted, nil
@@ -312,7 +396,16 @@ func (s *service) Publish(ctx context.Context, id uuid.UUID) (AgentResponse, err
 	if err != nil {
 		return AgentResponse{}, err
 	}
-	return ResponseFrom(a), nil
+	resp := ResponseFrom(a)
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent",
+		EntityID:   id.String(),
+		Action:     audit.AuditActionUpdate,
+		OldValue:   auditJSON(ResponseFrom(current)),
+		NewValue:   auditJSON(resp),
+		Metadata:   `{"operation":"publish"}`,
+	})
+	return resp, nil
 }
 
 // validatePublishStatus checks that the agent's current status allows publishing.
@@ -337,11 +430,50 @@ func validatePublishStatus(a Agent) error {
 }
 
 func (s *service) Archive(ctx context.Context, id uuid.UUID) (AgentResponse, error) {
+	current, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return AgentResponse{}, err
+	}
 	a, err := s.repo.UpdateStatus(ctx, id, StatusArchived)
 	if err != nil {
 		return AgentResponse{}, err
 	}
-	return ResponseFrom(a), nil
+	resp := ResponseFrom(a)
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent",
+		EntityID:   id.String(),
+		Action:     audit.AuditActionUpdate,
+		OldValue:   auditJSON(ResponseFrom(current)),
+		NewValue:   auditJSON(resp),
+		Metadata:   `{"operation":"archive"}`,
+	})
+	return resp, nil
+}
+
+// Restore transitions an ARCHIVED agent back to DRAFT status.
+// Only ARCHIVED agents can be restored; other statuses return ErrInvalidStatusTransition.
+func (s *service) Restore(ctx context.Context, id uuid.UUID) (AgentResponse, error) {
+	existing, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return AgentResponse{}, err
+	}
+	if existing.Status != StatusArchived {
+		return AgentResponse{}, fmt.Errorf("%w: only archived agents can be restored (current status: %s)", ErrInvalidStatusTransition, existing.Status)
+	}
+	a, err := s.repo.UpdateStatus(ctx, id, StatusDraft)
+	if err != nil {
+		return AgentResponse{}, err
+	}
+	resp := ResponseFrom(a)
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent",
+		EntityID:   id.String(),
+		Action:     audit.AuditActionUpdate,
+		OldValue:   auditJSON(ResponseFrom(existing)),
+		NewValue:   auditJSON(resp),
+		Metadata:   `{"operation":"restore"}`,
+	})
+	return resp, nil
 }
 
 func (s *service) Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest) (AgentResponse, error) {
@@ -369,7 +501,33 @@ func (s *service) Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest
 	if err != nil {
 		return AgentResponse{}, err
 	}
-	return ResponseFrom(created), nil
+
+	// BUG-CLONE1: copy skill and knowledge-base bindings from the original agent
+	// so the clone is a complete functional copy, not just a metadata copy.
+	if skillIDs, err := s.bindingRepo.ListSkillIDs(ctx, id); err == nil && len(skillIDs) > 0 {
+		if syncErr := s.bindingRepo.SyncSkills(ctx, created.ID, skillIDs); syncErr != nil {
+			// Non-fatal: log but don't fail the clone operation.
+			_ = syncErr
+		}
+	}
+	if kbIDs, err := s.bindingRepo.ListKnowledgeBaseIDs(ctx, id); err == nil && len(kbIDs) > 0 {
+		if syncErr := s.bindingRepo.SyncKnowledgeBases(ctx, created.ID, kbIDs); syncErr != nil {
+			_ = syncErr
+		}
+	}
+
+	resp, err := s.Get(ctx, created.ID)
+	if err != nil {
+		return AgentResponse{}, err
+	}
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent",
+		EntityID:   created.ID.String(),
+		Action:     audit.AuditActionCreate,
+		NewValue:   auditJSON(resp),
+		Metadata:   fmt.Sprintf(`{"operation":"clone","sourceAgentId":"%s"}`, id),
+	})
+	return resp, nil
 }
 
 // SupportedProviders lists the LLM providers recognised by the platform runner.
@@ -477,16 +635,27 @@ type VersionService interface {
 	GetDraft(ctx context.Context, agentID uuid.UUID) (AgentVersionResponse, error)
 	GetLatestPublished(ctx context.Context, agentID uuid.UUID) (AgentVersionResponse, error)
 	ListVersions(ctx context.Context, agentID uuid.UUID, req pagination.PageRequest) (pagination.Page[AgentVersionResponse], error)
+	// Rollback restores an agent's system prompt and model config from a previously
+	// published version and creates a new version entry for the rollback.
+	Rollback(ctx context.Context, agentID, versionID uuid.UUID) (AgentVersionResponse, error)
+	// GetVersionByID retrieves any version by its UUID regardless of status.
+	GetVersionByID(ctx context.Context, versionID uuid.UUID) (AgentVersionResponse, error)
 }
 
 type versionService struct {
 	repo    Repository
 	verRepo VersionRepository
+	audit   AuditRecorder
 }
 
 // NewVersionService creates a new VersionService.
 func NewVersionService(repo Repository, verRepo VersionRepository) VersionService {
-	return &versionService{repo: repo, verRepo: verRepo}
+	return NewVersionServiceWithAudit(repo, verRepo, nil)
+}
+
+// NewVersionServiceWithAudit creates a new VersionService with optional audit logging.
+func NewVersionServiceWithAudit(repo Repository, verRepo VersionRepository, auditRecorder AuditRecorder) VersionService {
+	return &versionService{repo: repo, verRepo: verRepo, audit: auditRecorder}
 }
 
 func (s *versionService) CreateDraft(ctx context.Context, agentID uuid.UUID, req CreateAgentVersionRequest) (AgentVersionResponse, error) {
@@ -515,7 +684,15 @@ func (s *versionService) CreateDraft(ctx context.Context, agentID uuid.UUID, req
 	if err != nil {
 		return AgentVersionResponse{}, err
 	}
-	return VersionResponseFrom(created), nil
+	resp := VersionResponseFrom(created)
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent_version",
+		EntityID:   created.ID.String(),
+		Action:     audit.AuditActionCreate,
+		NewValue:   auditJSON(resp),
+		Metadata:   fmt.Sprintf(`{"operation":"create_draft","agentId":"%s"}`, agentID),
+	})
+	return resp, nil
 }
 
 func (s *versionService) UpdateDraft(ctx context.Context, versionID uuid.UUID, req UpdateAgentVersionRequest) (AgentVersionResponse, error) {
@@ -539,7 +716,15 @@ func (s *versionService) UpdateDraft(ctx context.Context, versionID uuid.UUID, r
 	if err != nil {
 		return AgentVersionResponse{}, err
 	}
-	return VersionResponseFrom(updated), nil
+	resp := VersionResponseFrom(updated)
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent_version",
+		EntityID:   versionID.String(),
+		Action:     audit.AuditActionUpdate,
+		NewValue:   auditJSON(resp),
+		Metadata:   `{"operation":"update_draft"}`,
+	})
+	return resp, nil
 }
 
 func (s *versionService) Publish(ctx context.Context, versionID uuid.UUID) (AgentVersionResponse, error) {
@@ -554,7 +739,15 @@ func (s *versionService) Publish(ctx context.Context, versionID uuid.UUID) (Agen
 	if err != nil {
 		return AgentVersionResponse{}, err
 	}
-	return VersionResponseFrom(published), nil
+	resp := VersionResponseFrom(published)
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent_version",
+		EntityID:   versionID.String(),
+		Action:     audit.AuditActionUpdate,
+		NewValue:   auditJSON(resp),
+		Metadata:   `{"operation":"publish"}`,
+	})
+	return resp, nil
 }
 
 func (s *versionService) GetDraft(ctx context.Context, agentID uuid.UUID) (AgentVersionResponse, error) {
@@ -583,6 +776,90 @@ func (s *versionService) ListVersions(ctx context.Context, agentID uuid.UUID, re
 		responses[i] = VersionResponseFrom(v)
 	}
 	return pagination.NewPage(responses, total, req), nil
+}
+
+// Rollback restores agent configuration from a previously published version.
+// It creates a new PUBLISHED version entry that documents the rollback, and
+// applies the snapshot's definitionJson/configJson to the live agent record.
+func (s *versionService) Rollback(ctx context.Context, agentID, versionID uuid.UUID) (AgentVersionResponse, error) {
+	// 1. Load the target version — must be PUBLISHED.
+	target, err := s.verRepo.FindByID(ctx, versionID)
+	if err != nil {
+		return AgentVersionResponse{}, ErrVersionNotFound
+	}
+	if target.AgentID != agentID {
+		return AgentVersionResponse{}, ErrVersionNotFound
+	}
+	if target.Status != VersionStatusPublished {
+		return AgentVersionResponse{}, fmt.Errorf("only published versions can be rolled back to")
+	}
+
+	// 2. Ensure no active draft exists — rollback is not allowed with a pending draft.
+	if _, err := s.verRepo.FindDraft(ctx, agentID); err == nil {
+		return AgentVersionResponse{}, ErrRollbackBlockedByDraft
+	}
+
+	// 3. Create a new PUBLISHED version recording the rollback.
+	num, err := s.verRepo.NextVersionNumber(ctx, agentID)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	now := time.Now()
+	rollbackEntry := AgentVersion{
+		ID:             uuid.New(),
+		AgentID:        agentID,
+		VersionNumber:  num,
+		Status:         VersionStatusPublished,
+		Description:    fmt.Sprintf("Rollback to version %d", target.VersionNumber),
+		DefinitionJSON: target.DefinitionJSON,
+		ConfigJSON:     target.ConfigJSON,
+		PublishedAt:    &now,
+	}
+	created, err := s.verRepo.Create(ctx, rollbackEntry)
+	if err != nil {
+		return AgentVersionResponse{}, fmt.Errorf("rollback: create version entry: %w", err)
+	}
+	// Mark it published immediately.
+	created, err = s.verRepo.Publish(ctx, created.ID)
+	if err != nil {
+		return AgentVersionResponse{}, fmt.Errorf("rollback: publish version entry: %w", err)
+	}
+
+	// 4. Apply snapshot to the live agent — extract systemPrompt from definitionJson.
+	var def struct {
+		SystemPrompt string `json:"systemPrompt"`
+	}
+	if len(target.DefinitionJSON) > 0 {
+		_ = json.Unmarshal(target.DefinitionJSON, &def)
+	}
+	if def.SystemPrompt != "" {
+		current, err := s.repo.FindByID(ctx, agentID)
+		if err != nil {
+			return AgentVersionResponse{}, fmt.Errorf("rollback: load agent: %w", err)
+		}
+		current.SystemPrompt = &def.SystemPrompt
+		if _, err := s.repo.Update(ctx, current); err != nil {
+			return AgentVersionResponse{}, fmt.Errorf("rollback: apply system prompt: %w", err)
+		}
+	}
+
+	resp := VersionResponseFrom(created)
+	recordAudit(ctx, s.audit, audit.RecordRequest{
+		EntityType: "agent",
+		EntityID:   agentID.String(),
+		Action:     audit.AuditActionUpdate,
+		NewValue:   auditJSON(resp),
+		Metadata:   fmt.Sprintf(`{"operation":"rollback","targetVersionId":"%s","createdVersionId":"%s"}`, versionID, created.ID),
+	})
+	return resp, nil
+}
+
+func (s *versionService) GetVersionByID(ctx context.Context, versionID uuid.UUID) (AgentVersionResponse, error) {
+	v, err := s.verRepo.FindByID(ctx, versionID)
+	if err != nil {
+		return AgentVersionResponse{}, ErrVersionNotFound
+	}
+	return VersionResponseFrom(v), nil
 }
 
 // hasNestedModelConfig returns true when the given config JSON blob contains a

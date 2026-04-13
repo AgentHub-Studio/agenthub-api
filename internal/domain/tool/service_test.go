@@ -167,6 +167,7 @@ func TestToolService_Create_InvalidType(t *testing.T) {
 		Type: "INVALID_TYPE",
 	})
 	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
 	assert.Contains(t, err.Error(), "unsupported type")
 }
 
@@ -174,7 +175,20 @@ func TestToolService_Create_MissingName(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
 	_, err := svc.Create(context.Background(), tool.CreateRequest{Type: tool.ToolTypeHTTP})
 	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
 	assert.Contains(t, err.Error(), "name")
+}
+
+func TestToolService_Create_HTTPRejectsSSRFURL(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "SSRF Tool",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"url":"http://169.254.169.254/latest/meta-data/"}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
+	assert.Contains(t, err.Error(), "invalid URL")
 }
 
 func TestToolService_Create_WithLabels(t *testing.T) {
@@ -387,4 +401,44 @@ func TestNormalizeDataSourceID_NonSQLToolNotTouched(t *testing.T) {
 	// Non-SQL tools should NOT be normalised — config returned as-is.
 	keys := configKeys(t, created.Config)
 	assert.True(t, keys["datasourceId"], "non-SQL tool config should be untouched")
+}
+
+// --- TR-QA-LOOP: skillId auto-bind on create (Cenário A) ---
+
+func TestToolService_Create_WithSkillID_AutoBinds(t *testing.T) {
+	repo := newMockRepo()
+	svc := tool.NewService(repo)
+
+	skillID := uuid.New()
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:    "auto-bind-tool",
+		Type:    tool.ToolTypeCustom,
+		SkillID: &skillID,
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, uuid.Nil, created.ID)
+
+	// Verify the tool was auto-bound to the skill.
+	bindings, _, err := repo.ListBySkill(context.Background(), skillID)
+	require.NoError(t, err)
+	require.Len(t, bindings, 1, "tool should have been auto-bound to skill")
+	assert.Equal(t, created.ID, bindings[0].ToolID)
+}
+
+func TestToolService_Create_WithNilSkillID_DoesNotBind(t *testing.T) {
+	repo := newMockRepo()
+	svc := tool.NewService(repo)
+
+	skillID := uuid.New()
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:    "no-auto-bind-tool",
+		Type:    tool.ToolTypeCustom,
+		SkillID: nil,
+	})
+	require.NoError(t, err)
+
+	// No binding should have been created.
+	bindings, _, err := repo.ListBySkill(context.Background(), skillID)
+	require.NoError(t, err)
+	assert.Empty(t, bindings, "no binding should be created when SkillID is nil")
 }

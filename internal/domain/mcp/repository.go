@@ -24,6 +24,10 @@ type Repository interface {
 	Update(ctx context.Context, c McpServerConfig) (McpServerConfig, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	ListAutoStart(ctx context.Context) ([]McpServerConfig, error)
+	// ListAllEnabled returns all enabled MCP server configs regardless of auto_start.
+	// BUG-MCP-RUNTIME-STALE fix: bootstrap endpoint now returns all enabled configs so
+	// the runtime registers non-auto-start servers for lazy connection on first tool list.
+	ListAllEnabled(ctx context.Context) ([]McpServerConfig, error)
 }
 
 type postgresRepository struct {
@@ -234,6 +238,39 @@ func (r *postgresRepository) ListAutoStart(ctx context.Context) ([]McpServerConf
 	)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: list auto-start: %w", err)
+	}
+	defer rows.Close()
+
+	var items []McpServerConfig
+	for rows.Next() {
+		c, err := scanConfig(rows)
+		if err != nil {
+			return nil, fmt.Errorf("mcp: scan: %w", err)
+		}
+		items = append(items, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("mcp: rows: %w", err)
+	}
+
+	return items, nil
+}
+
+// ListAllEnabled returns all MCP server configs that are enabled, regardless of auto_start.
+// BUG-MCP-RUNTIME-STALE fix: the bootstrap endpoint uses this so non-auto_start servers
+// are registered in the runtime and available for lazy connection on first tool list.
+func (r *postgresRepository) ListAllEnabled(ctx context.Context) ([]McpServerConfig, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT `+selectColumns+` FROM mcp_server_config WHERE enabled = true ORDER BY name`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: list enabled: %w", err)
 	}
 	defer rows.Close()
 

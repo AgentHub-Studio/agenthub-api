@@ -124,8 +124,8 @@ type ToolSchemaBuilder struct {
 	tokenBudgets       SkillTokenBudgetProvider
 	currentDepth       int
 	maxDepth           int
-	adminScope         bool // P-C298-1: gate agenthub_manage to admin callers only
-	enableManagement   bool // P-C184-2: gate agenthub_manage to agents with enable_management=true
+	adminScope         bool        // P-C298-1: gate agenthub_manage to admin callers only
+	enableManagement   bool        // P-C184-2: gate agenthub_manage to agents with enable_management=true
 	skillIDsSnapshot   []uuid.UUID // P-C115-1: when set, use these IDs instead of querying by agentID
 	lastUserOnlySkills []skill.Skill
 	lastWarnings       []string
@@ -311,7 +311,7 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// Store user-only skills for prompt announcement (accessible via lastUserOnlySkills).
 	b.lastUserOnlySkills = userOnlySkills
 
-		// Builtin: document_search — added when the agent has linked knowledge bases
+	// Builtin: document_search — added when the agent has linked knowledge bases
 	// or if we decide to include all tenant KBs automatically.
 	if b.kbs != nil {
 		kbsResp, err := b.kbs.ListByAgentID(ctx, agentID)
@@ -350,6 +350,11 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 
 	// Builtin: memory_store — always available.
 	tools = append(tools, memoryStoreTool())
+
+	// Builtin: memory_store_bulk — batch variant; always available.
+	// BUG-MEM-STRESS1: models that loop on sequential memory_store calls can use
+	// this to persist all facts in a single tool invocation.
+	tools = append(tools, memoryStoreBulkTool())
 
 	// Builtin: ask_user — always available; lets the LLM request structured input from the user.
 	tools = append(tools, askUserTool())
@@ -648,6 +653,55 @@ func deriveSchemaFromToolConfig(t tool.Tool) json.RawMessage {
 		}
 	}
 
+	// BUG-TOOL-PARAM-SCHEMA: For HTTP tools with a "parameters" array in config,
+	// convert that array to a JSON Schema. This is the primary mechanism for
+	// exposing required/optional parameters to the LLM when the tool was created
+	// via POST /api/tools with a "parameters" array in config (without inputSchema).
+	if params, ok := cfg["parameters"]; ok {
+		if paramList, ok := params.([]any); ok && len(paramList) > 0 {
+			props := make(map[string]any, len(paramList))
+			var required []string
+			for _, p := range paramList {
+				pm, ok := p.(map[string]any)
+				if !ok {
+					continue
+				}
+				name, _ := pm["name"].(string)
+				if name == "" {
+					continue
+				}
+				prop := map[string]any{}
+				if t, ok := pm["type"].(string); ok && t != "" {
+					prop["type"] = t
+				} else {
+					prop["type"] = "string"
+				}
+				if desc, ok := pm["description"].(string); ok && desc != "" {
+					prop["description"] = desc
+				}
+				if def, ok := pm["default"]; ok {
+					prop["default"] = def
+				}
+				props[name] = prop
+				if req, _ := pm["required"].(bool); req {
+					required = append(required, name)
+				}
+			}
+			if len(props) > 0 {
+				schema := map[string]any{
+					"type":       "object",
+					"properties": props,
+				}
+				if len(required) > 0 {
+					schema["required"] = required
+				}
+				if data, err := json.Marshal(schema); err == nil {
+					return data
+				}
+			}
+		}
+	}
+
 	// For HTTP tools: auto-derive schema from {variable} placeholders in url/body_template.
 	// This ensures the LLM knows what parameters to pass even when inputSchema is absent.
 	seen := map[string]bool{}
@@ -773,6 +827,48 @@ IMPORTANT:
 	}
 }
 
+// memoryStoreBulkTool returns the builtin memory_store_bulk tool definition.
+// BUG-MEM-STRESS1: single-call alternative for bulk memorisation; avoids models
+// getting stuck in sequential memory_store loops.
+func memoryStoreBulkTool() LLMTool {
+	return LLMTool{
+		Name:    "memory_store_bulk",
+		Builtin: true,
+		Description: `Store multiple facts at once for long-term recall across sessions.
+Use this when the user provides a list of facts to remember — it is more reliable than
+calling memory_store repeatedly for each item.
+
+IMPORTANT:
+- Only store information the user has EXPLICITLY told you.
+- Each fact must have distinct content; duplicates are silently skipped.
+- Returns a summary: how many were stored, how many already existed.`,
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"facts": {
+					"type": "array",
+					"description": "List of facts to store",
+					"items": {
+						"type": "object",
+						"properties": {
+							"content": {
+								"type": "string",
+								"description": "The exact information to remember"
+							},
+							"category": {
+								"type": "string",
+								"description": "Category for the memory (e.g. preference, fact, decision)"
+							}
+						},
+						"required": ["content"]
+					}
+				}
+			},
+			"required": ["facts"]
+		}`),
+	}
+}
+
 // askUserTool returns the builtin ask_user tool definition.
 // This tool lets the LLM request structured input from the user at any point
 // during a run. The runner intercepts calls to this tool and routes them through
@@ -873,9 +969,9 @@ func agentTool(remainingLevels int) LLMTool {
 	desc := fmt.Sprintf(
 		"Spawn a sub-agent to handle a specific subtask autonomously. "+
 			"The sub-agent inherits all your tools, knowledge bases, and permissions. "+
-			"Use this to delegate complex subtasks that can be worked on independently. "+
+			"ONLY use this when the subtask is genuinely complex, requires independent context, or can be run in parallel with other subtasks. "+
+			"Do NOT use this for simple calculations, direct answers, or tasks you can complete immediately yourself. "+
 			"The sub-agent will return its result as text. "+
-			"You can spawn multiple sub-agents in parallel for independent tasks. "+
 			"Remaining delegation depth: %d level(s).",
 		remainingLevels,
 	)
@@ -1024,9 +1120,42 @@ func join(elems []string, sep string) string {
 
 // summarizeMCPErrors parses one or more server failures from a raw MCP error and
 // returns one concise, LLM-readable warning string per failing server.
-// When the error contains multiple failures (e.g. "no MCP tools available (s1: ...; s2: ...)")
-// each server gets its own entry so none are silently dropped.
+// Handles two error formats:
+//  1. Legacy: "no MCP tools available (s1: detail; s2: detail)"
+//  2. Current: "mcpbridge: list tools: MCP server \"name\": detail; MCP server \"name2\": detail"
 func summarizeMCPErrors(raw string) []string {
+	// Format 2: current mcpbridge format — parse "MCP server \"name\": detail" segments.
+	const mcpPrefix = "MCP server \""
+	if strings.Contains(raw, mcpPrefix) {
+		// Split on "; MCP server " to get individual server failure segments.
+		segments := strings.Split(raw, "; MCP server \"")
+		var warnings []string
+		for i, seg := range segments {
+			// First segment still has the full prefix; strip it.
+			if i == 0 {
+				if idx := strings.Index(seg, mcpPrefix); idx >= 0 {
+					seg = seg[idx+len(mcpPrefix):]
+				} else {
+					continue
+				}
+			}
+			// seg is now: name\": detail
+			end := strings.IndexByte(seg, '"')
+			if end <= 0 {
+				continue
+			}
+			serverName := seg[:end]
+			detail := seg[end+1:]
+			// Strip leading ": "
+			detail = strings.TrimPrefix(detail, ": ")
+			warnings = append(warnings, summarizeMCPError(serverName, detail))
+		}
+		if len(warnings) > 0 {
+			return warnings
+		}
+	}
+
+	// Format 1 (legacy): "no MCP tools available (s1: detail; s2: detail)"
 	const multiPrefix = "no MCP tools available ("
 	if idx := strings.Index(raw, multiPrefix); idx >= 0 {
 		inner := raw[idx+len(multiPrefix):]
@@ -1034,8 +1163,6 @@ func summarizeMCPErrors(raw string) []string {
 		if end := strings.LastIndexByte(inner, ')'); end > 0 {
 			inner = inner[:end]
 		}
-		// Each failure is "serverName: errorDetail"; failures are separated by "; serverName:".
-		// We split naively on "; " and re-join entries that don't start a new server name.
 		parts := strings.Split(inner, "; ")
 		var warnings []string
 		for _, part := range parts {

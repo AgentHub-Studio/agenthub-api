@@ -141,6 +141,11 @@ func (r *Repository) Recall(ctx context.Context, agentID uuid.UUID, userID *stri
 
 	// Select top-N by cosine distance and update last_accessed_at atomically.
 	// Scope and execution_id filters are optional ($5, $6).
+	// P-MEM-1: qualify all RETURNING columns with "m." to resolve the "id is
+	// ambiguous" error — both m.id and recalled.id are visible in the UPDATE FROM
+	// context; unqualified "id" causes SQLSTATE 42702.
+	const recallColumns = `m.id, m.agent_id, m.user_id, m.key, m.value, m.memory_type, m.scope, m.execution_id,
+		m.embedding::text, m.last_accessed_at, m.expires_at, m.created_at, m.updated_at`
 	query := `
 		WITH recalled AS (
 			SELECT id
@@ -157,7 +162,7 @@ func (r *Repository) Recall(ctx context.Context, agentID uuid.UUID, userID *stri
 		   SET last_accessed_at = NOW()
 		  FROM recalled
 		 WHERE m.id = recalled.id
-		RETURNING ` + memoryColumns
+		RETURNING ` + recallColumns
 
 	var scopeArg interface{}
 	if scope != "" {

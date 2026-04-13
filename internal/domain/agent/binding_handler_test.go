@@ -66,6 +66,10 @@ func (m *mockBindingRepo) ListMCPServerIDs(_ context.Context, agentID uuid.UUID)
 	return ids, nil
 }
 
+func (m *mockBindingRepo) ListMCPServerNames(_ context.Context, _ uuid.UUID) ([]string, error) {
+	return nil, nil
+}
+
 func (m *mockBindingRepo) SyncMCPServers(_ context.Context, agentID uuid.UUID, mcpServerIDs []uuid.UUID) error {
 	m.mcpServers[agentID] = mcpServerIDs
 	return nil

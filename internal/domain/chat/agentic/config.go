@@ -204,28 +204,28 @@ func BuildRunGates(cfg RunConfig, currentDepth int, hasSubtaskExec bool) RunGate
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
 func DefaultRunConfig() RunConfig {
 	return RunConfig{
-		MaxIterations:       25,
-		MaxTokensPerCall:    4096,
-		ContextWindowSize:   200000,
-		CompactThreshold:    0.75,
-		ToolTimeout:         30 * time.Second,
-		TotalTimeout:        5 * time.Minute, // agents can override via totalTimeoutSeconds in model config
-		LLMCallTimeout:      5 * time.Minute,  // P-C102-1: per-call timeout; configurable via LLM_CALL_TIMEOUT_SECS
-		ConcurrentReadTools: 3,
-		StreamBufferSize:    64,
-		MaxBudgetUSD:        0, // no limit by default
+		MaxIterations:              25,
+		MaxTokensPerCall:           4096,
+		ContextWindowSize:          200000,
+		CompactThreshold:           0.75,
+		ToolTimeout:                30 * time.Second,
+		TotalTimeout:               5 * time.Minute, // agents can override via totalTimeoutSeconds in model config
+		LLMCallTimeout:             5 * time.Minute, // P-C102-1: per-call timeout; configurable via LLM_CALL_TIMEOUT_SECS
+		ConcurrentReadTools:        3,
+		StreamBufferSize:           64,
+		MaxBudgetUSD:               0, // no limit by default
 		MaxToolResultChars:         50000,
 		MaxToolResultsPerTurnChars: 200000,
-		RetryMaxAttempts:    5,
-		MaxDepth:            3,
-		Provider:            "anthropic",
-		Model:               "claude-sonnet-4-20250514",
+		RetryMaxAttempts:           5,
+		MaxDepth:                   3,
+		Provider:                   "anthropic",
+		Model:                      "claude-sonnet-4-20250514",
 		Temperature:                0.7,
 		StallCheckInterval:         15 * time.Second,
 		StallThreshold:             45 * time.Second,
 		ToolCacheCapacity:          64,
-		DenialEscalationThreshold: 3,
-		MaxHistoryMessages:        200,
+		DenialEscalationThreshold:  3,
+		MaxHistoryMessages:         200,
 	}
 }
 

@@ -43,6 +43,7 @@ type Config struct {
 	RabbitMQURL         string // RABBITMQ_URL — optional; enables document pipeline events when set
 	SkillRuntimeURL     string // SKILL_RUNTIME_URL — optional; base URL for skill-runtime service
 	MCPRuntimeURL       string // MCP_RUNTIME_URL — optional; base URL for mcp-client-runtime service
+	EmbeddingURL        string // EMBEDDING_URL — optional; base URL for embedding service (enables document_search)
 	// LLMCallTimeoutSecs is the per-LLM-call timeout in seconds.
 	// P-C102-1: prevents stalled providers from blocking goroutines indefinitely.
 	// Default: 300 (5 minutes). Set to 0 to disable.
@@ -80,6 +81,7 @@ func Load() (*Config, error) {
 	cfg.RabbitMQURL = os.Getenv("RABBITMQ_URL")
 	cfg.SkillRuntimeURL = getEnv("SKILL_RUNTIME_URL", "http://agenthub-skill-runtime:8083")
 	cfg.MCPRuntimeURL = getEnv("MCP_RUNTIME_URL", "http://agenthub-mcp-client-runtime:8080")
+	cfg.EmbeddingURL = getEnv("EMBEDDING_URL", "http://agenthub-embedding:8092")
 
 	// P-C102-1: per-LLM-call timeout. Default 300s (5 minutes).
 	cfg.LLMCallTimeoutSecs = 300

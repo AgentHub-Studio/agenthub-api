@@ -408,3 +408,22 @@ func TestDenialTracker_MetadataAndEscalationCombined(t *testing.T) {
 	assert.True(t, d.IsAutoModeLoop())
 	assert.Len(t, d.History, 3)
 }
+
+func TestEvaluatePermission_InputPattern_WordBoundary(t *testing.T) {
+	// BUG-PERM-SUBSTRING fix: "DELETE" pattern must NOT match "deleted" column name.
+	rules := &agentic.PermissionRules{
+		Deny: []string{"execute-sql(DELETE)"},
+	}
+	// Should deny: standalone DELETE keyword.
+	assert.Equal(t, agentic.PermissionDeny,
+		agentic.EvaluatePermission(rules, "execute-sql", `{"query":"DELETE FROM users WHERE id=1"}`))
+	// Should allow: "deleted" column name — not a SQL keyword.
+	assert.Equal(t, agentic.PermissionAllow,
+		agentic.EvaluatePermission(rules, "execute-sql", `{"query":"SELECT id, deleted FROM users"}`))
+	// Should allow: "is_deleted" column — also not a keyword match.
+	assert.Equal(t, agentic.PermissionAllow,
+		agentic.EvaluatePermission(rules, "execute-sql", `{"query":"SELECT id, is_deleted FROM users"}`))
+	// Should deny: DELETE in mixed-case.
+	assert.Equal(t, agentic.PermissionDeny,
+		agentic.EvaluatePermission(rules, "execute-sql", `{"query":"delete from orders"}`))
+}

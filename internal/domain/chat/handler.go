@@ -57,13 +57,13 @@ type PermissionAuditEntryResponse struct {
 
 // Handler handles HTTP requests for chat sessions and messages.
 type Handler struct {
-	svc              chatService
-	executor         *AsyncExecutor
-	runLookup        RunLookup // nil when executor is nil (tests without DB)
-	bgRegistry       *BackgroundRunRegistry
-	bufferRegistry   *RunEventBufferRegistry
-	taskRepo         task.Repository // nil means task endpoints return 501
-	permAuditReader  PermissionAuditReader // nil means endpoint returns 501
+	svc             chatService
+	executor        *AsyncExecutor
+	runLookup       RunLookup // nil when executor is nil (tests without DB)
+	bgRegistry      *BackgroundRunRegistry
+	bufferRegistry  *RunEventBufferRegistry
+	taskRepo        task.Repository       // nil means task endpoints return 501
+	permAuditReader PermissionAuditReader // nil means endpoint returns 501
 }
 
 // NewHandler creates a new Handler.
@@ -73,6 +73,9 @@ func NewHandler(svc chatService, executor *AsyncExecutor) *Handler {
 		executor:       executor,
 		bgRegistry:     NewBackgroundRunRegistry(0),
 		bufferRegistry: NewRunEventBufferRegistry(),
+	}
+	if executor != nil {
+		executor.WithEventBufferRegistry(h.bufferRegistry)
 	}
 	if executor != nil {
 		h.runLookup = executor
@@ -292,6 +295,7 @@ func (h *Handler) addMessage(w http.ResponseWriter, r *http.Request) {
 type elicitationRespondRequest struct {
 	Action  string                 `json:"action"`  // "accept" | "decline" | "cancel"
 	Content map[string]interface{} `json:"content"` // form field values (for accept)
+	Values  map[string]interface{} `json:"values"`  // alias for Content (some clients use "values")
 }
 
 // runSessionRequest is the body for POST /api/chat/sessions/{id}/run.
@@ -333,6 +337,10 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	if h.executor != nil {
 		runID, err := h.executor.EnqueueRun(r.Context(), sessionID, tenantID, req.Message)
 		if err != nil {
+			if errors.Is(err, ErrRunAlreadyActive) {
+				respond.Error(w, http.StatusConflict, "a run is already in progress for this session")
+				return
+			}
 			respond.Error(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue run: %v", err))
 			return
 		}
@@ -612,6 +620,11 @@ func (h *Handler) respondElicitation(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Action == "" {
 		req.Action = "accept"
+	}
+	// BUG-ASK_USER-1: Accept "values" as an alias for "content" so clients that
+	// send {"values": {...}} instead of {"content": {...}} are not silently ignored.
+	if len(req.Content) == 0 && len(req.Values) > 0 {
+		req.Content = req.Values
 	}
 
 	result := ElicitationResult{

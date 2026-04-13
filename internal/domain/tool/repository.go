@@ -24,6 +24,9 @@ var ErrAlreadyBound = errors.New("tool: already bound to skill")
 // ErrDuplicateName is returned when a tool with the same name already exists (P-C338-1).
 var ErrDuplicateName = errors.New("tool: a tool with this name already exists")
 
+// ErrValidation is returned when a tool request fails business validation.
+var ErrValidation = errors.New("tool: validation failed")
+
 // ToolRepository defines the persistence interface for Tool.
 type ToolRepository interface {
 	List(ctx context.Context, req pagination.PageRequest, toolType string) ([]Tool, int64, error)
@@ -273,6 +276,17 @@ func (r *Repository) BindToSkill(ctx context.Context, skillID uuid.UUID, req Bin
 		return SkillTool{}, fmt.Errorf("tool: bind to skill: %w", err)
 	}
 	return st, nil
+}
+
+// BindSkillTool binds toolID to skillID with default settings (priority=0, active=true).
+// Implements skill.ToolBinder — used by skill.Service.Create for the BUG-F1 toolId auto-bind.
+// Returns nil if the binding already exists (idempotent).
+func (r *Repository) BindSkillTool(ctx context.Context, skillID uuid.UUID, toolID uuid.UUID) error {
+	_, err := r.BindToSkill(ctx, skillID, BindRequest{ToolID: toolID})
+	if errors.Is(err, ErrAlreadyBound) {
+		return nil
+	}
+	return err
 }
 
 // UnbindFromSkill removes a skill_tool binding.

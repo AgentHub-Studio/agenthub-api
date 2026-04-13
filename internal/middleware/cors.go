@@ -35,6 +35,10 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 					w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Request-ID, Cache-Control")
 				}
 			}
+			// BUG-DEPR2 fix: intercept ALL OPTIONS requests here so the router
+			// wildcard r.Options("/*") can be removed. Without that wildcard,
+			// chi no longer registers a method for unregistered paths, meaning
+			// GET/POST to non-existent routes correctly returns 404 (not 405).
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
 				return

@@ -8,6 +8,8 @@ import (
 )
 
 // CreateRequest is the payload for creating a tool.
+// SkillID is optional — when provided the tool is automatically bound to that
+// skill after creation (active, priority 0), saving callers a second API call.
 type CreateRequest struct {
 	Name        string          `json:"name"`
 	Type        ToolType        `json:"type"`
@@ -16,6 +18,7 @@ type CreateRequest struct {
 	Description string          `json:"description"`
 	Labels      []string        `json:"labels"`
 	ReadOnly    bool            `json:"readOnly"`
+	SkillID     *uuid.UUID      `json:"skillId,omitempty"` // optional: auto-bind to skill after creation
 }
 
 // UpdateRequest is the payload for updating a tool.

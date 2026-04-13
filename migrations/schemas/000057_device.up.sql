@@ -4,7 +4,7 @@
 -- Devices are discovered by the MCP Client Runtime and registered here.
 -- An agent can subscribe to a device to receive its data via MCP Resources.
 
-CREATE TABLE device (
+CREATE TABLE IF NOT EXISTS device (
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name            VARCHAR(255) NOT NULL,
     -- type: SENSOR, ACTUATOR, GATEWAY, COMPUTE
@@ -28,13 +28,13 @@ CREATE TABLE device (
 );
 
 -- agent_device links agents to devices they can interact with.
-CREATE TABLE agent_device (
+CREATE TABLE IF NOT EXISTS agent_device (
     agent_id    UUID NOT NULL REFERENCES agent(id) ON DELETE CASCADE,
     device_id   UUID NOT NULL REFERENCES device(id) ON DELETE CASCADE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (agent_id, device_id)
 );
 
-CREATE INDEX idx_device_mcp_server  ON device(mcp_server_config_id);
-CREATE INDEX idx_device_status      ON device(status);
-CREATE INDEX idx_agent_device_agent ON agent_device(agent_id);
+CREATE INDEX IF NOT EXISTS idx_device_mcp_server  ON device(mcp_server_config_id);
+CREATE INDEX IF NOT EXISTS idx_device_status      ON device(status);
+CREATE INDEX IF NOT EXISTS idx_agent_device_agent ON agent_device(agent_id);

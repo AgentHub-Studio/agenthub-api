@@ -11,8 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 type mockAgentRepo struct {
@@ -117,6 +119,9 @@ func (m *mockNoopBindingRepo) SyncKnowledgeBases(_ context.Context, _ uuid.UUID,
 func (m *mockNoopBindingRepo) ListMCPServerIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
 	return nil, nil
 }
+func (m *mockNoopBindingRepo) ListMCPServerNames(_ context.Context, _ uuid.UUID) ([]string, error) {
+	return nil, nil
+}
 func (m *mockNoopBindingRepo) SyncMCPServers(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
 	return nil
 }
@@ -161,6 +166,23 @@ func (m *mockNoopSkillRepo) CountActiveToolsForSkills(_ context.Context, ids []u
 		return 0, nil
 	}
 	return m.activeTools, nil
+}
+
+type mockAuditRecorder struct {
+	requests []audit.RecordRequest
+	tenants  []string
+}
+
+func (m *mockAuditRecorder) Record(_ context.Context, tenantID string, req audit.RecordRequest) (audit.AuditLog, error) {
+	m.requests = append(m.requests, req)
+	m.tenants = append(m.tenants, tenantID)
+	return audit.AuditLog{
+		ID:         uuid.New(),
+		EntityType: req.EntityType,
+		EntityID:   req.EntityID,
+		Action:     req.Action,
+		Metadata:   req.Metadata,
+	}, nil
 }
 
 func newMockAgentSvc() agent.Service {
@@ -511,6 +533,13 @@ func newVersionSvc() (agent.VersionService, *mockAgentRepo, *mockVersionRepo) {
 	return agent.NewVersionService(ar, vr), ar, vr
 }
 
+func newVersionSvcWithAudit() (agent.VersionService, *mockAgentRepo, *mockVersionRepo, *mockAuditRecorder) {
+	ar := newMockRepo()
+	vr := newMockVersionRepo()
+	auditRecorder := &mockAuditRecorder{}
+	return agent.NewVersionServiceWithAudit(ar, vr, auditRecorder), ar, vr, auditRecorder
+}
+
 func seedAgent(ar *mockAgentRepo) agent.Agent {
 	a := agent.Agent{ID: uuid.New(), Name: "test", Slug: "test", Status: agent.StatusDraft, CurrentVersion: 1}
 	ar.data[a.ID] = a
@@ -584,6 +613,22 @@ func TestVersionService_Publish(t *testing.T) {
 	assert.Equal(t, "PUBLISHED", published.Status)
 }
 
+func TestVersionService_Publish_RecordsAudit(t *testing.T) {
+	svc, ar, _, auditRecorder := newVersionSvcWithAudit()
+	a := seedAgent(ar)
+	ctx := tenantctx.NewContext(context.Background(), "test")
+
+	draft, _ := svc.CreateDraft(ctx, a.ID, agent.CreateAgentVersionRequest{})
+	_, err := svc.Publish(ctx, draft.ID)
+	require.NoError(t, err)
+	require.Len(t, auditRecorder.requests, 2)
+	assert.Equal(t, "test", auditRecorder.tenants[1])
+	assert.Equal(t, "agent_version", auditRecorder.requests[1].EntityType)
+	assert.Equal(t, draft.ID.String(), auditRecorder.requests[1].EntityID)
+	assert.Equal(t, audit.AuditActionUpdate, auditRecorder.requests[1].Action)
+	assert.Contains(t, auditRecorder.requests[1].Metadata, "publish")
+}
+
 func TestVersionService_GetDraft(t *testing.T) {
 	svc, ar, _ := newVersionSvc()
 	a := seedAgent(ar)
@@ -604,6 +649,41 @@ func TestVersionService_GetLatestPublished(t *testing.T) {
 	resp, err := svc.GetLatestPublished(context.Background(), a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "PUBLISHED", resp.Status)
+}
+
+func TestVersionService_Rollback_RecordsAudit(t *testing.T) {
+	svc, ar, vr, auditRecorder := newVersionSvcWithAudit()
+	a := seedAgent(ar)
+	ctx := tenantctx.NewContext(context.Background(), "test")
+
+	prompt := "version 1"
+	ar.data[a.ID] = agent.Agent{
+		ID:           a.ID,
+		Name:         a.Name,
+		Slug:         a.Slug,
+		Status:       agent.StatusPublished,
+		SystemPrompt: &prompt,
+	}
+	target := agent.AgentVersion{
+		ID:             uuid.New(),
+		AgentID:        a.ID,
+		VersionNumber:  1,
+		Status:         agent.VersionStatusPublished,
+		Description:    "v1",
+		DefinitionJSON: json.RawMessage(`{"systemPrompt":"version 1"}`),
+		ConfigJSON:     json.RawMessage(`{"provider":"openrouter","model":"openai/gpt-oss-120b"}`),
+	}
+	vr.data[target.ID] = target
+
+	resp, err := svc.Rollback(ctx, a.ID, target.ID)
+	require.NoError(t, err)
+	require.Len(t, auditRecorder.requests, 1)
+	assert.Equal(t, "test", auditRecorder.tenants[0])
+	assert.Equal(t, "agent", auditRecorder.requests[0].EntityType)
+	assert.Equal(t, a.ID.String(), auditRecorder.requests[0].EntityID)
+	assert.Equal(t, audit.AuditActionUpdate, auditRecorder.requests[0].Action)
+	assert.Contains(t, auditRecorder.requests[0].Metadata, "rollback")
+	assert.Equal(t, "Rollback to version 1", resp.Description)
 }
 
 // --- TR-01-TASK-31: rejeitar config.modelConfig aninhado (P-C249-2) ---
@@ -848,6 +928,9 @@ func (m *mockTrackingBindingRepo) SyncKnowledgeBases(_ context.Context, _ uuid.U
 	return nil
 }
 func (m *mockTrackingBindingRepo) ListMCPServerIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (m *mockTrackingBindingRepo) ListMCPServerNames(_ context.Context, _ uuid.UUID) ([]string, error) {
 	return nil, nil
 }
 func (m *mockTrackingBindingRepo) SyncMCPServers(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -35,12 +36,18 @@ func AcquireWithTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string)
 	}
 
 	schema := fmt.Sprintf("ah_%s", tenantID)
-	if _, err := conn.Exec(ctx, fmt.Sprintf("SET search_path TO %s, public", schema)); err != nil {
+	searchPath := tenantSearchPath(tenantID)
+	if _, err := conn.Exec(ctx, fmt.Sprintf("SET search_path TO %s", searchPath)); err != nil {
 		conn.Release()
 		return nil, nil, fmt.Errorf("database: set search_path to %s: %w", schema, err)
 	}
 
 	return conn, conn.Release, nil
+}
+
+func tenantSearchPath(tenantID string) string {
+	schema := fmt.Sprintf("ah_%s", tenantID)
+	return pgx.Identifier{schema}.Sanitize() + ", public"
 }
 
 // NewPool creates and validates a pgxpool.Pool.

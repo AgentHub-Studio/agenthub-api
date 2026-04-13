@@ -125,9 +125,10 @@ type AgentVersion struct {
 
 // Sentinel errors for version operations.
 var (
-	ErrVersionNotFound    = fmt.Errorf("agent version not found")
-	ErrDraftAlreadyExists = fmt.Errorf("agent already has an active draft version")
-	ErrVersionImmutable   = fmt.Errorf("published version is immutable")
+	ErrVersionNotFound       = fmt.Errorf("agent version not found")
+	ErrDraftAlreadyExists    = fmt.Errorf("agent already has an active draft version")
+	ErrVersionImmutable      = fmt.Errorf("published version is immutable")
+	ErrRollbackBlockedByDraft = fmt.Errorf("cannot rollback while a draft version exists; publish or discard the draft first")
 )
 
 // ReadinessLevel classifies the quality of an agent configuration.

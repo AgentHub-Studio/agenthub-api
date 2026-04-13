@@ -104,6 +104,25 @@ func (m *mockVersionSvc) Publish(_ context.Context, versionID uuid.UUID) (agent.
 	return v, nil
 }
 
+func (m *mockVersionSvc) Rollback(_ context.Context, agentID, versionID uuid.UUID) (agent.AgentVersionResponse, error) {
+	v, ok := m.versions[versionID]
+	if !ok {
+		return agent.AgentVersionResponse{}, agent.ErrVersionNotFound
+	}
+	if v.AgentID != agentID {
+		return agent.AgentVersionResponse{}, agent.ErrVersionNotFound
+	}
+	return v, nil
+}
+
+func (m *mockVersionSvc) GetVersionByID(_ context.Context, versionID uuid.UUID) (agent.AgentVersionResponse, error) {
+	v, ok := m.versions[versionID]
+	if !ok {
+		return agent.AgentVersionResponse{}, agent.ErrVersionNotFound
+	}
+	return v, nil
+}
+
 func setupVersionRouter() (*chi.Mux, *mockVersionSvc) {
 	svc := newMockVersionSvc()
 	h := agent.NewVersionHandler(svc)

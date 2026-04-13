@@ -1,0 +1,1 @@
+-- no-op: tables created with IF NOT EXISTS — drop is handled by 000013 down migration

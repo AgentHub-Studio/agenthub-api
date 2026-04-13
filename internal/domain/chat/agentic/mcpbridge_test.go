@@ -241,7 +241,7 @@ func TestMCPToolBridge_WithAllowedServerNames_FiltersUnbound(t *testing.T) {
 	assert.Equal(t, "mcp__fs__read_file", tools[1].Name)
 }
 
-func TestMCPToolBridge_WithAllowedServerNames_EmptyAllowsAll(t *testing.T) {
+func TestMCPToolBridge_WithAllowedServerNames_NilAllowsAll(t *testing.T) {
 	client := &mockMCPClient{
 		tools: []agentic.MCPToolInfo{
 			{ServerName: "github", Name: "list_repos"},
@@ -250,11 +250,29 @@ func TestMCPToolBridge_WithAllowedServerNames_EmptyAllowsAll(t *testing.T) {
 	}
 
 	bridge := agentic.NewMCPToolBridge(client, "t")
-	bridge.WithAllowedServerNames(nil)
+	bridge.WithAllowedServerNames(nil) // nil = no filter (agent has no bindings)
 
 	tools, err := bridge.ListTools(context.Background())
 	require.NoError(t, err)
 	assert.Len(t, tools, 2)
+}
+
+// P-C253-1: when the agent has explicit MCP bindings but all are disabled,
+// the snapshot is an empty (non-nil) slice → the bridge should expose zero tools.
+func TestMCPToolBridge_WithAllowedServerNames_EmptySliceBlocksAll(t *testing.T) {
+	client := &mockMCPClient{
+		tools: []agentic.MCPToolInfo{
+			{ServerName: "github", Name: "list_repos"},
+			{ServerName: "slack", Name: "send_message"},
+		},
+	}
+
+	bridge := agentic.NewMCPToolBridge(client, "t")
+	bridge.WithAllowedServerNames([]string{}) // empty non-nil = has bindings but all disabled
+
+	tools, err := bridge.ListTools(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tools, "empty non-nil allowed list should block all MCP tools")
 }
 
 func TestMCPToolBridge_WithAllowedServerNames_AllFiltered(t *testing.T) {

@@ -35,6 +35,9 @@ type AgentRunConfig struct {
 	// SkillIDs are the IDs of skills bound to the agent at the time of loading.
 	// Captured at session creation for snapshotting (P-C115-1).
 	SkillIDs []uuid.UUID
+	// MCPServerNames are the names of MCP servers bound to the agent.
+	// P-C253-1: used to filter MCP tools in the agentic loop.
+	MCPServerNames []string
 }
 
 // ErrAgentNotPublished is returned when an agent is not in PUBLISHED status.
@@ -73,6 +76,10 @@ type RunInput struct {
 	// creation time. The runner uses these IDs instead of the agent's current bindings
 	// so the tool set stays consistent throughout the conversation. P-C115-1.
 	SkillIDsSnapshot []uuid.UUID
+	// MCPServerNamesSnapshot, when non-empty, contains the MCP server names bound to
+	// the agent at session creation time. Passed to the runner to filter MCP tools.
+	// P-C253-1: agent-level MCP binding enforcement.
+	MCPServerNamesSnapshot []string
 }
 
 // ElicitationResponder routes a user's elicitation response to the active run.
@@ -332,15 +339,25 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		}
 	}
 
+	// P-C253-1: load MCP server names bound to the agent so the runner can filter
+	// MCP tools to only those from servers explicitly bound to this agent.
+	var mcpServerNames []string
+	if s.agentLoader != nil {
+		if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
+			mcpServerNames = agentCfg.MCPServerNames
+		}
+	}
+
 	return s.runner.RunSession(ctx, RunInput{
-		SessionID:            sessionID,
-		AgentID:              *session.AgentID,
-		UserMessage:          userMessage,
-		TenantID:             tenantID,
-		UserMessageID:        userMsgID,
-		SystemPromptSnapshot: session.SystemPromptSnapshot,
-		ModelConfigSnapshot:  session.ModelConfigSnapshot,
-		SkillIDsSnapshot:     skillIDsSnapshot,
+		SessionID:              sessionID,
+		AgentID:                *session.AgentID,
+		UserMessage:            userMessage,
+		TenantID:               tenantID,
+		UserMessageID:          userMsgID,
+		SystemPromptSnapshot:   session.SystemPromptSnapshot,
+		ModelConfigSnapshot:    session.ModelConfigSnapshot,
+		SkillIDsSnapshot:       skillIDsSnapshot,
+		MCPServerNamesSnapshot: mcpServerNames,
 	})
 }
 

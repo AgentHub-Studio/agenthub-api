@@ -120,6 +120,11 @@ func compileRules() []secretRule {
 		// JWT / Bearer tokens in headers
 		{"bearer-token", "Bearer Token in Header",
 			`(?i)(?:authorization|bearer)\s*[:=]\s*['"]?Bearer\s+[a-zA-Z0-9_-]{20,}[.][a-zA-Z0-9_-]+[.][a-zA-Z0-9_-]+['"]?`},
+		// Authorization header values in JSON responses (e.g. from httpbin-style echo endpoints).
+		// Catches any "Authorization": "Bearer <token>" or "Authorization": "<scheme> <value>"
+		// that may appear in tool output when the remote server echoes back request headers.
+		{"auth-header-json", "Authorization Header in JSON Response",
+			`(?i)"[Aa]uthorization"\s*:\s*"(?:Bearer|Basic|Token)\s+[^"]{8,}"`},
 
 		// Generic high-entropy secrets in config-like patterns
 		{"generic-password", "Password in Config",

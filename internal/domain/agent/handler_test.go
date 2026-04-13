@@ -113,6 +113,16 @@ func (m *mockAgentSvc) Archive(_ context.Context, id uuid.UUID) (agent.AgentResp
 	return a, nil
 }
 
+func (m *mockAgentSvc) Restore(_ context.Context, id uuid.UUID) (agent.AgentResponse, error) {
+	a, ok := m.agents[id]
+	if !ok {
+		return agent.AgentResponse{}, agent.ErrNotFound
+	}
+	a.Status = string(agent.StatusDraft)
+	m.agents[id] = a
+	return a, nil
+}
+
 func (m *mockAgentSvc) Clone(_ context.Context, id uuid.UUID, req agent.CloneAgentRequest) (agent.AgentResponse, error) {
 	a, ok := m.agents[id]
 	if !ok {

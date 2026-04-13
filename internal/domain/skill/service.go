@@ -27,14 +27,30 @@ type Deleter interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 }
 
+// ToolBinder is a narrow interface for auto-binding a tool to a skill after
+// creation. BUG-F1 fix: allows POST /api/skills with {"toolId": "..."} to bind
+// the tool in the same request rather than requiring a separate call.
+type ToolBinder interface {
+	// BindSkillTool binds toolID to skillID with default priority/active=true.
+	BindSkillTool(ctx context.Context, skillID uuid.UUID, toolID uuid.UUID) error
+}
+
 // Service holds business logic for skills.
 type Service struct {
-	repo SkillRepository
+	repo        SkillRepository
+	toolBinder  ToolBinder // optional: enables toolId auto-bind on Create
 }
 
 // NewService creates a new Service.
 func NewService(repo SkillRepository) *Service {
 	return &Service{repo: repo}
+}
+
+// WithToolBinder injects a ToolBinder so Create can auto-bind a tool when toolId
+// is provided in the request body.
+func (s *Service) WithToolBinder(b ToolBinder) *Service {
+	s.toolBinder = b
+	return s
 }
 
 // List returns a paginated list of skills, optionally filtered by category.
@@ -103,6 +119,19 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if err != nil {
 		return Response{}, err
 	}
+	// Auto-bind tools when toolId / toolIds were provided in the request.
+	// Non-fatal: skill was created; individual binding failures are ignored so that
+	// the skill creation itself does not roll back (BUG-F1 / BUG-API-toolIds-IGNORED fix).
+	if s.toolBinder != nil {
+		if req.ToolID != nil && *req.ToolID != uuid.Nil {
+			_ = s.toolBinder.BindSkillTool(ctx, created.ID, *req.ToolID)
+		}
+		for _, tid := range req.ToolIDs {
+			if tid != uuid.Nil {
+				_ = s.toolBinder.BindSkillTool(ctx, created.ID, tid)
+			}
+		}
+	}
 	return ResponseFrom(created), nil
 }
 
@@ -118,6 +147,34 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (Response, error) {
 // Update updates a skill.
 // Applies the same instruction-size and inert-skill guards as Create.
 func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (Response, error) {
+	// BUG-SKILL-NAME-LOST fix: load existing skill and apply only non-zero fields
+	// so that PATCH/PUT with a partial body does not wipe unchanged fields.
+	existing, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return Response{}, ErrNotFound
+	}
+	if req.Name == "" {
+		req.Name = existing.Name
+	}
+	if req.Description == "" {
+		req.Description = existing.Description
+	}
+	if req.Category == "" {
+		req.Category = existing.Category
+	}
+	if req.ContextMode == "" {
+		req.ContextMode = existing.ContextMode
+	}
+	if req.WhenToUse == nil {
+		req.WhenToUse = existing.WhenToUse
+	}
+	if req.ArgumentHint == nil {
+		req.ArgumentHint = existing.ArgumentHint
+	}
+	if len(req.AllowedTools) == 0 {
+		req.AllowedTools = existing.AllowedTools
+	}
+
 	// DX-01-H: normalize whitespace-only instructions.
 	req.Instructions = strings.TrimSpace(req.Instructions)
 

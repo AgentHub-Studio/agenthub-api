@@ -422,6 +422,137 @@ func TestPrompt_AgentWithoutSystemPrompt_HasDefaultGuard(t *testing.T) {
 	assert.NotEmpty(t, prompt)
 }
 
+// TestPromptBuild_BehavioralSkillInstructions_IncludedInPrompt verifies that skill
+// instructions without tool references are injected into the system prompt by Build.
+// This is the production-path integration of FormatSkillInstructionsSection.
+// P-C152-2 / B6 regression: instructions were being discarded before this fix.
+func TestPromptBuild_BehavioralSkillInstructions_IncludedInPrompt(t *testing.T) {
+	marker := "---END_MARKER---"
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{skills: []skill.Skill{
+			{Name: "Formatter", Slug: "formatter", Instructions: "Always end EVERY response with " + marker},
+		}},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	)
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:   uuid.New(),
+		SessionID: uuid.New(),
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, prompt, marker, "behavioral skill instruction must appear in the system prompt")
+}
+
+// TestPromptBuild_ToolRefSkillInstructions_OmittedFromPrompt verifies that instructions
+// containing a tool reference are omitted when we cannot verify active tool bindings.
+// This prevents LLM hallucination of non-existent tool calls. P-C152-2.
+func TestPromptBuild_ToolRefSkillInstructions_OmittedFromPrompt(t *testing.T) {
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{skills: []skill.Skill{
+			{Name: "Search", Slug: "search", Instructions: "Use the document_search tool to find answers."},
+		}},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	)
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:   uuid.New(),
+		SessionID: uuid.New(),
+	})
+
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, "document_search tool", "tool-referencing instruction must be omitted to prevent hallucination")
+}
+
+// TestPromptBuilder_ClearCacheForAgent_InvalidatesSkillInstructions verifies that
+// ClearCacheForAgent causes fresh skill data to be fetched on the next Build call.
+// P-C343-1: cache must not serve stale skill instructions after an edit.
+func TestPromptBuilder_ClearCacheForAgent_InvalidatesSkillInstructions(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+
+	// First build: skill says "respond in Portuguese"
+	lister := &mockSkillLister{skills: []skill.Skill{
+		{Name: "Language", Slug: "language", Instructions: "Always respond in Portuguese."},
+	}}
+	builder := agentic.NewPromptBuilder(lister, &mockKBLister{}, &mockSummaryFinder{}, agentic.DefaultPromptConfig())
+
+	prompt1, err := builder.Build(context.Background(), agentic.PromptInput{AgentID: agentID, SessionID: sessionID})
+	require.NoError(t, err)
+	assert.Contains(t, prompt1, "Portuguese")
+
+	// Simulate skill edit: now says "respond in Spanish"
+	lister.skills = []skill.Skill{
+		{Name: "Language", Slug: "language", Instructions: "Always respond in Spanish."},
+	}
+
+	// Without clearing cache: stale result
+	promptStale, err := builder.Build(context.Background(), agentic.PromptInput{AgentID: agentID, SessionID: sessionID})
+	require.NoError(t, err)
+	assert.Contains(t, promptStale, "Portuguese", "before cache clear: stale result expected")
+	assert.NotContains(t, promptStale, "Spanish")
+
+	// After clearing cache for this agent: fresh result
+	builder.ClearCacheForAgent(agentID)
+	promptFresh, err := builder.Build(context.Background(), agentic.PromptInput{AgentID: agentID, SessionID: sessionID})
+	require.NoError(t, err)
+	assert.Contains(t, promptFresh, "Spanish", "after cache clear: fresh result expected")
+	assert.NotContains(t, promptFresh, "Portuguese")
+}
+
+// TestPromptBuild_ActiveSkillSlugs_ExcludesEmptyToolSkill verifies that a skill
+// without active tool bindings is omitted from "## Available Tools" when the
+// caller provides a non-empty ActiveSkillSlugs set. BUG-SKILL-EMPTY: the LLM
+// was hallucinating calls to slugs that appeared in the system prompt even though
+// P-C62-1 already excluded them from the JSON tools[] array.
+func TestPromptBuild_ActiveSkillSlugs_ExcludesEmptyToolSkill(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+
+	lister := &mockSkillLister{skills: []skill.Skill{
+		{Name: "Active Tool", Slug: "active-tool", Description: "Has bound tools"},
+		{Name: "Empty Tool", Slug: "empty-tool", Description: "No bound tools"},
+	}}
+	builder := agentic.NewPromptBuilder(lister, &mockKBLister{}, &mockSummaryFinder{}, agentic.DefaultPromptConfig())
+
+	// Only "active-tool" has an active binding.
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:          agentID,
+		SessionID:        sessionID,
+		ActiveSkillSlugs: map[string]bool{"active-tool": true},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "active-tool", "skill with active binding must appear in Available Tools")
+	assert.NotContains(t, prompt, "empty-tool", "skill without active binding must be omitted from Available Tools")
+}
+
+// TestPromptBuild_ActiveSkillSlugs_EmptySetShowsAll verifies that when
+// ActiveSkillSlugs is nil/empty, all skills are listed (backward-compatible
+// behaviour for callers that do not supply tool binding info).
+func TestPromptBuild_ActiveSkillSlugs_EmptySetShowsAll(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+
+	lister := &mockSkillLister{skills: []skill.Skill{
+		{Name: "Tool A", Slug: "tool-a", Description: "First"},
+		{Name: "Tool B", Slug: "tool-b", Description: "Second"},
+	}}
+	builder := agentic.NewPromptBuilder(lister, &mockKBLister{}, &mockSummaryFinder{}, agentic.DefaultPromptConfig())
+
+	// No ActiveSkillSlugs — all skills must appear.
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:   agentID,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "tool-a")
+	assert.Contains(t, prompt, "tool-b")
+}
+
 // TestPrompt_AntiHallucinationGuard_AlwaysAtTopLevel verifies the guard is present even
 // when a skill instruction attempts to contradict it.
 func TestPrompt_AntiHallucinationGuard_AlwaysAtTopLevel(t *testing.T) {

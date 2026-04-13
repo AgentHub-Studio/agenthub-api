@@ -19,6 +19,7 @@ type BindingRepository interface {
 	SyncKnowledgeBases(ctx context.Context, agentID uuid.UUID, kbIDs []uuid.UUID) error
 	// P-C253-1: per-agent MCP server bindings
 	ListMCPServerIDs(ctx context.Context, agentID uuid.UUID) ([]uuid.UUID, error)
+	ListMCPServerNames(ctx context.Context, agentID uuid.UUID) ([]string, error)
 	SyncMCPServers(ctx context.Context, agentID uuid.UUID, mcpServerIDs []uuid.UUID) error
 	// GetSkillTokenBudgets returns the token_budget overrides from agent_skill for each
 	// skill bound to the given agent. Nil values indicate no budget limit.
@@ -182,6 +183,35 @@ func (r *pgBindingRepository) ListMCPServerIDs(ctx context.Context, agentID uuid
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// ListMCPServerNames returns the names of MCP servers bound to the given agent.
+// P-C253-1: agent-level MCP binding — names are used by the runner to filter tools.
+func (r *pgBindingRepository) ListMCPServerNames(ctx context.Context, agentID uuid.UUID) ([]string, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("agent.ListMCPServerNames: acquire: %w", err)
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT m.name FROM agent_mcp_server a
+		 JOIN mcp_server_config m ON m.id = a.mcp_server_id
+		 WHERE a.agent_id = $1 AND m.enabled = true ORDER BY a.created_at`, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("agent.ListMCPServerNames: %w", err)
+	}
+	defer rows.Close()
+
+	names := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("agent.ListMCPServerNames scan: %w", err)
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
 }
 
 // GetSkillTokenBudgets returns the token_budget column from agent_skill for each

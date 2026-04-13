@@ -7,18 +7,24 @@ import (
 )
 
 // CreateRequest is the payload for creating a skill.
+// ToolID is optional — when provided the newly-created tool is automatically
+// bound to the skill, mirroring the skillId auto-bind on POST /api/tools.
+// BUG-F1 fix: field was previously absent, causing clients that sent
+// {"toolId": "..."} to have it silently ignored by the JSON decoder.
 type CreateRequest struct {
-	Name                   string   `json:"name"`
-	Slug                   string   `json:"slug"`
-	Description            string   `json:"description"`
-	Instructions           string   `json:"instructions"`
-	Category               string   `json:"category"`
-	AllowedTools           []string `json:"allowedTools"`
-	DisableModelInvocation bool     `json:"disableModelInvocation"`
-	ContextMode            string   `json:"contextMode"`
-	WhenToUse              *string  `json:"whenToUse"`
-	ArgumentHint           *string  `json:"argumentHint"`
-	ShouldDefer            bool     `json:"shouldDefer"`
+	Name                   string     `json:"name"`
+	Slug                   string     `json:"slug"`
+	Description            string     `json:"description"`
+	Instructions           string     `json:"instructions"`
+	Category               string     `json:"category"`
+	AllowedTools           []string   `json:"allowedTools"`
+	DisableModelInvocation bool       `json:"disableModelInvocation"`
+	ContextMode            string     `json:"contextMode"`
+	WhenToUse              *string    `json:"whenToUse"`
+	ArgumentHint           *string    `json:"argumentHint"`
+	ShouldDefer            bool       `json:"shouldDefer"`
+	ToolID                 *uuid.UUID  `json:"toolId,omitempty"`  // optional: auto-bind single tool after creation
+	ToolIDs                []uuid.UUID `json:"toolIds,omitempty"` // optional: auto-bind multiple tools after creation (consistent with skillIds on agents)
 }
 
 // UpdateRequest is the payload for updating a skill.

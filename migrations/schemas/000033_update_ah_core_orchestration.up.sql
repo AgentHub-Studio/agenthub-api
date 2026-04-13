@@ -63,7 +63,7 @@ VALUES (
 - Use the `send_message` tool to coordinate between active sub-agents if needed.
 - Keep the user informed about the progress of the "swarm".',
     'general', NOW(), NOW()
-) ON CONFLICT (slug) DO NOTHING;
+) ON CONFLICT (id) DO NOTHING;
 
 -- 4. Ensure the AgentHub Assistant is linked to the core "agenthub-admin" capability (internal tool).
 -- This is a logical binding as the tool is now builtin in the Runner.

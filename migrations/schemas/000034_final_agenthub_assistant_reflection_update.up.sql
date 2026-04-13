@@ -1,8 +1,6 @@
 -- migration: 000034_final_agenthub_assistant_reflection_update
 -- purpose: Final robust update to AgentHub Assistant and core skills to ensure Auto-Reflection works seamlessly.
 
-SET search_path TO ah_test;
-
 -- 1. Update AgentHub Assistant with the definitive Master Orchestrator prompt.
 -- This prompt explicitly instructs the agent to use 'agenthub_manage' for all platform operations.
 UPDATE agent

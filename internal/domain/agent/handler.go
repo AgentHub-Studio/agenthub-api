@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,14 +13,36 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
+// TemplateGetter is the minimal interface the agent handler needs to
+// resolve a prompt template by ID. Implemented by prompttemplate.Service.
+type TemplateGetter interface {
+	Get(ctx context.Context, id uuid.UUID) (TemplateContent, error)
+}
+
+// TemplateContent carries the fields from a prompt template that
+// apply-template needs. Avoids a hard import of prompttemplate package.
+type TemplateContent struct {
+	Content       string
+	ModelOverride *string
+	IsBuiltin     bool // true when AgentID == nil (global/builtin template)
+}
+
 // Handler exposes agent HTTP endpoints.
 type Handler struct {
-	svc Service
+	svc         Service
+	templateSvc TemplateGetter
 }
 
 // NewHandler creates a new Handler.
 func NewHandler(svc Service) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithTemplateGetter attaches a prompt-template resolver used by the
+// POST /api/agents/{id}/apply-template endpoint.
+func (h *Handler) WithTemplateGetter(g TemplateGetter) *Handler {
+	h.templateSvc = g
+	return h
 }
 
 // RegisterRoutes mounts agent routes on the given router.
@@ -34,7 +57,9 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Delete("/api/agents/{id}", h.delete)
 	r.Post("/api/agents/{id}/publish", h.publish)
 	r.Post("/api/agents/{id}/archive", h.archive)
+	r.Post("/api/agents/{id}/restore", h.restore)
 	r.Post("/api/agents/{id}/clone", h.clone)
+	r.Post("/api/agents/{id}/apply-template", h.applyTemplate)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +213,28 @@ func (h *Handler) archive(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, http.StatusOK, resp)
 }
 
+func (h *Handler) restore(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	resp, err := h.svc.Restore(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		if isValidationError(err) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
 func (h *Handler) clone(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -205,10 +252,86 @@ func (h *Handler) clone(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return
 		}
+		if errors.Is(err, ErrSlugConflict) {
+			respond.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)
+}
+
+// applyTemplate applies a prompt template's content to an agent's system_prompt.
+// POST /api/agents/{id}/apply-template
+// Body: {"template_id": "<uuid>", "merge": false}
+// When merge=false (default), the template content replaces the system_prompt.
+// When merge=true, the template content is appended to the existing system_prompt.
+func (h *Handler) applyTemplate(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+
+	if h.templateSvc == nil {
+		respond.Error(w, http.StatusNotImplemented, "prompt template service not configured")
+		return
+	}
+
+	var body struct {
+		TemplateID string `json:"template_id"`
+		Merge      bool   `json:"merge"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	templateID, err := uuid.Parse(body.TemplateID)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid template_id: must be a UUID")
+		return
+	}
+
+	tpl, err := h.templateSvc.Get(r.Context(), templateID)
+	if err != nil {
+		respond.Error(w, http.StatusNotFound, "prompt template not found")
+		return
+	}
+
+	// Resolve the new system prompt content.
+	newContent := tpl.Content
+	if body.Merge {
+		// Fetch existing system prompt and append.
+		existing, getErr := h.svc.Get(r.Context(), id)
+		if getErr != nil {
+			if errors.Is(getErr, ErrNotFound) {
+				respond.Error(w, http.StatusNotFound, "agent not found")
+				return
+			}
+			respond.Error(w, http.StatusInternalServerError, getErr.Error())
+			return
+		}
+		if existing.SystemPrompt != nil && *existing.SystemPrompt != "" {
+			newContent = *existing.SystemPrompt + "\n\n" + tpl.Content
+		}
+	}
+
+	updateReq := UpdateAgentRequest{SystemPrompt: &newContent}
+	resp, err := h.svc.Update(r.Context(), id, updateReq)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		if isValidationError(err) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
 }
 
 // VersionHandler exposes agent version HTTP endpoints.
@@ -227,8 +350,10 @@ func (h *VersionHandler) RegisterVersionRoutes(r chi.Router) {
 	r.Post("/api/agents/{agentId}/versions", h.createDraft)
 	r.Get("/api/agents/{agentId}/versions/draft", h.getDraft)
 	r.Get("/api/agents/{agentId}/versions/latest-published", h.getLatestPublished)
+	r.Get("/api/agents/{agentId}/versions/by-id/{versionId}", h.getVersionByID)
 	r.Put("/api/agents/{agentId}/versions/by-id/{versionId}", h.updateDraft)
 	r.Post("/api/agents/{agentId}/versions/{versionId}/publish", h.publishVersion)
+	r.Post("/api/agents/{agentId}/versions/{versionId}/rollback", h.rollbackVersion)
 }
 
 func parseAgentID(r *http.Request) (uuid.UUID, error) {
@@ -316,6 +441,24 @@ func (h *VersionHandler) getLatestPublished(w http.ResponseWriter, r *http.Reque
 	respond.JSON(w, http.StatusOK, resp)
 }
 
+func (h *VersionHandler) getVersionByID(w http.ResponseWriter, r *http.Request) {
+	versionID, err := parseVersionID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid versionId")
+		return
+	}
+	resp, err := h.svc.GetVersionByID(r.Context(), versionID)
+	if err != nil {
+		if errors.Is(err, ErrVersionNotFound) {
+			respond.Error(w, http.StatusNotFound, "version not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
 func (h *VersionHandler) updateDraft(w http.ResponseWriter, r *http.Request) {
 	versionID, err := parseVersionID(r)
 	if err != nil {
@@ -355,6 +498,32 @@ func (h *VersionHandler) publishVersion(w http.ResponseWriter, r *http.Request) 
 			respond.Error(w, http.StatusNotFound, "version not found")
 		case errors.Is(err, ErrVersionImmutable):
 			respond.Error(w, http.StatusConflict, err.Error())
+		default:
+			respond.Error(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *VersionHandler) rollbackVersion(w http.ResponseWriter, r *http.Request) {
+	agentID, err := parseAgentID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agentId")
+		return
+	}
+	versionID, err := parseVersionID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid versionId")
+		return
+	}
+	resp, err := h.svc.Rollback(r.Context(), agentID, versionID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrVersionNotFound):
+			respond.Error(w, http.StatusNotFound, "version not found")
+		case errors.Is(err, ErrRollbackBlockedByDraft):
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		default:
 			respond.Error(w, http.StatusInternalServerError, err.Error())
 		}

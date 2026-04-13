@@ -59,6 +59,12 @@ type ToolExecResult struct {
 	// up these values into its own totals (ACT-F3-13 / P-C336-1).
 	SubtaskTokens  int     `json:"-"`
 	SubtaskCostUSD float64 `json:"-"`
+	// InjectText carries text that a post_tool_use hook wants injected into the
+	// conversation as a separate [SYSTEM NOTE] user message — NOT appended to the
+	// tool result itself (which caused LLM retry loops, see BUG-HOOK-PROMPT-INJECT).
+	// The runner collects all non-empty InjectText values after a tool-execution turn
+	// and prepends them as a single user message before the next LLM call.
+	InjectText string `json:"-"`
 }
 
 // skillExecRequest is the body sent to the skill-runtime.

@@ -35,6 +35,15 @@ var knownPricing = map[string]modelPricing{
 	"gpt-3.5-turbo": {InputPerM: 0.50, OutputPerM: 1.50},
 	"o1":            {InputPerM: 15.0, OutputPerM: 60.0},
 	"o3":            {InputPerM: 10.0, OutputPerM: 40.0},
+	// OpenRouter — OSS/custom models routed via OpenRouter
+	"openai/gpt-oss-120b": {InputPerM: 0.50, OutputPerM: 1.50}, // approximate; update when pricing is published
+	"openai/gpt-4o":       {InputPerM: 2.50, OutputPerM: 10.0},
+	"openai/gpt-4-turbo":  {InputPerM: 10.0, OutputPerM: 30.0},
+	"openai/gpt-4":        {InputPerM: 30.0, OutputPerM: 60.0},
+	"openai/gpt-3.5":      {InputPerM: 0.50, OutputPerM: 1.50},
+	"meta-llama/":         {InputPerM: 0.10, OutputPerM: 0.30},
+	"mistralai/":          {InputPerM: 0.20, OutputPerM: 0.60},
+	"google/gemini":       {InputPerM: 0.35, OutputPerM: 1.05},
 }
 
 // EstimateCostUSD returns the estimated cost in USD for the given usage and model.

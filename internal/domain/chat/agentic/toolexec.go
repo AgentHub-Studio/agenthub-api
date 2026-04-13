@@ -101,10 +101,17 @@ func (e *StreamingToolExecutor) emitToolResult(ch chan<- RunEvent, tt *TrackedTo
 		duration = tt.DoneAt.Sub(tt.StartedAt).Milliseconds()
 	}
 
+	// SECRET-SCANNER: redact known credential patterns from tool output before
+	// emitting the SSE tool_result event visible to the frontend.
+	output := result.Output
+	if len(output) > 0 {
+		output = json.RawMessage(RedactSecrets(string(output), "[REDACTED]"))
+	}
+
 	ch <- NewRunEvent(EventToolResult, ToolResultData{
 		ID:         tt.ID,
 		Name:       tt.Name,
-		Output:     result.Output,
+		Output:     output,
 		DurationMs: duration,
 		Error:      result.Error,
 	})
@@ -458,6 +465,11 @@ func (e *StreamingToolExecutor) executeParallel(
 			// Route document_search locally (P-C179-1), then MCP, then skill-runtime.
 			if tc.Function.Name == "document_search" && e.docSearch != nil {
 				execResult, execErr = executeDocumentSearchInternal(toolCtx, e.docSearch, e.activeKBIDs, toolInput)
+			} else if tc.Function.Name == "document_search" && e.docSearch == nil {
+				// P-E1-1: docSearch client not wired — surface clear error instead of delegating to
+				// skill-runtime (which returns the confusing "skill not found" message).
+				msg := "Document search is not available for this agent. The knowledge base search client is not connected. Please check that the agent has an active knowledge base linked."
+				execResult = &ToolExecResult{Error: &msg}
 			} else if IsMCPToolCall(tc.Function.Name) && e.mcpBridge != nil {
 				execResult, execErr = e.mcpBridge.Execute(toolCtx, tc.Function.Name, toolInput)
 			} else {
@@ -503,9 +515,10 @@ func (e *StreamingToolExecutor) executeParallel(
 			})
 			e.emitToolResult(ch, tt, results[i])
 
-			// Post-tool hooks.
+			// Post-tool hooks. Prompt hooks may inject extra text into the
+			// tool result so the LLM sees it in the next turn.
 			if e.hookExecutor != nil {
-				e.hookExecutor.Execute(ctx, HookPayload{
+				hookResults := e.hookExecutor.Execute(ctx, HookPayload{
 					Event:      HookPostToolUse,
 					AgentID:    in.AgentID.String(),
 					SessionID:  in.SessionID.String(),
@@ -514,6 +527,21 @@ func (e *StreamingToolExecutor) executeParallel(
 					ToolOutput: results[i].Output,
 					ToolError:  results[i].Error,
 				})
+				// Collect inject text from prompt hooks.
+				// BUG-HOOK-PROMPT-INJECT fix: store in InjectText, NOT appended to
+				// tool Output. The runner emits it as a [SYSTEM NOTE] user message
+				// before the next LLM call — preventing the LLM from treating the
+				// annotation as part of the tool result and entering a retry loop.
+				for _, hr := range hookResults {
+					if hr.Inject == "" {
+						continue
+					}
+					if results[i].InjectText == "" {
+						results[i].InjectText = hr.Inject
+					} else {
+						results[i].InjectText += "\n" + hr.Inject
+					}
+				}
 			}
 		}(idx)
 	}
@@ -588,6 +616,11 @@ func (e *StreamingToolExecutor) executeToolCall(
 	var err error
 	if tc.Function.Name == "document_search" && e.docSearch != nil {
 		execResult, err = executeDocumentSearchInternal(toolCtx, e.docSearch, e.activeKBIDs, json.RawMessage(tc.Function.Arguments))
+	} else if tc.Function.Name == "document_search" && e.docSearch == nil {
+		// P-E1-1: docSearch client not wired — surface clear error instead of delegating to
+		// skill-runtime (which returns the confusing "skill not found" message).
+		msg := "Document search is not available for this agent. The knowledge base search client is not connected. Please check that the agent has an active knowledge base linked."
+		execResult = &ToolExecResult{Error: &msg}
 	} else if IsMCPToolCall(tc.Function.Name) && e.mcpBridge != nil {
 		execResult, err = e.mcpBridge.Execute(toolCtx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 	} else {
@@ -619,7 +652,7 @@ func (e *StreamingToolExecutor) executeToolCall(
 
 	// Post-tool hooks.
 	if e.hookExecutor != nil {
-		e.hookExecutor.Execute(ctx, HookPayload{
+		hookResults := e.hookExecutor.Execute(ctx, HookPayload{
 			Event:      HookPostToolUse,
 			AgentID:    in.AgentID.String(),
 			SessionID:  in.SessionID.String(),
@@ -628,6 +661,19 @@ func (e *StreamingToolExecutor) executeToolCall(
 			ToolOutput: result.Output,
 			ToolError:  result.Error,
 		})
+		// BUG-HOOK-PROMPT-INJECT fix (serial path): collect InjectText from prompt
+		// hooks so the runner can emit a [SYSTEM NOTE] user message before the next
+		// LLM call. Previously this path discarded the hook results entirely.
+		for _, hr := range hookResults {
+			if hr.Inject == "" {
+				continue
+			}
+			if result.InjectText == "" {
+				result.InjectText = hr.Inject
+			} else {
+				result.InjectText += "\n" + hr.Inject
+			}
+		}
 
 		// Post-tool-failure hooks — fired only when tool execution failed.
 		// Inspired by Claude Code's PostToolFailure hook event.
@@ -692,19 +738,68 @@ func ValidateToolInput(toolName string, input json.RawMessage) string {
 // and returns the results serialised as JSON.
 func executeDocumentSearchInternal(ctx context.Context, client knowledge.DocumentSearchClient, kbIDs []uuid.UUID, rawArgs json.RawMessage) (*ToolExecResult, error) {
 	var args struct {
-		Query string `json:"query"`
-		TopK  int    `json:"top_k"`
+		Query           string `json:"query"`
+		TopK            int    `json:"top_k"`
+		Limit           int    `json:"limit"` // BUG-DOCSEARCH-PARAMS: alias accepted from LLM schema
+		KnowledgeBaseID string `json:"knowledge_base_id"` // BUG-DOCSEARCH-PARAMS: optional KB filter
 	}
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
 		return nil, fmt.Errorf("document_search: invalid arguments: %w", err)
+	}
+	// Prefer limit over top_k (limit is the schema-visible field name).
+	if args.Limit > 0 && args.TopK <= 0 {
+		args.TopK = args.Limit
 	}
 	if args.TopK <= 0 {
 		args.TopK = 5
 	}
 
-	results, err := client.Search(ctx, args.Query, kbIDs, args.TopK)
+	// BUG-DOCSEARCH-PARAMS: when the LLM provides knowledge_base_id, restrict the search
+	// to that KB only — but only if it is already in the agent's allowed kbIDs list.
+	// This prevents the LLM from searching arbitrary KBs beyond what the agent can access.
+	effectiveKBIDs := kbIDs
+	if args.KnowledgeBaseID != "" {
+		if kbID, err := uuid.Parse(args.KnowledgeBaseID); err == nil {
+			allowed := false
+			for _, id := range kbIDs {
+				if id == kbID {
+					allowed = true
+					break
+				}
+			}
+			if allowed {
+				effectiveKBIDs = []uuid.UUID{kbID}
+			}
+			// When kbIDs is nil (search all active KBs), any valid UUID is allowed.
+			if kbIDs == nil {
+				effectiveKBIDs = []uuid.UUID{kbID}
+			}
+		}
+	}
+
+	results, err := client.Search(ctx, args.Query, effectiveKBIDs, args.TopK)
 	if err != nil {
 		return nil, fmt.Errorf("document_search: search failed: %w", err)
+	}
+
+	// BUG-KB-PAUSE-TRANSPARENT: when no results are returned, include a diagnostic
+	// note so the LLM understands the possible cause instead of silently receiving [].
+	// The search client filters out PAUSED knowledge bases — an empty result may mean
+	// "no relevant content" OR "all knowledge bases are currently paused". Without this
+	// note the LLM retries blindly or fabricates an answer.
+	if len(results) == 0 {
+		type emptyResult struct {
+			Results []knowledge.SearchResult `json:"results"`
+			Note    string                   `json:"note"`
+		}
+		out, err := json.Marshal(emptyResult{
+			Results: []knowledge.SearchResult{},
+			Note:    "No matching documents found. The knowledge base may not contain content relevant to this query, or all associated knowledge bases may currently be paused. Do not retry — inform the user that the information is not available.",
+		})
+		if err != nil {
+			return nil, fmt.Errorf("document_search: failed to marshal empty result: %w", err)
+		}
+		return &ToolExecResult{Output: out, ToolName: "document_search"}, nil
 	}
 
 	out, err := json.Marshal(results)

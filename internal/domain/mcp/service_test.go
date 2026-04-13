@@ -76,6 +76,16 @@ func (m *mockMCPRepo) ListAutoStart(_ context.Context) ([]mcp.McpServerConfig, e
 	return out, nil
 }
 
+func (m *mockMCPRepo) ListAllEnabled(_ context.Context) ([]mcp.McpServerConfig, error) {
+	var out []mcp.McpServerConfig
+	for _, c := range m.data {
+		if c.Enabled {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 func TestMCPService_Create_Success(t *testing.T) {
 	svc := mcp.NewService(newMockRepo())
 	c, err := svc.Create(context.Background(), mcp.CreateRequest{

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -189,6 +190,14 @@ func (r *Runner) WithMCPClient(client MCPClientService) *Runner {
 	return r
 }
 
+// WithDocumentSearch wires the document search client into the tool executor.
+// P-E1-2: enables the document_search builtin tool when an active knowledge base
+// is linked to the agent.
+func (r *Runner) WithDocumentSearch(client knowledge.DocumentSearchClient, kbIDs []uuid.UUID) *Runner {
+	r.toolExec.WithDocumentSearch(client, kbIDs)
+	return r
+}
+
 // Progress returns the Runner's progress tracker for external monitoring.
 func (r *Runner) Progress() *RunProgressTracker {
 	return r.progress
@@ -253,11 +262,26 @@ const maxToolRetries = 3
 type runState struct {
 	// toolRetries maps tool name → number of times it has been invoked this run.
 	toolRetries map[string]int
+	// storedMemoryKeys is the set of normalised keys stored by memory_store this run.
+	// BUG-MEM-STRESS1 fix: tracking per-key instead of a single bool allows the LLM
+	// to store multiple distinct facts in a single run (bulk memorisation). Only the
+	// exact same normalised key is blocked on a second call, not every subsequent call.
+	storedMemoryKeys map[string]struct{}
+	// collectedUserValues accumulates all values accepted by the user via ask_user
+	// this run. BUG-ASK_USER-LOOP fix: when the LLM calls ask_user a second time for
+	// fields already collected, the runner auto-answers with the cached values instead
+	// of blocking for user input again. This prevents infinite ask_user loops observed
+	// with models like gpt-oss-120b that do not follow the "_instruction" hint.
+	collectedUserValues map[string]any
 }
 
 // newRunState initialises a fresh runState for a new run.
 func newRunState() *runState {
-	return &runState{toolRetries: make(map[string]int)}
+	return &runState{
+		toolRetries:         make(map[string]int),
+		storedMemoryKeys:    make(map[string]struct{}),
+		collectedUserValues: make(map[string]any),
+	}
 }
 
 // checkAndIncrementRetry returns an error when the tool has already been called
@@ -371,8 +395,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			if finishReason == "" && lastRunError != nil {
 				finishReason = "error"
 			}
+			// turnIndex is incremented only after tool_call turns; for a single
+			// text-only turn that exits via "stop", turnIndex is still 0 but one
+			// full turn did complete. Use turnIndex+1 when the run finished
+			// normally (runCompleted=true) to accurately reflect the turn count.
+			totalTurnsForMeta := turnIndex
+			if runCompleted {
+				totalTurnsForMeta = turnIndex + 1
+			}
 			meta := RunMetadata{
-				TotalTurns:        turnIndex,
+				TotalTurns:        totalTurnsForMeta,
 				TotalInputTokens:  latestInputTokens,
 				TotalOutputTokens: totalOutputTokens,
 				TotalCostUSD:      totalCost,
@@ -483,7 +515,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	if r.mcpClient != nil {
 		bridge := NewMCPToolBridge(r.mcpClient, in.TenantID)
 		// P-C253-1: filter MCP tools to only those from bound servers.
-		if len(in.MCPServerNamesSnapshot) > 0 {
+		// Use nil-check (not len>0) to support "has bindings but all disabled" (empty non-nil slice).
+		if in.MCPServerNamesSnapshot != nil {
 			bridge.WithAllowedServerNames(in.MCPServerNamesSnapshot)
 		}
 		toolBuilder.WithMCPBridge(bridge)
@@ -548,6 +581,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	// 3. Build system prompt (after tools, so deferred tool names can be injected).
+	// BUG-SKILL-EMPTY: derive active skill slug set from toolResult.All so that
+	// formatToolsSection can omit skills with no callable tool binding from the
+	// "## Available Tools" section. P-C62-1 already removed them from the JSON
+	// tools[] array; this closes the remaining hallucination vector in the system prompt.
+	activeSkillSlugs := make(map[string]bool, len(toolResult.All))
+	for _, t := range toolResult.All {
+		if !t.Builtin && !t.DisableModelInvocation {
+			activeSkillSlugs[t.Name] = true
+		}
+	}
 	systemPrompt, err := r.prompt.Build(ctx, PromptInput{
 		AgentID:           in.AgentID,
 		SessionID:         in.SessionID,
@@ -556,6 +599,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		CoordinatorMode:   gates.CoordinatorMode,
 		DeferredToolNames: toolResult.DeferredToolNames(),
 		UserOnlySkills:    toolResult.UserOnlySkills,
+		ActiveSkillSlugs:  activeSkillSlugs,
 	})
 	if err != nil {
 		localEmitError("prompt_build", err)
@@ -572,6 +616,54 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	// Track the index of the last message sent to the LLM, used to slice
 	// messages when response chaining is active (previous_response_id).
 	lastSentIndex := 0
+
+	// 4b. Fire session_start hooks on the first run of a session.
+	// Detected by empty history: no prior messages means this is the opening turn.
+	// Sub-agents (CurrentDepth > 0) are not first-run sessions — skip them.
+	// Prompt hook inject texts are prepended as system notes so the LLM sees them
+	// in the first turn context.
+	if len(messages) == 0 && in.CurrentDepth == 0 && r.toolExec != nil && r.toolExec.hookExecutor != nil {
+		sessionStartResults := r.toolExec.hookExecutor.Execute(ctx, HookPayload{
+			Event:     HookSessionStart,
+			AgentID:   in.AgentID.String(),
+			SessionID: in.SessionID.String(),
+		})
+		for _, res := range sessionStartResults {
+			if res.Inject != "" {
+				note := "[SYSTEM NOTE from session_start hook]\n" + res.Inject
+				noteMsg := chat.ChatMessage{
+					SessionID:   in.SessionID,
+					Role:        "user",
+					Content:     note,
+					MessageType: chat.MessageTypeText,
+					RunID:       &r.runID,
+				}
+				if r.runID == uuid.Nil {
+					noteMsg.RunID = nil
+				}
+				if _, err := r.persister.CreateMessage(ctx, noteMsg); err != nil {
+					slog.Warn("runner: failed to persist session_start hook note", "error", err)
+				}
+				messages = append(messages, ai.Message{Role: ai.RoleUser, Content: note})
+			}
+		}
+	}
+
+	// 4c. BUG-MCP-SILENT-FAIL fix: inject MCP failure warnings into the LLM context so
+	// the model can proactively inform the user that bound MCP tools are unavailable,
+	// rather than silently responding as if those tools never existed.
+	// These are non-fatal — the run continues with whatever tools did load.
+	if len(toolResult.Warnings) > 0 {
+		var sb strings.Builder
+		sb.WriteString("[SYSTEM NOTE: The following MCP servers bound to this agent could not be reached. Their tools are unavailable for this session.]\n")
+		for _, w := range toolResult.Warnings {
+			sb.WriteString("- ")
+			sb.WriteString(w)
+			sb.WriteString("\n")
+		}
+		mcpNote := sb.String()
+		messages = append(messages, ai.Message{Role: ai.RoleUser, Content: mcpNote})
+	}
 
 	// 5. Append user message.
 	messages = append(messages, ai.Message{
@@ -887,6 +979,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		// Accumulate cost using the effective model (may be a fallback).
 		turnCost := EstimateCostUSD(effectiveModel, usage)
+		if turnCost == 0 && gates.HasBudgetLimit && usage.TotalTokens > 0 {
+			slog.Warn("agentic: cost estimation returned 0 for unknown model — budget limit may not enforce correctly",
+				"model", effectiveModel, "tokens", usage.TotalTokens, "budget", effectiveBudget)
+		}
 		totalCost += turnCost
 
 		// Update progress tracker.
@@ -959,7 +1055,24 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			}
 
 			// Turn-end hooks (before emitting turn_complete).
-			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
+			// BUG-HOOK-TURNEND-INJECT: surface inject texts from turn-end hooks.
+			if turnEndInjects := r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload()); len(turnEndInjects) > 0 {
+				injectNote := "[SYSTEM NOTE from hook]\n" + strings.Join(turnEndInjects, "\n---\n")
+				hookNoteMsg := chat.ChatMessage{
+					SessionID:   in.SessionID,
+					Role:        "user",
+					Content:     injectNote,
+					MessageType: chat.MessageTypeText,
+					RunID:       &r.runID,
+				}
+				if r.runID == uuid.Nil {
+					hookNoteMsg.RunID = nil
+				}
+				if _, err := r.persister.CreateMessage(ctx, hookNoteMsg); err != nil {
+					slog.Warn("runner: failed to persist turn-end hook inject note", "error", err)
+				}
+				messages = append(messages, ai.Message{Role: ai.RoleUser, Content: injectNote})
+			}
 			stopHookResult := r.handlePostTurnLifecycle(ctx, ch, StopHookContext{
 				Messages:         append([]ai.Message(nil), messages...),
 				SystemPrompt:     systemPrompt,
@@ -1046,8 +1159,27 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				// at lines 761-773 (the main flow above). Do NOT re-persist or re-append here —
 				// that would produce duplicate DB rows and a doubled/tripled LLM context window.
 				// Only persist and append the synthetic nudge tool_result.
-				nudgeContent := fmt.Sprintf("[SYSTEM] You have called the same tool (%s) with identical arguments %d times. The data is already in your context. Please stop calling tools and provide a final summary response to the user now.",
-					tcNames[0], duplicateToolCallStreak+1)
+				var nudgeContent string
+				if lastTurnHadToolErrors {
+					// P-F2-1: when the tool has been consistently failing, do NOT say
+					// "data is already in your context" — that invites the LLM to fabricate.
+					// Instead, instruct it to acknowledge the failure honestly.
+					nudgeContent = fmt.Sprintf("[SYSTEM] You have called the same tool (%s) %d times and it has failed every time. Do NOT fabricate or invent any result. Tell the user that the operation could not be completed due to a recurring tool error, and do not claim otherwise.",
+						tcNames[0], duplicateToolCallStreak+1)
+				} else if tcNames[0] == "memory_store" {
+					// BUG-MEM-STRESS1: for memory_store the generic "stop calling tools"
+					// nudge causes the LLM to fabricate bulk success. Instead, tell it the
+					// specific fact is stored and to advance to the next item in the list.
+					nudgeContent = fmt.Sprintf("[SYSTEM] This fact is already stored in memory (%d identical calls). Do NOT call memory_store again for this exact fact. If the user gave you a list, call memory_store NOW with the NEXT fact from the list. If all facts have been stored, provide a summary of what was saved.",
+						duplicateToolCallStreak+1)
+				} else if tcNames[0] == "memory_store_bulk" {
+					// BUG-MEM-STRESS1: bulk variant already stored all facts in the first call.
+					nudgeContent = fmt.Sprintf("[SYSTEM] All facts were already stored by the first memory_store_bulk call (%d identical calls detected). Do NOT call memory_store_bulk again. Provide your final summary response to the user now.",
+						duplicateToolCallStreak+1)
+				} else {
+					nudgeContent = fmt.Sprintf("[SYSTEM] You have called the same tool (%s) with identical arguments %d times. The data is already in your context. Please stop calling tools and provide a final summary response to the user now.",
+						tcNames[0], duplicateToolCallStreak+1)
+				}
 				// P-C216-1: persist a nudge tool_result for EVERY tool_call in the batch.
 				// When the LLM calls N tools in parallel and the repetition guard fires,
 				// previously only toolCalls[0] got a result, leaving the other tool_call_ids
@@ -1128,6 +1260,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				// P-C84-1: sanitize error before sending to LLM, same as for SSE (P-C65-2).
 				sanitizedResult := result
 				sanitizedResult.Error = sanitizeToolErrorPtr(result.Error)
+				// SECRET-SCANNER: redact known credential patterns from tool output before
+				// sending to the LLM. Prevents static authToken values from leaking into
+				// the conversation when remote endpoints echo back Authorization headers.
+				if len(sanitizedResult.Output) > 0 {
+					sanitizedResult.Output = json.RawMessage(RedactSecrets(string(sanitizedResult.Output), "[REDACTED]"))
+				}
 				resultContent := FormatToolResult(sanitizedResult)
 				toolMsg := chat.ChatMessage{
 					SessionID:   in.SessionID,
@@ -1177,6 +1315,38 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				}
 			}
 
+			// BUG-HOOK-PROMPT-INJECT fix: collect inject text from post-tool hooks
+			// and inject as a [SYSTEM NOTE] user message before the next LLM call.
+			// Injecting inside the tool result caused the LLM to retry the tool in
+			// response to the annotation text. A separate user message keeps the
+			// annotation in the conversation context without appearing as tool output.
+			var hookInjectParts []string
+			for _, res := range toolResults {
+				if res.InjectText != "" {
+					hookInjectParts = append(hookInjectParts, res.InjectText)
+				}
+			}
+			if len(hookInjectParts) > 0 {
+				injectNote := "[SYSTEM NOTE from hook]\n" + strings.Join(hookInjectParts, "\n---\n")
+				hookNoteMsg := chat.ChatMessage{
+					SessionID:   in.SessionID,
+					Role:        "user",
+					Content:     injectNote,
+					MessageType: chat.MessageTypeText,
+					RunID:       &r.runID,
+				}
+				if r.runID == uuid.Nil {
+					hookNoteMsg.RunID = nil
+				}
+				if _, err := r.persister.CreateMessage(ctx, hookNoteMsg); err != nil {
+					slog.Warn("runner: failed to persist hook inject note", "error", err)
+				}
+				messages = append(messages, ai.Message{
+					Role:    ai.RoleUser,
+					Content: injectNote,
+				})
+			}
+
 			if summary := r.buildToolUseSummary(ctx, in.AgentID, toolCalls, toolResults, assistantContent); summary != "" {
 				ch <- NewRunEvent(EventToolUseSummary, ToolUseSummaryData{
 					TurnIndex: turnIndex,
@@ -1185,7 +1355,24 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			}
 
 			// Turn-end hooks (after tool results, before incrementing turnIndex).
-			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
+			// BUG-HOOK-TURNEND-INJECT: surface inject texts; will be visible to LLM on next turn.
+			if turnEndInjects := r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload()); len(turnEndInjects) > 0 {
+				injectNote := "[SYSTEM NOTE from hook]\n" + strings.Join(turnEndInjects, "\n---\n")
+				hookNoteMsg := chat.ChatMessage{
+					SessionID:   in.SessionID,
+					Role:        "user",
+					Content:     injectNote,
+					MessageType: chat.MessageTypeText,
+					RunID:       &r.runID,
+				}
+				if r.runID == uuid.Nil {
+					hookNoteMsg.RunID = nil
+				}
+				if _, err := r.persister.CreateMessage(ctx, hookNoteMsg); err != nil {
+					slog.Warn("runner: failed to persist turn-end hook inject note", "error", err)
+				}
+				messages = append(messages, ai.Message{Role: ai.RoleUser, Content: injectNote})
+			}
 			stopHookResult := r.handlePostTurnLifecycle(ctx, ch, StopHookContext{
 				Messages:         append([]ai.Message(nil), messages...),
 				SystemPrompt:     systemPrompt,
@@ -1304,6 +1491,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 							CoordinatorMode:   gates.CoordinatorMode,
 							DeferredToolNames: toolResult.DeferredToolNames(),
 							UserOnlySkills:    toolResult.UserOnlySkills,
+							ActiveSkillSlugs:  activeSkillSlugs,
 						}); err == nil {
 							systemPrompt = rebuilt
 						}
@@ -1338,7 +1526,24 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		default:
 			// Unknown finish reason, treat as stop.
-			r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload())
+			// BUG-HOOK-TURNEND-INJECT: surface inject texts.
+			if turnEndInjects := r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload()); len(turnEndInjects) > 0 {
+				injectNote := "[SYSTEM NOTE from hook]\n" + strings.Join(turnEndInjects, "\n---\n")
+				hookNoteMsg := chat.ChatMessage{
+					SessionID:   in.SessionID,
+					Role:        "user",
+					Content:     injectNote,
+					MessageType: chat.MessageTypeText,
+					RunID:       &r.runID,
+				}
+				if r.runID == uuid.Nil {
+					hookNoteMsg.RunID = nil
+				}
+				if _, err := r.persister.CreateMessage(ctx, hookNoteMsg); err != nil {
+					slog.Warn("runner: failed to persist turn-end hook inject note", "error", err)
+				}
+				messages = append(messages, ai.Message{Role: ai.RoleUser, Content: injectNote})
+			}
 			stopHookResult := r.handlePostTurnLifecycle(ctx, ch, StopHookContext{
 				Messages:         append([]ai.Message(nil), messages...),
 				SystemPrompt:     systemPrompt,
@@ -1830,7 +2035,13 @@ func convertLLMToolsToAI(tools []LLMTool) []ai.Tool {
 // Inspired by Claude Code's toolResultStorage.ts empty result injection.
 func FormatToolResult(r ToolExecResult) string {
 	if r.Error != nil {
-		return fmt.Sprintf("Error: %s", *r.Error)
+		// P-F3-1 (BUG-F3): append a direct instruction so the LLM does not call ask_user
+		// after a server-side failure. The P-G1 guard in executeWithPermissions already
+		// intercepts ask_user on the next turn, but this hint prevents the extra round-trip
+		// by steering the model at the moment the error is delivered.
+		// BUG-ASK_USER-2: also explicitly forbid outputting JSON tool call formats in plain
+		// text — some models leak tool_call arguments into their text response when confused.
+		return fmt.Sprintf("Error: %s\n\n[SYSTEM] If this failure is server-side (configuration, network, or internal error), do NOT call ask_user and do NOT output JSON tool call formats in your text response — respond directly to the user in plain natural language about what went wrong.", *r.Error)
 	}
 	if len(r.Output) > 0 {
 		// P-C176-1: strip status_code / statusCode from HTTP tool output before
@@ -1908,7 +2119,13 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 	for i, tc := range toolCalls {
 		// P-C57-3: enforce per-run retry limit before any other checks so that
 		// exhausted tools never reach permission evaluation or execution.
-		if retryErr := rs.checkAndIncrementRetry(tc.Function.Name); retryErr != nil {
+		// BUG-MEM-STRESS1 fix: memory_store is exempt — it has per-key dedup in
+		// storedMemoryKeys, so the global retry counter would prematurely block
+		// legitimate bulk memorisation (e.g. "store these 22 facts").
+		if tc.Function.Name == "memory_store" || tc.Function.Name == "memory_store_bulk" {
+			// count is still tracked for observability but never blocks execution.
+			rs.toolRetries[tc.Function.Name]++
+		} else if retryErr := rs.checkAndIncrementRetry(tc.Function.Name); retryErr != nil {
 			errMsg := retryErr.Error()
 			results[i] = ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
 			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
@@ -1928,7 +2145,11 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 		// This prevents the LLM from calling tools it remembers from conversation
 		// history that are no longer bound to the agent (P-SK6).
 		if len(allowedToolsIndex) > 0 && !allowedToolsIndex[tc.Function.Name] {
-			errMsg := fmt.Sprintf("Tool '%s' is not available for this agent.", tc.Function.Name)
+			// BUG-SUB-AGENT-1 fix: include an explicit directive so the LLM does not
+			// keep retrying the same blocked tool on subsequent turns. Without this,
+			// models may call the same unavailable tool 3× (maxToolRetries) before
+			// giving a direct answer, wasting latency and tokens.
+			errMsg := fmt.Sprintf("Tool '%s' is not available for this agent. Do NOT call it again — provide a direct answer instead.", tc.Function.Name)
 			results[i] = ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
 			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
 				ID:    tc.ID,
@@ -2059,6 +2280,39 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 				Questions       []AskUserQuestion `json:"questions"`
 			}
 			_ = json.Unmarshal(json.RawMessage(tc.Function.Arguments), &params)
+
+			// BUG-ASK_USER-LOOP: auto-answer if all requested question IDs were already
+			// collected via a prior accepted ask_user call this run. This prevents the
+			// infinite-loop pattern where the LLM calls ask_user repeatedly even after
+			// receiving the user's values (observed with gpt-oss-120b).
+			if len(rs.collectedUserValues) > 0 && len(params.Questions) > 0 {
+				autoValues := make(map[string]any)
+				allCovered := true
+				for _, q := range params.Questions {
+					if val, ok := rs.collectedUserValues[q.ID]; ok {
+						autoValues[q.ID] = val
+					} else if q.Required == nil || *q.Required {
+						allCovered = false
+						break
+					}
+				}
+				if allCovered && len(autoValues) > 0 {
+					slog.Warn("agentic: ask_user auto-answered from run-state cache (BUG-ASK_USER-LOOP)", "toolCallID", tc.ID, "keys", mapKeys(autoValues))
+					ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+						ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+					})
+					wrapped := map[string]any{
+						"values":       autoValues,
+						"_instruction": "Values were already provided by the user earlier in this session. Proceed immediately with the pending task using these values.",
+					}
+					out, _ := json.Marshal(wrapped)
+					results[i] = ToolExecResult{Output: out, ToolName: tc.Function.Name}
+					ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+						ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
+					})
+					continue
+				}
+			}
 			requestedSchema := params.Schema
 			if len(requestedSchema) == 0 {
 				requestedSchema = params.InputSchema
@@ -2084,10 +2338,28 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			slog.Info("agentic: ask_user Submit returned", "toolCallID", tc.ID, "action", result.Action, "contentKeys", mapKeys(result.Content), "ctxErr", ctx.Err())
 			var output json.RawMessage
 			if result.Action == ElicitationCancel || result.Action == ElicitationDecline {
-				msg := fmt.Sprintf(`{"action": %q}`, result.Action)
+				// P-E2-1: Include explicit instruction so the LLM stops retrying.
+				// Returning only {"action":"decline"} causes the LLM to re-ask repeatedly.
+				msg := fmt.Sprintf(
+					`{"action": %q, "message": "The user explicitly declined or cancelled this request. Do NOT ask again. Acknowledge that the action has been cancelled and offer no further prompts for this task."}`,
+					result.Action,
+				)
 				output = json.RawMessage(msg)
 			} else {
-				out, _ := json.Marshal(result.Content)
+				// Accumulate accepted values in run-state so subsequent ask_user calls
+				// for the same fields can be auto-answered (BUG-ASK_USER-LOOP fix).
+				for k, v := range result.Content {
+					rs.collectedUserValues[k] = v
+				}
+				// BUG-ASK_USER-LOOP: wrap the user-provided values with an explicit
+				// _instruction field so the LLM knows to proceed immediately with the
+				// pending task rather than calling ask_user again. Without this hint
+				// models like gpt-oss-120b loop back to ask_user on the next turn.
+				wrapped := map[string]any{
+					"values":       result.Content,
+					"_instruction": "User provided the requested values. Use them immediately to proceed with the pending task. Do NOT call ask_user again for the same information.",
+				}
+				out, _ := json.Marshal(wrapped)
 				output = out
 			}
 			results[i] = ToolExecResult{Output: output}
@@ -2116,7 +2388,19 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			})
 			var memResult string
 			if r.memory != nil {
-				memResult = r.memory.Store(ctx, in.AgentID, args.Content, args.Category)
+				// BUG-MEM-STRESS1 fix: track per-key instead of a single boolean so
+				// the LLM can store multiple distinct facts in one run (bulk memorisation).
+				// Only block a second call for the EXACT same normalised key; different
+				// content keys proceed normally.
+				key := normalizeKey(args.Content)
+				if _, alreadyStored := rs.storedMemoryKeys[key]; alreadyStored {
+					memResult = "Memory already stored for this item — no action needed. Continue with the next fact."
+				} else {
+					memResult = r.memory.Store(ctx, in.AgentID, args.Content, args.Category)
+					if strings.HasPrefix(memResult, "Memory stored successfully") {
+						rs.storedMemoryKeys[key] = struct{}{}
+					}
+				}
 			} else {
 				memResult = "Memory storage is not available for this agent."
 			}
@@ -2125,6 +2409,96 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
 			})
+			// Post-tool hooks for memory_store builtin.
+			// BUG-HOOK-BUILTIN: capture hookResults to populate InjectText so the runner
+			// can emit [SYSTEM NOTE] messages. Previously the return value was discarded.
+			if r.toolExec != nil && r.toolExec.hookExecutor != nil {
+				hookResults := r.toolExec.hookExecutor.Execute(ctx, HookPayload{
+					Event:      HookPostToolUse,
+					AgentID:    in.AgentID.String(),
+					SessionID:  in.SessionID.String(),
+					ToolName:   tc.Function.Name,
+					ToolInput:  json.RawMessage(tc.Function.Arguments),
+					ToolOutput: results[i].Output,
+				})
+				for _, hr := range hookResults {
+					if hr.Inject == "" {
+						continue
+					}
+					if results[i].InjectText == "" {
+						results[i].InjectText = hr.Inject
+					} else {
+						results[i].InjectText += "\n" + hr.Inject
+					}
+				}
+			}
+			continue
+		}
+
+		// Builtin: memory_store_bulk — persists multiple memory entries in one call.
+		// BUG-MEM-STRESS1: batch alternative so the LLM does not need to loop.
+		if tc.Function.Name == "memory_store_bulk" {
+			var args struct {
+				Facts []struct {
+					Content  string `json:"content"`
+					Category string `json:"category"`
+				} `json:"facts"`
+			}
+			_ = json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args)
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+			})
+			var bulkResult string
+			if r.memory != nil {
+				// Per-run dedup: skip the actual store if ALL facts in this batch
+				// are already in storedMemoryKeys from a prior call this run.
+				// Without this, the LLM can call memory_store_bulk in a tight loop
+				// (the duplicate-call detector can miss it when JSON formatting varies).
+				allAlready := len(args.Facts) > 0
+				for _, fact := range args.Facts {
+					if _, done := rs.storedMemoryKeys[normalizeKey(fact.Content)]; !done {
+						allAlready = false
+						break
+					}
+				}
+				if allAlready {
+					bulkResult = fmt.Sprintf("All %d facts are already stored — no action needed. Provide your response to the user now.", len(args.Facts))
+				} else {
+					bulkResult = r.memory.StoreBulk(ctx, in.AgentID, args.Facts)
+					for _, fact := range args.Facts {
+						rs.storedMemoryKeys[normalizeKey(fact.Content)] = struct{}{}
+					}
+				}
+			} else {
+				bulkResult = "Memory storage is not available for this agent."
+			}
+			out, _ := json.Marshal(bulkResult)
+			results[i] = ToolExecResult{Output: out, ToolName: tc.Function.Name}
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
+			})
+			// Post-tool hooks for memory_store_bulk builtin.
+			// BUG-HOOK-BUILTIN: capture hookResults to populate InjectText.
+			if r.toolExec != nil && r.toolExec.hookExecutor != nil {
+				hookResults := r.toolExec.hookExecutor.Execute(ctx, HookPayload{
+					Event:      HookPostToolUse,
+					AgentID:    in.AgentID.String(),
+					SessionID:  in.SessionID.String(),
+					ToolName:   tc.Function.Name,
+					ToolInput:  json.RawMessage(tc.Function.Arguments),
+					ToolOutput: results[i].Output,
+				})
+				for _, hr := range hookResults {
+					if hr.Inject == "" {
+						continue
+					}
+					if results[i].InjectText == "" {
+						results[i].InjectText = hr.Inject
+					} else {
+						results[i].InjectText += "\n" + hr.Inject
+					}
+				}
+			}
 			continue
 		}
 
@@ -2213,24 +2587,47 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 	return results
 }
 
-// executeTurnEndHooks runs all registered turn-end handlers.
-func (r *Runner) executeTurnEndHooks(ctx context.Context, ch chan<- RunEvent, payload TurnEndPayload) {
+// executeTurnEndHooks runs all registered turn-end handlers and returns inject
+// texts from persisted hooks so the caller can emit [SYSTEM NOTE from hook]
+// user messages before the next LLM turn.
+// BUG-HOOK-TURNEND-INJECT: previously the inject field was discarded.
+func (r *Runner) executeTurnEndHooks(ctx context.Context, ch chan<- RunEvent, payload TurnEndPayload) []string {
 	if r.toolExec != nil && r.toolExec.hookExecutor != nil {
-		r.toolExec.hookExecutor.ExecuteTurnEnd(ctx, payload, r.turnEndHandlers)
-	} else {
-		// No hook executor — run in-memory handlers directly.
-		for _, h := range r.turnEndHandlers {
-			if err := h.HandleTurnEnd(ctx, payload); err != nil {
-				emitError(ch, "turn_end_handler", err)
-			}
+		return r.toolExec.hookExecutor.ExecuteTurnEnd(ctx, payload, r.turnEndHandlers)
+	}
+	// No hook executor — run in-memory handlers directly (no inject texts).
+	for _, h := range r.turnEndHandlers {
+		if err := h.HandleTurnEnd(ctx, payload); err != nil {
+			emitError(ch, "turn_end_handler", err)
 		}
 	}
+	return nil
 }
 
-// executeRunEndHooks runs all registered run-end handlers.
+// executeRunEndHooks runs all registered run-end handlers and persists any
+// inject texts from prompt hooks as audit notes in the session history.
+// There is no next LLM turn to inject into, but the notes remain visible
+// in the conversation log for audit and observability purposes.
 func (r *Runner) executeRunEndHooks(ctx context.Context, ch chan<- RunEvent, payload RunEndPayload) {
 	if r.toolExec != nil && r.toolExec.hookExecutor != nil {
-		r.toolExec.hookExecutor.ExecuteRunEnd(ctx, payload, r.runEndHandlers)
+		injects := r.toolExec.hookExecutor.ExecuteRunEnd(ctx, payload, r.runEndHandlers)
+		for _, inject := range injects {
+			note := "[SYSTEM NOTE from run_end hook]\n" + inject
+			sessionID, _ := uuid.Parse(payload.SessionID)
+			noteMsg := chat.ChatMessage{
+				SessionID:   sessionID,
+				Role:        "user",
+				Content:     note,
+				MessageType: chat.MessageTypeText,
+				RunID:       &r.runID,
+			}
+			if r.runID == uuid.Nil {
+				noteMsg.RunID = nil
+			}
+			if _, err := r.persister.CreateMessage(ctx, noteMsg); err != nil {
+				slog.Warn("runner: failed to persist run_end hook audit note", "error", err)
+			}
+		}
 	} else {
 		for _, h := range r.runEndHandlers {
 			if err := h.HandleRunEnd(ctx, payload); err != nil {

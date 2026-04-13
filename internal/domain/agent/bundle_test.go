@@ -109,6 +109,9 @@ func (r *stubBindingRepo) SyncKnowledgeBases(_ context.Context, _ uuid.UUID, _ [
 func (r *stubBindingRepo) ListMCPServerIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
 	return nil, nil
 }
+func (r *stubBindingRepo) ListMCPServerNames(_ context.Context, _ uuid.UUID) ([]string, error) {
+	return nil, nil
+}
 func (r *stubBindingRepo) SyncMCPServers(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
 	return nil
 }

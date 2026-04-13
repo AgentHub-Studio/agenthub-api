@@ -18,6 +18,7 @@ import (
 type mcpService interface {
 	List(ctx context.Context) ([]McpServerConfigResponse, error)
 	ListAutoStart(ctx context.Context) ([]McpServerConfigResponse, error)
+	ListAllEnabled(ctx context.Context) ([]McpServerConfigResponse, error)
 	Create(ctx context.Context, req CreateRequest) (McpServerConfigResponse, error)
 	GetByID(ctx context.Context, id uuid.UUID) (McpServerConfigResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (McpServerConfigResponse, error)
@@ -214,10 +215,13 @@ func (h *Handler) listTools(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, http.StatusOK, resp)
 }
 
-// bootstrap returns all auto-start configs for the mcp-client-runtime service.
+// bootstrap returns all enabled MCP server configs for the mcp-client-runtime service.
+// BUG-MCP-RUNTIME-STALE fix: previously returned only auto_start=true configs, causing
+// servers with auto_start=false to be invisible to agent runs after startup. Now returns
+// all enabled configs so the runtime registers them for lazy connection.
 // Protected by RequireRole("mcp-client-runtime") — only service accounts may call this.
 func (h *Handler) bootstrap(w http.ResponseWriter, r *http.Request) {
-	items, err := h.svc.ListAutoStart(r.Context())
+	items, err := h.svc.ListAllEnabled(r.Context())
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "failed to load bootstrap configs")
 		return

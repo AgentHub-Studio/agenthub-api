@@ -3,6 +3,7 @@ package agentic_test
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,11 +17,11 @@ import (
 // simpleSummaryChatModel returns a fixed response for Chat calls.
 type simpleSummaryChatModel struct {
 	response string
-	calls    int
+	calls    atomic.Int32
 }
 
 func (m *simpleSummaryChatModel) Chat(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (*ai.ChatResponse, error) {
-	m.calls++
+	m.calls.Add(1)
 	return &ai.ChatResponse{
 		Content:      m.response,
 		FinishReason: "stop",
@@ -34,6 +35,8 @@ func (m *simpleSummaryChatModel) ChatStream(_ context.Context, _ []ai.Message, _
 }
 
 func (m *simpleSummaryChatModel) GetProviderName() string { return "mock" }
+
+func (m *simpleSummaryChatModel) CallCount() int { return int(m.calls.Load()) }
 
 func TestProgressSummarizer_EmitsProgressEvents(t *testing.T) {
 	model := &simpleSummaryChatModel{response: "Analyzing main.go"}
@@ -101,7 +104,7 @@ func TestProgressSummarizer_SkipsWhenNoMessages(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	// Should not have called the model or emitted events.
-	assert.Equal(t, 0, model.calls)
+	assert.Equal(t, 0, model.CallCount())
 	assert.Equal(t, 0, len(ch))
 }
 
@@ -131,5 +134,5 @@ func TestProgressSummarizer_UpdateMessages(t *testing.T) {
 	<-ctx.Done()
 	time.Sleep(20 * time.Millisecond)
 
-	require.GreaterOrEqual(t, model.calls, 1)
+	require.GreaterOrEqual(t, model.CallCount(), 1)
 }

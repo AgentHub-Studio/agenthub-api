@@ -35,7 +35,8 @@ type MCPClientService interface {
 type MCPToolBridge struct {
 	mcpClient      MCPClientService
 	tenantID       string
-	allowedServers map[string]bool // nil = no filter (all servers allowed); P-C253-1
+	allowedServers map[string]bool // nil = no filter (all servers); non-nil = filter applies; P-C253-1
+	filterEnabled  bool            // true when WithAllowedServerNames was called with a non-nil slice
 }
 
 // NewMCPToolBridge creates a bridge for the given tenant.
@@ -47,12 +48,18 @@ func NewMCPToolBridge(mcpClient MCPClientService, tenantID string) *MCPToolBridg
 }
 
 // WithAllowedServerNames restricts MCP tools to the named servers only.
-// P-C253-1: agent-level MCP binding — called when the agent has a bound MCP server list.
+// P-C253-1: agent-level MCP binding — called when the agent has explicit MCP server bindings.
+//
+// Nil resets the filter (no restriction — all MCP tools exposed).
+// An empty non-nil slice blocks all MCP tools (agent has bindings but all are disabled).
+// A non-empty slice exposes only tools from the named servers.
 func (b *MCPToolBridge) WithAllowedServerNames(names []string) {
-	if len(names) == 0 {
+	if names == nil {
 		b.allowedServers = nil
+		b.filterEnabled = false
 		return
 	}
+	b.filterEnabled = true
 	b.allowedServers = make(map[string]bool, len(names))
 	for _, n := range names {
 		b.allowedServers[n] = true
@@ -62,16 +69,29 @@ func (b *MCPToolBridge) WithAllowedServerNames(names []string) {
 // ListTools fetches all MCP tools and converts them into LLMTool format.
 // Tool names follow the Claude Code convention: mcp__{serverName}__{toolName}.
 // When allowedServers is set, only tools from those servers are returned.
+//
+// BUG-MCP-PARTIAL-DROP fix: when mcpClient.ListTools returns (partial-tools, error),
+// the partial tools come from servers that DID succeed. We must not discard them —
+// return the partial set along with the error so the caller can include what worked
+// while still surfacing the warning about servers that failed.
 func (b *MCPToolBridge) ListTools(ctx context.Context) ([]LLMTool, error) {
 	infos, err := b.mcpClient.ListTools(ctx, b.tenantID)
-	if err != nil {
+	if err != nil && len(infos) == 0 {
+		// All servers failed — nothing to return.
 		return nil, fmt.Errorf("mcpbridge: list tools: %w", err)
+	}
+	var listErr error
+	if err != nil {
+		// Partial failure: some servers failed. Wrap the error so the caller can log it,
+		// but continue to convert the tools we did get.
+		listErr = fmt.Errorf("mcpbridge: list tools: %w", err)
 	}
 
 	tools := make([]LLMTool, 0, len(infos))
 	for _, info := range infos {
 		// P-C253-1: skip tools from servers not in the agent's binding list.
-		if b.allowedServers != nil && !b.allowedServers[info.ServerName] {
+		// filterEnabled is true when the agent has explicit MCP bindings (even if all are disabled).
+		if b.filterEnabled && !b.allowedServers[info.ServerName] {
 			continue
 		}
 		name := FormatMCPToolName(info.ServerName, info.Name)
@@ -91,7 +111,7 @@ func (b *MCPToolBridge) ListTools(ctx context.Context) ([]LLMTool, error) {
 			InputSchema: schema,
 		})
 	}
-	return tools, nil
+	return tools, listErr
 }
 
 // Execute routes an MCP tool call to the correct server and tool.
@@ -166,11 +186,17 @@ func NewHTTPMCPClient(baseURL string) *HTTPMCPClient {
 }
 
 // listToolsResponse is the response shape from the MCP client runtime.
+// Warnings contains per-server failures (BUG-MCP2 fix): when a server can't be
+// started or listed, the runtime now includes it here instead of silently skipping.
 type listToolsResponse struct {
-	Tools []MCPToolInfo `json:"tools"`
+	Tools    []MCPToolInfo `json:"tools"`
+	Warnings []string      `json:"warnings,omitempty"`
 }
 
 // ListTools fetches available tools from all active MCP servers.
+// Returns (tools, nil) when all servers succeeded.
+// Returns (partial-tools, error) when some servers failed — the error
+// aggregates all per-server warning messages so the caller can surface them.
 func (c *HTTPMCPClient) ListTools(ctx context.Context, tenantID string) ([]MCPToolInfo, error) {
 	url := fmt.Sprintf("%s/api/tools?tenantId=%s", c.baseURL, tenantID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -197,6 +223,14 @@ func (c *HTTPMCPClient) ListTools(ctx context.Context, tenantID string) ([]MCPTo
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("mcpclient: unmarshal tools: %w", err)
 	}
+
+	// BUG-MCP2: propagate per-server warnings as a combined error so the caller
+	// (ToolSchemaBuilder) can emit them as run-level warning events.
+	// We still return the tools we did get (partial success).
+	if len(result.Warnings) > 0 {
+		return result.Tools, fmt.Errorf("%s", strings.Join(result.Warnings, "; "))
+	}
+
 	return result.Tools, nil
 }
 
@@ -208,9 +242,13 @@ type callToolRequest struct {
 }
 
 // callToolResponse is the response from the MCP client runtime.
+// The runtime mirrors the MCP spec: when the tool itself signals a failure,
+// it sets isError=true and puts a description in output rather than returning
+// a non-200 HTTP status or a top-level error string.
 type callToolResponse struct {
-	Output json.RawMessage `json:"output"`
-	Error  *string         `json:"error,omitempty"`
+	Output  json.RawMessage `json:"output"`
+	Error   *string         `json:"error,omitempty"`
+	IsError bool            `json:"isError"`
 }
 
 // CallTool invokes a tool on a specific MCP server.
@@ -255,6 +293,17 @@ func (c *HTTPMCPClient) CallTool(ctx context.Context, tenantID, serverName, tool
 
 	if result.Error != nil {
 		return nil, fmt.Errorf("mcpclient: tool error: %s", *result.Error)
+	}
+
+	// BUG-MCP1: the MCP spec uses isError=true (not a non-2xx HTTP status) to
+	// signal that the tool call itself failed. Without this check, the error is
+	// silently delivered as success output and hadToolFailures stays false.
+	if result.IsError {
+		errMsg := string(result.Output)
+		if errMsg == "" || errMsg == "null" {
+			errMsg = "tool returned an error (no details provided)"
+		}
+		return nil, fmt.Errorf("mcpclient: mcp tool failure: %s", errMsg)
 	}
 
 	return result.Output, nil
@@ -303,7 +352,10 @@ func (c *CachedMCPClient) ListTools(ctx context.Context, tenantID string) ([]MCP
 
 	tools, err := c.inner.ListTools(ctx, tenantID)
 	if err != nil {
-		return nil, err
+		// BUG-MCP-PARTIAL-DROP: on partial failure (some servers returned tools, some failed),
+		// pass partial tools through to the caller without caching — the error state should
+		// not be persisted so the next call retries fresh.
+		return tools, err
 	}
 
 	c.mu.Lock()

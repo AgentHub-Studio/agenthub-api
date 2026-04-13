@@ -29,6 +29,12 @@ type MemoryUpserter interface {
 	Upsert(ctx context.Context, agentID uuid.UUID, key string, req memory.UpsertMemoryRequest) (memory.AgentMemory, error)
 }
 
+// MemoryLister lists all memories for an agent. Used as a fallback when semantic
+// recall yields no results but memories exist (e.g. exact-code recall, BUG-MEM7 fix).
+type MemoryLister interface {
+	List(ctx context.Context, agentID uuid.UUID, userID *string) ([]memory.AgentMemory, error)
+}
+
 // MemoryEvaluator asks the LLM whether turn messages contain memorable information.
 // Returns a list of memory items to store, or nil/empty if nothing is worth remembering.
 type MemoryEvaluator interface {
@@ -69,14 +75,19 @@ type MemoryBridgeConfig struct {
 	MinRelevance float64
 	// StoreTurnInterval controls how often MaybeStore evaluates (every N turns, default 3).
 	StoreTurnInterval int
+	// RecentFallbackLimit is the max number of recent memories to include when semantic
+	// recall returns nothing. Helps surface exact-code or low-entropy memories that
+	// score poorly on cosine similarity (BUG-MEM7 fix). Zero disables the fallback.
+	RecentFallbackLimit int
 }
 
 // DefaultMemoryBridgeConfig returns sensible defaults.
 func DefaultMemoryBridgeConfig() MemoryBridgeConfig {
 	return MemoryBridgeConfig{
-		RecallLimit:       10,
-		MinRelevance:      0.3,
-		StoreTurnInterval: 3,
+		RecallLimit:         10,
+		MinRelevance:        0.3,
+		StoreTurnInterval:   3,
+		RecentFallbackLimit: 5, // include up to 5 recent memories when semantic search yields nothing
 	}
 }
 
@@ -91,6 +102,7 @@ type MemoryDistiller interface {
 type MemoryBridge struct {
 	embedder    Embedder
 	recaller    MemoryRecaller
+	lister      MemoryLister  // optional: used for recent-memory fallback (BUG-MEM7)
 	upserter    MemoryUpserter
 	evaluator   MemoryEvaluator
 	distiller   MemoryDistiller
@@ -113,6 +125,13 @@ func NewMemoryBridge(
 		evaluator: evaluator,
 		config:    config,
 	}
+}
+
+// WithLister sets the MemoryLister used for recent-memory fallback when semantic
+// recall returns no results (BUG-MEM7 fix).
+func (mb *MemoryBridge) WithLister(l MemoryLister) *MemoryBridge {
+	mb.lister = l
+	return mb
 }
 
 // WithDistiller sets the distiller used to promote execution memories at run end.
@@ -165,11 +184,34 @@ func (mb *MemoryBridge) Recall(ctx context.Context, agentID uuid.UUID, userMessa
 		}
 	}
 
-	if len(relevant) == 0 {
-		return "", nil
+	if len(relevant) > 0 {
+		return formatMemories(relevant), nil
 	}
 
-	return formatMemories(relevant), nil
+	// BUG-MEM7 fix: semantic recall yielded nothing. Fall back to the most recently
+	// stored memories so that low-entropy values (codes, IDs, exact strings) that
+	// score poorly on cosine similarity are still injected into the prompt.
+	// This ensures the LLM has context to answer recall questions without calling ask_user.
+	if mb.lister != nil && mb.config.RecentFallbackLimit > 0 {
+		allMemories, listErr := mb.lister.List(ctx, agentID, nil)
+		if listErr == nil && len(allMemories) > 0 {
+			limit := mb.config.RecentFallbackLimit
+			if limit > len(allMemories) {
+				limit = len(allMemories)
+			}
+			recent := allMemories[:limit] // List returns newest-first
+			var fallback []memory.MemoryRecallResult
+			for _, m := range recent {
+				fallback = append(fallback, memory.MemoryRecallResult{
+					AgentMemory: m,
+					Relevance:   0, // below threshold but included as recent fallback
+				})
+			}
+			return formatMemories(fallback), nil
+		}
+	}
+
+	return "", nil
 }
 
 // memoryTypeLabel returns a human-readable section header for a memory type.
@@ -199,9 +241,19 @@ func formatMemories(results []memory.MemoryRecallResult) string {
 		memory.MemoryTypeReference,
 		memory.MemoryTypeGeneral,
 	}
+	// P-MEM-2: normalize unknown memory types to "general" so they appear in
+	// the output. Only the 5 canonical types are iterated in typeOrder; any
+	// custom type (e.g. "preference") would otherwise be silently dropped.
+	knownTypes := map[memory.MemoryType]bool{
+		memory.MemoryTypeFeedback:  true,
+		memory.MemoryTypeUser:      true,
+		memory.MemoryTypeProject:   true,
+		memory.MemoryTypeReference: true,
+		memory.MemoryTypeGeneral:   true,
+	}
 	for _, r := range results {
 		mt := r.MemoryType
-		if mt == "" {
+		if mt == "" || !knownTypes[mt] {
 			mt = memory.MemoryTypeGeneral
 		}
 		grouped[mt] = append(grouped[mt], r)
@@ -351,8 +403,13 @@ func (mb *MemoryBridge) Store(ctx context.Context, agentID uuid.UUID, content, c
 		return "Nothing to store: content is empty."
 	}
 
-	// P-C333-1 (ACT-F3-10): normalize key before persisting.
-	key := normalizeKey(category)
+	// P-MEM-5: use content-derived key so different facts under the same category
+	// get distinct DB rows and don't overwrite each other. Category is used only as
+	// MemoryType. The normalizeKey function limits to 100 chars, so two long strings
+	// differing only past 100 chars would collide — acceptable for this use case.
+	// (If category were the key, storing "favorite language: Rust" and
+	// "favorite language: Go" under category="preference" would collapse to 1 row.)
+	key := normalizeKey(content)
 
 	valueJSON, err := json.Marshal(content)
 	if err != nil {
@@ -381,7 +438,49 @@ func (mb *MemoryBridge) Store(ctx context.Context, agentID uuid.UUID, content, c
 	if err != nil {
 		return fmt.Sprintf("Failed to store memory: %v", err)
 	}
-	return "Memory stored successfully."
+	// BUG-MEM-STRESS1 fix: removed "respond to user now" directive — that instruction
+	// caused the LLM to stop after storing the first fact instead of looping through
+	// all remaining facts. The per-key deduplication in runner.go now handles retries.
+	return "Memory stored successfully. Proceed to store the next fact if there are more."
+}
+
+// StoreBulk stores multiple facts at once, returning a summary of successes/failures.
+// BUG-MEM-STRESS1: gpt-oss-120b cannot reliably execute N sequential tool calls —
+// it loops on the first item. StoreBulk lets the LLM make ONE call with all facts.
+func (mb *MemoryBridge) StoreBulk(ctx context.Context, agentID uuid.UUID, facts []struct {
+	Content  string `json:"content"`
+	Category string `json:"category"`
+}) string {
+	if mb.upserter == nil {
+		return "Memory storage is not available for this agent."
+	}
+	if len(facts) == 0 {
+		return "Nothing to store: facts list is empty."
+	}
+
+	stored := 0
+	skipped := 0
+	var errs []string
+	for _, fact := range facts {
+		if fact.Content == "" {
+			skipped++
+			continue
+		}
+		result := mb.Store(ctx, agentID, fact.Content, fact.Category)
+		if strings.HasPrefix(result, "Memory stored successfully") {
+			stored++
+		} else if strings.HasPrefix(result, "Memory already stored") {
+			skipped++
+		} else {
+			errs = append(errs, fmt.Sprintf("%q: %s", fact.Content, result))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Sprintf("Stored %d facts; %d already existed; %d errors: %s",
+			stored, skipped, len(errs), strings.Join(errs, "; "))
+	}
+	return fmt.Sprintf("Stored %d facts successfully. %d were already stored (skipped).", stored, skipped)
 }
 
 // DistillExecution promotes all execution-scoped memories to workflow scope.

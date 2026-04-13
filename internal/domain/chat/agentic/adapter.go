@@ -17,6 +17,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
@@ -64,6 +65,7 @@ type SessionRunnerAdapter struct {
 	integRepo    *integration.Service
 	mcpRepo      mcp.Repository
 	mcpClient    MCPClientService
+	docSearch    knowledge.DocumentSearchClient // P-E1-2: wired when embedding service is available
 
 	// llmCallTimeout overrides the default per-LLM-call timeout set by DefaultRunConfig.
 	// P-C102-1: sourced from LLM_CALL_TIMEOUT_SECS env var at server startup.
@@ -207,6 +209,21 @@ func (a *SessionRunnerAdapter) WithPermissionAuditLogger(logger PermissionAuditL
 	return a
 }
 
+// WithDocumentSearchClient wires the document search client so the document_search
+// builtin tool executes locally via pgvector instead of failing with "not available".
+// P-E1-2: call this when the embedding service URL is configured.
+func (a *SessionRunnerAdapter) WithDocumentSearchClient(client knowledge.DocumentSearchClient) *SessionRunnerAdapter {
+	a.docSearch = client
+	return a
+}
+
+// WithMemoryBridge wires the memory bridge so the memory_store builtin tool
+// can persist and recall memories across sessions.
+func (a *SessionRunnerAdapter) WithMemoryBridge(bridge *MemoryBridge) *SessionRunnerAdapter {
+	a.memory = bridge
+	return a
+}
+
 // staticModelFactory always returns the same ChatModel regardless of provider.
 type staticModelFactory struct {
 	model ai.ChatModel
@@ -260,6 +277,9 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	if f.adapter.mcpClient != nil {
 		runner.WithMCPClient(f.adapter.mcpClient)
 	}
+	if f.adapter.docSearch != nil {
+		runner.WithDocumentSearch(f.adapter.docSearch, nil)
+	}
 	runner.WithAgentMailbox(f.agentMailbox)
 	subtaskExec := NewSubtaskExecutor(f)
 	subtaskExec.WithAgentMailbox(f.agentMailbox)
@@ -279,6 +299,13 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 // EventInputRequest events into the SSE stream and registers the handler so that
 // HTTP respond calls (POST /elicitation/{requestId}/respond) can unblock the loop.
 func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput) (<-chan chat.RunEvent, error) {
+	// P-C343-1: invalidate cached prompt sections for this agent at the start of
+	// every run so that edits to skills, tools, or KBs are reflected without a
+	// server restart. The cache is per-agent-ID, so other agents are unaffected.
+	if a.prompt != nil {
+		a.prompt.ClearCacheForAgent(in.AgentID)
+	}
+
 	agentCfg, err := a.agentLoader.GetAgentForRun(ctx, in.AgentID)
 	if err != nil {
 		return nil, fmt.Errorf("session runner: load agent: %w", err)
@@ -326,6 +353,9 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	if err != nil {
 		return nil, fmt.Errorf("session runner: build model for provider %q: %w", config.Provider, err)
 	}
+	// P-I1-1: log the effective model/provider at run start so operators can verify
+	// which model is executing without querying the DB.
+	slog.Info("agentic: run started", "model", config.Model, "provider", config.Provider, "agentID", in.AgentID)
 
 	// Create a shared mailbox for inter-agent messaging within this run.
 	agentMailbox := NewAgentMailbox()
@@ -352,6 +382,11 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	}
 	if a.mcpClient != nil {
 		runner.WithMCPClient(a.mcpClient)
+	}
+	// P-E1-2: wire document search client so document_search builtin tool executes
+	// locally via pgvector when an embedding service is available.
+	if a.docSearch != nil {
+		runner.WithDocumentSearch(a.docSearch, nil) // kbIDs=nil → search all active KBs
 	}
 	runner.WithAgentMailbox(agentMailbox)
 	subtaskExec := NewSubtaskExecutor(factory)
@@ -413,18 +448,19 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	}
 
 	agenticCh := runner.Run(ctx, RunInput{
-		RunID:            in.RunID,
-		SessionID:        in.SessionID,
-		AgentID:          in.AgentID,
-		UserMessage:      in.UserMessage,
-		SystemPrompt:     effectiveSystemPrompt,
-		TenantID:         in.TenantID,
-		PermissionRules:  ParsePermissionRules(agentCfg.PermissionRules),
-		Elicitation:      elicHandler,
-		IsAdmin:          callerHasAdminRole(ctx),    // P-C298-1
-		EnableManagement: agentCfg.EnableManagement, // P-C184-2
-		SkillIDsSnapshot: in.SkillIDsSnapshot,       // P-C115-1: use snapshot if available
-		PermissionAudit:  a.permAudit,
+		RunID:                  in.RunID,
+		SessionID:              in.SessionID,
+		AgentID:                in.AgentID,
+		UserMessage:            in.UserMessage,
+		SystemPrompt:           effectiveSystemPrompt,
+		TenantID:               in.TenantID,
+		PermissionRules:        ParsePermissionRules(agentCfg.PermissionRules),
+		Elicitation:            elicHandler,
+		IsAdmin:                callerHasAdminRole(ctx),    // P-C298-1
+		EnableManagement:       agentCfg.EnableManagement, // P-C184-2
+		SkillIDsSnapshot:       in.SkillIDsSnapshot,       // P-C115-1: use snapshot if available
+		MCPServerNamesSnapshot: in.MCPServerNamesSnapshot, // P-C253-1: filter MCP tools by bound servers
+		PermissionAudit:        a.permAudit,
 	})
 
 	chatCh := make(chan chat.RunEvent, config.StreamBufferSize)

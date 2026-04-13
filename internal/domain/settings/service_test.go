@@ -93,3 +93,37 @@ func TestSettingsService_List(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, items, 3)
 }
+
+// TestResponseFrom_MasksSensitiveKeys verifies that API keys and secrets are
+// masked in the SettingResponse returned from ResponseFrom.
+func TestResponseFrom_MasksSensitiveKeys(t *testing.T) {
+	tests := []struct {
+		key       string
+		value     string
+		wantMask  bool
+	}{
+		{"openrouter.apiKey", "sk-or-v1-supersecrettoken123456", true},
+		{"openai.apiKey", "sk-proj-verysecret", true},
+		{"claude.apiKey", "sk-ant-api03-secret", true},
+		{"smtp.password", "my-password-123", true},
+		{"oauth.secret", "client-secret-xyz", true},
+		{"general.language", "pt-BR", false},
+		{"openrouter.temperature", "1", false},
+		{"general.defaultProvider", "openrouter", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			rawVal, _ := json.Marshal(tt.value)
+			s := settings.Setting{Key: tt.key, Value: rawVal}
+			resp := settings.ResponseFrom(s)
+			var got string
+			require.NoError(t, json.Unmarshal(resp.Value, &got))
+			if tt.wantMask {
+				assert.Contains(t, got, "***", "expected value to be masked")
+				assert.NotEqual(t, tt.value, got, "expected masked value to differ from original")
+			} else {
+				assert.Equal(t, tt.value, got, "non-sensitive key should not be masked")
+			}
+		})
+	}
+}

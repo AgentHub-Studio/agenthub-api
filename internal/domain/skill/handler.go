@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -78,6 +79,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		respond.Error(w, http.StatusUnprocessableEntity, "name is required")
 		return
@@ -127,6 +129,10 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "skill not found")
+			return
+		}
+		if errors.Is(err, ErrSkillInert) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())

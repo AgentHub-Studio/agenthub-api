@@ -31,7 +31,9 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
 	mkplInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
 	mkplListing "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
@@ -51,6 +53,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skilleval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/trigger"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/user"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/vpnresource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
@@ -63,6 +66,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/ollama"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/openai"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/openrouter"
+	commonsmigratemulti "github.com/AgentHub-Studio/agenthub-go-commons/database/multitenant"
 )
 
 // Server is the HTTP server for agenthub-api.
@@ -99,7 +103,15 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Instantiate domain handlers.
 	presetSeeder := llmpreset.NewSeeder(pool)
-	tenantHandler := tenant.NewHandler(tenant.NewService(tenant.NewRepository(pool), provisioner, presetSeeder))
+	tenantSvc := tenant.NewService(tenant.NewRepository(pool), provisioner, presetSeeder)
+
+	// Wire the schema migrator so that new tenants get their PostgreSQL schema
+	// created and migrated immediately upon provisioning (same path used on startup).
+	tenantSvc.WithSchemaMigrator(tenantSchemaMigratorFunc(func(ctx context.Context, tenantID string) error {
+		return commonsmigratemulti.MigrateTenant(ctx, pool, tenantID, "/migrations/schemas")
+	}))
+
+	tenantHandler := tenant.NewHandler(tenantSvc)
 	userHandler := user.NewHandler(user.NewService(keycloakClient))
 	settingsRepo := settings.NewRepository(pool)
 	settingsHandler := settings.NewHandler(settings.NewService(settingsRepo))
@@ -107,9 +119,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentRepo := agent.NewRepository(pool)
 	skillRepo := skill.NewRepository(pool)
 	agentBindingRepo := agent.NewBindingRepository(pool)
-	agentSvc := agent.NewService(agentRepo, agentBindingRepo, skillRepo)
-	agentHandler := agent.NewHandler(agentSvc)
-	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionService(agentRepo, agent.NewVersionRepository(pool)))
+	auditSvc := audit.NewService(audit.NewRepository(pool))
+	agentSvc := agent.NewServiceWithAudit(agentRepo, agentBindingRepo, skillRepo, auditSvc)
+	promptTemplateRepo := prompttemplate.NewRepository(pool)
+	agentHandler := agent.NewHandler(agentSvc).WithTemplateGetter(&promptTemplateAdapter{repo: promptTemplateRepo})
+	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionServiceWithAudit(agentRepo, agent.NewVersionRepository(pool), auditSvc))
 	agentBindingHandler := agent.NewBindingHandler(agentRepo, agentBindingRepo)
 	skillSvc := skill.NewService(skillRepo)
 	skillHandler := skill.NewHandler(skillSvc).WithRepository(skillRepo)
@@ -119,6 +133,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	)
 	datasourceSvc := datasource.NewService(datasource.NewRepository(pool))
 	toolRepo := tool.NewRepository(pool)
+	// BUG-F1: wire toolRepo as ToolBinder so skill.Service.Create can auto-bind
+	// a tool when {"toolId": "..."} is provided in POST /api/skills.
+	skillSvc = skillSvc.WithToolBinder(toolRepo)
 	toolSvc := tool.NewService(toolRepo).
 		WithSettings(&toolSettingsAdapter{repo: settingsRepo}).
 		WithDatasource(&toolDatasourceAdapter{svc: datasourceSvc}, tenantctx.FromContext)
@@ -130,9 +147,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	analyticsHandler := analytics.NewHandler(analytics.NewService(analytics.NewPostgresStore(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
+	// BUG-TRIGGER-NOT-MOUNTED: trigger domain was fully implemented but never wired.
+	triggerHandler := trigger.NewHandler(trigger.NewService(trigger.NewRepository(pool), trigger.NewSimpleCronParser()))
 	oauthSvc := oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey)
 	oauthHandler := oauth.NewHandler(oauthSvc)
-	auditHandler := audit.NewHandler(audit.NewService(audit.NewRepository(pool)))
+	auditHandler := audit.NewHandler(auditSvc)
 	metricsHandler := metrics.NewHandler(metrics.NewService(metrics.NewRepository(pool)))
 	vpnSvc := vpnresource.NewService(vpnresource.NewRepository(pool))
 	vpnHandler := vpnresource.NewHandler(vpnSvc)
@@ -150,6 +169,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		vpnSvc,
 	).WithHTTPManagement(skill.NewService(skillRepo), toolSvc, integration.NewRepository(pool)))
 	kbRepo := knowledgebase.NewRepository(pool)
+	pipelineHandler := pipeline.NewHandler(pipeline.NewRepository(pool))
 	coreToolLoader := core.NewCoreToolLoader(pool)
 
 	// Build agentic runner and wire it into the chat service.
@@ -159,6 +179,13 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	var chatExecutor *chat.AsyncExecutor
 	if cfg.RabbitMQURL != "" {
 		chatExecutor = chat.NewAsyncExecutor(chatRepo, sessionRunner, cfg.RabbitMQURL)
+		if agentRepo != nil {
+			// P-C253-1: wire agent loader so background runs can enforce per-agent MCP bindings.
+			chatExecutor = chatExecutor.WithAgentLoader(&agentConfigAdapter{
+				repo:        agentRepo,
+				bindingRepo: agent.NewBindingRepository(pool),
+			})
+		}
 		go func() {
 			if err := chatExecutor.StartWorker(context.Background()); err != nil {
 				slog.Error("rabbitmq: chat worker failed", "err", err)
@@ -233,7 +260,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		}
 	}
 	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher))
-	knowledgebaseHandler := knowledgebase.NewHandler(knowledgebase.NewService(kbRepo))
+	kbHandler := knowledgebase.NewHandler(knowledgebase.NewService(kbRepo))
+	if cfg.EmbeddingURL != "" {
+		kbHandler.WithSearchClient(knowledge.NewPgDocumentSearchClient(pool, cfg.EmbeddingURL))
+	}
+	knowledgebaseHandler := kbHandler
 	mcpHandler := mcp.NewHandler(mcpSvc)
 	approvalHandler := approval.NewHandler(approval.NewService(approval.NewRepository(pool)))
 	coreAgentLoader := core.NewCoreAgentLoader(pool)
@@ -277,8 +308,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// CORS must be at root level so OPTIONS preflight requests are handled
 	// before chi's router can return 405 Method Not Allowed.
+	// BUG-DEPR2 fix: removed r.Options("/*") wildcard — the CORS middleware now
+	// intercepts ALL OPTIONS requests (with or without Origin header), so the
+	// wildcard is redundant. Without it, chi returns 404 (not 405) for unregistered
+	// routes, which is the correct HTTP semantics.
 	r.Use(chain.CORSHandler())
-	r.Options("/*", func(w http.ResponseWriter, r *http.Request) {})
 
 	// Health endpoints — no auth.
 	r.Get("/health", s.handleHealth)
@@ -309,6 +343,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		settingsHandler.RegisterProtectedRoutes(r)
 		llmpresetHandler.RegisterProtectedRoutes(r)
 		agentHandler.RegisterRoutes(r)
+		agent.NewHookHandler(pool).RegisterRoutes(r)
 		agentVersionHandler.RegisterVersionRoutes(r)
 		agentBindingHandler.RegisterBindingRoutes(r)
 		agentBundleHandler.RegisterBundleRoutes(r)
@@ -324,6 +359,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		analyticsHandler.RegisterRoutes(r)
 		executionHandler.RegisterRoutes(r)
 		webhookHandler.RegisterRoutes(r)
+		triggerHandler.RegisterRoutes(r)
 		r.Mount("/api/oauth-credentials", oauthHandler.Routes())
 		r.Mount("/api/audit-logs", auditHandler.Routes())
 		r.Mount("/api/metrics", metricsHandler.Routes())
@@ -344,6 +380,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		mcpHandler.RegisterRoutes(r)
 		approvalHandler.RegisterRoutes(r)
 		coreHandler.RegisterRoutes(r)
+			// BUG-DEPR1: read-only deprecated pipeline endpoints (Sunset: 2026-07-01).
+			pipelineHandler.RegisterRoutes(r)
 		// Marketplace
 		mkplListingHandler.RegisterRoutes(r)
 		mkplReviewHandler.RegisterRoutes(r)
@@ -432,6 +470,20 @@ func (a *promptTemplateAdapter) ResolvePromptTemplate(ctx context.Context, agent
 	return tpl.Content, true, nil
 }
 
+// Get satisfies agent.TemplateGetter, allowing the agent handler to
+// resolve a prompt template by ID for POST /api/agents/{id}/apply-template.
+func (a *promptTemplateAdapter) Get(ctx context.Context, id uuid.UUID) (agent.TemplateContent, error) {
+	tpl, err := a.repo.FindByID(ctx, id)
+	if err != nil {
+		return agent.TemplateContent{}, err
+	}
+	return agent.TemplateContent{
+		Content:       tpl.Content,
+		ModelOverride: tpl.ModelOverride,
+		IsBuiltin:     tpl.AgentID == nil,
+	}, nil
+}
+
 // --- agentic wiring ---
 
 // buildAgenticRunner creates the SessionRunner that powers the agentic chat loop.
@@ -465,9 +517,9 @@ func buildAgenticRunner(
 	}
 
 	skillClient := agentic.NewSkillRuntimeClient(cfg.SkillRuntimeURL)
-	promptTemplateRepo := prompttemplate.NewRepository(pool)
+	ptRepo := prompttemplate.NewRepository(pool)
 	promptBuilder := agentic.NewPromptBuilder(skillRepo, kbRepo, chatRepo, agentic.DefaultPromptConfig()).
-		WithPromptTemplateResolver(&promptTemplateAdapter{repo: promptTemplateRepo})
+		WithPromptTemplateResolver(&promptTemplateAdapter{repo: ptRepo})
 	toolSchemaBuilder := agentic.NewToolSchemaBuilder(skillRepo, toolRepo, kbRepo).
 		WithCoreToolProvider(&coreToolAdapter{loader: coreToolLoader}).
 		WithTokenBudgetProvider(&skillTokenBudgetAdapter{repo: bindingRepo})
@@ -507,6 +559,42 @@ func buildAgenticRunner(
 
 	// Wire permission audit logger so every permission decision is persisted.
 	adapter.WithPermissionAuditLogger(agentic.NewPermissionAuditRepository(pool))
+
+	// P-C253-1: wire the MCP client so agents with bound MCP servers get their tools.
+	// HTTPMCPClient calls the agenthub-mcp-client-runtime service which proxies
+	// external MCP servers and exposes their tools over HTTP.
+	if cfg.MCPRuntimeURL != "" {
+		mcpHTTPClient := agentic.NewHTTPMCPClient(cfg.MCPRuntimeURL)
+		cachedMCPClient := agentic.NewCachedMCPClient(mcpHTTPClient, 30*time.Second)
+		adapter.WithMCPClient(cachedMCPClient)
+		slog.Info("agentic: MCP client wired", "url", cfg.MCPRuntimeURL)
+	}
+
+	// P-E1-2: wire the document search client so the document_search builtin tool
+	// executes locally via pgvector. Requires the embedding service to vectorize
+	// the query before running cosine similarity search.
+	if cfg.EmbeddingURL != "" {
+		docSearchClient := knowledge.NewPgDocumentSearchClient(pool, cfg.EmbeddingURL)
+		adapter.WithDocumentSearchClient(docSearchClient)
+		slog.Info("agentic: document search client wired", "embeddingURL", cfg.EmbeddingURL)
+
+		// Wire MemoryBridge so the memory_store builtin tool can persist and
+		// recall memories. Shares the same embedding service as document search.
+		embedder := agentic.NewHTTPEmbedder(cfg.EmbeddingURL)
+		memSvc := memory.NewService(memory.NewRepository(pool))
+		bridge := agentic.NewMemoryBridge(
+			embedder,
+			memSvc, // implements MemoryRecaller
+			memSvc, // implements MemoryUpserter
+			nil,    // MemoryEvaluator — background auto-store not wired yet
+			agentic.DefaultMemoryBridgeConfig(),
+		)
+		// BUG-MEM7 fix: wire lister for recent-memory fallback when semantic recall
+		// yields nothing (e.g. for exact codes or low-entropy values like "ALPHA-XYZ-42").
+		bridge.WithLister(memSvc)
+		adapter.WithMemoryBridge(bridge)
+		slog.Info("agentic: memory bridge wired", "embeddingURL", cfg.EmbeddingURL)
+	}
 
 	return adapter
 }
@@ -558,9 +646,22 @@ func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (
 	}
 
 	// P-C115-1: include skill IDs so the chat service can snapshot them at session creation.
+	// P-C253-1: include MCP server names so the runner can filter MCP tools.
 	if a.bindingRepo != nil {
 		if skillIDs, err := a.bindingRepo.ListSkillIDs(ctx, id); err == nil {
 			cfg.SkillIDs = skillIDs
+		}
+		// P-C253-1: use ListMCPServerIDs (all, not filtered by enabled) to detect whether
+		// the agent has ANY MCP bindings. If it does, pass only enabled names to the runner.
+		// This distinguishes "no bindings → no filter" from "has bindings but all disabled → block all".
+		if boundIDs, err := a.bindingRepo.ListMCPServerIDs(ctx, id); err == nil && len(boundIDs) > 0 {
+			if enabledNames, err := a.bindingRepo.ListMCPServerNames(ctx, id); err == nil {
+				// Ensure non-nil so runner knows to apply the filter even if all servers are disabled.
+				if enabledNames == nil {
+					enabledNames = []string{}
+				}
+				cfg.MCPServerNames = enabledNames
+			}
 		}
 	}
 
@@ -681,4 +782,11 @@ type noopSkillEvaluator struct{}
 
 func (e *noopSkillEvaluator) Evaluate(_ context.Context, _ uuid.UUID, _ string) (skilleval.EvalOutput, error) {
 	return skilleval.EvalOutput{}, nil
+}
+
+// tenantSchemaMigratorFunc is a function adapter for the tenant.SchemaMigrator interface.
+type tenantSchemaMigratorFunc func(ctx context.Context, tenantID string) error
+
+func (f tenantSchemaMigratorFunc) MigrateTenant(ctx context.Context, tenantID string) error {
+	return f(ctx, tenantID)
 }

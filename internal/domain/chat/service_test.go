@@ -168,6 +168,10 @@ func (m *mockChatRepo) MarkRunCompleted(_ context.Context, _ uuid.UUID) error {
 	return nil
 }
 
+func (m *mockChatRepo) MarkRunFailed(_ context.Context, _ uuid.UUID, _ string) error {
+	return nil
+}
+
 func (m *mockChatRepo) UpdateRunMetadata(_ context.Context, _ uuid.UUID, _ json.RawMessage) error {
 	return nil
 }

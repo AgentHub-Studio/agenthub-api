@@ -23,6 +23,8 @@ type mockToolSvc struct {
 	bindings             map[uuid.UUID][]tool.SkillToolResponse
 	createForceDuplicate string    // if non-empty, Create returns ErrDuplicateName for this name
 	updateForceDuplicate uuid.UUID // if non-zero, Update returns ErrDuplicateName for this ID
+	createErr            error
+	updateErr            error
 }
 
 func newMockToolSvc() *mockToolSvc {
@@ -41,6 +43,9 @@ func (m *mockToolSvc) List(_ context.Context, req pagination.PageRequest, _ stri
 }
 
 func (m *mockToolSvc) Create(_ context.Context, req tool.CreateRequest) (tool.Response, error) {
+	if m.createErr != nil {
+		return tool.Response{}, m.createErr
+	}
 	if m.createForceDuplicate != "" && req.Name == m.createForceDuplicate {
 		return tool.Response{}, tool.ErrDuplicateName
 	}
@@ -59,6 +64,9 @@ func (m *mockToolSvc) GetByID(_ context.Context, id uuid.UUID) (tool.Response, e
 }
 
 func (m *mockToolSvc) Update(_ context.Context, id uuid.UUID, req tool.UpdateRequest) (tool.Response, error) {
+	if m.updateErr != nil {
+		return tool.Response{}, m.updateErr
+	}
 	if m.updateForceDuplicate != uuid.Nil && id == m.updateForceDuplicate {
 		return tool.Response{}, tool.ErrDuplicateName
 	}
@@ -176,6 +184,19 @@ func TestToolHandler_Create_InvalidBody(t *testing.T) {
 func TestToolHandler_Create_MissingFields(t *testing.T) {
 	r, _ := setupTool()
 	body, _ := json.Marshal(tool.CreateRequest{Name: ""})
+	req := httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func TestToolHandler_Create_ValidationError(t *testing.T) {
+	r, svc := setupTool()
+	svc.createErr = tool.ErrValidation
+
+	body, _ := json.Marshal(tool.CreateRequest{Name: "Bad Tool", Type: "HTTP"})
 	req := httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -328,6 +349,22 @@ func TestToolHandler_Update_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestToolHandler_Update_ValidationError(t *testing.T) {
+	r, svc := setupTool()
+	id := uuid.New()
+	svc.tools[id] = tool.Response{ID: id, Name: "Original", Type: "HTTP"}
+	svc.updateErr = tool.ErrValidation
+
+	updatedName := "Updated"
+	body, _ := json.Marshal(tool.UpdateRequest{Name: &updatedName})
+	req := httptest.NewRequest(http.MethodPut, "/api/tools/"+id.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }
 
 func TestToolHandler_BindToSkill_Success(t *testing.T) {

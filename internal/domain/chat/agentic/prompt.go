@@ -16,20 +16,20 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
-	// SkillLister returns skills.
-	type SkillLister interface {
-		ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]skill.Skill, error)
-		// ListByIDs returns the skills with the given IDs. Used to load a session's
-		// snapshotted skill bindings (P-C115-1).
-		ListByIDs(ctx context.Context, ids []uuid.UUID) ([]skill.Skill, error)
-		List(ctx context.Context, category *string, req pagination.PageRequest) ([]skill.Skill, int64, error)
-	}
-	
-	// KBLister returns knowledge bases.
-	type KBLister interface {
-		ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]knowledgebase.KnowledgeBase, error)
-		List(ctx context.Context, req pagination.PageRequest) ([]knowledgebase.KnowledgeBase, int64, error)
-	}
+// SkillLister returns skills.
+type SkillLister interface {
+	ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]skill.Skill, error)
+	// ListByIDs returns the skills with the given IDs. Used to load a session's
+	// snapshotted skill bindings (P-C115-1).
+	ListByIDs(ctx context.Context, ids []uuid.UUID) ([]skill.Skill, error)
+	List(ctx context.Context, category *string, req pagination.PageRequest) ([]skill.Skill, int64, error)
+}
+
+// KBLister returns knowledge bases.
+type KBLister interface {
+	ListByAgentID(ctx context.Context, agentID uuid.UUID) ([]knowledgebase.KnowledgeBase, error)
+	List(ctx context.Context, req pagination.PageRequest) ([]knowledgebase.KnowledgeBase, int64, error)
+}
 
 // CompactSummaryFinder returns the latest compact summary for a session.
 type CompactSummaryFinder interface {
@@ -99,6 +99,19 @@ func (b *PromptBuilder) ClearCache() {
 	b.sectionCache = make(map[string]string)
 }
 
+// ClearCacheForAgent removes all cached sections for the given agent.
+// Should be called at the start of each new run so edits to skills, tools,
+// or KBs are reflected without requiring a server restart.
+// P-C343-1: per-agent cache invalidation on run start.
+func (b *PromptBuilder) ClearCacheForAgent(agentID uuid.UUID) {
+	suffix := ":" + agentID.String()
+	for k := range b.sectionCache {
+		if strings.HasSuffix(k, suffix) {
+			delete(b.sectionCache, k)
+		}
+	}
+}
+
 // getCachedOrCompute returns a cached section or computes and caches it.
 func (b *PromptBuilder) getCachedOrCompute(name string, compute func() (string, error)) (string, error) {
 	if cached, ok := b.sectionCache[name]; ok {
@@ -135,6 +148,12 @@ type PromptInput struct {
 	// cannot invoke them directly. Inspired by Claude Code's user-invocable skills
 	// that appear in /help but not in the tools[] array.
 	UserOnlySkills []skill.Skill
+	// ActiveSkillSlugs is the set of skill slugs that have at least one active tool
+	// binding, as determined by ToolSchemaBuilder (P-C62-1). When non-empty, only
+	// skills present in this set are listed in "## Available Tools". Skills absent
+	// from the set are excluded so the LLM cannot hallucinate calls to a slug that
+	// has no callable implementation (BUG-SKILL-EMPTY).
+	ActiveSkillSlugs map[string]bool
 }
 
 // Build assembles the full system prompt from all dynamic sections.
@@ -173,13 +192,17 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 
 	// 2. Available Tools (cached — only changes on skill config changes)
 	if b.skills != nil {
+		// BUG-SKILL-EMPTY: snapshot active slugs so the closure uses the value
+		// from this Build() call. The cache is cleared per-agent at run start so
+		// a stale snapshot cannot persist across runs.
+		activeSlugSnapshot := in.ActiveSkillSlugs
 		toolsSection, err := b.getCachedOrCompute("tools:"+in.AgentID.String(), func() (string, error) {
 			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
 			if err != nil {
 				return "", fmt.Errorf("prompt: list skills: %w", err)
 			}
 			if len(skills) > 0 {
-				return formatToolsSection(skills), nil
+				return formatToolsSection(skills, activeSlugSnapshot), nil
 			}
 			return "", nil
 		})
@@ -188,6 +211,38 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 		}
 		if toolsSection != "" {
 			sections = append(sections, toolsSection)
+		}
+
+		// 2b. Skill Instructions (cached — stable across turns).
+		// P-C152-2: behavioral instructions (no tool references) are always included.
+		// Tool-referencing instructions require active tool bindings to avoid hallucination;
+		// they are handled by FormatSkillInstructionsSection when tool info is available.
+		// Without tool info here, we safely include only behavioral (non-tool-referencing)
+		// instructions so that formatting, tone, and workflow rules always reach the LLM.
+		instrSection, instrErr := b.getCachedOrCompute("skill-instructions:"+in.AgentID.String(), func() (string, error) {
+			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
+			if err != nil {
+				return "", fmt.Errorf("prompt: list skills for instructions: %w", err)
+			}
+			var sb strings.Builder
+			for _, s := range skills {
+				if s.Instructions == "" || s.DisableModelInvocation {
+					continue
+				}
+				// Only include behavioral instructions — ones that don't reference a
+				// specific tool by name — to prevent LLM from hallucinating tool calls.
+				if !referencesToolByName(s.Instructions) {
+					sb.WriteString(s.Instructions)
+					sb.WriteString("\n")
+				}
+			}
+			return sb.String(), nil
+		})
+		if instrErr != nil {
+			return "", instrErr
+		}
+		if instrSection != "" {
+			sections = append(sections, "## Skill Instructions\n\n"+instrSection)
 		}
 	}
 
@@ -291,15 +346,25 @@ func (b *PromptBuilder) resolvePromptSection(
 // formatToolsSection produces a markdown block listing the available skills.
 // Skills with DisableModelInvocation=true are excluded (they appear in the
 // User Commands section instead).
+// activeSkillSlugs, when non-empty, restricts the list to skills that have at
+// least one active tool binding. Skills absent from the set are omitted so the
+// LLM cannot hallucinate calls to a slug with no callable implementation.
+// BUG-SKILL-EMPTY: this prevents empty-tool skills from appearing here even
+// though P-C62-1 already excludes them from the JSON tools[] array — the
+// system prompt listing was the remaining vector for LLM hallucination.
 // For skills with WhenToUse set, it injects a "When to use:" sub-bullet so the
 // LLM can make more precise selection decisions. This keeps the tool description
 // focused on WHAT the skill does while WhenToUse explains WHEN to invoke it.
 // Inspired by Claude Code's BundledSkillDefinition.whenToUse injection pattern.
-func formatToolsSection(skills []skill.Skill) string {
+func formatToolsSection(skills []skill.Skill, activeSkillSlugs map[string]bool) string {
 	var sb strings.Builder
 	sb.WriteString("## Available Tools\n\n")
 	for _, s := range skills {
 		if s.DisableModelInvocation {
+			continue
+		}
+		// BUG-SKILL-EMPTY: skip skills that have no active tool bindings.
+		if len(activeSkillSlugs) > 0 && !activeSkillSlugs[s.Slug] {
 			continue
 		}
 		fmt.Fprintf(&sb, "- **%s** (`%s`)", s.Name, s.Slug)
@@ -518,7 +583,10 @@ const toolUsageInstructions = `## Tool Usage Instructions
 - If a tool call fails, explain the error and suggest an alternative approach.
 - Do not fabricate data — if you do not have the information, say so.
 - Cite document sources when answering from knowledge base results.
-- ALWAYS call ask_user to collect information — never ask via plain text.`
+- ALWAYS call ask_user to collect information — never ask via plain text.
+- **After ask_user returns**, the result is a JSON object containing the user's answers (e.g. {"city":"Tokyo","units":"celsius"}). Extract those values and IMMEDIATELY proceed to call the intended tool or perform the pending action — do NOT call ask_user again for the same information.
+
+**Memory recall rule (BUG-MEM7 fix):** When the user asks about something previously stored, told you, or saved in memory, ALWAYS call agenthub_search_memories (or agenthub_list_memories) FIRST to look it up — do NOT call ask_user to request information the user already provided. Only call ask_user if the search returns nothing useful AND you genuinely need clarification.`
 
 const (
 	// Prompt template slugs for agentic global sections. When present in the
@@ -545,8 +613,8 @@ func FormatSkillInstructionsSection(skills []SkillWithTools) string {
 		if sw.Skill.Instructions == "" {
 			continue
 		}
-		// If the skill has no active tools AND the instructions reference a tool
-		// by name, omit them to prevent the LLM from invoking a non-existent tool.
+		// Keep purely behavioral instructions even when a skill has no active
+		// implementation, but suppress instructions that mention concrete tool use.
 		if len(sw.ActiveTools) == 0 && referencesToolByName(sw.Skill.Instructions) {
 			continue
 		}
@@ -561,7 +629,9 @@ func FormatSkillInstructionsSection(skills []SkillWithTools) string {
 // Heuristic: looks for common invocation phrases ("call the X", "use the X", etc.).
 func referencesToolByName(instructions string) bool {
 	lower := strings.ToLower(instructions)
-	for _, p := range []string{"call the ", "call ", "use the ", "invoke ", "using tool", " tool"} {
+	// BUG-SKILL-EMPTY: added "this skill", "use this" to catch instructions like
+	// "use this skill to perform X" that cause LLM to hallucinate tool calls.
+	for _, p := range []string{"call the ", "call ", "use the ", "use this", "invoke ", "using tool", " tool", "this skill"} {
 		if strings.Contains(lower, p) {
 			return true
 		}

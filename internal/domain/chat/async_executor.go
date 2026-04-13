@@ -35,10 +35,12 @@ const defaultRunTimeout = 15 * time.Minute
 
 // AsyncExecutor handles asynchronous execution of chat runs via RabbitMQ.
 type AsyncExecutor struct {
-	repo       Repository
-	runner     SessionRunner
-	connURL    string
-	runTimeout time.Duration
+	repo           Repository
+	runner         SessionRunner
+	agentLoader    AgentLoader // optional: used to enrich RunInput with agent bindings
+	connURL        string
+	runTimeout     time.Duration
+	bufferRegistry *RunEventBufferRegistry
 }
 
 func NewAsyncExecutor(repo Repository, runner SessionRunner, connURL string) *AsyncExecutor {
@@ -48,6 +50,22 @@ func NewAsyncExecutor(repo Repository, runner SessionRunner, connURL string) *As
 		connURL:    connURL,
 		runTimeout: defaultRunTimeout,
 	}
+}
+
+// WithEventBufferRegistry wires the shared SSE replay buffer registry used by
+// the HTTP handler. Async runs must publish into the same registry so
+// GET /api/chat/sessions/{id}/run/{runId}/resume works for RabbitMQ-backed runs.
+func (e *AsyncExecutor) WithEventBufferRegistry(reg *RunEventBufferRegistry) *AsyncExecutor {
+	e.bufferRegistry = reg
+	return e
+}
+
+// WithAgentLoader wires an agent loader so that per-agent MCP server bindings
+// (and other agent-level snapshots) are applied to background runs.
+// P-C253-1: without this, async runs ignore agent MCP binding lists.
+func (e *AsyncExecutor) WithAgentLoader(loader AgentLoader) *AsyncExecutor {
+	e.agentLoader = loader
+	return e
 }
 
 // GetRunByID looks up a run from the persistent store (DB).
@@ -72,10 +90,10 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 		// the worker is likely down. Active runs (StartedAt non-zero) expire at the normal threshold.
 		if stale.Status == ChatRunStatusQueued && time.Since(stale.CreatedAt) > 2*staleThreshold {
 			slog.Warn("chat: auto-expiring stale queued run (worker may be down)", "runId", stale.ID, "age", time.Since(stale.CreatedAt))
-			_ = e.repo.UpdateRunStatus(ctx, stale.ID, ChatRunStatusFailed, "")
-		} else if !stale.StartedAt.IsZero() && time.Since(stale.StartedAt) > staleThreshold {
-			slog.Warn("chat: auto-expiring orphaned active run", "runId", stale.ID, "age", time.Since(stale.StartedAt))
-			_ = e.repo.UpdateRunStatus(ctx, stale.ID, ChatRunStatusFailed, "")
+			_ = e.repo.MarkRunFailed(ctx, stale.ID, "run expired in queue — worker may be down")
+		} else if stale.StartedAt != nil && !stale.StartedAt.IsZero() && time.Since(*stale.StartedAt) > staleThreshold {
+			slog.Warn("chat: auto-expiring orphaned active run", "runId", stale.ID, "age", time.Since(*stale.StartedAt))
+			_ = e.repo.MarkRunFailed(ctx, stale.ID, "run exceeded maximum duration and was auto-expired")
 		} else {
 			return uuid.Nil, ErrRunAlreadyActive
 		}
@@ -90,6 +108,12 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 	})
 	if err != nil {
 		return uuid.Nil, err
+	}
+
+	// Pre-create the replay buffer before the worker starts so resume requests
+	// can attach immediately after the 202 Accepted response.
+	if e.bufferRegistry != nil {
+		e.bufferRegistry.GetOrCreate(run.ID.String(), DefaultEventBufferSize)
 	}
 
 	// 2. Publish to RabbitMQ
@@ -187,6 +211,24 @@ func (e *AsyncExecutor) StartWorker(ctx context.Context) error {
 	}
 }
 
+func (e *AsyncExecutor) getOrCreateBuffer(runID uuid.UUID) *EventBuffer {
+	if e.bufferRegistry == nil {
+		return nil
+	}
+	return e.bufferRegistry.GetOrCreate(runID.String(), DefaultEventBufferSize)
+}
+
+func appendBufferedError(buf *EventBuffer, message, code string) {
+	if buf == nil {
+		return
+	}
+	data, _ := json.Marshal(map[string]any{
+		"message": message,
+		"code":    code,
+	})
+	buf.Append(RunEvent{Type: "error", Data: data})
+}
+
 func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// task.TenantID already contains the schema name (e.g., "ah_test") in some contexts,
 	// but the NewContext should receive the raw tenant ID if AcquireWithTenant
@@ -207,6 +249,10 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	defer cancel()
 	// cleanupCtx: used for DB writes after ctx is cancelled — has tenant but no deadline.
 	cleanupCtx := baseCtx
+	buf := e.getOrCreateBuffer(task.RunID)
+	if buf != nil {
+		defer buf.MarkDone()
+	}
 
 	slog.Info("chat: background run starting", "runId", task.RunID, "sessionId", task.SessionID, "tenant", task.TenantID)
 
@@ -221,7 +267,8 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	session, err := e.repo.GetSessionByID(ctx, task.SessionID)
 	if err != nil {
 		slog.Error("chat: background run failed to load session", "runId", task.RunID, "err", err)
-		e.repo.UpdateRunStatus(ctx, task.RunID, ChatRunStatusFailed, "")
+		_ = e.repo.MarkRunFailed(ctx, task.RunID, "failed to load session: "+err.Error())
+		appendBufferedError(buf, "failed to load session: "+err.Error(), "startup")
 		return
 	}
 
@@ -231,7 +278,8 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		defaultID, err := e.repo.FindDefaultAgentID(ctx)
 		if err != nil || defaultID == nil {
 			slog.Error("chat: background run session has no agent and no default agent found", "runId", task.RunID, "err", err)
-			e.repo.UpdateRunStatus(ctx, task.RunID, ChatRunStatusFailed, "")
+			_ = e.repo.MarkRunFailed(ctx, task.RunID, "no agent configured for this session and no default published agent found")
+			appendBufferedError(buf, "no agent configured for this session and no default published agent found", "startup")
 			// P-C292-2: persist a user-facing error so chat history is not left empty.
 			_, _ = e.repo.CreateMessage(ctx, ChatMessage{
 				SessionID:   task.SessionID,
@@ -243,25 +291,38 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		}
 		if err := e.repo.UpdateSessionAgent(ctx, task.SessionID, *defaultID); err != nil {
 			slog.Error("chat: background run failed to bind default agent", "runId", task.RunID, "err", err)
-			e.repo.UpdateRunStatus(ctx, task.RunID, ChatRunStatusFailed, "")
+			_ = e.repo.MarkRunFailed(ctx, task.RunID, "failed to bind default agent: "+err.Error())
+			appendBufferedError(buf, "failed to bind default agent: "+err.Error(), "startup")
 			return
 		}
 		session.AgentID = defaultID
 		slog.Info("chat: background run bound default agent to session", "runId", task.RunID, "agentId", *defaultID)
 	}
 
+	// P-C253-1: load MCP server names so the runner filters tools to only those
+	// from servers explicitly bound to this agent. Without this, all MCP tools
+	// from all running servers would be included regardless of agent binding.
+	var mcpServerNames []string
+	if e.agentLoader != nil {
+		if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
+			mcpServerNames = agentCfg.MCPServerNames
+		}
+	}
+
 	// 2. Execute the run
 	runEvents, err := e.runner.RunSession(ctx, RunInput{
-		RunID:       task.RunID,
-		SessionID:   task.SessionID,
-		AgentID:     *session.AgentID,
-		TenantID:    task.TenantID,
-		UserMessage: task.Message,
+		RunID:                  task.RunID,
+		SessionID:              task.SessionID,
+		AgentID:                *session.AgentID,
+		TenantID:               task.TenantID,
+		UserMessage:            task.Message,
+		MCPServerNamesSnapshot: mcpServerNames,
 	})
 
 	if err != nil {
 		slog.Error("chat: background run failed to start", "runId", task.RunID, "err", err)
-		e.repo.UpdateRunStatus(ctx, task.RunID, ChatRunStatusFailed, "")
+		_ = e.repo.MarkRunFailed(ctx, task.RunID, err.Error())
+		appendBufferedError(buf, err.Error(), "startup")
 		// Persist a user-facing error message so the chat history is not left empty.
 		// This covers failures that happen before the runner starts (e.g. unknown provider,
 		// missing API key settings) which the runner's own error-persistence path cannot handle.
@@ -284,17 +345,23 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// Infrastructure errors (persist_tool_result, etc.) also emit error events but
 	// do NOT write user messages — those must NOT suppress the timeout message.
 	runnerWroteUserMessage := false
+	var lastLLMErrorMsg string // non-empty when a fatal LLM error (llm_call/stream_consume) occurred
 	for event := range runEvents {
+		if buf != nil {
+			buf.Append(event)
+		}
 		if event.Type == "error" {
 			slog.Error("chat: background run error event", "runId", task.RunID, "data", string(event.Data))
 			var errData struct {
-				Code string `json:"code"`
+				Code    string `json:"code"`
+				Message string `json:"message"`
 			}
 			if json.Unmarshal(event.Data, &errData) == nil {
 				switch errData.Code {
 				case "stream_consume", "llm_call":
 					// Runner deferred cleanup will persist a user-facing message for these.
 					runnerWroteUserMessage = true
+					lastLLMErrorMsg = errData.Message
 				}
 			}
 		}
@@ -306,7 +373,8 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// (prevents two consecutive error messages in the chat history).
 	if ctx.Err() != nil {
 		slog.Warn("chat: background run timed out", "runId", task.RunID, "timeout", e.runTimeout)
-		e.repo.UpdateRunStatus(cleanupCtx, task.RunID, ChatRunStatusFailed, "")
+		_ = e.repo.MarkRunFailed(cleanupCtx, task.RunID, fmt.Sprintf("run exceeded the %s timeout", e.runTimeout))
+		appendBufferedError(buf, fmt.Sprintf("run exceeded the %s timeout", e.runTimeout), "timeout")
 		if !runnerWroteUserMessage {
 			_, _ = e.repo.CreateMessage(cleanupCtx, ChatMessage{
 				SessionID:   task.SessionID,
@@ -318,13 +386,28 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		return
 	}
 
-	e.repo.MarkRunCompleted(ctx, task.RunID)
+	// If the runner encountered a fatal LLM error (e.g. provider rejected the request),
+	// mark the run as failed so callers get a clear, queryable status rather than a
+	// misleading "completed" with an error buried in metadata.
+	if lastLLMErrorMsg != "" {
+		_ = e.repo.MarkRunFailed(cleanupCtx, task.RunID, lastLLMErrorMsg)
+		slog.Warn("chat: background run failed due to LLM error", "runId", task.RunID, "err", lastLLMErrorMsg)
+		return
+	}
+
+	_ = e.repo.MarkRunCompleted(ctx, task.RunID)
 	slog.Info("chat: background run completed", "runId", task.RunID)
 }
 
 // friendlyStartupError maps errors that occur before the runner loop starts
 // to user-facing messages suitable for persisting to chat history.
 func friendlyStartupError(rawMsg string) string {
+	if strings.Contains(rawMsg, "is not published") || strings.Contains(rawMsg, "DRAFT status") || strings.Contains(rawMsg, "agent is not published") {
+		return "Não foi possível iniciar o agente: este agente ainda não foi publicado. Publique o agente nas configurações antes de usá-lo no chat."
+	}
+	if strings.Contains(rawMsg, "is archived") || strings.Contains(rawMsg, "ARCHIVED") {
+		return "Não foi possível iniciar o agente: este agente foi arquivado e não aceita novas conversas."
+	}
 	if strings.Contains(rawMsg, "unsupported provider") || strings.Contains(rawMsg, "unknown provider") {
 		return "Não foi possível iniciar o agente: o provedor de IA configurado não é suportado. Verifique a configuração do modelo nas configurações do agente."
 	}

@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
@@ -23,6 +24,7 @@ type service struct {
 	repo               Repository
 	provisioningClient ProvisioningClient
 	presetSeeder       PresetSeeder
+	schemaMigrator     SchemaMigrator
 }
 
 // ProvisioningClient is a placeholder interface for Keycloak realm provisioning.
@@ -36,9 +38,25 @@ type PresetSeeder interface {
 	SeedDefaults(ctx context.Context, tenantID string) error
 }
 
+// SchemaMigrator creates the PostgreSQL schema for a new tenant and applies
+// all pending tenant-scoped migrations. Implementations are expected to be
+// idempotent (CREATE SCHEMA IF NOT EXISTS + migrate ErrNoChange is ok).
+type SchemaMigrator interface {
+	MigrateTenant(ctx context.Context, tenantID string) error
+}
+
 // NewService creates a new tenant Service.
-func NewService(repo Repository, pc ProvisioningClient, ps PresetSeeder) Service {
+// The returned *service also satisfies the Service interface; callers that
+// need to attach optional collaborators (e.g. SchemaMigrator) should use
+// the concrete type returned by this constructor.
+func NewService(repo Repository, pc ProvisioningClient, ps PresetSeeder) *service {
 	return &service{repo: repo, provisioningClient: pc, presetSeeder: ps}
+}
+
+// WithSchemaMigrator attaches a schema migrator that is called during tenant creation.
+func (s *service) WithSchemaMigrator(sm SchemaMigrator) *service {
+	s.schemaMigrator = sm
+	return s
 }
 
 func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantResponse, error) {
@@ -65,8 +83,25 @@ func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantRe
 	// Attempt Keycloak provisioning; on failure mark status but do not rollback.
 	if s.provisioningClient != nil {
 		if pErr := s.provisioningClient.ProvisionRealm(ctx, created.ID, created.Name); pErr != nil {
+			slog.Warn("tenant: keycloak provisioning failed",
+				"tenantID", created.ID,
+				"error", pErr.Error(),
+			)
 			_ = s.repo.UpdateStatus(ctx, created.ID, StatusProvisioningFailed)
 			created.Status = StatusProvisioningFailed
+		}
+	}
+
+	// Create the tenant PostgreSQL schema and run schema migrations.
+	// Only attempt if Keycloak provisioning did not fail — a failed realm means
+	// the tenant cannot authenticate, so schema provisioning would be premature.
+	if s.schemaMigrator != nil && created.Status == StatusActive {
+		if mErr := s.schemaMigrator.MigrateTenant(ctx, created.ID); mErr != nil {
+			slog.Warn("tenant: schema migration failed",
+				"tenantID", created.ID,
+				"error", mErr.Error(),
+			)
+			// Non-fatal: schema can be created on next server restart via MigrateAllTenants.
 		}
 	}
 

@@ -9,11 +9,16 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strings"
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/database"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // HookEvent identifies when a hook fires.
@@ -72,19 +77,32 @@ type HTTPHookConfig struct {
 }
 
 // PromptHookConfig is the config shape for hook_type = "prompt".
+// Both "template" and "inject" are accepted; "template" takes priority when both are set.
+// "inject" is provided as an intuitive alias for static text that requires no substitution.
 type PromptHookConfig struct {
 	Template string `json:"template"` // Go text/template with {{.ToolName}}, {{.Input}}, {{.Output}}
+	Inject   string `json:"inject"`   // alias for static inject text (no templating)
 }
 
-// HookPayload is the data sent to hook executors.
+// HookPayload is the data sent to hook executors and used as the template
+// data object when rendering prompt hooks. All fields are optional — only those
+// relevant to the specific event are populated.
 type HookPayload struct {
-	Event     HookEvent       `json:"event"`
-	AgentID   string          `json:"agentId"`
-	SessionID string          `json:"sessionId"`
-	ToolName  string          `json:"toolName,omitempty"`
-	ToolInput json.RawMessage `json:"toolInput,omitempty"`
+	Event      HookEvent       `json:"event"`
+	AgentID    string          `json:"agentId"`
+	SessionID  string          `json:"sessionId"`
+	ToolName   string          `json:"toolName,omitempty"`
+	ToolInput  json.RawMessage `json:"toolInput,omitempty"`
 	ToolOutput json.RawMessage `json:"toolOutput,omitempty"`
 	ToolError  *string         `json:"toolError,omitempty"`
+	// Turn-end / run-end fields (populated for turn_end and run_end events).
+	// These allow prompt hook templates to use {{.TurnIndex}}, {{.TotalTurns}}, etc.
+	TurnIndex        int            `json:"turnIndex,omitempty"`
+	AssistantContent string         `json:"assistantContent,omitempty"`
+	ToolCalls        []ToolCallInfo `json:"toolCalls,omitempty"`
+	TotalTurns       int            `json:"totalTurns,omitempty"`
+	TotalTokens      int            `json:"totalTokens,omitempty"`
+	TotalCostUSD     float64        `json:"totalCostUSD,omitempty"`
 }
 
 // HookResult holds the result of a hook execution.
@@ -111,6 +129,14 @@ func NewHookRepository(pool *pgxpool.Pool) HookRepository {
 }
 
 func (r *pgHookRepository) FindByAgentAndEvent(ctx context.Context, agentID uuid.UUID, event HookEvent) ([]AgentHook, error) {
+	// BUG-HOOK2 fix: use tenant-aware connection so search_path is set correctly.
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("hook repo: acquire: %w", err)
+	}
+	defer release()
+
 	query := `SELECT id, agent_id, event, matcher, hook_type, config, enabled, priority,
 		       timeout_seconds, is_async, run_once, status_message,
 		       created_at, updated_at
@@ -118,7 +144,7 @@ func (r *pgHookRepository) FindByAgentAndEvent(ctx context.Context, agentID uuid
 		WHERE agent_id = $1 AND event = $2 AND enabled = TRUE
 		ORDER BY priority ASC, created_at ASC`
 
-	rows, err := r.pool.Query(ctx, query, agentID, string(event))
+	rows, err := conn.Query(ctx, query, agentID, string(event))
 	if err != nil {
 		return nil, fmt.Errorf("hook repo: query: %w", err)
 	}
@@ -136,7 +162,14 @@ func (r *pgHookRepository) FindByAgentAndEvent(ctx context.Context, agentID uuid
 }
 
 func (r *pgHookRepository) DisableHook(ctx context.Context, hookID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `UPDATE agent_hook SET enabled = FALSE, updated_at = NOW() WHERE id = $1`, hookID)
+	// BUG-HOOK2 fix: use tenant-aware connection for UPDATE as well.
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return fmt.Errorf("hook repo: acquire for disable: %w", err)
+	}
+	defer release()
+	_, err = conn.Exec(ctx, `UPDATE agent_hook SET enabled = FALSE, updated_at = NOW() WHERE id = $1`, hookID)
 	if err != nil {
 		return fmt.Errorf("hook repo: disable: %w", err)
 	}
@@ -199,11 +232,16 @@ func (e *HookExecutor) Execute(ctx context.Context, payload HookPayload) []HookR
 		return nil
 	}
 
+	if len(hooks) > 0 {
+		slog.Debug("hook executor: loaded hooks", "event", payload.Event, "count", len(hooks), "toolName", payload.ToolName)
+	}
+
 	var results []HookResult
 	for _, hook := range hooks {
 		if !matchesToolName(hook.Matcher, payload.ToolName) {
 			continue
 		}
+		slog.Info("hook executor: firing hook", "hookID", hook.ID, "event", hook.Event, "hookType", hook.HookType, "toolName", payload.ToolName)
 
 		// Apply per-hook timeout if set.
 		hookCtx := ctx
@@ -232,6 +270,13 @@ func (e *HookExecutor) Execute(ctx context.Context, payload HookPayload) []HookR
 		result := e.executeHook(hookCtx, hook, payload)
 		if cancel != nil {
 			cancel()
+		}
+		// BUG-HOOK-ERROR-SILENT: log synchronous hook errors so operators can
+		// diagnose misconfigured or unreachable hooks without having to trace
+		// SSE events. Async hooks already log errors in their goroutine.
+		if result.Error != nil {
+			slog.Warn("hook executor: hook failed", "hookID", hook.ID, "event", hook.Event,
+				"hookType", hook.HookType, "toolName", payload.ToolName, "error", *result.Error)
 		}
 		results = append(results, result)
 
@@ -318,9 +363,32 @@ func (e *HookExecutor) executePromptHook(hook AgentHook, payload HookPayload) Ho
 		return HookResult{Error: &errMsg}
 	}
 
-	// Simple variable substitution (no full template engine to avoid injection).
-	result := cfg.Template
-	return HookResult{Inject: result}
+	// Prefer template; fall back to inject alias for static text.
+	raw := cfg.Template
+	if raw == "" {
+		raw = cfg.Inject
+	}
+
+	// BUG-HOOK-TEMPLATE: execute Go text/template substitutions so that
+	// {{.ToolName}}, {{.ToolInput}}, {{.ToolOutput}} etc. are expanded.
+	// If the template has no actions (no {{...}}), this is a no-op and the
+	// raw string is returned unchanged — fully backward-compatible.
+	if strings.Contains(raw, "{{") {
+		tmpl, err := template.New("hook").Parse(raw)
+		if err != nil {
+			// Malformed template — fall back to raw string rather than erroring.
+			slog.Warn("prompt hook: malformed template, using raw text", "hookID", hook.ID, "error", err)
+			return HookResult{Inject: raw}
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, payload); err != nil {
+			slog.Warn("prompt hook: template execute failed, using raw text", "hookID", hook.ID, "error", err)
+			return HookResult{Inject: raw}
+		}
+		return HookResult{Inject: buf.String()}
+	}
+
+	return HookResult{Inject: raw}
 }
 
 // --- Turn-End / Run-End Payloads ---
@@ -366,7 +434,12 @@ type RunEndHandler interface {
 }
 
 // ExecuteTurnEnd runs all turn-end hooks (persisted + in-memory handlers).
-func (e *HookExecutor) ExecuteTurnEnd(ctx context.Context, payload TurnEndPayload, handlers []TurnEndHandler) {
+// BUG-HOOK-TURNEND-INJECT: returns inject texts from persisted hooks so the
+// runner can emit [SYSTEM NOTE from hook] user messages before the next turn.
+// Previously the inject field was discarded; only Error was checked.
+func (e *HookExecutor) ExecuteTurnEnd(ctx context.Context, payload TurnEndPayload, handlers []TurnEndHandler) []string {
+	var injects []string
+
 	// 1. Execute persisted hooks (HTTP/prompt).
 	agentID, err := uuid.Parse(payload.AgentID)
 	if err == nil && e.repo != nil {
@@ -376,14 +449,22 @@ func (e *HookExecutor) ExecuteTurnEnd(ctx context.Context, payload TurnEndPayloa
 		} else {
 			for _, hook := range hooks {
 				// Turn-end hooks don't use tool matcher — execute all.
+				// Populate turn-end fields so prompt templates can use
+				// {{.TurnIndex}}, {{.AssistantContent}}, {{.ToolCalls}}, etc.
 				hookPayload := HookPayload{
-					Event:     HookTurnEnd,
-					AgentID:   payload.AgentID,
-					SessionID: payload.SessionID,
+					Event:            HookTurnEnd,
+					AgentID:          payload.AgentID,
+					SessionID:        payload.SessionID,
+					TurnIndex:        payload.TurnIndex,
+					AssistantContent: payload.AssistantContent,
+					ToolCalls:        payload.ToolCalls,
 				}
 				result := e.executeHook(ctx, hook, hookPayload)
 				if result.Error != nil {
 					slog.Warn("turn-end hook failed", "hookId", hook.ID, "error", *result.Error)
+				}
+				if result.Inject != "" {
+					injects = append(injects, result.Inject)
 				}
 			}
 		}
@@ -395,10 +476,16 @@ func (e *HookExecutor) ExecuteTurnEnd(ctx context.Context, payload TurnEndPayloa
 			slog.Warn("turn-end handler failed", "error", err)
 		}
 	}
+
+	return injects
 }
 
 // ExecuteRunEnd runs all run-end hooks (persisted + in-memory handlers).
-func (e *HookExecutor) ExecuteRunEnd(ctx context.Context, payload RunEndPayload, handlers []RunEndHandler) {
+// Returns inject texts from prompt hooks so the runner can persist them as audit
+// notes in the session history (there is no next LLM turn to inject into, but
+// the notes remain visible in the conversation log for audit purposes).
+func (e *HookExecutor) ExecuteRunEnd(ctx context.Context, payload RunEndPayload, handlers []RunEndHandler) []string {
+	var injects []string
 	agentID, err := uuid.Parse(payload.AgentID)
 	if err == nil && e.repo != nil {
 		hooks, err := e.repo.FindByAgentAndEvent(ctx, agentID, HookRunEnd)
@@ -406,14 +493,22 @@ func (e *HookExecutor) ExecuteRunEnd(ctx context.Context, payload RunEndPayload,
 			slog.Warn("hook executor: failed to load run-end hooks", "error", err)
 		} else {
 			for _, hook := range hooks {
+				// Populate run-end fields so prompt templates can use
+				// {{.TotalTurns}}, {{.TotalTokens}}, {{.TotalCostUSD}}, etc.
 				hookPayload := HookPayload{
-					Event:     HookRunEnd,
-					AgentID:   payload.AgentID,
-					SessionID: payload.SessionID,
+					Event:        HookRunEnd,
+					AgentID:      payload.AgentID,
+					SessionID:    payload.SessionID,
+					TotalTurns:   payload.TotalTurns,
+					TotalTokens:  payload.TotalTokens,
+					TotalCostUSD: payload.TotalCost,
 				}
 				result := e.executeHook(ctx, hook, hookPayload)
 				if result.Error != nil {
 					slog.Warn("run-end hook failed", "hookId", hook.ID, "error", *result.Error)
+				}
+				if result.Inject != "" {
+					injects = append(injects, result.Inject)
 				}
 			}
 		}
@@ -424,6 +519,7 @@ func (e *HookExecutor) ExecuteRunEnd(ctx context.Context, payload RunEndPayload,
 			slog.Warn("run-end handler failed", "error", err)
 		}
 	}
+	return injects
 }
 
 // --- Memory Turn-End Handler ---

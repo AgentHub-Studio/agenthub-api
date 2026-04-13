@@ -1171,7 +1171,11 @@ func TestFormatToolResult_NormalOutput(t *testing.T) {
 func TestFormatToolResult_Error(t *testing.T) {
 	errMsg := "connection refused"
 	r := agentic.ToolExecResult{Error: &errMsg}
-	assert.Equal(t, "Error: connection refused", agentic.FormatToolResult(r))
+	result := agentic.FormatToolResult(r)
+	// P-F3-1 (BUG-F3): error results include an anti-ask_user [SYSTEM] instruction.
+	assert.Contains(t, result, "Error: connection refused")
+	assert.Contains(t, result, "[SYSTEM]")
+	assert.Contains(t, result, "do NOT call ask_user")
 }
 
 func TestFormatToolResult_EmptyOutputWithToolName(t *testing.T) {

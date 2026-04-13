@@ -72,7 +72,14 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusInternalServerError, "failed to list memory")
 		return
 	}
-	respond.JSON(w, http.StatusOK, items)
+	// BUG-MEMORY-EMBEDDING-LEAKED: strip embedding vectors before responding.
+	// Each 1024-float embedding is ~5 KB; returning it via the management API
+	// leaks internal infrastructure and bloats responses unnecessarily.
+	responses := make([]MemoryResponse, len(items))
+	for i, m := range items {
+		responses[i] = MemoryResponseFrom(m)
+	}
+	respond.JSON(w, http.StatusOK, responses)
 }
 
 func (h *Handler) upsert(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +99,7 @@ func (h *Handler) upsert(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	respond.JSON(w, http.StatusOK, m)
+	respond.JSON(w, http.StatusOK, MemoryResponseFrom(m))
 }
 
 func (h *Handler) getByKey(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +122,7 @@ func (h *Handler) getByKey(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusInternalServerError, "failed to get memory")
 		return
 	}
-	respond.JSON(w, http.StatusOK, m)
+	respond.JSON(w, http.StatusOK, MemoryResponseFrom(m))
 }
 
 func (h *Handler) deleteByKey(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +178,15 @@ func (h *Handler) recall(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	respond.JSON(w, http.StatusOK, results)
+	// Strip embedding vectors from recall results too.
+	safeResults := make([]MemoryRecallResponse, len(results))
+	for i, res := range results {
+		safeResults[i] = MemoryRecallResponse{
+			MemoryResponse: MemoryResponseFrom(res.AgentMemory),
+			Relevance:      res.Relevance,
+		}
+	}
+	respond.JSON(w, http.StatusOK, safeResults)
 }
 
 // search handles GET /api/agents/{agentId}/memory/search?q=text&limit=20.
@@ -199,7 +214,12 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	respond.JSON(w, http.StatusOK, items)
+	// Strip embedding vectors.
+	responses := make([]MemoryResponse, len(items))
+	for i, m := range items {
+		responses[i] = MemoryResponseFrom(m)
+	}
+	respond.JSON(w, http.StatusOK, responses)
 }
 
 // stats handles GET /api/agents/{agentId}/memory/stats.

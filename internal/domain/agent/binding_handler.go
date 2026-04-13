@@ -32,11 +32,26 @@ func NewBindingHandler(agentRepo Repository, bindingRepo BindingRepository) *Bin
 func (h *BindingHandler) RegisterBindingRoutes(r chi.Router) {
 	r.Get("/api/agents/{id}/skills", h.listSkills)
 	r.Put("/api/agents/{id}/skills", h.syncSkills)
+	// BUG-G1: explicit POST handler so callers get a clear 405 with guidance instead of a bare chi 405.
+	r.Post("/api/agents/{id}/skills", methodNotAllowed("GET, PUT", `use PUT /api/agents/{id}/skills with body {"ids":["<uuid>",...]}`))
+
 	r.Get("/api/agents/{id}/knowledge-bases", h.listKnowledgeBases)
 	r.Put("/api/agents/{id}/knowledge-bases", h.syncKnowledgeBases)
+	r.Post("/api/agents/{id}/knowledge-bases", methodNotAllowed("GET, PUT", `use PUT /api/agents/{id}/knowledge-bases with body {"ids":["<uuid>",...]}`))
+
 	// P-C253-1: per-agent MCP server bindings
 	r.Get("/api/agents/{id}/mcp-servers", h.listMCPServers)
 	r.Put("/api/agents/{id}/mcp-servers", h.syncMCPServers)
+	r.Post("/api/agents/{id}/mcp-servers", methodNotAllowed("GET, PUT", `use PUT /api/agents/{id}/mcp-servers with body {"ids":["<uuid>",...]}`))
+}
+
+// methodNotAllowed returns a handler that sets the Allow header and responds with a
+// 405 JSON error explaining the allowed methods and the correct body format.
+func methodNotAllowed(allow, hint string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", allow)
+		respond.Error(w, http.StatusMethodNotAllowed, "method not allowed: "+hint)
+	}
 }
 
 func (h *BindingHandler) parseAndValidateAgentID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -77,7 +92,7 @@ func (h *BindingHandler) syncSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	var req syncIDsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		respond.Error(w, http.StatusBadRequest, `invalid request body — expected {"ids":["<uuid>",...]}`)
 		return
 	}
 	if req.IDs == nil {
@@ -116,7 +131,7 @@ func (h *BindingHandler) syncKnowledgeBases(w http.ResponseWriter, r *http.Reque
 	}
 	var req syncIDsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		respond.Error(w, http.StatusBadRequest, `invalid request body — expected {"ids":["<uuid>",...]}`)
 		return
 	}
 	if req.IDs == nil {
@@ -154,7 +169,7 @@ func (h *BindingHandler) syncMCPServers(w http.ResponseWriter, r *http.Request) 
 	}
 	var req syncIDsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		respond.Error(w, http.StatusBadRequest, `invalid request body — expected {"ids":["<uuid>",...]}`)
 		return
 	}
 	if req.IDs == nil {

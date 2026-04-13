@@ -43,15 +43,21 @@ func New(apiKey, baseURL, appName string) *Provider {
 // GetProviderName returns the provider identifier.
 func (p *Provider) GetProviderName() string { return "openrouter" }
 
+// streamOptions enables usage reporting in the final streaming chunk (OpenAI spec).
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 // chatRequest mirrors the OpenAI-compatible request body expected by OpenRouter.
 type chatRequest struct {
-	Model       string       `json:"model"`
-	Messages    []ai.Message `json:"messages"`
-	Stream      bool         `json:"stream,omitempty"`
-	MaxTokens   int          `json:"max_tokens,omitempty"`
-	Temperature float64      `json:"temperature,omitempty"`
-	TopP        float64      `json:"top_p,omitempty"`
-	Tools       []ai.Tool    `json:"tools,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []ai.Message   `json:"messages"`
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Temperature   float64        `json:"temperature,omitempty"`
+	TopP          float64        `json:"top_p,omitempty"`
+	Tools         []ai.Tool      `json:"tools,omitempty"`
 }
 
 type toolCallFunction struct {
@@ -150,12 +156,14 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 	}
 
 	reqBody := chatRequest{
-		Model:       opts.Model,
-		Messages:    msgs,
-		Stream:      true,
-		MaxTokens:   opts.MaxTokens,
-		Temperature: opts.Temperature,
-		TopP:        opts.TopP,
+		Model:         opts.Model,
+		Messages:      msgs,
+		Stream:        true,
+		StreamOptions: &streamOptions{IncludeUsage: true},
+		MaxTokens:     opts.MaxTokens,
+		Temperature:   opts.Temperature,
+		TopP:          opts.TopP,
+		Tools:         opts.Tools,
 	}
 
 	data, err := json.Marshal(reqBody)
@@ -199,15 +207,28 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 			var event struct {
 				Choices []struct {
 					Delta struct {
-						Content   *string     `json:"content"`
-						ToolCalls []toolCall  `json:"tool_calls"`
+						Content   *string    `json:"content"`
+						ToolCalls []toolCall `json:"tool_calls"`
 					} `json:"delta"`
 					FinishReason *string `json:"finish_reason"`
 				} `json:"choices"`
+				// OpenRouter sends a final chunk with usage populated.
+				Usage *usageResponse `json:"usage"`
 			}
 			if err := json.Unmarshal([]byte(payload), &event); err != nil {
 				ch <- ai.StreamChunk{Error: fmt.Errorf("openrouter: decode chunk: %w", err)}
 				return
+			}
+			// Usage-only chunk (no choices) — forward token counts.
+			if event.Usage != nil && len(event.Choices) == 0 {
+				ch <- ai.StreamChunk{
+					Usage: &ai.Usage{
+						PromptTokens:     event.Usage.PromptTokens,
+						CompletionTokens: event.Usage.CompletionTokens,
+						TotalTokens:      event.Usage.TotalTokens,
+					},
+				}
+				continue
 			}
 			if len(event.Choices) == 0 {
 				continue
@@ -230,6 +251,14 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 			}
 			if c.FinishReason != nil {
 				chunk.FinishReason = *c.FinishReason
+			}
+			// Some providers include usage in the final choice chunk.
+			if event.Usage != nil {
+				chunk.Usage = &ai.Usage{
+					PromptTokens:     event.Usage.PromptTokens,
+					CompletionTokens: event.Usage.CompletionTokens,
+					TotalTokens:      event.Usage.TotalTokens,
+				}
 			}
 			ch <- chunk
 		}
