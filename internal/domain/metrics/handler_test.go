@@ -74,9 +74,7 @@ func setupMetrics() (*chi.Mux, *mockMetricsSvc) {
 		})
 	})
 	r.Mount("/api/metrics", h.Routes())
-	r.Route("/api/agents/{agentId}", func(sr chi.Router) {
-		sr.Mount("/", h.AgentRoutes())
-	})
+	r.Mount("/api/agents/{id}/metrics", h.AgentRoutes())
 	return r, svc
 }
 

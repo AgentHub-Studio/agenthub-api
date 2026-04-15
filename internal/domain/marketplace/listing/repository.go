@@ -150,13 +150,15 @@ func (r *Repository) Create(ctx context.Context, l Listing) (Listing, error) {
 	             status, avg_rating, review_count, created_at, updated_at`
 	row := r.db.QueryRow(ctx, q,
 		l.ID, l.TenantID, l.PackageID, l.Name, l.Slug, l.Description,
-		string(l.Type), l.Category, string(l.Status), l.AvgRating, l.ReviewCount)
+		string(l.Type), "1.0.0", l.Category, string(l.Status), l.AvgRating, l.ReviewCount)
 	return scanRow(row)
 }
 
 // Update updates a listing.
 // Bug 40 fix: 'name' is GENERATED — update via 'package_name' source column.
 func (r *Repository) Update(ctx context.Context, l Listing) (Listing, error) {
+	// name/slug/type are GENERATED columns sourced from package_name/package_slug/package_type;
+	// only mutable fields go in the SET clause.
 	const q = `UPDATE marketplace_listing
 	           SET package_name=$2, description=$3, category=$4, updated_at=NOW()
 	           WHERE id=$1
