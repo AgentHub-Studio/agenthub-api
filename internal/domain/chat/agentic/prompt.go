@@ -154,6 +154,9 @@ type PromptInput struct {
 	// from the set are excluded so the LLM cannot hallucinate calls to a slug that
 	// has no callable implementation (BUG-SKILL-EMPTY).
 	ActiveSkillSlugs map[string]bool
+	// RequestContext supplies per-request identity (user, tenant) used to resolve
+	// {{user.email}}, {{tenant.id}}, etc. placeholders in SystemPrompt. MA-09.
+	RequestContext RequestContext
 }
 
 // Build assembles the full system prompt from all dynamic sections.
@@ -167,7 +170,7 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 
 	// 1. Agent Identity & Instructions (cached — stable across turns)
 	if in.SystemPrompt != "" {
-		sections = append(sections, in.SystemPrompt)
+		sections = append(sections, ResolveSystemPromptPlaceholders(in.SystemPrompt, in.RequestContext))
 	}
 
 	// 1b. Anti-hallucination guard (P-C127-3, P-C130-1, P-C142-2).
