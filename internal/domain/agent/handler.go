@@ -29,8 +29,9 @@ type TemplateContent struct {
 
 // Handler exposes agent HTTP endpoints.
 type Handler struct {
-	svc         Service
-	templateSvc TemplateGetter
+	svc              Service
+	templateSvc      TemplateGetter
+	portableBindings PortableBindingLookup
 }
 
 // NewHandler creates a new Handler.
@@ -60,6 +61,9 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/agents/{id}/restore", h.restore)
 	r.Post("/api/agents/{id}/clone", h.clone)
 	r.Post("/api/agents/{id}/apply-template", h.applyTemplate)
+	// MA-02: Agent-as-Code — YAML export/import.
+	r.Get("/api/agents/{id}/export", h.exportPortable)
+	r.Post("/api/agents/import", h.importPortable)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
