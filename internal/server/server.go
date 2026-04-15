@@ -16,6 +16,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/abtest"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/auth"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agenttemplate"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/analytics"
@@ -345,6 +346,13 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		settingsHandler.RegisterProtectedRoutes(r)
 		llmpresetHandler.RegisterProtectedRoutes(r)
 		agentHandler.RegisterRoutes(r)
+		// MA-11: Capabilities endpoint — frontend queries this to adapt UI per user.
+		// Extractor returns zeros in placeholder auth mode; wired to JWT claims once
+		// agenthub-go-commons/auth lands.
+		auth.NewHandler(
+			func(*http.Request) (string, string, []string) { return "", "", nil },
+			auth.FeatureFlags{RBAC: true},
+		).RegisterRoutes(r)
 		agent.NewHookHandler(pool).RegisterRoutes(r)
 		agentVersionHandler.RegisterVersionRoutes(r)
 		agentBindingHandler.RegisterBindingRoutes(r)
