@@ -1727,6 +1727,20 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 	// the requested tool instead of surfacing raw JSON to the user.
 	if len(toolCalls) == 0 && content != "" {
 		if parsed, consumed := parseTextToolCalls(content); consumed {
+			// Log as structured event so observability pipelines can track
+			// fallback frequency per agent/model and flag agents that should
+			// migrate to modelConfig.toolMode="required" (issue #184).
+			// Name of the first tool is included to help identify patterns
+			// (e.g. a particular management skill that always triggers text).
+			firstToolName := ""
+			if len(parsed) > 0 {
+				firstToolName = parsed[0].Function.Name
+			}
+			slog.Info("agentic: text-format tool call intercepted by fallback",
+				"event", "text_toolcall_fallback",
+				"toolName", firstToolName,
+				"toolCount", len(parsed),
+				"contentLen", len(content))
 			toolCalls = parsed
 			content = ""
 			finishReason = "tool_calls"
