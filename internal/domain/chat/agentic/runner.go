@@ -2252,7 +2252,13 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 		// Auto-require confirmation for destructive tools (delete, drop, overwrite)
 		// even when permission rules would allow them. This is a safety net inspired
 		// by Claude Code's isDestructive per-tool flag (Tool.ts).
-		if destructiveIndex[tc.Function.Name] {
+		//
+		// Meta-tools that multiplex CRUD operations via an "operation" argument
+		// (e.g. agent-management) are flagged destructive because some of their
+		// operations mutate state. For calls whose arguments explicitly request
+		// a known read-only operation (list/get/show/...), fall through so the
+		// LLM is not forced to keep retrying with narrower tools.
+		if destructiveIndex[tc.Function.Name] && !isReadOnlyOperation(tc.Function.Arguments) {
 			errMsg := fmt.Sprintf(
 				"Tool '%s' is flagged as destructive (irreversible operation). "+
 					"Automated execution is blocked — this operation requires explicit user confirmation.",
