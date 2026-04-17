@@ -16,11 +16,24 @@ type HTTPEmbedder struct {
 	httpClient *http.Client
 }
 
+// defaultEmbedTimeout caps how long a single /embed call is allowed to take.
+// The e5-large model on CPU takes ~20–28s for a single sentence in practice;
+// the prior 30s budget caused false timeouts whenever the embedding pod had
+// the slightest load. 60s gives headroom without making the caller wait
+// forever if the service is genuinely stuck.
+const defaultEmbedTimeout = 60 * time.Second
+
 // NewHTTPEmbedder creates an HTTPEmbedder that sends requests to baseURL/embed.
 func NewHTTPEmbedder(baseURL string) *HTTPEmbedder {
+	return NewHTTPEmbedderWithTimeout(baseURL, defaultEmbedTimeout)
+}
+
+// NewHTTPEmbedderWithTimeout is like NewHTTPEmbedder but allows overriding
+// the per-request timeout, primarily for tests that need a tight deadline.
+func NewHTTPEmbedderWithTimeout(baseURL string, timeout time.Duration) *HTTPEmbedder {
 	return &HTTPEmbedder{
 		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: timeout},
 	}
 }
 
