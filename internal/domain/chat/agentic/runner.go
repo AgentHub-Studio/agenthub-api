@@ -433,12 +433,18 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	gates := BuildRunGates(r.config, in.CurrentDepth, r.subtaskExec != nil)
 
 	// 1. Recall memories (non-fatal on failure).
+	//
+	// A recall miss is expected and recoverable: the turn proceeds with an
+	// empty memories string. Surface it as a warning (not an error) so the UI
+	// does not light up red on every run when the embedding service is slow.
 	memories := ""
 	if r.memory != nil {
 		var err error
 		memories, err = r.memory.Recall(ctx, in.AgentID, in.UserMessage)
 		if err != nil {
-			emitError(ch, "memory_recall", err)
+			slog.Warn("runner: memory recall failed, continuing without memories",
+				"agentID", in.AgentID, "error", err)
+			emitWarning(ch, "memory_recall", err.Error())
 		}
 	}
 
