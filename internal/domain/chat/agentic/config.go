@@ -3,6 +3,7 @@ package agentic
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
@@ -121,6 +122,18 @@ type RunConfig struct {
 	FallbackOnOverload *bool `json:"fallbackOnOverload,omitempty"`
 	// FallbackOnTimeout enables fallback on timeout errors. Default true.
 	FallbackOnTimeout *bool `json:"fallbackOnTimeout,omitempty"`
+
+	// ToolMode controls how the provider is asked to select tools on each LLM
+	// call. "auto" (default, empty) lets the model decide; "required" forces
+	// the model to emit a tool_call (safer for agents whose entire job is to
+	// chain tools); "none" prevents tool use for a turn. Providers that do
+	// not support the requested mode fall back to "auto" transparently.
+	//
+	// See issue #178/#182 for the motivating failure mode: some local models
+	// (e.g. openrouter/openai/gpt-oss-120b) emit tool calls as plain JSON text
+	// in ~50% of runs. Agents with long tool-heavy workflows should opt into
+	// "required" to avoid the text-format fallback path entirely.
+	ToolMode ai.ToolChoiceType `json:"toolMode,omitempty"`
 
 	// Thinking configures extended thinking / chain-of-thought for the LLM.
 	// Nil means disabled. Inspired by Claude Code's ThinkingConfig.
@@ -262,6 +275,11 @@ type modelConfig struct {
 	// LLMCallTimeoutSeconds overrides the per-LLM-call timeout (P-C102-1).
 	// Default: 300 (5 minutes). Set to 0 to disable.
 	LLMCallTimeoutSeconds *int `json:"llmCallTimeoutSeconds,omitempty"`
+	// ToolMode opts the agent into stricter tool-selection behaviour. See
+	// RunConfig.ToolMode for semantics. Accepts "auto" (default), "required",
+	// "any", or "none". Unknown values are coerced to "auto" so malformed
+	// configs never break a run.
+	ToolMode string `json:"toolMode,omitempty"`
 }
 
 // RunConfigFromModelConfig creates a RunConfig by overlaying agent-specific
@@ -344,7 +362,26 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	if mc.LLMCallTimeoutSeconds != nil && *mc.LLMCallTimeoutSeconds >= 0 {
 		cfg.LLMCallTimeout = time.Duration(*mc.LLMCallTimeoutSeconds) * time.Second
 	}
+	cfg.ToolMode = normaliseToolMode(mc.ToolMode)
 	return cfg
+}
+
+// normaliseToolMode validates the raw toolMode string from modelConfig and
+// returns the corresponding ai.ToolChoiceType. Unknown or empty values are
+// coerced to ai.ToolChoiceAuto so malformed configs never break a run.
+func normaliseToolMode(raw string) ai.ToolChoiceType {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return "" // sentinel: caller treats as "no preference" (auto)
+	case "required", "any":
+		return ai.ToolChoiceAny
+	case "none":
+		return ai.ToolChoiceNone
+	case "auto":
+		return ai.ToolChoiceAuto
+	default:
+		return ""
+	}
 }
 
 // EffectiveTurnBudget calculates the token budget for a given turn.

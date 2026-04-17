@@ -798,6 +798,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			Thinking:     resolveThinkingConfig(r.config),
 			CacheControl: gates.CacheControl,
 			Effort:       gates.ResolvedEffort,
+			ToolChoice:   resolveToolChoice(r.config.ToolMode, aiTools, r.chatModel.GetProviderName()),
 		}
 		cacheSafeParams := NewCacheSafeParams(
 			systemPrompt,
