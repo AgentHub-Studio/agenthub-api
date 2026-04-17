@@ -23,7 +23,8 @@ import (
 // explanatory prose that happens to contain a JSON fragment.
 //
 // Supported shapes (single object or array):
-//   - {"tool":"<name>","call":{...}}             — gpt-oss
+//   - {"tool":"<name>","call":{...}}             — gpt-oss variant A
+//   - {"tool":"<name>","action":{...}}           — gpt-oss variant B
 //   - {"tool_name":"<name>","arguments":{...}}   — some local models
 //   - {"name":"<name>","arguments":{...}}        — OpenAI-ish
 //   - {"name":"<name>","parameters":{...}}       — Gemini-ish
@@ -81,7 +82,7 @@ func decodeOneToolCall(raw json.RawMessage, index int) (ai.ToolCall, bool) {
 	// that happens to carry a "name" key (e.g. `{"name":"Alice","age":30}`).
 	// A call with no arguments must still declare it explicitly, typically as
 	// "call":null or "arguments":{}.
-	argsRaw, ok := rawField(m, "call", "arguments", "parameters", "input", "args")
+	argsRaw, ok := rawField(m, "call", "action", "arguments", "parameters", "input", "args")
 	if !ok {
 		return ai.ToolCall{}, false
 	}
