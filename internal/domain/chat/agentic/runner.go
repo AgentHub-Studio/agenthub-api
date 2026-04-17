@@ -1713,6 +1713,19 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 		}
 	}
 
+	// Fallback: some models (e.g. openrouter/openai/gpt-oss-120b) emit tool
+	// calls as raw JSON text instead of populating the provider's structured
+	// tool_calls channel. When the assistant content is *only* such a payload
+	// and no structured calls arrived, parse it here so the loop can execute
+	// the requested tool instead of surfacing raw JSON to the user.
+	if len(toolCalls) == 0 && content != "" {
+		if parsed, consumed := parseTextToolCalls(content); consumed {
+			toolCalls = parsed
+			content = ""
+			finishReason = "tool_calls"
+		}
+	}
+
 	// Map "tool_calls" finish reason if we got tool calls.
 	if len(toolCalls) > 0 && finishReason == "" {
 		finishReason = "tool_calls"
