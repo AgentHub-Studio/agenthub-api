@@ -25,16 +25,32 @@ type Provider struct {
 	client  *http.Client
 }
 
+// defaultTimeout is the per-request timeout applied by New. It caps the
+// wait for response *headers*; callers needing different behaviour (e.g.
+// Ollama on CPU) should use NewWithTimeout.
+const defaultTimeout = 120 * time.Second
+
 // New creates a new OpenAI Provider.
 // If baseURL is empty, the default OpenAI API URL is used.
 func New(apiKey, baseURL string) *Provider {
+	return NewWithTimeout(apiKey, baseURL, defaultTimeout)
+}
+
+// NewWithTimeout is like New but lets the caller override the per-request
+// timeout. Local-CPU deployments of Ollama serving large models (gpt-oss:20b
+// and up) routinely need several minutes for the first token, so the Ollama
+// provider wraps this constructor with a generous default.
+func NewWithTimeout(apiKey, baseURL string, timeout time.Duration) *Provider {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
+	}
+	if timeout <= 0 {
+		timeout = defaultTimeout
 	}
 	return &Provider{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  &http.Client{Timeout: timeout},
 	}
 }
 

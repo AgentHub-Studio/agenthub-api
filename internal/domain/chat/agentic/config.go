@@ -209,8 +209,12 @@ func DefaultRunConfig() RunConfig {
 		ContextWindowSize:          200000,
 		CompactThreshold:           0.75,
 		ToolTimeout:                30 * time.Second,
-		TotalTimeout:               5 * time.Minute, // agents can override via totalTimeoutSeconds in model config
-		LLMCallTimeout:             5 * time.Minute, // P-C102-1: per-call timeout; configurable via LLM_CALL_TIMEOUT_SECS
+		// TotalTimeout must be ≥ LLMCallTimeout; otherwise agents running
+		// slow providers (Ollama on CPU) abort mid-LLM-call. Both align with
+		// the async_executor runTimeout (15 min) to avoid contradictory
+		// cutoffs between layers. Agents can override via totalTimeoutSeconds.
+		TotalTimeout:   15 * time.Minute,
+		LLMCallTimeout: 15 * time.Minute, // P-C102-1: per-call timeout; configurable via LLM_CALL_TIMEOUT_SECS
 		ConcurrentReadTools:        3,
 		StreamBufferSize:           64,
 		MaxBudgetUSD:               0, // no limit by default

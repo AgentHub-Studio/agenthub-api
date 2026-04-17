@@ -18,7 +18,10 @@ func TestDefaultRunConfig(t *testing.T) {
 	assert.Equal(t, 200000, cfg.ContextWindowSize)
 	assert.Equal(t, 0.75, cfg.CompactThreshold)
 	assert.Equal(t, 30*time.Second, cfg.ToolTimeout)
-	assert.Equal(t, 5*time.Minute, cfg.TotalTimeout)
+	// TotalTimeout aligned with async_executor runTimeout (15 min) so slow
+	// providers (Ollama on CPU) don't abort mid-stream — see issue #181.
+	assert.Equal(t, 15*time.Minute, cfg.TotalTimeout)
+	assert.Equal(t, 15*time.Minute, cfg.LLMCallTimeout)
 	assert.Equal(t, 3, cfg.ConcurrentReadTools)
 	assert.Equal(t, 64, cfg.StreamBufferSize)
 	assert.Equal(t, "anthropic", cfg.Provider)
