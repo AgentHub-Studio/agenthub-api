@@ -67,6 +67,35 @@ func TestParseTextToolCalls_ParametersShape(t *testing.T) {
 	}
 }
 
+func TestParseTextToolCalls_ActionShape(t *testing.T) {
+	// Observed in production: gpt-oss-120b emitting {"tool":"...","action":{...}}
+	// where "action" carries the args object (not the operation verb).
+	content := `{"tool":"agenthub_list_skills","action":{"page":0,"size":100}}`
+
+	calls, consumed := parseTextToolCalls(content)
+	if !consumed {
+		t.Fatalf("expected consumed=true, got false")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "agenthub_list_skills" {
+		t.Errorf("name=%q", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, `"size":100`) {
+		t.Errorf("arguments should contain size=100, got %q", calls[0].Function.Arguments)
+	}
+}
+
+func TestParseTextToolCalls_ActionAsStringRejected(t *testing.T) {
+	// `"action":"list"` is an operation verb, not an args payload —
+	// parseTextToolCalls must not coerce it. Operation-verb semantics are
+	// handled separately by isReadOnlyOperation.
+	if _, consumed := parseTextToolCalls(`{"tool":"X","action":"list"}`); consumed {
+		t.Errorf("action-as-string must not be parsed as a tool call payload")
+	}
+}
+
 func TestParseTextToolCalls_Array(t *testing.T) {
 	content := `[{"tool":"a","call":{}},{"tool":"b","call":{"x":1}}]`
 
