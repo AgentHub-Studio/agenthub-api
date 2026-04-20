@@ -61,7 +61,10 @@ func (f *settingsChatModelFactory) Build(ctx context.Context, provider, model st
 		if baseURL == "" {
 			baseURL = "http://localhost:11434"
 		}
-		return ollama.New(baseURL), nil
+		// Optional — blank for local Ollama, required for Ollama Cloud
+		// (https://ollama.com/v1) and other authenticated deployments.
+		apiKey, _ := readSettingString(ctx, f.settingsRepo, "ollama.apiKey")
+		return ollama.New(baseURL, apiKey), nil
 
 	case "openrouter":
 		apiKey, err := readSettingString(ctx, f.settingsRepo, "openrouter.apiKey")
