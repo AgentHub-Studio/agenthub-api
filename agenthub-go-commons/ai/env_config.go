@@ -10,6 +10,7 @@ type EnvConfig struct {
 	AnthropicAPIKey   string // ANTHROPIC_API_KEY
 	AnthropicBaseURL  string // ANTHROPIC_BASE_URL (default: https://api.anthropic.com)
 	OllamaBaseURL     string // OLLAMA_BASE_URL (default: http://localhost:11434)
+	OllamaAPIKey      string // OLLAMA_API_KEY (empty for local; required for Ollama Cloud)
 	OpenRouterAPIKey  string // OPENROUTER_API_KEY
 	OpenRouterBaseURL string // OPENROUTER_BASE_URL (default: https://openrouter.ai/api/v1)
 }
@@ -22,6 +23,7 @@ func EnvConfigFromEnvironment() EnvConfig {
 		AnthropicAPIKey:   os.Getenv("ANTHROPIC_API_KEY"),
 		AnthropicBaseURL:  envOrDefault("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
 		OllamaBaseURL:     envOrDefault("OLLAMA_BASE_URL", "http://localhost:11434"),
+		OllamaAPIKey:      os.Getenv("OLLAMA_API_KEY"),
 		OpenRouterAPIKey:  os.Getenv("OPENROUTER_API_KEY"),
 		OpenRouterBaseURL: envOrDefault("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
 	}

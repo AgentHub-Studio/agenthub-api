@@ -621,7 +621,7 @@ func buildDefaultChatModel() ai.ChatModel {
 		return openai.New(envCfg.OpenAIAPIKey, envCfg.OpenAIBaseURL)
 	}
 	if envCfg.OllamaBaseURL != "" && envCfg.OllamaBaseURL != "http://localhost:11434" {
-		return ollama.New(envCfg.OllamaBaseURL)
+		return ollama.New(envCfg.OllamaBaseURL, envCfg.OllamaAPIKey)
 	}
 	if envCfg.OpenRouterAPIKey != "" {
 		return openrouter.New(envCfg.OpenRouterAPIKey, envCfg.OpenRouterBaseURL, "agenthub")

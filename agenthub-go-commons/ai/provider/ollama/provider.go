@@ -30,14 +30,18 @@ type Provider struct {
 
 // New creates a new Ollama Provider.
 // If baseURL is empty, http://localhost:11434/v1 is used.
+// apiKey is optional: local Ollama ignores it; Ollama Cloud
+// (https://ollama.com/v1) and other authenticated deployments require it
+// and the openai-compatible inner provider will inject
+//   Authorization: Bearer <apiKey>
+// whenever apiKey is non-empty.
 // The per-request timeout defaults to 10 minutes, overridable via the
 // OLLAMA_TIMEOUT_SECONDS environment variable.
-func New(baseURL string) *Provider {
+func New(baseURL, apiKey string) *Provider {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
-	// Ollama's OpenAI-compatible endpoint requires no API key.
-	return &Provider{inner: openai.NewWithTimeout("", baseURL, resolveTimeout())}
+	return &Provider{inner: openai.NewWithTimeout(apiKey, baseURL, resolveTimeout())}
 }
 
 // resolveTimeout reads OLLAMA_TIMEOUT_SECONDS from the environment and
