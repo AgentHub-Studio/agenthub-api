@@ -126,17 +126,18 @@ func (p *Provisioner) adminRequest(ctx context.Context, method, path string, bod
 
 func (p *Provisioner) createRealm(ctx context.Context, tenantID string) error {
 	payload := map[string]any{
-		"realm":   tenantID,
-		"enabled": true,
-		"displayName": tenantID,
-		"ssoSessionIdleTimeout":         1800,
-		"accessTokenLifespan":           300,
-		"registrationAllowed":           false,
-		"loginWithEmailAllowed":         true,
-		"duplicateEmailsAllowed":        false,
-		"resetPasswordAllowed":          true,
-		"editUsernameAllowed":           false,
-		"bruteForceProtected":           true,
+		"realm":                  tenantID,
+		"enabled":                true,
+		"displayName":            tenantID,
+		"loginTheme":             "agenthub-theme",
+		"ssoSessionIdleTimeout":  1800,
+		"accessTokenLifespan":    300,
+		"registrationAllowed":    false,
+		"loginWithEmailAllowed":  true,
+		"duplicateEmailsAllowed": false,
+		"resetPasswordAllowed":   true,
+		"editUsernameAllowed":    false,
+		"bruteForceProtected":    true,
 	}
 	resp, err := p.adminRequest(ctx, http.MethodPost, "/admin/realms", payload)
 	if err != nil {
