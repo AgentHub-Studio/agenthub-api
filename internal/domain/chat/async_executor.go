@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -399,23 +400,78 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	slog.Info("chat: background run completed", "runId", task.RunID)
 }
 
+// providerNameRE captures the provider slug out of error strings like
+//   build model for provider "anthropic": chat model: claude.apiKey not configured
+// so the friendly message can point the user at the specific provider row
+// in the tenant settings.
+var providerNameRE = regexp.MustCompile(`provider\s+"([^"]+)"`)
+
+// settingKeyRE captures the settings key that the backend expected, e.g.
+//   chat model: claude.apiKey not configured
+// Used to tell the user which setting to fill in.
+var settingKeyRE = regexp.MustCompile(`([a-z][a-zA-Z0-9_]*\.[a-zA-Z][a-zA-Z0-9_]*)\s+not configured`)
+
 // friendlyStartupError maps errors that occur before the runner loop starts
 // to user-facing messages suitable for persisting to chat history.
+//
+// Every branch must be explicit about (a) what failed, (b) the probable root
+// cause and (c) where to fix it. If we fall through to the default, the message
+// still names the setting key extracted from the raw error.
 func friendlyStartupError(rawMsg string) string {
 	if strings.Contains(rawMsg, "is not published") || strings.Contains(rawMsg, "DRAFT status") || strings.Contains(rawMsg, "agent is not published") {
-		return "Não foi possível iniciar o agente: este agente ainda não foi publicado. Publique o agente nas configurações antes de usá-lo no chat."
+		return "Não foi possível iniciar o agente: este agente ainda não foi publicado. Abra o agente na seção Administração → Agentes e clique em Publicar antes de usá-lo no chat."
 	}
 	if strings.Contains(rawMsg, "is archived") || strings.Contains(rawMsg, "ARCHIVED") {
-		return "Não foi possível iniciar o agente: este agente foi arquivado e não aceita novas conversas."
+		return "Não foi possível iniciar o agente: ele foi arquivado e não aceita novas conversas. Restaure-o em Administração → Agentes ou use outro agente."
 	}
+
+	provider := ""
+	if m := providerNameRE.FindStringSubmatch(rawMsg); len(m) == 2 {
+		provider = m[1]
+	}
+	settingKey := ""
+	if m := settingKeyRE.FindStringSubmatch(rawMsg); len(m) == 2 {
+		settingKey = m[1]
+	}
+
 	if strings.Contains(rawMsg, "unsupported provider") || strings.Contains(rawMsg, "unknown provider") {
-		return "Não foi possível iniciar o agente: o provedor de IA configurado não é suportado. Verifique a configuração do modelo nas configurações do agente."
+		if provider != "" {
+			return fmt.Sprintf("Não foi possível iniciar o agente: o provedor de IA %q informado no agente não é suportado pela plataforma. Edite o agente (Administração → Agentes → editar → modelo) e escolha um provedor válido (anthropic, openai, openrouter, ollama).", provider)
+		}
+		return "Não foi possível iniciar o agente: o provedor de IA configurado não é suportado. Edite o agente (Administração → Agentes → editar → modelo) e escolha um provedor válido."
 	}
-	if strings.Contains(rawMsg, "no AI provider configured") || strings.Contains(rawMsg, "api key") || strings.Contains(rawMsg, "API key") {
-		return "Não foi possível iniciar o agente: chave de API não configurada. Verifique as configurações do provedor de IA."
+	if strings.Contains(rawMsg, "no AI provider configured") ||
+		strings.Contains(rawMsg, "api key") ||
+		strings.Contains(rawMsg, "API key") ||
+		strings.Contains(rawMsg, "apiKey") ||
+		strings.Contains(rawMsg, "not configured in settings") {
+		// Most specific: we know both the provider AND the settings key.
+		if provider != "" && settingKey != "" {
+			return fmt.Sprintf("Não foi possível iniciar o agente: a chave de API do provedor %q não está configurada neste tenant (configuração %q ausente). Acesse Administração → Configurações → Provedores, selecione %s e preencha a chave de API.", provider, settingKey, provider)
+		}
+		if provider != "" {
+			return fmt.Sprintf("Não foi possível iniciar o agente: a chave de API do provedor %q não está configurada neste tenant. Acesse Administração → Configurações → Provedores, selecione %s e preencha a chave de API.", provider, provider)
+		}
+		return "Não foi possível iniciar o agente: chave de API do provedor de IA não configurada neste tenant. Acesse Administração → Configurações → Provedores e preencha a chave do provedor usado pelo agente."
 	}
 	if strings.Contains(rawMsg, "build model") {
-		return "Não foi possível iniciar o agente: erro ao configurar o modelo de IA. Verifique o provedor e o modelo nas configurações do agente."
+		if provider != "" {
+			return fmt.Sprintf("Não foi possível iniciar o agente: erro ao configurar o provedor %q (verifique o modelo selecionado no agente e a chave de API em Administração → Configurações → Provedores).", provider)
+		}
+		return "Não foi possível iniciar o agente: erro ao configurar o modelo de IA. Verifique o provedor e o modelo em Administração → Agentes e a chave de API em Administração → Configurações → Provedores."
 	}
-	return "Não foi possível iniciar o agente. Verifique a configuração do modelo de IA nas configurações do agente."
+
+	// Default: still explicit about next steps even when we don't recognize the cause.
+	if provider != "" {
+		return fmt.Sprintf("Não foi possível iniciar o agente (provedor %q). Verifique o modelo selecionado no agente e a chave de API em Administração → Configurações → Provedores. Detalhes técnicos: %s", provider, truncate(rawMsg, 200))
+	}
+	return fmt.Sprintf("Não foi possível iniciar o agente. Verifique o modelo selecionado em Administração → Agentes e a chave de API em Administração → Configurações → Provedores. Detalhes técnicos: %s", truncate(rawMsg, 200))
+}
+
+// truncate returns s bounded to at most n runes, adding an ellipsis when cut.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
