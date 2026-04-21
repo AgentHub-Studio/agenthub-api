@@ -76,6 +76,14 @@ type RunInput struct {
 	// P-C184-2: must be combined with IsAdmin=true AND CurrentDepth==0 to include agenthub_manage.
 	EnableManagement bool
 
+	// DisableAskUser removes the ask_user builtin from the agent's tool set.
+	// Read from agent.Config["disableAskUser"] by the chat service. Default false.
+	DisableAskUser bool
+
+	// DisableAgentDelegation removes the agent (sub-agent spawner) builtin.
+	// Read from agent.Config["disableAgentDelegation"]. Default false.
+	DisableAgentDelegation bool
+
 	// UserMessageID, when non-nil, indicates the user message was already persisted
 	// by the caller (chat.Service.RunSession). The runner skips its own persistence
 	// to avoid duplicates. P-C178-2.
@@ -536,6 +544,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	toolBuilder.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
 	toolBuilder.WithAdminScope(in.IsAdmin)               // P-C298-1: gate agenthub_manage on admin role
 	toolBuilder.WithEnableManagement(in.EnableManagement) // P-C184-2: gate on agent opt-in flag
+	toolBuilder.WithDisableAskUser(in.DisableAskUser)
+	toolBuilder.WithDisableAgentDelegation(in.DisableAgentDelegation)
 	// P-C115-1: use skill snapshot IDs when available to ensure consistent tool set.
 	if len(in.SkillIDsSnapshot) > 0 {
 		toolBuilder.WithSkillIDsSnapshot(in.SkillIDsSnapshot)
