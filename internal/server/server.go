@@ -646,13 +646,16 @@ func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (
 		systemPrompt = *ag.SystemPrompt
 	}
 
+	disableAskUser, disableAgentDelegation := parseAgentToolFlags(ag.Config)
 	cfg := &chat.AgentRunConfig{
-		ID:               ag.ID,
-		SystemPrompt:     systemPrompt,
-		ModelConfig:      ag.ModelConfig,
-		PermissionRules:  ag.PermissionRules,
-		EnableManagement: ag.EnableManagement,
-		Status:           string(ag.Status),
+		ID:                     ag.ID,
+		SystemPrompt:           systemPrompt,
+		ModelConfig:            ag.ModelConfig,
+		PermissionRules:        ag.PermissionRules,
+		EnableManagement:       ag.EnableManagement,
+		DisableAskUser:         disableAskUser,
+		DisableAgentDelegation: disableAgentDelegation,
+		Status:                 string(ag.Status),
 	}
 
 	// P-C115-1: include skill IDs so the chat service can snapshot them at session creation.
@@ -799,4 +802,31 @@ type tenantSchemaMigratorFunc func(ctx context.Context, tenantID string) error
 
 func (f tenantSchemaMigratorFunc) MigrateTenant(ctx context.Context, tenantID string) error {
 	return f(ctx, tenantID)
+}
+
+// parseAgentToolFlags extracts per-agent builtin tool opt-outs from agent.Config JSONB.
+// Recognized keys (all optional, default false):
+//   - disableAskUser        → removes `ask_user` from the agent's tool set
+//   - disableAgentDelegation → removes `agent` (sub-agent spawner)
+//
+// Invalid/missing JSON is treated as "both flags false" so legacy agents retain
+// their existing tool surface.
+func parseAgentToolFlags(raw json.RawMessage) (disableAskUser, disableAgentDelegation bool) {
+	if len(raw) == 0 {
+		return false, false
+	}
+	var m struct {
+		DisableAskUser         *bool `json:"disableAskUser"`
+		DisableAgentDelegation *bool `json:"disableAgentDelegation"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return false, false
+	}
+	if m.DisableAskUser != nil {
+		disableAskUser = *m.DisableAskUser
+	}
+	if m.DisableAgentDelegation != nil {
+		disableAgentDelegation = *m.DisableAgentDelegation
+	}
+	return disableAskUser, disableAgentDelegation
 }

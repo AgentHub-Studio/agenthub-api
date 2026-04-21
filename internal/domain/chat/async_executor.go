@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +34,29 @@ type ChatRunTask struct {
 
 // defaultRunTimeout is the maximum time a single background run may take.
 // P-C102-1: prevents a slow/unresponsive LLM from blocking a session forever.
-const defaultRunTimeout = 15 * time.Minute
+//
+// Configurable via the CHAT_RUN_TIMEOUT_SECS env var (read at process start).
+// Slow hardware (CPU-only ollama with large models) benefits from longer caps.
+var defaultRunTimeout = resolveRunTimeout()
+
+// resolveRunTimeout reads CHAT_RUN_TIMEOUT_SECS; falls back to 15 min on empty
+// or malformed input. Bounds: [60s, 2h] to prevent accidental misconfiguration.
+func resolveRunTimeout() time.Duration {
+	const fallback = 15 * time.Minute
+	raw := strings.TrimSpace(os.Getenv("CHAT_RUN_TIMEOUT_SECS"))
+	if raw == "" {
+		return fallback
+	}
+	secs, err := strconv.Atoi(raw)
+	if err != nil || secs < 60 {
+		return fallback
+	}
+	const maxSecs = 2 * 60 * 60
+	if secs > maxSecs {
+		secs = maxSecs
+	}
+	return time.Duration(secs) * time.Second
+}
 
 // AsyncExecutor handles asynchronous execution of chat runs via RabbitMQ.
 type AsyncExecutor struct {

@@ -29,12 +29,27 @@ func (p PageRequest) Offset() int {
 	return p.Page * p.Size
 }
 
+// MaxPageSize is the hard upper bound for the `size` query parameter.
+// Bumped from 100 to 500 so callers that need to enumerate large collections
+// (e.g. the tool list for prompt injection) can do it in fewer round trips.
+// Requests with size > MaxPageSize are clamped; invalid input falls back to 20.
+const MaxPageSize = 500
+
 // ParsePageRequest extracts pagination parameters from an HTTP request.
+// Accepts `size` or `pageSize` as the size parameter (the latter being the
+// convention used by many REST consumers).
 func ParsePageRequest(r *http.Request) PageRequest {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	size, _ := strconv.Atoi(r.URL.Query().Get("size"))
-	if size <= 0 || size > 100 {
+	sizeStr := r.URL.Query().Get("size")
+	if sizeStr == "" {
+		sizeStr = r.URL.Query().Get("pageSize")
+	}
+	size, _ := strconv.Atoi(sizeStr)
+	switch {
+	case size <= 0:
 		size = 20
+	case size > MaxPageSize:
+		size = MaxPageSize
 	}
 	if page < 0 {
 		page = 0

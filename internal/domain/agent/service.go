@@ -93,10 +93,14 @@ func recordAudit(ctx context.Context, recorder AuditRecorder, req audit.RecordRe
 	}
 }
 
+// auditJSON marshals v for the audit_log.old_value / new_value JSONB columns.
+// Those columns reject the empty string (SQLSTATE 22P02 "invalid input syntax
+// for type json"), so fall back to a valid JSON null whenever marshalling
+// fails — we'd rather record a null than drop the entire audit row.
 func auditJSON(v any) string {
 	raw, err := json.Marshal(v)
-	if err != nil {
-		return ""
+	if err != nil || len(raw) == 0 {
+		return "null"
 	}
 	return string(raw)
 }

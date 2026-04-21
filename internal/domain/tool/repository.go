@@ -71,7 +71,7 @@ func (r *Repository) List(ctx context.Context, req pagination.PageRequest, toolT
 			return nil, 0, fmt.Errorf("tool: count: %w", err)
 		}
 		rows, err = conn.Query(ctx,
-			`SELECT id, name, type, config, input_schema, description, labels, read_only,
+			`SELECT id, name, slug, type, config, input_schema, description, labels, read_only,
 			        should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 			        max_result_chars, interrupt_behavior, is_search_or_read,
 			        created_at, updated_at
@@ -83,7 +83,7 @@ func (r *Repository) List(ctx context.Context, req pagination.PageRequest, toolT
 			return nil, 0, fmt.Errorf("tool: count: %w", err)
 		}
 		rows, err = conn.Query(ctx,
-			`SELECT id, name, type, config, input_schema, description, labels, read_only,
+			`SELECT id, name, slug, type, config, input_schema, description, labels, read_only,
 			        should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 			        max_result_chars, interrupt_behavior, is_search_or_read,
 			        created_at, updated_at
@@ -131,16 +131,20 @@ func (r *Repository) Create(ctx context.Context, t Tool) (Tool, error) {
 		inputSchema = []byte(t.InputSchema)
 	}
 
+	slug := t.Slug
+	if slug == "" {
+		slug = ToSlug(t.Name)
+	}
 	row := conn.QueryRow(ctx,
-		`INSERT INTO tool (name, type, config, input_schema, description, labels, read_only,
+		`INSERT INTO tool (name, slug, type, config, input_schema, description, labels, read_only,
 		                   should_defer, is_destructive, search_hint, always_load,
 		                   concurrency_safe, max_result_chars, interrupt_behavior, is_search_or_read)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-		 RETURNING id, name, type, config, input_schema, description, labels, read_only,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		 RETURNING id, name, slug, type, config, input_schema, description, labels, read_only,
 		           should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 		           max_result_chars, interrupt_behavior, is_search_or_read,
 		           created_at, updated_at`,
-		t.Name, t.Type, cfg, inputSchema, t.Description, labels, t.ReadOnly,
+		t.Name, slug, t.Type, cfg, inputSchema, t.Description, labels, t.ReadOnly,
 		t.ShouldDefer, t.IsDestructive, t.SearchHint, t.AlwaysLoad,
 		t.ConcurrencySafe, t.MaxResultChars, t.InterruptBehavior, t.IsSearchOrRead,
 	)
@@ -164,7 +168,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (Tool, error) {
 	defer release()
 
 	row := conn.QueryRow(ctx,
-		`SELECT id, name, type, config, input_schema, description, labels, read_only,
+		`SELECT id, name, slug, type, config, input_schema, description, labels, read_only,
 		        should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 		        max_result_chars, interrupt_behavior, is_search_or_read,
 		        created_at, updated_at
@@ -205,14 +209,18 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, t Tool) (Tool, er
 		inputSchema = []byte(t.InputSchema)
 	}
 
+	slug := t.Slug
+	if slug == "" {
+		slug = ToSlug(t.Name)
+	}
 	row := conn.QueryRow(ctx,
-		`UPDATE tool SET name=$1, type=$2, config=$3, input_schema=$4, description=$5, labels=$6, read_only=$7, updated_at=NOW()
-		 WHERE id=$8
-		 RETURNING id, name, type, config, input_schema, description, labels, read_only,
+		`UPDATE tool SET name=$1, slug=$2, type=$3, config=$4, input_schema=$5, description=$6, labels=$7, read_only=$8, updated_at=NOW()
+		 WHERE id=$9
+		 RETURNING id, name, slug, type, config, input_schema, description, labels, read_only,
 		           should_defer, is_destructive, search_hint, always_load, concurrency_safe,
 		           max_result_chars, interrupt_behavior, is_search_or_read,
 		           created_at, updated_at`,
-		t.Name, t.Type, cfg, inputSchema, t.Description, labels, t.ReadOnly, id,
+		t.Name, slug, t.Type, cfg, inputSchema, t.Description, labels, t.ReadOnly, id,
 	)
 	updated, err := scanTool(row)
 	if err != nil {
@@ -319,7 +327,7 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 
 	rows, err := conn.Query(ctx,
 		`SELECT st.id, st.skill_id, st.tool_id, st.priority, st.is_active, st.created_at,
-		        t.id, t.name, t.type, t.config, t.input_schema, t.description, t.labels, t.read_only,
+		        t.id, t.name, t.slug, t.type, t.config, t.input_schema, t.description, t.labels, t.read_only,
 		        t.should_defer, t.is_destructive, t.search_hint, t.always_load, t.concurrency_safe,
 		        t.max_result_chars, t.interrupt_behavior, t.is_search_or_read,
 		        t.created_at, t.updated_at
@@ -343,7 +351,7 @@ func (r *Repository) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]Skil
 		var inputSchema []byte
 		if err := rows.Scan(
 			&st.ID, &st.SkillID, &st.ToolID, &st.Priority, &st.IsActive, &st.CreatedAt,
-			&t.ID, &t.Name, &t.Type, &cfg, &inputSchema, &t.Description, &t.Labels, &t.ReadOnly,
+			&t.ID, &t.Name, &t.Slug, &t.Type, &cfg, &inputSchema, &t.Description, &t.Labels, &t.ReadOnly,
 			&t.ShouldDefer, &t.IsDestructive, &t.SearchHint, &t.AlwaysLoad, &t.ConcurrencySafe,
 			&t.MaxResultChars, &t.InterruptBehavior, &t.IsSearchOrRead,
 			&t.CreatedAt, &t.UpdatedAt,
@@ -367,7 +375,7 @@ func scanTool(row pgx.Row) (Tool, error) {
 	var cfg []byte
 	var inputSchema []byte
 	if err := row.Scan(
-		&t.ID, &t.Name, &t.Type, &cfg, &inputSchema, &t.Description, &t.Labels, &t.ReadOnly,
+		&t.ID, &t.Name, &t.Slug, &t.Type, &cfg, &inputSchema, &t.Description, &t.Labels, &t.ReadOnly,
 		&t.ShouldDefer, &t.IsDestructive, &t.SearchHint, &t.AlwaysLoad, &t.ConcurrencySafe,
 		&t.MaxResultChars, &t.InterruptBehavior, &t.IsSearchOrRead,
 		&t.CreatedAt, &t.UpdatedAt,
@@ -386,7 +394,7 @@ func scanToolFromRows(rows pgx.Rows) (Tool, error) {
 	var cfg []byte
 	var inputSchema []byte
 	if err := rows.Scan(
-		&t.ID, &t.Name, &t.Type, &cfg, &inputSchema, &t.Description, &t.Labels, &t.ReadOnly,
+		&t.ID, &t.Name, &t.Slug, &t.Type, &cfg, &inputSchema, &t.Description, &t.Labels, &t.ReadOnly,
 		&t.ShouldDefer, &t.IsDestructive, &t.SearchHint, &t.AlwaysLoad, &t.ConcurrencySafe,
 		&t.MaxResultChars, &t.InterruptBehavior, &t.IsSearchOrRead,
 		&t.CreatedAt, &t.UpdatedAt,

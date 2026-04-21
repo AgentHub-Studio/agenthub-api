@@ -29,6 +29,12 @@ type AgentRunConfig struct {
 	// EnableManagement controls whether the agenthub_manage builtin tool is included.
 	// P-C184-2: both this flag AND the caller's admin role must be true.
 	EnableManagement bool
+	// DisableAskUser removes the ask_user builtin from the agent's tool set.
+	// Stored in agent.Config["disableAskUser"]. Default false.
+	DisableAskUser bool
+	// DisableAgentDelegation removes the agent (sub-agent spawner) builtin.
+	// Stored in agent.Config["disableAgentDelegation"]. Default false.
+	DisableAgentDelegation bool
 	// Status is the agent's lifecycle status. Used to reject runs for DRAFT/ARCHIVED agents.
 	// P-C178-1.
 	Status string

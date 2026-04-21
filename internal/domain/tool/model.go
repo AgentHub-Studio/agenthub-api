@@ -47,6 +47,10 @@ func IsValidToolType(t string) bool {
 type Tool struct {
 	ID            uuid.UUID       `db:"id"`
 	Name          string          `db:"name"`
+	// Slug is the stable, URL-safe identifier exposed to LLMs as the tool name
+	// in the OpenAI function-calling schema. Defaults to Name (sanitized to kebab/snake).
+	// Must be unique per tenant (DB UNIQUE constraint).
+	Slug          string          `db:"slug"`
 	Type          ToolType        `db:"type"`
 	Config        []byte          `db:"config"`
 	// InputSchema is an explicit JSON Schema for this tool's input parameters.

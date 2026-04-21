@@ -458,6 +458,8 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		Elicitation:            elicHandler,
 		IsAdmin:                callerHasAdminRole(ctx),    // P-C298-1
 		EnableManagement:       agentCfg.EnableManagement, // P-C184-2
+		DisableAskUser:         agentCfg.DisableAskUser,
+		DisableAgentDelegation: agentCfg.DisableAgentDelegation,
 		SkillIDsSnapshot:       in.SkillIDsSnapshot,       // P-C115-1: use snapshot if available
 		MCPServerNamesSnapshot: in.MCPServerNamesSnapshot, // P-C253-1: filter MCP tools by bound servers
 		PermissionAudit:        a.permAudit,

@@ -124,8 +124,10 @@ type ToolSchemaBuilder struct {
 	tokenBudgets       SkillTokenBudgetProvider
 	currentDepth       int
 	maxDepth           int
-	adminScope         bool        // P-C298-1: gate agenthub_manage to admin callers only
-	enableManagement   bool        // P-C184-2: gate agenthub_manage to agents with enable_management=true
+	adminScope            bool // P-C298-1: gate agenthub_manage to admin callers only
+	enableManagement      bool // P-C184-2: gate agenthub_manage to agents with enable_management=true
+	disableAskUser        bool // per-agent opt-out — removes ask_user from the builtin set
+	disableAgentDelegation bool // per-agent opt-out — removes the agent sub-agent spawner
 	skillIDsSnapshot   []uuid.UUID // P-C115-1: when set, use these IDs instead of querying by agentID
 	lastUserOnlySkills []skill.Skill
 	lastWarnings       []string
@@ -186,6 +188,20 @@ func (b *ToolSchemaBuilder) WithDepthLimits(currentDepth, maxDepth int) *ToolSch
 // it opportunistically during normal user sessions.
 func (b *ToolSchemaBuilder) WithAdminScope(admin bool) *ToolSchemaBuilder {
 	b.adminScope = admin
+	return b
+}
+
+// WithDisableAskUser removes the ask_user builtin from the tool set when true.
+// Useful for fully autonomous agents where asking the user is never desired.
+func (b *ToolSchemaBuilder) WithDisableAskUser(disabled bool) *ToolSchemaBuilder {
+	b.disableAskUser = disabled
+	return b
+}
+
+// WithDisableAgentDelegation removes the agent builtin (sub-agent spawner) when true.
+// Useful when the parent agent must handle every tool call itself rather than delegating.
+func (b *ToolSchemaBuilder) WithDisableAgentDelegation(disabled bool) *ToolSchemaBuilder {
+	b.disableAgentDelegation = disabled
 	return b
 }
 
@@ -356,15 +372,17 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// this to persist all facts in a single tool invocation.
 	tools = append(tools, memoryStoreBulkTool())
 
-	// Builtin: ask_user — always available; lets the LLM request structured input from the user.
-	tools = append(tools, askUserTool())
+	// Builtin: ask_user — available by default; agents can opt-out via config.disableAskUser.
+	if !b.disableAskUser {
+		tools = append(tools, askUserTool())
+	}
 
 	// Builtins: canvas_update, canvas_feedback, canvas_export_table — always available.
 	// These tools render rich visual content in the canvas panel alongside the chat.
 	tools = append(tools, canvasUpdateTool(), canvasFeedbackTool(), canvasExportTableTool())
 
-	// Builtin: agent — available when depth < maxDepth (enables sub-agent spawning).
-	if b.currentDepth < b.maxDepth {
+	// Builtin: agent — available when depth < maxDepth and agent hasn't opted out.
+	if b.currentDepth < b.maxDepth && !b.disableAgentDelegation {
 		tools = append(tools, agentTool(b.maxDepth-b.currentDepth))
 	}
 

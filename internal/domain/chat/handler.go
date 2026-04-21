@@ -455,6 +455,13 @@ type runStatusResponse struct {
 }
 
 // runStatus handles GET /api/chat/sessions/{id}/run/{runId}/status.
+//
+// Runs are tracked in two places depending on the execution path:
+//   1. bgRegistry (in-memory) — synchronous SSE runs held for the HTTP handler's lifetime
+//   2. chat_run persistent store — async runs dispatched via AsyncExecutor/RabbitMQ
+//
+// The handler consults both so programmatic polling works for every run type.
+// P-C102-2: async runs are not in bgRegistry and previously returned 404.
 func (h *Handler) runStatus(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runId")
 	if runID == "" {
@@ -462,18 +469,38 @@ func (h *Handler) runStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run := h.bgRegistry.Get(runID)
-	if run == nil {
-		respond.Error(w, http.StatusNotFound, "run not found")
+	// Fast path: in-memory bgRegistry (sync SSE runs).
+	if run := h.bgRegistry.Get(runID); run != nil {
+		respond.JSON(w, http.StatusOK, runStatusResponse{
+			RunID:     run.RunID,
+			SessionID: run.SessionID,
+			Status:    run.Status,
+			StartedAt: run.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+		})
 		return
 	}
 
-	respond.JSON(w, http.StatusOK, runStatusResponse{
-		RunID:     run.RunID,
-		SessionID: run.SessionID,
-		Status:    run.Status,
-		StartedAt: run.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
-	})
+	// Fallback: persistent store for async runs.
+	if h.executor != nil {
+		runUUID, err := uuid.Parse(runID)
+		if err == nil {
+			if persisted, perr := h.executor.GetRunByID(r.Context(), runUUID); perr == nil {
+				startedAt := ""
+				if persisted.StartedAt != nil {
+					startedAt = persisted.StartedAt.Format("2006-01-02T15:04:05Z07:00")
+				}
+				respond.JSON(w, http.StatusOK, runStatusResponse{
+					RunID:     persisted.ID.String(),
+					SessionID: persisted.SessionID,
+					Status:    RunStatus(persisted.Status),
+					StartedAt: startedAt,
+				})
+				return
+			}
+		}
+	}
+
+	respond.Error(w, http.StatusNotFound, "run not found")
 }
 
 // cancelRun handles POST /api/chat/sessions/{id}/run/{runId}/cancel.

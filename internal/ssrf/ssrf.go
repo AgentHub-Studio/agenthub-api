@@ -6,11 +6,19 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 )
 
 // privateCIDRs is the blocklist used when validating HTTP tool URLs at creation time.
 var privateCIDRs []*net.IPNet
+
+// allowedHosts lets operators whitelist specific internal hostnames (typically
+// for dev/test harnesses inside the cluster). Populated from the
+// SSRF_ALLOWED_HOSTS env var at process start — comma-separated exact host
+// matches, e.g. "fake-crm-api.agenthub-e2e.svc.cluster.local,echo.internal".
+// Entries bypass both the cluster-DNS suffix check and the private-IP check.
+var allowedHosts map[string]struct{}
 
 func init() {
 	cidrs := []string{
@@ -27,6 +35,13 @@ func init() {
 		_, network, _ := net.ParseCIDR(cidr)
 		if network != nil {
 			privateCIDRs = append(privateCIDRs, network)
+		}
+	}
+	allowedHosts = map[string]struct{}{}
+	for _, h := range strings.Split(os.Getenv("SSRF_ALLOWED_HOSTS"), ",") {
+		h = strings.TrimSpace(strings.ToLower(h))
+		if h != "" {
+			allowedHosts[h] = struct{}{}
 		}
 	}
 }
@@ -48,6 +63,11 @@ func ValidateURL(rawURL string) error {
 	}
 
 	host := u.Hostname()
+
+	// Explicit allowlist bypass (dev/test harness hosts).
+	if _, ok := allowedHosts[strings.ToLower(host)]; ok {
+		return nil
+	}
 
 	// Block internal cluster DNS names.
 	if strings.HasSuffix(host, ".svc.cluster.local") ||
