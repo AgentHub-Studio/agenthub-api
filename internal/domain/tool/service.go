@@ -328,12 +328,18 @@ func (s *Service) TestTool(ctx context.Context, id uuid.UUID, inputs map[string]
 func (s *Service) testHTTPTool(ctx context.Context, cfg, inputs map[string]any) (string, error) {
 	rawURL, _ := cfg["url"].(string)
 	if rawURL == "" {
+		rawURL, _ = cfg["urlTemplate"].(string)
+	}
+	if rawURL == "" {
 		return "", fmt.Errorf("tool: HTTP tool has no url configured")
 	}
 	method, _ := cfg["method"].(string)
 	if method == "" {
 		method = "GET"
 	}
+
+	// Render {key} and {{input.key}} placeholders in the URL from the test input.
+	rawURL = renderPlaceholders(rawURL, inputs)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
@@ -344,8 +350,31 @@ func (s *Service) testHTTPTool(ctx context.Context, cfg, inputs map[string]any) 
 	if headers, ok := cfg["headers"].(map[string]any); ok {
 		for k, v := range headers {
 			if vs, ok := v.(string); ok {
-				req.Header.Set(k, vs)
+				req.Header.Set(k, renderPlaceholders(vs, inputs))
 			}
+		}
+	}
+
+	// Apply static auth from config (authType + authToken) so the test endpoint
+	// mirrors what the skill-runtime executor does at runtime. P-C239-1:
+	// authToken is never returned to the client, only sent on the outbound
+	// request.
+	authType, _ := cfg["authType"].(string)
+	if authType == "" {
+		authType, _ = cfg["auth_type"].(string)
+	}
+	authToken, _ := cfg["authToken"].(string)
+	if authToken == "" {
+		authToken, _ = cfg["auth_token"].(string)
+	}
+	switch strings.ToLower(strings.TrimSpace(authType)) {
+	case "bearer":
+		if authToken != "" {
+			req.Header.Set("Authorization", "Bearer "+authToken)
+		}
+	case "basic":
+		if authToken != "" {
+			req.Header.Set("Authorization", "Basic "+authToken)
 		}
 	}
 
@@ -362,6 +391,30 @@ func (s *Service) testHTTPTool(ctx context.Context, cfg, inputs map[string]any) 
 	buf.Write(respBody[:n])
 
 	return buf.String(), nil
+}
+
+// renderPlaceholders substitutes {key} and {{input.key}} occurrences in s with
+// the corresponding string value from inputs. Missing keys are left untouched
+// so the caller can see the failure in the outbound URL/header.
+func renderPlaceholders(s string, inputs map[string]any) string {
+	if len(inputs) == 0 {
+		return s
+	}
+	out := s
+	for k, v := range inputs {
+		var val string
+		switch t := v.(type) {
+		case string:
+			val = t
+		case fmt.Stringer:
+			val = t.String()
+		default:
+			val = fmt.Sprintf("%v", t)
+		}
+		out = strings.ReplaceAll(out, "{"+k+"}", val)
+		out = strings.ReplaceAll(out, "{{input."+k+"}}", val)
+	}
+	return out
 }
 
 // GenerateCode uses the configured LLM to generate code for a tool.
