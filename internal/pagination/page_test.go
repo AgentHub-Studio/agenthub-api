@@ -34,9 +34,22 @@ func TestParsePageRequest_CustomValues(t *testing.T) {
 }
 
 func TestParsePageRequest_SizeCap(t *testing.T) {
+	// size=500 is now exactly the upper bound — preserved.
 	r := httptest.NewRequest("GET", "/?size=500", nil)
 	req := pagination.ParsePageRequest(r)
-	assert.Equal(t, 20, req.Size)
+	assert.Equal(t, 500, req.Size)
+}
+
+func TestParsePageRequest_SizeAboveCapClampsToMax(t *testing.T) {
+	r := httptest.NewRequest("GET", "/?size=10000", nil)
+	req := pagination.ParsePageRequest(r)
+	assert.Equal(t, pagination.MaxPageSize, req.Size)
+}
+
+func TestParsePageRequest_PageSizeAlias(t *testing.T) {
+	r := httptest.NewRequest("GET", "/?pageSize=50", nil)
+	req := pagination.ParsePageRequest(r)
+	assert.Equal(t, 50, req.Size)
 }
 
 func TestParsePageRequest_NegativePage(t *testing.T) {

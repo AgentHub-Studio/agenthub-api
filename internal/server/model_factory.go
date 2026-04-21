@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/settings"
@@ -57,7 +58,14 @@ func (f *settingsChatModelFactory) Build(ctx context.Context, provider, model st
 		return anthropic.New(apiKey, baseURL), nil
 
 	case "ollama":
+		// Resolution order: per-tenant setting → OLLAMA_BASE_URL env → localhost.
+		// The env fallback makes it possible to point all tenants at a shared
+		// ollama deployment without writing a setting row per tenant, which is
+		// especially useful for self-hosted dev clusters.
 		baseURL, _ := readSettingString(ctx, f.settingsRepo, "ollama.baseUrl")
+		if baseURL == "" {
+			baseURL = os.Getenv("OLLAMA_BASE_URL")
+		}
 		if baseURL == "" {
 			baseURL = "http://localhost:11434"
 		}
