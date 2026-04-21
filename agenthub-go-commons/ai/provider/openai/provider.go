@@ -67,6 +67,11 @@ type chatRequest struct {
 	TopP        float64   `json:"top_p,omitempty"`
 	Tools       []tool    `json:"tools,omitempty"`
 	Stream      bool      `json:"stream,omitempty"`
+	// Options is an opaque passthrough reserved for OpenAI-compatible backends
+	// that accept extra parameters. Ollama uses this to receive `num_ctx`,
+	// `num_predict`, `seed`, etc. OpenAI itself ignores the field (omitempty
+	// protects strict validators from choking on an empty object).
+	Options map[string]any `json:"options,omitempty"`
 }
 
 type message struct {
@@ -333,6 +338,7 @@ func (p *Provider) buildRequest(messages []ai.Message, opts ai.ChatOptions, stre
 		TopP:        opts.TopP,
 		Tools:       tools,
 		Stream:      stream,
+		Options:     opts.ProviderOptions,
 	}
 }
 

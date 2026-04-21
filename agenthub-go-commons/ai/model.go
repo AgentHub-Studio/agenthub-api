@@ -118,6 +118,11 @@ type ChatOptions struct {
 	// resending the full conversation. The response ID returned by the previous
 	// call is passed as PreviousResponseID on the next call.
 	PreviousResponseID string `json:"previousResponseId,omitempty"`
+	// ProviderOptions carries backend-specific parameters that don't fit the
+	// generic ChatOptions schema. Providers that recognise a key pass it through
+	// to the underlying API; others ignore it. Ollama uses num_ctx, num_predict,
+	// seed, top_k, repeat_penalty, mirostat, etc. — see the Ollama options table.
+	ProviderOptions map[string]any `json:"providerOptions,omitempty"`
 }
 
 // ToolChoiceType identifies how the model should use tools.
