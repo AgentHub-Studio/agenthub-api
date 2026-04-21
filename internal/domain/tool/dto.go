@@ -12,6 +12,9 @@ import (
 // skill after creation (active, priority 0), saving callers a second API call.
 type CreateRequest struct {
 	Name        string          `json:"name"`
+	// Slug is optional. When omitted, it is auto-derived from Name (see ToSlug).
+	// Must be unique per tenant; conflicts return 422 DuplicateName.
+	Slug        string          `json:"slug,omitempty"`
 	Type        ToolType        `json:"type"`
 	Config      json.RawMessage `json:"config"`
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"` // P-C175-1: explicit schema
@@ -27,6 +30,7 @@ type CreateRequest struct {
 // P-C196-1: partial updates must not overwrite fields that were not sent.
 type UpdateRequest struct {
 	Name        *string         `json:"name,omitempty"`
+	Slug        *string         `json:"slug,omitempty"`
 	Type        *ToolType       `json:"type,omitempty"`
 	Config      json.RawMessage `json:"config,omitempty"`
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"` // P-C175-1: explicit schema
@@ -46,6 +50,7 @@ type BindRequest struct {
 type Response struct {
 	ID          uuid.UUID       `json:"id"`
 	Name        string          `json:"name"`
+	Slug        string          `json:"slug"`
 	Type        ToolType        `json:"type"`
 	Config      any             `json:"config"`
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"` // P-C175-1: exposed when set
@@ -104,6 +109,7 @@ func ResponseFrom(t Tool) Response {
 	return Response{
 		ID:          t.ID,
 		Name:        t.Name,
+		Slug:        t.Slug,
 		Type:        t.Type,
 		Config:      config,
 		InputSchema: t.InputSchema,

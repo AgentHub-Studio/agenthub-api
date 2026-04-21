@@ -103,8 +103,13 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if isSQLToolType(req.Type) {
 		config = normalizeDataSourceID(config)
 	}
+	slug := strings.TrimSpace(req.Slug)
+	if slug == "" {
+		slug = ToSlug(req.Name)
+	}
 	t := Tool{
 		Name:        req.Name,
+		Slug:        slug,
 		Type:        req.Type,
 		Config:      config,
 		InputSchema: req.InputSchema,
@@ -150,6 +155,12 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	// Merge only the fields that were explicitly included in the request.
 	if req.Name != nil {
 		existing.Name = *req.Name
+	}
+	if req.Slug != nil {
+		trimmed := strings.TrimSpace(*req.Slug)
+		if trimmed != "" {
+			existing.Slug = trimmed
+		}
 	}
 	if req.Type != nil {
 		existing.Type = *req.Type
