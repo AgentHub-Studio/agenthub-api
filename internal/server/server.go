@@ -26,6 +26,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/suggest"
 	chatTask "github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chatsession"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
@@ -169,12 +170,14 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	if cfg.MCPRuntimeURL != "" {
 		mcpSvc.WithRuntimeURL(cfg.MCPRuntimeURL)
 	}
-	integrationHandler := integration.NewHandler(integration.NewService(
+	integrationSvc := integration.NewService(
 		toolSvc,
 		datasourceSvc,
 		mcpSvc,
 		vpnSvc,
-	).WithHTTPManagement(skill.NewService(skillRepo), toolSvc, integration.NewRepository(pool)))
+	).WithHTTPManagement(skill.NewService(skillRepo), toolSvc, integration.NewRepository(pool))
+	integrationHandler := integration.NewHandler(integrationSvc)
+	suggestHandler := suggest.NewHandler(suggest.NewService(integrationSvc))
 	kbRepo := knowledgebase.NewRepository(pool)
 	pipelineHandler := pipeline.NewHandler(pipeline.NewRepository(pool))
 	coreToolLoader := core.NewCoreToolLoader(pool)
@@ -393,6 +396,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		documentHandler.RegisterRoutes(r)
 		knowledgebaseHandler.RegisterRoutes(r)
 		integrationHandler.RegisterRoutes(r)
+		suggestHandler.RegisterRoutes(r)
 		mcpHandler.RegisterRoutes(r)
 		approvalHandler.RegisterRoutes(r)
 		coreHandler.RegisterRoutes(r)
