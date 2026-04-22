@@ -32,6 +32,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration/probe"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
@@ -149,6 +150,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentTemplateSvc := agenttemplate.NewService(agenttemplate.NewRepository(pool)).WithAgentCreator(agentSvc)
 	agentTemplateHandler := agenttemplate.NewHandler(agentTemplateSvc)
 	providerHandler := provider.NewHandler(provider.NewService(provider.NewRepository(pool)))
+	probeHandler := probe.NewHandler(probe.NewService())
 	analyticsHandler := analytics.NewHandler(analytics.NewService(analytics.NewPostgresStore(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
@@ -365,6 +367,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		promptTemplateHandler.RegisterRoutes(r)
 		agentTemplateHandler.RegisterRoutes(r)
 		providerHandler.RegisterRoutes(r)
+		probeHandler.RegisterRoutes(r)
 		channelHandler.RegisterRoutes(r)
 		abtestHandler.RegisterRoutes(r)
 		deviceHandler.RegisterRoutes(r)
