@@ -44,6 +44,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/prompttemplate"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/provider"
 	regDependency "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/dependency"
 	regInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/installation"
 	regPackage "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
@@ -147,6 +148,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	promptTemplateHandler := prompttemplate.NewHandler(prompttemplate.NewService(prompttemplate.NewRepository(pool)))
 	agentTemplateSvc := agenttemplate.NewService(agenttemplate.NewRepository(pool)).WithAgentCreator(agentSvc)
 	agentTemplateHandler := agenttemplate.NewHandler(agentTemplateSvc)
+	providerHandler := provider.NewHandler(provider.NewService(provider.NewRepository(pool)))
 	analyticsHandler := analytics.NewHandler(analytics.NewService(analytics.NewPostgresStore(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
@@ -362,6 +364,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		memoryHandler.RegisterRoutes(r)
 		promptTemplateHandler.RegisterRoutes(r)
 		agentTemplateHandler.RegisterRoutes(r)
+		providerHandler.RegisterRoutes(r)
 		channelHandler.RegisterRoutes(r)
 		abtestHandler.RegisterRoutes(r)
 		deviceHandler.RegisterRoutes(r)
