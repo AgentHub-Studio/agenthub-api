@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -56,6 +57,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skilleval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenantsignup"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/trigger"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/user"
@@ -117,6 +119,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	tenantHandler := tenant.NewHandler(tenantSvc)
 	userHandler := user.NewHandler(user.NewService(keycloakClient))
+	tenantSignupHandler := tenantsignup.NewHandler(tenantsignup.NewService(
+		tenantSvc, keycloakClient, cfg.KeycloakBaseURL, os.Getenv("FRONTEND_BASE_URL"),
+	))
 	settingsRepo := settings.NewRepository(pool)
 	settingsHandler := settings.NewHandler(settings.NewService(settingsRepo))
 	llmpresetHandler := llmpreset.NewHandler(llmpreset.NewService(llmpreset.NewRepository(pool)))
@@ -338,6 +343,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			r.Use(m)
 		}
 		tenantHandler.RegisterPublicRoutes(r)
+		tenantSignupHandler.RegisterPublicRoutes(r)
 		webhookHandler.RegisterPublicRoutes(r)
 		regPackageHandler.RegisterPublicRoutes(r)
 		regInstallationHandler.RegisterPublicRoutes(r)
