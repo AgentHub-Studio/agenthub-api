@@ -142,7 +142,7 @@ func TestBuildRunGates_AnthropicOpus(t *testing.T) {
 	assert.True(t, gates.CoordinatorMode) // depth 0 < maxDepth 3, has subtask exec
 	assert.True(t, gates.HasToolResultLimits)
 	assert.True(t, gates.HasAggregateResultLimit)
-	assert.Equal(t, 200000, gates.ContextWindowTokens)
+	assert.Equal(t, 1000000, gates.ContextWindowTokens)
 }
 
 func TestBuildRunGates_OpenAI(t *testing.T) {
@@ -195,9 +195,9 @@ func TestDetectModelCapabilities_ClaudeOpus(t *testing.T) {
 	assert.True(t, caps.SupportsCacheControl)
 	assert.True(t, caps.SupportsVision)
 	assert.True(t, caps.SupportsToolUse)
-	assert.True(t, caps.Supports1MContext) // Opus 4.x
+	assert.True(t, caps.Supports1MContext)
 	assert.True(t, caps.SupportsStreaming)
-	assert.Equal(t, 200000, caps.ContextWindowSize)
+	assert.Equal(t, 1000000, caps.ContextWindowSize)
 }
 
 func TestDetectModelCapabilities_ClaudeSonnet(t *testing.T) {
@@ -206,7 +206,8 @@ func TestDetectModelCapabilities_ClaudeSonnet(t *testing.T) {
 	assert.False(t, caps.SupportsMaxEffort)
 	assert.True(t, caps.SupportsThinking)
 	assert.True(t, caps.SupportsCacheControl)
-	assert.False(t, caps.Supports1MContext) // only Opus
+	assert.True(t, caps.Supports1MContext)
+	assert.Equal(t, 1000000, caps.ContextWindowSize)
 }
 
 func TestDetectModelCapabilities_GPT4o(t *testing.T) {

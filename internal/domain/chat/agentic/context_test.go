@@ -135,13 +135,18 @@ func TestEstimateStringTokens_Long(t *testing.T) {
 // --- GetContextWindowSize ---
 
 func TestGetContextWindowSize_ExactMatch(t *testing.T) {
+	assert.Equal(t, 1000000, agentic.GetContextWindowSize("claude-sonnet-4-6", 0))
+	assert.Equal(t, 1000000, agentic.GetContextWindowSize("claude-opus-4-6", 0))
 	assert.Equal(t, 200000, agentic.GetContextWindowSize("claude-sonnet-4", 0))
+	assert.Equal(t, 131072, agentic.GetContextWindowSize("openai/gpt-oss-20b", 0))
 	assert.Equal(t, 128000, agentic.GetContextWindowSize("gpt-4o", 0))
 	assert.Equal(t, 8192, agentic.GetContextWindowSize("gpt-4", 0))
 }
 
 func TestGetContextWindowSize_PrefixMatch(t *testing.T) {
+	assert.Equal(t, 1000000, agentic.GetContextWindowSize("claude-sonnet-4-6-20260217", 0))
 	assert.Equal(t, 200000, agentic.GetContextWindowSize("claude-sonnet-4-20250514", 0))
+	assert.Equal(t, 128000, agentic.GetContextWindowSize("llama3.3:70b", 0))
 	assert.Equal(t, 128000, agentic.GetContextWindowSize("gpt-4o-2024-05-13", 0))
 }
 
@@ -468,7 +473,9 @@ func TestHistorySnip_PreservesToolPairs(t *testing.T) {
 				found := false
 				for _, m2 := range result.Messages {
 					if m2.MessageType == chat.MessageTypeToolUse && len(m2.ToolCalls) > 0 {
-						var tcs []struct{ ID string `json:"id"` }
+						var tcs []struct {
+							ID string `json:"id"`
+						}
 						if err := json.Unmarshal(m2.ToolCalls, &tcs); err == nil {
 							for _, tc := range tcs {
 								if tc.ID == *m.ToolCallID {
@@ -524,7 +531,9 @@ func TestHistorySnip_NoOrphanedToolResults(t *testing.T) {
 				hasToolResult = true
 			}
 			if m.MessageType == chat.MessageTypeToolUse && len(m.ToolCalls) > 0 {
-				var tcs []struct{ ID string `json:"id"` }
+				var tcs []struct {
+					ID string `json:"id"`
+				}
 				_ = json.Unmarshal(m.ToolCalls, &tcs)
 				for _, tc := range tcs {
 					if tc.ID == "tc_A" {
@@ -579,8 +588,8 @@ func TestVerifyCompaction_EffectiveCompaction(t *testing.T) {
 	// Stage 1 applied and result is below 75% → no escalation.
 	result := &agentic.ReactiveCompactResult{
 		CompactResult: agentic.CompactResult{
-			Messages:      makeMessages(5, 40), // ~70 tokens
-			OriginalCount: 10,
+			Messages:       makeMessages(5, 40), // ~70 tokens
+			OriginalCount:  10,
 			CompactedCount: 5,
 		},
 		Stage: agentic.StageToolResultTruncation,
@@ -620,8 +629,8 @@ func TestVerifyCompaction_FullSummarizationNoEscalation(t *testing.T) {
 	// Full summarization can't escalate further → returns as-is.
 	result := &agentic.ReactiveCompactResult{
 		CompactResult: agentic.CompactResult{
-			Messages:      makeMessages(5, 400), // still big
-			OriginalCount: 20,
+			Messages:       makeMessages(5, 400), // still big
+			OriginalCount:  20,
 			CompactedCount: 5,
 		},
 		Stage: agentic.StageFullSummarization,
@@ -702,7 +711,9 @@ func TestCompactForPTLRetry_PreservesToolPairs(t *testing.T) {
 			found := false
 			for _, m2 := range result {
 				if m2.MessageType == chat.MessageTypeToolUse && len(m2.ToolCalls) > 0 {
-					var tcs []struct{ ID string `json:"id"` }
+					var tcs []struct {
+						ID string `json:"id"`
+					}
 					if err := json.Unmarshal(m2.ToolCalls, &tcs); err == nil {
 						for _, tc := range tcs {
 							if tc.ID == *m.ToolCallID {

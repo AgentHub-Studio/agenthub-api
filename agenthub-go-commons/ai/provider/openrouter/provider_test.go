@@ -80,6 +80,53 @@ func TestOpenRouterProvider_Chat_APIError(t *testing.T) {
 	assert.Contains(t, err.Error(), "openrouter")
 }
 
+func TestOpenRouterProvider_Chat_ToolMessagesUseOpenAIWireFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		messages, ok := body["messages"].([]any)
+		require.True(t, ok)
+		require.Len(t, messages, 3)
+
+		assistantMsg, ok := messages[1].(map[string]any)
+		require.True(t, ok)
+		assert.Contains(t, assistantMsg, "tool_calls")
+		assert.NotContains(t, assistantMsg, "toolCalls")
+
+		toolMsg, ok := messages[2].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "call_123", toolMsg["tool_call_id"])
+		assert.NotContains(t, toolMsg, "toolCallId")
+
+		resp := map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	p := openrouter.New("key", srv.URL, "")
+	_, err := p.Chat(context.Background(), []ai.Message{
+		{Role: ai.RoleUser, Content: "Use a tool"},
+		{
+			Role:    ai.RoleAssistant,
+			Content: "",
+			ToolCalls: []ai.ToolCall{{
+				ID:   "call_123",
+				Type: "function",
+				Function: ai.ToolFunction{
+					Name:      "lookup",
+					Arguments: `{"id":"1"}`,
+				},
+			}},
+		},
+		{Role: ai.RoleTool, Content: `{"ok":true}`, ToolCallID: "call_123"},
+	}, ai.ChatOptions{Model: "openai/gpt-4o"})
+	require.NoError(t, err)
+}
+
 func TestOpenRouterProvider_ChatStream_Tokens(t *testing.T) {
 	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{\"content\":\" router\"},\"finish_reason\":null}]}\n\n" +

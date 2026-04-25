@@ -56,10 +56,12 @@ func (m *mockLLMPresetSvc) Get(_ context.Context, _ string, id uuid.UUID) (llmpr
 func (m *mockLLMPresetSvc) Create(_ context.Context, _ string, req llmpreset.CreateLLMPresetRequest) (llmpreset.LLMPresetResponse, error) {
 	id := uuid.New()
 	resp := llmpreset.LLMPresetResponse{
-		ID:       id,
-		Name:     req.Name,
-		Provider: req.Provider,
-		Model:    req.Model,
+		ID:            id,
+		Name:          req.Name,
+		Provider:      req.Provider,
+		Model:         req.Model,
+		MaxTokens:     req.MaxTokens,
+		ContextWindow: req.ContextWindow,
 	}
 	m.presets[id] = resp
 	return resp, nil
@@ -72,6 +74,9 @@ func (m *mockLLMPresetSvc) Update(_ context.Context, _ string, id uuid.UUID, req
 	}
 	if req.Name != nil {
 		p.Name = *req.Name
+	}
+	if req.ContextWindow != nil {
+		p.ContextWindow = *req.ContextWindow
 	}
 	m.presets[id] = p
 	return p, nil

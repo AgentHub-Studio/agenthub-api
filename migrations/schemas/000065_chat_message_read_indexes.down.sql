@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS idx_chat_message_session_compact_summary_created_at_desc;
+DROP INDEX IF EXISTS idx_chat_message_session_role_created_at_desc;
+DROP INDEX IF EXISTS idx_chat_message_session_created_at;
