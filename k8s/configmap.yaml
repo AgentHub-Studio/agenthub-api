@@ -15,4 +15,4 @@ data:
   MINIO_ENDPOINT: "minio.agenthub.svc.cluster.local:9000"
   MINIO_REGION: "us-east-1"
   MINIO_USE_SSL: "false"
-  CORS_ORIGINS: "*"
+  CORS_ORIGINS: "https://app.cezar.dev,https://test.cezar.dev,https://chat.cezar.dev"

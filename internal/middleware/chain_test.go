@@ -101,6 +101,59 @@ func TestChain_Protected_AcceptsValidJWT(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "valid JWT signed with realm key should be accepted")
 }
 
+func TestRequireRole_RejectsMissingRole(t *testing.T) {
+	realm := "test-realm-missing-role"
+	key, keycloakURL := mustSetupFakeKeycloak(t, realm)
+	tokenStr := mustSignJWT(t, key, realm, keycloakURL, "test-kid")
+
+	chain := middleware.New(keycloakURL, []string{"*"})
+	stack := append(chain.Protected(), middleware.RequireRole("admin"))
+	handler := applyMiddlewares(stack, okHandler())
+	req := httptest.NewRequest(http.MethodGet, "/api/admin", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestRequireRole_AcceptsRealmRole(t *testing.T) {
+	realm := "test-realm-has-role"
+	key, keycloakURL := mustSetupFakeKeycloak(t, realm)
+	tokenStr := mustSignJWTWithRoles(t, key, realm, keycloakURL, "test-kid", []string{"admin"}, nil)
+
+	chain := middleware.New(keycloakURL, []string{"*"})
+	stack := append(chain.Protected(), middleware.RequireRole("admin"))
+	handler := applyMiddlewares(stack, okHandler())
+	req := httptest.NewRequest(http.MethodGet, "/api/admin", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRequireRole_AcceptsResourceRole(t *testing.T) {
+	realm := "test-realm-resource-role"
+	key, keycloakURL := mustSetupFakeKeycloak(t, realm)
+	tokenStr := mustSignJWTWithRoles(t, key, realm, keycloakURL, "test-kid", nil, map[string][]string{
+		"agenthub-api": {"mcp-client-runtime"},
+	})
+
+	chain := middleware.New(keycloakURL, []string{"*"})
+	stack := append(chain.Protected(), middleware.RequireRole("mcp-client-runtime"))
+	handler := applyMiddlewares(stack, okHandler())
+	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs/bootstrap", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestChain_Public_HasCORSHeader(t *testing.T) {
 	chain := middleware.New("http://keycloak:8080", []string{"https://app.example.com"})
 
@@ -114,6 +167,20 @@ func TestChain_Public_HasCORSHeader(t *testing.T) {
 
 	// CORS header should be present.
 	require.NotEmpty(t, rec.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestChain_CORSWildcardDoesNotAllowCredentialedOrigins(t *testing.T) {
+	chain := middleware.New("http://keycloak:8080", []string{"*"})
+
+	handler := chain.CORSHandler()(applyMiddlewares(chain.Public(), okHandler()))
+	req := httptest.NewRequest(http.MethodOptions, "/health", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestChain_New_ReturnsNonNil(t *testing.T) {
@@ -191,16 +258,45 @@ func mustSetupFakeKeycloak(t *testing.T, realm string) (*rsa.PrivateKey, string)
 func mustSignJWT(t *testing.T, key *rsa.PrivateKey, realm, keycloakBaseURL, kid string) string {
 	t.Helper()
 
+	return mustSignJWTWithRoles(t, key, realm, keycloakBaseURL, kid, nil, nil)
+}
+
+type testAccessRoles struct {
+	Roles []string `json:"roles"`
+}
+
+type testRoleClaims struct {
+	jwt.RegisteredClaims
+	RealmAccess    testAccessRoles            `json:"realm_access,omitempty"`
+	ResourceAccess map[string]testAccessRoles `json:"resource_access,omitempty"`
+}
+
+func mustSignJWTWithRoles(
+	t *testing.T,
+	key *rsa.PrivateKey,
+	realm, keycloakBaseURL, kid string,
+	realmRoles []string,
+	resourceRoles map[string][]string,
+) string {
+	t.Helper()
+
 	// Encode the public key as PEM for display only; not needed for signing.
 	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
 	require.NoError(t, err)
 	_ = pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
 
-	claims := jwt.RegisteredClaims{
-		Issuer:    fmt.Sprintf("%s/realms/%s", keycloakBaseURL, realm),
-		Subject:   "test-user",
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
-		IssuedAt:  jwt.NewNumericDate(time.Now()),
+	claims := testRoleClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    fmt.Sprintf("%s/realms/%s", keycloakBaseURL, realm),
+			Subject:   "test-user",
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+		RealmAccess:    testAccessRoles{Roles: realmRoles},
+		ResourceAccess: make(map[string]testAccessRoles, len(resourceRoles)),
+	}
+	for clientID, roles := range resourceRoles {
+		claims.ResourceAccess[clientID] = testAccessRoles{Roles: roles}
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)

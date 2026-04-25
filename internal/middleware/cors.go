@@ -8,19 +8,17 @@ import (
 // CORS returns a middleware that sets CORS headers for the given allowed origins.
 func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 	originsMap := make(map[string]bool, len(allowedOrigins))
-	allowAll := false
 	for _, o := range allowedOrigins {
-		if o == "*" {
-			allowAll = true
-			break
+		origin := strings.TrimSpace(o)
+		if origin != "" && origin != "*" {
+			originsMap[origin] = true
 		}
-		originsMap[strings.TrimSpace(o)] = true
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-			if origin != "" && (allowAll || originsMap[origin]) {
+			if origin != "" && originsMap[origin] {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
