@@ -24,6 +24,16 @@ type mockToolsBySkill struct {
 	}
 }
 
+type mockCoreToolProvider struct {
+	tools  []agentic.LLMTool
+	called bool
+}
+
+func (m *mockCoreToolProvider) LoadCoreTools(context.Context) ([]agentic.LLMTool, error) {
+	m.called = true
+	return m.tools, nil
+}
+
 func newMockToolsBySkill() *mockToolsBySkill {
 	return &mockToolsBySkill{
 		bySkill: make(map[uuid.UUID]struct {
@@ -731,6 +741,38 @@ func TestBuildTools_ManagementExcludedWhenNoAdminScope(t *testing.T) {
 	}
 }
 
+func TestBuildTools_CoreToolsExcludedWithoutManagementScope(t *testing.T) {
+	coreTools := &mockCoreToolProvider{
+		tools: []agentic.LLMTool{{Name: "core-list-agents", Description: "List agents"}},
+	}
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{}).
+		WithCoreToolProvider(coreTools).
+		WithAdminScope(true).
+		WithEnableManagement(false)
+
+	tools, err := builder.Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	assert.False(t, coreTools.called, "core tools must not be loaded outside management scope")
+	assert.NotContains(t, toolNames(tools), "core-list-agents")
+}
+
+func TestBuildTools_CoreToolsIncludedWithManagementScope(t *testing.T) {
+	coreTools := &mockCoreToolProvider{
+		tools: []agentic.LLMTool{{Name: "core-list-agents", Description: "List agents"}},
+	}
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{}).
+		WithCoreToolProvider(coreTools).
+		WithAdminScope(true).
+		WithEnableManagement(true)
+
+	tools, err := builder.Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	assert.True(t, coreTools.called, "core tools should load only inside management scope")
+	assert.Contains(t, toolNames(tools), "core-list-agents")
+}
+
 // --- TR-01-TASK-06: orphaned skill instructions (P-C152-2, P-C159-1, P-C168-1) ---
 
 // TestBuildTools_InstructionOnlySkill_NotInToolArray verifies that a skill with
@@ -780,6 +822,44 @@ func TestBuildTools_SkillWithTools_InToolArray(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, toolNames(tools), "search-skill",
 		"skill with active binding must appear in tools[]")
+}
+
+func TestBuildTools_MCPDuplicateOfNativeSkill_IsSkipped(t *testing.T) {
+	skillID := uuid.New()
+	toolID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{
+			ID:   skillID,
+			Name: "ViaCEP Address Lookup",
+			Slug: "viacep_address_lookup",
+		},
+	}}
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools:    []tool.Tool{{ID: toolID, Name: "ViaCEP Tool"}},
+	}
+
+	mcpClient := &mockMCPClient{
+		tools: []agentic.MCPToolInfo{
+			{ServerName: "agenthub-platform-mcp", Name: "viacep_address_lookup"},
+			{ServerName: "agenthub-platform-mcp", Name: "github_repository_lookup"},
+		},
+	}
+	mcpBridge := agentic.NewMCPToolBridge(mcpClient, "test")
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+		WithMCPBridge(mcpBridge)
+
+	tools, err := builder.Build(context.Background(), uuid.New())
+
+	require.NoError(t, err)
+	names := toolNames(tools)
+	assert.Contains(t, names, "viacep_address_lookup")
+	assert.NotContains(t, names, "mcp__agenthub-platform-mcp__viacep_address_lookup")
+	assert.Contains(t, names, "mcp__agenthub-platform-mcp__github_repository_lookup")
 }
 
 // --- TR-01-TASK-07: FilterActiveKBs (P-C179-1, P-C168-1) ---

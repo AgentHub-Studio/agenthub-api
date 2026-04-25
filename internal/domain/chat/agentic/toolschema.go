@@ -116,21 +116,21 @@ type CoreToolProvider interface {
 // ToolSchemaBuilder converts the skills/tools linked to an agent into LLMTool
 // definitions compatible with the LLM function-calling API.
 type ToolSchemaBuilder struct {
-	skills             SkillLister
-	tools              ToolsBySkillLister
-	kbs                KBLister
-	mcpBridge          *MCPToolBridge
-	coreTools          CoreToolProvider
-	tokenBudgets       SkillTokenBudgetProvider
-	currentDepth       int
-	maxDepth           int
-	adminScope            bool // P-C298-1: gate agenthub_manage to admin callers only
-	enableManagement      bool // P-C184-2: gate agenthub_manage to agents with enable_management=true
-	disableAskUser        bool // per-agent opt-out — removes ask_user from the builtin set
-	disableAgentDelegation bool // per-agent opt-out — removes the agent sub-agent spawner
-	skillIDsSnapshot   []uuid.UUID // P-C115-1: when set, use these IDs instead of querying by agentID
-	lastUserOnlySkills []skill.Skill
-	lastWarnings       []string
+	skills                 SkillLister
+	tools                  ToolsBySkillLister
+	kbs                    KBLister
+	mcpBridge              *MCPToolBridge
+	coreTools              CoreToolProvider
+	tokenBudgets           SkillTokenBudgetProvider
+	currentDepth           int
+	maxDepth               int
+	adminScope             bool        // P-C298-1: gate agenthub_manage to admin callers only
+	enableManagement       bool        // P-C184-2: gate agenthub_manage to agents with enable_management=true
+	disableAskUser         bool        // per-agent opt-out — removes ask_user from the builtin set
+	disableAgentDelegation bool        // per-agent opt-out — removes the agent sub-agent spawner
+	skillIDsSnapshot       []uuid.UUID // P-C115-1: when set, use these IDs instead of querying by agentID
+	lastUserOnlySkills     []skill.Skill
+	lastWarnings           []string
 }
 
 // NewToolSchemaBuilder creates a ToolSchemaBuilder.
@@ -396,7 +396,8 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// 2. The caller has the "admin" realm role (JWT-based)
 	// 3. This is not a sub-agent run (depth == 0)
 	// Sub-agents must never inherit management scope from their parent agent.
-	if b.enableManagement && b.adminScope && b.currentDepth == 0 {
+	managementScope := b.enableManagement && b.adminScope && b.currentDepth == 0
+	if managementScope {
 		tools = append(tools, agentHubManageTool())
 	}
 
@@ -412,12 +413,15 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 			// Parse one warning per server from the combined error message.
 			b.lastWarnings = append(b.lastWarnings, summarizeMCPErrors(mcpErr.Error())...)
 		}
-		tools = append(tools, mcpTools...)
+		tools = appendNonDuplicateMCPTools(tools, mcpTools)
 	}
 
-	// Core tools — platform-managed tools from ah_core schema, available to all agents.
+	// Core tools — legacy platform-management tools from ah_core schema.
+	// They have the same blast radius as agenthub_manage, so keep them behind
+	// the same explicit admin + agent opt-in gate. Normal demo/business agents
+	// should not send dozens of management tools to the LLM.
 	// Non-fatal: provider returns nil when ah_core schema does not exist.
-	if b.coreTools != nil {
+	if b.coreTools != nil && managementScope {
 		coreList, coreErr := b.coreTools.LoadCoreTools(ctx)
 		if coreErr != nil {
 			slog.WarnContext(ctx, "agentic: failed to load core tools", "error", coreErr)
@@ -455,6 +459,29 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	})
 
 	return tools, nil
+}
+
+func appendNonDuplicateMCPTools(tools []LLMTool, mcpTools []LLMTool) []LLMTool {
+	if len(mcpTools) == 0 {
+		return tools
+	}
+	existing := make(map[string]struct{}, len(tools)+len(mcpTools))
+	for _, t := range tools {
+		existing[t.Name] = struct{}{}
+	}
+	for _, mcpTool := range mcpTools {
+		if _, toolName, ok := ParseMCPToolName(mcpTool.Name); ok {
+			if _, duplicate := existing[toolName]; duplicate {
+				continue
+			}
+		}
+		if _, duplicate := existing[mcpTool.Name]; duplicate {
+			continue
+		}
+		tools = append(tools, mcpTool)
+		existing[mcpTool.Name] = struct{}{}
+	}
+	return tools
 }
 
 // BuildWithDeferred returns loaded and deferred tools separately.

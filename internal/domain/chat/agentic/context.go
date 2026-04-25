@@ -184,12 +184,16 @@ func estimateMessageTokens(m chat.ChatMessage) int {
 // knownContextWindows maps model prefixes to their context window sizes.
 var knownContextWindows = map[string]int{
 	"claude-opus-4":      200000,
+	"claude-opus-4-6":    1000000,
 	"claude-sonnet-4":    200000,
+	"claude-sonnet-4-6":  1000000,
 	"claude-haiku-4":     200000,
 	"claude-3.5-sonnet":  200000,
 	"claude-3-opus":      200000,
 	"claude-3-sonnet":    200000,
 	"claude-3-haiku":     200000,
+	"openai/gpt-oss-20b": 131072,
+	"llama3.3":           128000,
 	"gpt-4o":             128000,
 	"gpt-4-turbo":        128000,
 	"gpt-4":              8192,
@@ -487,7 +491,9 @@ func adjustSplitForToolPairs(messages []chat.ChatMessage, startIdx int) int {
 	for i := startIdx; i < len(messages); i++ {
 		if messages[i].MessageType == chat.MessageTypeToolUse && len(messages[i].ToolCalls) > 0 {
 			// Parse tool call IDs from this message.
-			var tcs []struct{ ID string `json:"id"` }
+			var tcs []struct {
+				ID string `json:"id"`
+			}
 			if err := json.Unmarshal(messages[i].ToolCalls, &tcs); err == nil {
 				for _, tc := range tcs {
 					delete(neededIDs, tc.ID)
@@ -503,7 +509,9 @@ func adjustSplitForToolPairs(messages []chat.ChatMessage, startIdx int) int {
 	// Look backward for assistant messages containing the needed tool_use IDs.
 	for i := startIdx - 1; i >= 0 && len(neededIDs) > 0; i-- {
 		if messages[i].MessageType == chat.MessageTypeToolUse && len(messages[i].ToolCalls) > 0 {
-			var tcs []struct{ ID string `json:"id"` }
+			var tcs []struct {
+				ID string `json:"id"`
+			}
 			if err := json.Unmarshal(messages[i].ToolCalls, &tcs); err == nil {
 				for _, tc := range tcs {
 					if neededIDs[tc.ID] {

@@ -106,13 +106,15 @@ const tenantB = "tenant-b"
 func TestLLMPresetService_Create_Success(t *testing.T) {
 	svc := llmpreset.NewService(newMockRepo())
 	p, err := svc.Create(context.Background(), tenantA, llmpreset.CreateLLMPresetRequest{
-		Name:     "GPT-4o",
-		Provider: "openai",
-		Model:    "gpt-4o",
+		Name:          "GPT-4o",
+		Provider:      "openai",
+		Model:         "gpt-4o",
+		ContextWindow: 128000,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "GPT-4o", p.Name)
 	assert.Equal(t, tenantA, p.TenantID)
+	assert.Equal(t, 128000, p.ContextWindow)
 	assert.NotEqual(t, uuid.Nil, p.ID)
 }
 

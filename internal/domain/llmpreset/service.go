@@ -91,16 +91,17 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	}
 
 	p := LLMPreset{
-		ID:          uuid.New(),
-		TenantID:    tenantID,
-		Name:        req.Name,
-		Description: req.Description,
-		Provider:    req.Provider,
-		Model:       req.Model,
-		MaxTokens:   maxTokens,
-		Temperature: temperature,
-		ConfigJSON:  req.ConfigJSON,
-		IsDefault:   req.IsDefault,
+		ID:            uuid.New(),
+		TenantID:      tenantID,
+		Name:          req.Name,
+		Description:   req.Description,
+		Provider:      req.Provider,
+		Model:         req.Model,
+		MaxTokens:     maxTokens,
+		ContextWindow: req.ContextWindow,
+		Temperature:   temperature,
+		ConfigJSON:    req.ConfigJSON,
+		IsDefault:     req.IsDefault,
 	}
 	created, err := s.repo.Create(ctx, p)
 	if err != nil {
@@ -128,6 +129,9 @@ func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	}
 	if req.MaxTokens != nil {
 		p.MaxTokens = *req.MaxTokens
+	}
+	if req.ContextWindow != nil {
+		p.ContextWindow = *req.ContextWindow
 	}
 	if req.Temperature != nil {
 		p.Temperature = *req.Temperature

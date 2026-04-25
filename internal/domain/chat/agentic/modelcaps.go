@@ -36,6 +36,7 @@ func DetectModelCapabilities(model, provider string) ModelCapabilities {
 	lower := strings.ToLower(model)
 	isAnthropic := strings.ToLower(provider) == "anthropic"
 	isClaude := isAnthropic || strings.HasPrefix(lower, "claude")
+	contextWindowSize := GetContextWindowSize(model, 0)
 
 	caps := ModelCapabilities{
 		// Effort: Claude 4.x models (Opus 4.6, Sonnet 4.6).
@@ -60,15 +61,15 @@ func DetectModelCapabilities(model, provider string) ModelCapabilities {
 			hasAnyPrefix(lower, "gpt-4", "gpt-3.5-turbo") ||
 			strings.HasPrefix(lower, "gemini"),
 
-		// 1M context: Claude Opus 4.x with beta, Gemini 1.5 Pro.
-		Supports1MContext: (isClaude && strings.Contains(lower, "opus-4")) ||
+		// 1M context: models with a resolved 1M window, plus known external variants.
+		Supports1MContext: contextWindowSize >= 1000000 ||
 			strings.Contains(lower, "gemini-1.5-pro"),
 
 		// Streaming: all major models.
 		SupportsStreaming: true,
 
 		// Context window: use the existing detection function.
-		ContextWindowSize: GetContextWindowSize(model, 0),
+		ContextWindowSize: contextWindowSize,
 	}
 
 	return caps

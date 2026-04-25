@@ -54,6 +54,18 @@ func NewWithTimeout(apiKey, baseURL string, timeout time.Duration) *Provider {
 	}
 }
 
+// WithTransport overrides the HTTP transport used for outbound requests.
+// Useful when a compatible provider needs to inject proxy headers, retries, or
+// metrics wrapping without reimplementing the OpenAI wire format.
+func (p *Provider) WithTransport(rt http.RoundTripper) *Provider {
+	if rt == nil {
+		return p
+	}
+	timeout := p.client.Timeout
+	p.client = &http.Client{Transport: rt, Timeout: timeout}
+	return p
+}
+
 // GetProviderName returns "openai".
 func (p *Provider) GetProviderName() string { return "openai" }
 

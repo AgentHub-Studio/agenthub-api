@@ -41,14 +41,14 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 }
 
 const presetColumns = `id, tenant_id, name, description, provider, model,
-	max_tokens, temperature, config_json, is_default, created_at, updated_at`
+	max_tokens, context_window, temperature, config_json, is_default, created_at, updated_at`
 
 func scanPreset(row pgx.Row) (LLMPreset, error) {
 	var p LLMPreset
 	var configJSON []byte
 	err := row.Scan(
 		&p.ID, &p.TenantID, &p.Name, &p.Description, &p.Provider, &p.Model,
-		&p.MaxTokens, &p.Temperature,
+		&p.MaxTokens, &p.ContextWindow, &p.Temperature,
 		&configJSON, &p.IsDefault,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
@@ -155,12 +155,12 @@ func (r *pgRepository) Create(ctx context.Context, p LLMPreset) (LLMPreset, erro
 	query := fmt.Sprintf(`
 		INSERT INTO public.llm_config_preset
 			(id, tenant_id, name, description, provider, model,
-			 max_tokens, temperature, config_json, is_default, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+			 max_tokens, context_window, temperature, config_json, is_default, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
 		RETURNING %s`, presetColumns)
 	row := r.pool.QueryRow(ctx, query,
 		p.ID, p.TenantID, p.Name, p.Description, p.Provider, p.Model,
-		p.MaxTokens, p.Temperature,
+		p.MaxTokens, p.ContextWindow, p.Temperature,
 		[]byte(configJSON), p.IsDefault,
 	)
 	created, err := scanPreset(row)
@@ -178,12 +178,12 @@ func (r *pgRepository) Update(ctx context.Context, p LLMPreset) (LLMPreset, erro
 	query := fmt.Sprintf(`
 		UPDATE public.llm_config_preset
 		SET name=$3, description=$4, provider=$5, model=$6,
-		    max_tokens=$7, temperature=$8, config_json=$9, updated_at=NOW()
+		    max_tokens=$7, context_window=$8, temperature=$9, config_json=$10, updated_at=NOW()
 		WHERE tenant_id=$1 AND id=$2
 		RETURNING %s`, presetColumns)
 	row := r.pool.QueryRow(ctx, query,
 		p.TenantID, p.ID, p.Name, p.Description, p.Provider, p.Model,
-		p.MaxTokens, p.Temperature,
+		p.MaxTokens, p.ContextWindow, p.Temperature,
 		[]byte(configJSON),
 	)
 	updated, err := scanPreset(row)
