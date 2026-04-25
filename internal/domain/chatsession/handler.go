@@ -1,28 +1,29 @@
-// Package chatsession provides a stateless session relay used by the Flutter
+// Package chatsession provides an opaque session relay used by the Flutter
 // chat widget embedded in the Angular frontend.
-//
-// Instead of storing state server-side, the session payload is JSON-encoded
-// and base64url-encoded into the key itself. This keeps the design
-// pod-count agnostic — any replica can serve any request.
 //
 // Flow:
 //  1. Angular (test.cezar.dev) POSTs to /api/session with the Keycloak JWT,
 //     tenant ID, API base URL, and optional conversation ID.
-//  2. The handler base64url-encodes the payload and returns it as {key}.
+//  2. The handler stores the payload server-side and returns an opaque {key}.
 //  3. The Flutter iframe loads with ?key=<encoded> and GETs /api/session/<key>
 //     to retrieve the init data.
-//  4. Every 60 s Angular PUTs /api/session/<key>/token with a refreshed token;
-//     the handler decodes the key, swaps the token, re-encodes and returns
-//     the new key so the caller can update the iframe URL if needed.
+//  4. Token refresh can update the stored payload without putting secrets in URLs.
 package chatsession
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
+
+const defaultSessionTTL = 30 * time.Minute
 
 // sessionPayload holds the data that Angular passes to the Flutter widget.
 type sessionPayload struct {
@@ -32,11 +33,27 @@ type sessionPayload struct {
 	ConversationID *string `json:"conversationId,omitempty"`
 }
 
+type storedSession struct {
+	payload   sessionPayload
+	expiresAt time.Time
+}
+
 // Handler handles /api/session endpoints.
-type Handler struct{}
+type Handler struct {
+	mu       sync.RWMutex
+	sessions map[string]storedSession
+	ttl      time.Duration
+	now      func() time.Time
+}
 
 // NewHandler creates a new Handler.
-func NewHandler() *Handler { return &Handler{} }
+func NewHandler() *Handler {
+	return &Handler{
+		sessions: make(map[string]storedSession),
+		ttl:      defaultSessionTTL,
+		now:      time.Now,
+	}
+}
 
 // RegisterRoutes mounts the session endpoints under r.
 func (h *Handler) RegisterRoutes(r chi.Router) {
@@ -46,30 +63,35 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 }
 
 // create handles POST /api/session.
-// Encodes the payload as a base64url key and returns it.
+// Stores the payload behind an opaque key and returns it.
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var payload sessionPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	key, err := encode(payload)
-	if err != nil {
-		http.Error(w, "failed to encode session", http.StatusInternalServerError)
+	if payload.Token == "" || payload.TenantID == "" || payload.APIBaseURL == "" {
+		http.Error(w, "token, tenantId and apiBaseUrl are required", http.StatusBadRequest)
 		return
 	}
+
+	key, err := newSessionKey()
+	if err != nil {
+		http.Error(w, "failed to create session", http.StatusInternalServerError)
+		return
+	}
+	h.store(key, payload)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"key": key})
 }
 
 // get handles GET /api/session/{key}.
-// Decodes the base64url key and returns the payload.
+// Returns the payload stored for an opaque key.
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
-	payload, err := decode(key)
-	if err != nil {
+	payload, ok := h.load(key)
+	if !ok {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
@@ -78,11 +100,11 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 }
 
 // refreshToken handles PUT /api/session/{key}/token.
-// Decodes the key, swaps the token, re-encodes and returns the new key.
+// Swaps the token in the stored payload and returns the same opaque key.
 func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
-	payload, err := decode(key)
-	if err != nil {
+	payload, ok := h.load(key)
+	if !ok {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
@@ -94,34 +116,47 @@ func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	payload.Token = req.Token
-	newKey, err := encode(payload)
-	if err != nil {
-		http.Error(w, "failed to encode session", http.StatusInternalServerError)
+	if req.Token == "" {
+		http.Error(w, "token required", http.StatusBadRequest)
 		return
 	}
 
+	payload.Token = req.Token
+	h.store(key, payload)
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"key": newKey})
+	_ = json.NewEncoder(w).Encode(map[string]string{"key": key})
 }
 
-func encode(p sessionPayload) (string, error) {
-	data, err := json.Marshal(p)
-	if err != nil {
-		return "", err
+func (h *Handler) store(key string, payload sessionPayload) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sessions[key] = storedSession{
+		payload:   payload,
+		expiresAt: h.now().Add(h.ttl),
 	}
-	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
-func decode(key string) (sessionPayload, error) {
-	data, err := base64.RawURLEncoding.DecodeString(key)
-	if err != nil {
-		return sessionPayload{}, err
+func (h *Handler) load(key string) (sessionPayload, bool) {
+	h.mu.RLock()
+	session, ok := h.sessions[key]
+	h.mu.RUnlock()
+	if !ok {
+		return sessionPayload{}, false
 	}
-	var p sessionPayload
-	if err := json.Unmarshal(data, &p); err != nil {
-		return sessionPayload{}, err
+	if !h.now().Before(session.expiresAt) {
+		h.mu.Lock()
+		delete(h.sessions, key)
+		h.mu.Unlock()
+		return sessionPayload{}, false
 	}
-	return p, nil
+	return session.payload, true
+}
+
+func newSessionKey() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+		return "", errors.New("read random bytes")
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }

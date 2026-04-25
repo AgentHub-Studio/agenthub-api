@@ -13,7 +13,7 @@ import (
 
 // --- CORS ---
 
-func TestCORS_AllowsWildcard(t *testing.T) {
+func TestCORS_DoesNotReflectWildcard(t *testing.T) {
 	handler := middleware.CORS([]string{"*"})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -23,7 +23,7 @@ func TestCORS_AllowsWildcard(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, "https://app.example.com", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 

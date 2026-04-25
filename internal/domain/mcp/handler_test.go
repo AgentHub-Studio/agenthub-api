@@ -3,17 +3,25 @@ package mcp_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -50,6 +58,23 @@ func (m *mockMCPSvc) ListAllEnabled(_ context.Context) ([]mcp.McpServerConfigRes
 		if c.Enabled {
 			items = append(items, c)
 		}
+	}
+	return items, nil
+}
+
+func (m *mockMCPSvc) ListBootstrap(_ context.Context) ([]mcp.McpServerConfigBootstrapResponse, error) {
+	var items []mcp.McpServerConfigBootstrapResponse
+	for _, c := range m.configs {
+		if !c.Enabled {
+			continue
+		}
+		items = append(items, mcp.McpServerConfigBootstrapResponse{
+			ID:            c.ID,
+			Name:          c.Name,
+			TransportType: c.TransportType,
+			AutoStart:     c.AutoStart,
+			Enabled:       c.Enabled,
+		})
 	}
 	return items, nil
 }
@@ -115,6 +140,80 @@ func setupMCP() (*chi.Mux, *mockMCPSvc) {
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
 	return r, svc
+}
+
+func setupMCPWithAuth(t *testing.T, roles ...string) (*chi.Mux, *mockMCPSvc, string) {
+	t.Helper()
+
+	realm := "mcp-test-" + uuid.NewString()
+	key, keycloakURL := setupFakeKeycloak(t, realm)
+	token := signMCPJWT(t, key, realm, keycloakURL, roles)
+
+	svc := newMockMCPSvc()
+	h := mcp.NewHandler(svc)
+	r := chi.NewRouter()
+	chain := middleware.New(keycloakURL, []string{"https://app.cezar.dev"})
+	for _, mw := range chain.Protected() {
+		r.Use(mw)
+	}
+	h.RegisterRoutes(r)
+	return r, svc, token
+}
+
+func setupFakeKeycloak(t *testing.T, realm string) (*rsa.PrivateKey, string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	jwksDoc := map[string]any{
+		"keys": []map[string]any{
+			{
+				"kid": "mcp-test-kid",
+				"kty": "RSA",
+				"use": "sig",
+				"alg": "RS256",
+				"n":   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+			},
+		},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf("/realms/%s/protocol/openid-connect/certs", realm), func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jwksDoc)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return key, srv.URL
+}
+
+type mcpTestAccessRoles struct {
+	Roles []string `json:"roles"`
+}
+
+type mcpTestClaims struct {
+	jwt.RegisteredClaims
+	RealmAccess mcpTestAccessRoles `json:"realm_access"`
+}
+
+func signMCPJWT(t *testing.T, key *rsa.PrivateKey, realm, keycloakURL string, roles []string) string {
+	t.Helper()
+	claims := mcpTestClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    fmt.Sprintf("%s/realms/%s", keycloakURL, realm),
+			Subject:   "mcp-runtime",
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+		RealmAccess: mcpTestAccessRoles{Roles: roles},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = "mcp-test-kid"
+	signed, err := token.SignedString(key)
+	require.NoError(t, err)
+	return signed
 }
 
 func TestMCPHandler_List_Success(t *testing.T) {
@@ -192,7 +291,7 @@ func TestMCPHandler_Delete_NotFound(t *testing.T) {
 // Servers with auto_start=false but enabled=true are also registered so agents can reach them.
 
 func TestMCPHandler_Bootstrap_ReturnsAllEnabledConfigs(t *testing.T) {
-	r, svc := setupMCP()
+	r, svc, token := setupMCPWithAuth(t, "mcp-client-runtime")
 	// enabled=true, auto_start=true — must appear.
 	id1 := uuid.New()
 	svc.configs[id1] = mcp.McpServerConfigResponse{ID: id1, Name: "auto-enabled", AutoStart: true, Enabled: true}
@@ -204,11 +303,12 @@ func TestMCPHandler_Bootstrap_ReturnsAllEnabledConfigs(t *testing.T) {
 	svc.configs[id3] = mcp.McpServerConfigResponse{ID: id3, Name: "disabled", AutoStart: true, Enabled: false}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs/bootstrap", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	var items []mcp.McpServerConfigResponse
+	var items []mcp.McpServerConfigBootstrapResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&items))
 	require.Len(t, items, 2)
 	names := make(map[string]bool)
@@ -221,16 +321,17 @@ func TestMCPHandler_Bootstrap_ReturnsAllEnabledConfigs(t *testing.T) {
 }
 
 func TestMCPHandler_Bootstrap_EmptyWhenAllDisabled(t *testing.T) {
-	r, svc := setupMCP()
+	r, svc, token := setupMCPWithAuth(t, "mcp-client-runtime")
 	id := uuid.New()
 	svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "disabled", AutoStart: true, Enabled: false}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs/bootstrap", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	var items []mcp.McpServerConfigResponse
+	var items []mcp.McpServerConfigBootstrapResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&items))
 	assert.Len(t, items, 0)
 }

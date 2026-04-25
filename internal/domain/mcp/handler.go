@@ -19,6 +19,7 @@ type mcpService interface {
 	List(ctx context.Context) ([]McpServerConfigResponse, error)
 	ListAutoStart(ctx context.Context) ([]McpServerConfigResponse, error)
 	ListAllEnabled(ctx context.Context) ([]McpServerConfigResponse, error)
+	ListBootstrap(ctx context.Context) ([]McpServerConfigBootstrapResponse, error)
 	Create(ctx context.Context, req CreateRequest) (McpServerConfigResponse, error)
 	GetByID(ctx context.Context, id uuid.UUID) (McpServerConfigResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (McpServerConfigResponse, error)
@@ -221,7 +222,7 @@ func (h *Handler) listTools(w http.ResponseWriter, r *http.Request) {
 // all enabled configs so the runtime registers them for lazy connection.
 // Protected by RequireRole("mcp-client-runtime") — only service accounts may call this.
 func (h *Handler) bootstrap(w http.ResponseWriter, r *http.Request) {
-	items, err := h.svc.ListAllEnabled(r.Context())
+	items, err := h.svc.ListBootstrap(r.Context())
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "failed to load bootstrap configs")
 		return

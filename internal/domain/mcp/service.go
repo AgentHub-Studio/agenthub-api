@@ -222,6 +222,82 @@ func (s *Service) ListAllEnabled(ctx context.Context) ([]McpServerConfigResponse
 	return responses, nil
 }
 
+// ListBootstrap returns enabled MCP configs with runtime-only OAuth material.
+func (s *Service) ListBootstrap(ctx context.Context) ([]McpServerConfigBootstrapResponse, error) {
+	items, err := s.repo.ListAllEnabled(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mcp service: list bootstrap: %w", err)
+	}
+
+	responses := make([]McpServerConfigBootstrapResponse, len(items))
+	for i, item := range items {
+		resp := BootstrapResponseFrom(item)
+		if item.OAuthCredentialID != nil {
+			if err := s.attachOAuthBootstrap(ctx, &resp, *item.OAuthCredentialID); err != nil {
+				return nil, err
+			}
+		}
+		responses[i] = resp
+	}
+
+	return responses, nil
+}
+
+func (s *Service) attachOAuthBootstrap(ctx context.Context, resp *McpServerConfigBootstrapResponse, credentialID uuid.UUID) error {
+	if s.oauthSvc == nil {
+		return nil
+	}
+	tenantID := tenant.FromContext(ctx)
+	if tenantID == "" {
+		return fmt.Errorf("mcp service: tenant context is required for OAuth bootstrap")
+	}
+
+	cred, err := s.oauthSvc.GetByID(ctx, tenantID, credentialID)
+	if err != nil {
+		return fmt.Errorf("mcp service: load oauth credential %s: %w", credentialID, err)
+	}
+
+	resp.OAuthTokenURL = stringValue(cred.TokenURL)
+	resp.OAuthClientID = stringValue(cred.ClientID)
+	resp.OAuthClientSecret, err = decryptedString(s.oauthSvc, cred.ClientSecret)
+	if err != nil {
+		return fmt.Errorf("mcp service: decrypt oauth client secret: %w", err)
+	}
+	resp.OAuthBearerToken, err = decryptedString(s.oauthSvc, cred.BearerToken)
+	if err != nil {
+		return fmt.Errorf("mcp service: decrypt oauth bearer token: %w", err)
+	}
+	resp.OAuthRefreshToken, err = decryptedString(s.oauthSvc, cred.RefreshToken)
+	if err != nil {
+		return fmt.Errorf("mcp service: decrypt oauth refresh token: %w", err)
+	}
+	resp.OAuthScopes = splitOAuthScopes(cred.Scopes)
+
+	return nil
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func decryptedString(oauthSvc oauthService, encrypted *string) (string, error) {
+	value, err := oauthSvc.DecryptSecret(encrypted)
+	if err != nil {
+		return "", err
+	}
+	return stringValue(value), nil
+}
+
+func splitOAuthScopes(scopes *string) []string {
+	if scopes == nil || *scopes == "" {
+		return nil
+	}
+	return strings.Fields(strings.ReplaceAll(*scopes, ",", " "))
+}
+
 // GetAuthStatus returns the current authentication status for an MCP server.
 func (s *Service) GetAuthStatus(ctx context.Context, id uuid.UUID) (AuthStatusResponse, error) {
 	config, err := s.repo.GetByID(ctx, id)
@@ -504,7 +580,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 						return nil
 					}
 					log.Printf("mcp service: server %s registered but status is %s, starting...", config.Name, status.Status)
-					
+
 					// Try to start explicitly
 					startURL := fmt.Sprintf("%s/servers/%s/start", s.mcpRuntimeURL, config.Name)
 					startResp, startErr := http.Post(startURL, "application/json", nil)
