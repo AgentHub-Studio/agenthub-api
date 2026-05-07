@@ -209,6 +209,10 @@ func (h *Handler) listTools(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.svc.ListTools(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "MCP server not found")
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
