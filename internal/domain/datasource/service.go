@@ -58,17 +58,22 @@ func applyDefaults(req *CreateRequest) {
 }
 
 // validateRequest checks required fields and type constraints.
+// Erros são wrapped em ErrValidation pra que o handler possa
+// mappear para 422 (em vez do 500 genérico). Sem esse wrap, o
+// usuário recebia 500 silencioso na UI quando esquecia preencher
+// um campo — feedback errado ("erro do servidor" em vez de
+// "corrija seu input").
 func validateRequest(req CreateRequest) error {
 	if req.Name == "" {
-		return fmt.Errorf("datasource: name is required")
+		return fmt.Errorf("%w: name is required", ErrValidation)
 	}
 	switch req.Type {
 	case DataSourceTypePostgreSQL, DataSourceTypeMySQL, DataSourceTypeSQLServer:
 	default:
-		return fmt.Errorf("datasource: unsupported type: %s", req.Type)
+		return fmt.Errorf("%w: unsupported type: %s", ErrValidation, req.Type)
 	}
 	if req.Host == "" {
-		return fmt.Errorf("datasource: host is required")
+		return fmt.Errorf("%w: host is required", ErrValidation)
 	}
 	return nil
 }

@@ -11,6 +11,12 @@ import (
 // ErrNotFound is returned when a DataSource is not found.
 var ErrNotFound = errors.New("datasource not found")
 
+// ErrValidation is returned when CreateRequest fails server-side
+// validation (empty name/host, unsupported type). Without it, esses
+// erros caíam em 500 no handler genérico, mascarando "input ruim"
+// como "erro do servidor" — UX terrível na UI de Datasources.
+var ErrValidation = errors.New("datasource validation failed")
+
 // DataSourceType represents the database engine type.
 type DataSourceType string
 
