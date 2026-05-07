@@ -6,6 +6,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/database"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // PostgresStore implements AnalyticsStore by querying the agent_metrics table
@@ -88,7 +91,20 @@ func (s *PostgresStore) AgentCosts(ctx context.Context, agentID uuid.UUID, tr Ti
 }
 
 // TopTools returns the most frequently used tools ranked by execution count.
+//
+// Usa AcquireWithTenant para setar search_path em ah_{tenantID} —
+// tool_execution só existe nesses schemas, não em public. Sem isso,
+// a query falhava com "table does not exist" e o handler vazava 500.
+// AgentUsage e AgentCosts funcionam por sorte (default search_path
+// inclui ah_test) mas TopTools quebrava em qualquer outro tenant.
 func (s *PostgresStore) TopTools(ctx context.Context, tr TimeRange, limit int) ([]TopTool, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, s.pool, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("analytics: acquire connection: %w", err)
+	}
+	defer release()
+
 	q := `
 		SELECT
 			tool_name,
@@ -105,7 +121,7 @@ func (s *PostgresStore) TopTools(ctx context.Context, tr TimeRange, limit int) (
 		ORDER BY executions DESC
 		LIMIT $3`
 
-	rows, err := s.pool.Query(ctx, q, tr.From, tr.To, limit)
+	rows, err := conn.Query(ctx, q, tr.From, tr.To, limit)
 	if err != nil {
 		return nil, fmt.Errorf("analytics: top tools: %w", err)
 	}
