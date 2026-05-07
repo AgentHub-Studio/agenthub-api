@@ -64,7 +64,7 @@ type CreateDeviceRequest struct {
 
 func (r CreateDeviceRequest) validate() error {
 	if r.Name == "" {
-		return fmt.Errorf("device: name is required")
+		return fmt.Errorf("%w: name is required", ErrValidation)
 	}
 	return nil
 }

@@ -17,6 +17,10 @@ var ErrNotFound = errors.New("device: not found")
 // ErrNameConflict is returned when a device name is already in use.
 var ErrNameConflict = errors.New("device: name already in use")
 
+// ErrValidation is returned when a device request fails business validation
+// (name vazio, type inválido, etc).
+var ErrValidation = errors.New("device: validation failed")
+
 // DeviceType classifies the role of a device in the network.
 type DeviceType string
 
