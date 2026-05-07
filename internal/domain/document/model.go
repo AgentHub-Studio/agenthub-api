@@ -66,10 +66,17 @@ type UploadRequest struct {
 
 // DocumentUploadedEvent is published to RabbitMQ after a successful upload so the
 // extractor service can start the chunking pipeline for the new document.
+//
+// `bucket` and `filePath` ("{bucket}/{storagePath}") are emitted alongside the
+// typed StoragePath because agenthub-extractor (Python pika consumer) parses
+// bucket/key from a single path field — without them it dies with
+// "invalid bucket name".
 type DocumentUploadedEvent struct {
 	DocumentID      uuid.UUID `json:"documentId"`
 	KnowledgeBaseID uuid.UUID `json:"knowledgeBaseId"`
 	StoragePath     string    `json:"storagePath"`
+	Bucket          string    `json:"bucket"`
+	FilePath        string    `json:"filePath"`
 	ContentType     string    `json:"contentType"`
 	FileName        string    `json:"fileName"`
 	TenantID        string    `json:"tenantId"`

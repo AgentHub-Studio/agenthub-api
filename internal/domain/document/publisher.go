@@ -35,14 +35,19 @@ func NewRabbitMQEventPublisher(url string) (*RabbitMQEventPublisher, error) {
 		return nil, fmt.Errorf("document publisher: open channel: %w", err)
 	}
 
-	// Declare the queue so it exists before the first publish.
+	// Declare the queue so it exists before the first publish. The
+	// x-dead-letter-exchange argument matches what agenthub-extractor
+	// (Python pika consumer) declares; without it RabbitMQ rejects with
+	// PRECONDITION_FAILED when the consumer connects after the publisher.
 	_, err = ch.QueueDeclare(
 		DocumentUploadedQueue,
 		true,  // durable
 		false, // autoDelete
 		false, // exclusive
 		false, // noWait
-		nil,
+		amqp.Table{
+			"x-dead-letter-exchange": "agenthub.documents.dlx",
+		},
 	)
 	if err != nil {
 		ch.Close()

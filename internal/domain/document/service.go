@@ -16,12 +16,16 @@ type Service struct {
 	repo      Repository
 	storage   StorageClient
 	publisher EventPublisher
+	bucket    string
 }
 
 // NewService creates a new Service backed by the given Repository, StorageClient, and EventPublisher.
 // Pass &NoopEventPublisher{} when RabbitMQ is not configured.
-func NewService(repo Repository, storage StorageClient, publisher EventPublisher) *Service {
-	return &Service{repo: repo, storage: storage, publisher: publisher}
+// `bucket` is included in DocumentUploadedEvent so the extractor can locate the
+// object in MinIO/S3 — the Python pika consumer parses bucket + key from the
+// `filePath` field, which we build as "{bucket}/{storagePath}".
+func NewService(repo Repository, storage StorageClient, publisher EventPublisher, bucket string) *Service {
+	return &Service{repo: repo, storage: storage, publisher: publisher, bucket: bucket}
 }
 
 // ListByKnowledgeBase returns a paginated list of documents for a knowledge base.
@@ -85,6 +89,8 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentRespon
 		DocumentID:      created.ID,
 		KnowledgeBaseID: created.KnowledgeBaseID,
 		StoragePath:     created.StoragePath,
+		Bucket:          s.bucket,
+		FilePath:        s.bucket + "/" + created.StoragePath,
 		ContentType:     created.ContentType,
 		FileName:        created.FileName,
 		TenantID:        tenant.FromContext(ctx),
@@ -122,6 +128,8 @@ func (s *Service) Reprocess(ctx context.Context, id uuid.UUID) (DocumentResponse
 		DocumentID:      updated.ID,
 		KnowledgeBaseID: updated.KnowledgeBaseID,
 		StoragePath:     updated.StoragePath,
+		Bucket:          s.bucket,
+		FilePath:        s.bucket + "/" + updated.StoragePath,
 		ContentType:     updated.ContentType,
 		FileName:        updated.FileName,
 		TenantID:        tenant.FromContext(ctx),

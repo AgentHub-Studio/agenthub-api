@@ -57,6 +57,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skilleval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/admintenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenantsignup"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/trigger"
@@ -122,6 +123,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	tenantSignupHandler := tenantsignup.NewHandler(tenantsignup.NewService(
 		tenantSvc, keycloakClient, cfg.KeycloakBaseURL, os.Getenv("FRONTEND_BASE_URL"),
 	))
+	adminTenantHandler := admintenant.NewHandler(admintenant.NewService(tenantSvc, tenant.NewRepository(pool), keycloakClient, provisioner))
 	settingsRepo := settings.NewRepository(pool)
 	settingsHandler := settings.NewHandler(settings.NewService(settingsRepo))
 	llmpresetHandler := llmpreset.NewHandler(llmpreset.NewService(llmpreset.NewRepository(pool)))
@@ -274,7 +276,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			slog.Info("rabbitmq: document event publisher connected")
 		}
 	}
-	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher))
+	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher, cfg.MinIO.DocumentsBucket))
 	kbHandler := knowledgebase.NewHandler(knowledgebase.NewService(kbRepo))
 	if cfg.EmbeddingURL != "" {
 		kbHandler.WithSearchClient(knowledge.NewPgDocumentSearchClient(pool, cfg.EmbeddingURL))
@@ -417,6 +419,17 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		regVersionHandler.RegisterRoutes(r)
 		regDependencyHandler.RegisterRoutes(r)
 		regInstallationHandler.RegisterProtectedRoutes(r)
+	})
+
+	// Core-tenant admin routes — only callable from the `core` tenant by an
+	// authenticated user holding the `admin` realm role.
+	r.Group(func(r chi.Router) {
+		for _, m := range chain.Protected() {
+			r.Use(m)
+		}
+		r.Use(middleware.RequireCoreTenant)
+		r.Use(middleware.RequireRole("admin"))
+		adminTenantHandler.RegisterRoutes(r)
 	})
 
 	s.router = r
