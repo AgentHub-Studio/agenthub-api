@@ -125,6 +125,12 @@ func (r *Repository) GetByID(ctx context.Context, tenantID string, id uuid.UUID)
 }
 
 // Record appends a new audit log entry.
+//
+// old_value, new_value and metadata are jsonb columns that reject the
+// empty string with SQLSTATE 22P02 ("invalid input syntax for type json").
+// Callers (agent.recordAudit and friends) sometimes leave Metadata blank;
+// normalise empty strings to a JSON null so the row is persisted instead
+// of being silently dropped with a WARN log.
 func (r *Repository) Record(ctx context.Context, tenantID string, l AuditLog) (AuditLog, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
@@ -140,11 +146,18 @@ func (r *Repository) Record(ctx context.Context, tenantID string, l AuditLog) (A
 		 RETURNING id, entity_type, entity_id, action, actor_id, actor_email,
 		           old_value, new_value, metadata, ip_address, created_at`,
 		l.EntityType, l.EntityID, l.Action, l.ActorID, l.ActorEmail,
-		l.OldValue, l.NewValue, l.Metadata, l.IPAddress,
+		jsonOrNull(l.OldValue), jsonOrNull(l.NewValue), jsonOrNull(l.Metadata), l.IPAddress,
 	).Scan(
 		&created.ID, &created.EntityType, &created.EntityID, &created.Action,
 		&created.ActorID, &created.ActorEmail, &created.OldValue, &created.NewValue,
 		&created.Metadata, &created.IPAddress, &created.CreatedAt,
 	)
 	return created, err
+}
+
+func jsonOrNull(s string) string {
+	if s == "" {
+		return "null"
+	}
+	return s
 }
