@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,6 +67,13 @@ type AsyncExecutor struct {
 	connURL        string
 	runTimeout     time.Duration
 	bufferRegistry *RunEventBufferRegistry
+	// cancellers maps runID → context.CancelFunc for in-flight worker tasks
+	// in this process. Populated in processTask and cleared on completion.
+	// Allows the HTTP handler to abort an async run from POST /run/{id}/cancel.
+	cancellers sync.Map
+	// cancelled records runIDs explicitly cancelled by Cancel() so processTask
+	// can distinguish a deliberate cancel from a timeout when ctx.Err() fires.
+	cancelled sync.Map
 }
 
 func NewAsyncExecutor(repo Repository, runner SessionRunner, connURL string) *AsyncExecutor {
@@ -97,6 +105,35 @@ func (e *AsyncExecutor) WithAgentLoader(loader AgentLoader) *AsyncExecutor {
 // Used by the handler to resolve async runs that are not in the in-memory bgRegistry.
 func (e *AsyncExecutor) GetRunByID(ctx context.Context, id uuid.UUID) (ChatRun, error) {
 	return e.repo.GetRunByID(ctx, id)
+}
+
+// Cancel aborts an in-flight async run. Returns true if a cancel was
+// dispatched to the worker, false when the runID is not currently being
+// processed by this process. Records the cancellation intent so
+// processTask can mark the run as cancelled (rather than failed) when
+// the context-cancel propagates to the Runner.
+//
+// This complements the bgRegistry path used by legacy synchronous runs.
+// Without this, POST /api/chat/sessions/{id}/run/{runId}/cancel returns
+// 404 for any run dispatched via RabbitMQ — which is the production path.
+func (e *AsyncExecutor) Cancel(runID uuid.UUID) bool {
+	e.cancelled.Store(runID, true)
+	v, ok := e.cancellers.Load(runID)
+	if !ok {
+		return false
+	}
+	if cancelFn, ok := v.(context.CancelFunc); ok {
+		cancelFn()
+		return true
+	}
+	return false
+}
+
+// wasCancelled reports whether Cancel was invoked for this runID since
+// the worker took the task. Used to distinguish cancel from timeout.
+func (e *AsyncExecutor) wasCancelled(runID uuid.UUID) bool {
+	_, ok := e.cancelled.Load(runID)
+	return ok
 }
 
 // EnqueueRun persists a new run and sends a task to RabbitMQ.
@@ -272,6 +309,16 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	baseCtx := tenant.NewContextWithToken(context.Background(), tenantID, task.RawToken)
 	ctx, cancel := context.WithTimeout(baseCtx, e.runTimeout)
 	defer cancel()
+
+	// Register the cancel func so AsyncExecutor.Cancel(runID) can abort
+	// this run from another goroutine (the HTTP handler). Cleared in the
+	// deferred remove below regardless of completion path.
+	e.cancellers.Store(task.RunID, cancel)
+	defer func() {
+		e.cancellers.Delete(task.RunID)
+		e.cancelled.Delete(task.RunID)
+	}()
+
 	// cleanupCtx: used for DB writes after ctx is cancelled — has tenant but no deadline.
 	cleanupCtx := baseCtx
 	buf := e.getOrCreateBuffer(task.RunID)
@@ -397,6 +444,15 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// P-C106-1: skip the timeout message only when the runner already persisted one
 	// (prevents two consecutive error messages in the chat history).
 	if ctx.Err() != nil {
+		// Differentiate explicit cancel (POST /cancel) from a timeout. In both
+		// cases the Runner observed ctx.Done() and returned, but the user-facing
+		// status and chat history must reflect the right cause.
+		if e.wasCancelled(task.RunID) {
+			slog.Info("chat: background run cancelled by user", "runId", task.RunID)
+			_ = e.repo.UpdateRunStatus(cleanupCtx, task.RunID, ChatRunStatusCancelled, "")
+			appendBufferedError(buf, "run cancelled by user", "cancelled")
+			return
+		}
 		slog.Warn("chat: background run timed out", "runId", task.RunID, "timeout", e.runTimeout)
 		_ = e.repo.MarkRunFailed(cleanupCtx, task.RunID, fmt.Sprintf("run exceeded the %s timeout", e.runTimeout))
 		appendBufferedError(buf, fmt.Sprintf("run exceeded the %s timeout", e.runTimeout), "timeout")

@@ -504,6 +504,8 @@ func (h *Handler) runStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // cancelRun handles POST /api/chat/sessions/{id}/run/{runId}/cancel.
+// Tries the in-process bgRegistry (legacy synchronous path) first, then
+// falls back to AsyncExecutor.Cancel for runs dispatched via RabbitMQ.
 func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runId")
 	if runID == "" {
@@ -511,14 +513,32 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run := h.bgRegistry.Get(runID)
-	if run == nil {
-		respond.Error(w, http.StatusNotFound, "run not found")
+	if run := h.bgRegistry.Get(runID); run != nil {
+		h.bgRegistry.Cancel(runID)
+		respond.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 		return
 	}
 
-	h.bgRegistry.Cancel(runID)
-	respond.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+	if h.executor != nil {
+		runUUID, err := uuid.Parse(runID)
+		if err != nil {
+			respond.Error(w, http.StatusBadRequest, "invalid runId")
+			return
+		}
+		if h.executor.Cancel(runUUID) {
+			respond.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+			return
+		}
+		// Run not in-flight on this pod — best-effort: persist the
+		// cancellation in the DB so a poll on /status surfaces the right
+		// state even if the worker already finished or runs on another pod.
+		if err := h.executor.repo.UpdateRunStatus(r.Context(), runUUID, ChatRunStatusCancelled, ""); err == nil {
+			respond.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+			return
+		}
+	}
+
+	respond.Error(w, http.StatusNotFound, "run not found")
 }
 
 // ReconnectOverflowData is the payload for the reconnect_overflow event.
