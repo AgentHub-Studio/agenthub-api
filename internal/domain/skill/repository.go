@@ -17,6 +17,12 @@ import (
 // ErrNotFound is returned when a skill is not found.
 var ErrNotFound = errors.New("skill: not found")
 
+// ErrValidation é retornado quando o request falha validação
+// server-side (instructions > 32K chars, etc). Sem ele, esses
+// erros caíam em 500 no handler genérico mascarando "input ruim"
+// como "erro de servidor" — UX terrível na UI de Skills.
+var ErrValidation = errors.New("skill: validation failed")
+
 // SkillRepository defines the persistence interface for Skill.
 type SkillRepository interface {
 	List(ctx context.Context, category *string, req pagination.PageRequest) ([]Skill, int64, error)

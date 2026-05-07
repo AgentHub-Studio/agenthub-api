@@ -75,7 +75,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	// ACT-F3-05: enforce maximum instructions size (32K chars).
 	const maxInstructionsChars = 32000
 	if len(req.Instructions) > maxInstructionsChars {
-		return Response{}, fmt.Errorf("skill: instructions exceeds maximum length of %d chars (got %d)", maxInstructionsChars, len(req.Instructions))
+		return Response{}, fmt.Errorf("%w: instructions exceeds maximum length of %d chars (got %d)", ErrValidation, maxInstructionsChars, len(req.Instructions))
 	}
 
 	// DX-01-J (ACT-F3-04): reject skills that are completely inert — no instructions
@@ -181,7 +181,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	// ACT-F3-05: enforce maximum instructions size (32K chars).
 	const maxInstructionsChars = 32000
 	if len(req.Instructions) > maxInstructionsChars {
-		return Response{}, fmt.Errorf("skill: instructions exceeds maximum length of %d chars (got %d)", maxInstructionsChars, len(req.Instructions))
+		return Response{}, fmt.Errorf("%w: instructions exceeds maximum length of %d chars (got %d)", ErrValidation, maxInstructionsChars, len(req.Instructions))
 	}
 
 	// DX-01-J (ACT-F3-04): reject inert skill updates — no instructions AND no tool restrictions.

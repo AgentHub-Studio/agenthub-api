@@ -86,7 +86,11 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.Create(r.Context(), req)
 	if err != nil {
-		if errors.Is(err, ErrSkillInert) {
+		// ErrSkillInert e ErrValidation cobrem validações server-side
+		// (skill sem efeito, instructions > 32K chars). Sem essa branch,
+		// o usuário recebia 500 silencioso na UI ao colar texto longo
+		// nas instruções.
+		if errors.Is(err, ErrSkillInert) || errors.Is(err, ErrValidation) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
@@ -202,7 +206,11 @@ func (h *Handler) importSkillMD(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.Create(r.Context(), req)
 	if err != nil {
-		if errors.Is(err, ErrSkillInert) {
+		// ErrSkillInert e ErrValidation cobrem validações server-side
+		// (skill sem efeito, instructions > 32K chars). Sem essa branch,
+		// o usuário recebia 500 silencioso na UI ao colar texto longo
+		// nas instruções.
+		if errors.Is(err, ErrSkillInert) || errors.Is(err, ErrValidation) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
