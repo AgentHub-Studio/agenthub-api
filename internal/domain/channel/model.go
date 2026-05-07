@@ -20,6 +20,11 @@ var ErrTokenNotFound = errors.New("channel: token not found")
 // ErrSlugConflict is returned when a channel name-slug is already in use.
 var ErrSlugConflict = errors.New("channel: name conflict")
 
+// ErrValidation é retornado quando CreateChannelRequest falha
+// validação server-side (name/type vazios). Sem esse error, esses
+// erros caíam em 500 no handler genérico — UX terrível.
+var ErrValidation = errors.New("channel: validation failed")
+
 // ChannelType identifies the messaging platform.
 type ChannelType string
 

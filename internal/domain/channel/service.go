@@ -70,10 +70,10 @@ func (s *service) GetByID(ctx context.Context, id uuid.UUID) (ChannelResponse, e
 
 func (s *service) Create(ctx context.Context, req CreateChannelRequest) (ChannelTokenResponse, error) {
 	if req.Name == "" {
-		return ChannelTokenResponse{}, fmt.Errorf("channel: name is required")
+		return ChannelTokenResponse{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
 	if req.Type == "" {
-		return ChannelTokenResponse{}, fmt.Errorf("channel: type is required")
+		return ChannelTokenResponse{}, fmt.Errorf("%w: type is required", ErrValidation)
 	}
 
 	token, err := generateToken()
