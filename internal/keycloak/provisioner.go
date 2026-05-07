@@ -45,8 +45,13 @@ func NewProvisioner(cfg Config) *Provisioner {
 		cfg.FrontendClient = "agenthub-frontend"
 	}
 	return &Provisioner{
-		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		cfg: cfg,
+		// 120s — under sustained load (BDD ladder spinning up tenants
+		// back-to-back) Keycloak admin-cli can block >30s on a single
+		// POST /admin/realms while it imports the AgentHub realm template.
+		// A 30s ceiling caused PROVISIONING_FAILED rows that left tenants
+		// realm-less and no automatic retry to recover them.
+		httpClient: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -122,6 +127,24 @@ func (p *Provisioner) adminRequest(ctx context.Context, method, path string, bod
 		req.Header.Set("Content-Type", "application/json")
 	}
 	return p.httpClient.Do(req)
+}
+
+// DeleteRealm removes a Keycloak realm. Tolerates 404 (already gone) for idempotency.
+func (p *Provisioner) DeleteRealm(ctx context.Context, tenantID string) error {
+	resp, err := p.adminRequest(ctx, http.MethodDelete,
+		fmt.Sprintf("/admin/realms/%s", tenantID), nil)
+	if err != nil {
+		return fmt.Errorf("keycloak delete realm: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	body, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("delete realm %d: %s", resp.StatusCode, body)
 }
 
 func (p *Provisioner) createRealm(ctx context.Context, tenantID string) error {
