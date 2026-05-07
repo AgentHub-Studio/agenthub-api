@@ -137,6 +137,14 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return
 		}
+		// ErrSlugConflict precede a checagem genérica de validation
+		// para retornar 409 (consistente com create após L39 fix).
+		// 422 sugeriria "corrija seu input" enquanto 409 sugere
+		// "estado do servidor rejeita o pedido — tente outro slug".
+		if errors.Is(err, ErrSlugConflict) {
+			respond.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		if isValidationError(err) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
