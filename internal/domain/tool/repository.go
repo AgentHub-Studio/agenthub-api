@@ -278,8 +278,18 @@ func (r *Repository) BindToSkill(ctx context.Context, skillID uuid.UUID, req Bin
 	)
 	if err := row.Scan(&st.ID, &st.SkillID, &st.ToolID, &st.Priority, &st.IsActive, &st.CreatedAt); err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return SkillTool{}, ErrAlreadyBound
+		if errors.As(err, &pgErr) {
+			switch pgErr.Code {
+			case "23505":
+				// unique_violation — skill+tool já bound
+				return SkillTool{}, ErrAlreadyBound
+			case "23503":
+				// foreign_key_violation — skillID ou toolID não
+				// existem. Mapear para ErrNotFound pra o handler
+				// retornar 404 em vez de vazar o erro PG genérico
+				// como 500 (UX terrível e expõe schema interno).
+				return SkillTool{}, ErrNotFound
+			}
 		}
 		return SkillTool{}, fmt.Errorf("tool: bind to skill: %w", err)
 	}
