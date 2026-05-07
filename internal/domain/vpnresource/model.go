@@ -11,6 +11,12 @@ import (
 // ErrNotFound is returned when a VpnResource is not found.
 var ErrNotFound = errors.New("vpn resource not found")
 
+// ErrValidation é retornado quando CreateRequest falha validação
+// server-side (name vazio, etc). Antes do fix, qualquer erro do
+// service caía em 500 no handler genérico — incluindo body {}
+// que criava VpnResource com name="" persistido no banco.
+var ErrValidation = errors.New("vpn resource validation failed")
+
 // VpnResource represents an OpenVPN tunnel configuration.
 type VpnResource struct {
 	ID             uuid.UUID `db:"id"`

@@ -61,8 +61,13 @@ func (s *Service) GetByID(ctx context.Context, tenantID string, id uuid.UUID) (V
 	return s.repo.GetByID(ctx, tenantID, id)
 }
 
-// Create creates a new VPN resource.
+// Create creates a new VPN resource. Validação precede a inserção
+// para que body {} não persista um VpnResource com name="" (lixo
+// inerte que polui a tela de VPNs sem efeito útil).
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (VpnResource, error) {
+	if strings.TrimSpace(req.Name) == "" {
+		return VpnResource{}, fmt.Errorf("%w: name is required", ErrValidation)
+	}
 	v := VpnResource{
 		Name:           req.Name,
 		Description:    req.Description,
