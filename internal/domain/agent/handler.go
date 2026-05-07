@@ -86,6 +86,16 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.Create(r.Context(), req)
 	if err != nil {
+		// ErrSlugConflict deve virar 409 (não 422). 422 sugere
+		// "corrija seu input" enquanto 409 sugere "estado do servidor
+		// rejeita o pedido — tente outro slug". Sem essa branch o
+		// cliente não distingue validação de payload de conflito de
+		// recurso e retentaria criação inutilmente. Update já trata
+		// isso corretamente; create estava simétrico errado.
+		if errors.Is(err, ErrSlugConflict) {
+			respond.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
