@@ -118,7 +118,33 @@ func (s *Service) GetByID(ctx context.Context, tenantID string, id uuid.UUID) (O
 }
 
 // Create creates a new OAuth credential, encrypting all secret fields.
+//
+// Validation precede encryption — without it, body {} produzia
+// credenciais com name="" e authType="" salvas no banco (lixo
+// inerte que populava listings de Integrações sem efeito útil).
+// O handler converte ErrValidation em 422.
+func validateCreateRequest(req CreateRequest) error {
+	if strings.TrimSpace(req.Name) == "" {
+		return fmt.Errorf("%w: name is required", ErrValidation)
+	}
+	switch req.AuthType {
+	case AuthTypeOAuth2ClientCredentials,
+		AuthTypeOAuth2AuthorizationCode,
+		AuthTypeAPIKey,
+		AuthTypeBearerToken,
+		AuthTypeBasicAuth:
+		// supported
+	default:
+		return fmt.Errorf("%w: authType must be one of OAUTH2_CLIENT_CREDENTIALS|OAUTH2_AUTHORIZATION_CODE|API_KEY|BEARER_TOKEN|BASIC_AUTH (got %q)",
+			ErrValidation, req.AuthType)
+	}
+	return nil
+}
+
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (OAuthCredential, error) {
+	if err := validateCreateRequest(req); err != nil {
+		return OAuthCredential{}, err
+	}
 	clientSecret, err := s.encryptSecret(req.ClientSecret)
 	if err != nil {
 		return OAuthCredential{}, fmt.Errorf("oauth: encrypt client_secret: %w", err)
@@ -137,22 +163,31 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 	}
 
 	c := OAuthCredential{
-		Name:         req.Name,
-		AuthType:     req.AuthType,
-		TokenURL:     req.TokenURL,
-		ClientID:     req.ClientID,
-		ClientSecret: clientSecret,
-		Scopes:       req.Scopes,
-		APIKeyHeader: req.APIKeyHeader,
-		APIKeyValue:  apiKeyValue,
-		BearerToken:  bearerToken,
-		Username:     req.Username,
-		Password:     password,
-		AuthURL:      req.AuthURL,
-		RedirectURL:  req.RedirectURL,
-		CodeVerifier: req.CodeVerifier,
+		Name:           req.Name,
+		AuthType:       req.AuthType,
+		TokenURL:       req.TokenURL,
+		ClientID:       req.ClientID,
+		ClientSecret:   clientSecret,
+		Scopes:         req.Scopes,
+		APIKeyHeader:   req.APIKeyHeader,
+		APIKeyValue:    apiKeyValue,
+		APIKeyLocation: normalizeAPIKeyLocation(req.APIKeyLocation),
+		BearerToken:    bearerToken,
+		Username:       req.Username,
+		Password:       password,
+		AuthURL:        req.AuthURL,
+		RedirectURL:    req.RedirectURL,
+		CodeVerifier:   req.CodeVerifier,
 	}
 	return s.repo.Create(ctx, tenantID, c)
+}
+
+// normalizeAPIKeyLocation defaults empty/unknown values to HEADER for backward compat.
+func normalizeAPIKeyLocation(loc APIKeyLocation) APIKeyLocation {
+	if loc == APIKeyLocationQuery {
+		return APIKeyLocationQuery
+	}
+	return APIKeyLocationHeader
 }
 
 // Update updates an existing OAuth credential.
@@ -180,20 +215,21 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	}
 
 	c := OAuthCredential{
-		Name:         req.Name,
-		AuthType:     req.AuthType,
-		TokenURL:     req.TokenURL,
-		ClientID:     req.ClientID,
-		ClientSecret: clientSecret,
-		Scopes:       req.Scopes,
-		APIKeyHeader: req.APIKeyHeader,
-		APIKeyValue:  apiKeyValue,
-		BearerToken:  bearerToken,
-		Username:     req.Username,
-		Password:     password,
-		AuthURL:      req.AuthURL,
-		RedirectURL:  req.RedirectURL,
-		CodeVerifier: req.CodeVerifier,
+		Name:           req.Name,
+		AuthType:       req.AuthType,
+		TokenURL:       req.TokenURL,
+		ClientID:       req.ClientID,
+		ClientSecret:   clientSecret,
+		Scopes:         req.Scopes,
+		APIKeyHeader:   req.APIKeyHeader,
+		APIKeyValue:    apiKeyValue,
+		APIKeyLocation: normalizeAPIKeyLocation(req.APIKeyLocation),
+		BearerToken:    bearerToken,
+		Username:       req.Username,
+		Password:       password,
+		AuthURL:        req.AuthURL,
+		RedirectURL:    req.RedirectURL,
+		CodeVerifier:   req.CodeVerifier,
 	}
 	result, err := s.repo.Update(ctx, tenantID, id, c)
 	if err == nil {
@@ -280,7 +316,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 		if apiKeyValuePtr != nil {
 			val = *apiKeyValuePtr
 		}
-		return ResolveResponse{Header: header, Value: val}, nil
+		return ResolveResponse{Header: header, Value: val, Location: normalizeAPIKeyLocation(c.APIKeyLocation)}, nil
 
 	case AuthTypeBasicAuth:
 		passwordPtr, _ := s.DecryptSecret(c.Password)

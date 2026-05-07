@@ -78,6 +78,13 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 
 	created, err := h.svc.Create(r.Context(), tenantID, req)
 	if err != nil {
+		// ErrValidation veio do Service quando o request omite name
+		// ou usa authType fora do enum. Sem essa branch, body {} caía
+		// em 500 (silencioso na UI) ou em 201 com lixo persistido.
+		if errors.Is(err, ErrValidation) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}

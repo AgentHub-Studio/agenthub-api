@@ -38,7 +38,7 @@ func (r *Repository) ListAll(ctx context.Context, tenantID string, pr pagination
 
 	rows, err := conn.Query(ctx,
 		`SELECT id, name, auth_type, token_url, client_id, client_secret, scopes,
-		        api_key_header, api_key_value, bearer_token, username, password,
+		        api_key_header, api_key_value, api_key_location, bearer_token, username, password,
 		        auth_url, redirect_url, code_verifier, refresh_token, expires_at,
 		        created_at, updated_at
 		 FROM oauth_credential
@@ -56,7 +56,7 @@ func (r *Repository) ListAll(ctx context.Context, tenantID string, pr pagination
 		var c OAuthCredential
 		if err := rows.Scan(
 			&c.ID, &c.Name, &c.AuthType, &c.TokenURL, &c.ClientID, &c.ClientSecret,
-			&c.Scopes, &c.APIKeyHeader, &c.APIKeyValue, &c.BearerToken, &c.Username,
+			&c.Scopes, &c.APIKeyHeader, &c.APIKeyValue, &c.APIKeyLocation, &c.BearerToken, &c.Username,
 			&c.Password, &c.AuthURL, &c.RedirectURL, &c.CodeVerifier, &c.RefreshToken,
 			&c.ExpiresAt, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
@@ -78,7 +78,7 @@ func (r *Repository) GetByID(ctx context.Context, tenantID string, id uuid.UUID)
 	var c OAuthCredential
 	err = conn.QueryRow(ctx,
 		`SELECT id, name, auth_type, token_url, client_id, client_secret, scopes,
-		        api_key_header, api_key_value, bearer_token, username, password,
+		        api_key_header, api_key_value, api_key_location, bearer_token, username, password,
 		        auth_url, redirect_url, code_verifier, refresh_token, expires_at,
 		        created_at, updated_at
 		 FROM oauth_credential WHERE id = $1`,
@@ -107,19 +107,19 @@ func (r *Repository) Create(ctx context.Context, tenantID string, c OAuthCredent
 	err = conn.QueryRow(ctx,
 		`INSERT INTO oauth_credential
 		 (name, auth_type, token_url, client_id, client_secret, scopes,
-		  api_key_header, api_key_value, bearer_token, username, password,
+		  api_key_header, api_key_value, api_key_location, bearer_token, username, password,
 		  auth_url, redirect_url, code_verifier)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		 RETURNING id, name, auth_type, token_url, client_id, client_secret, scopes,
-		           api_key_header, api_key_value, bearer_token, username, password,
+		           api_key_header, api_key_value, api_key_location, bearer_token, username, password,
 		           auth_url, redirect_url, code_verifier, refresh_token, expires_at,
 		           created_at, updated_at`,
 		c.Name, c.AuthType, c.TokenURL, c.ClientID, c.ClientSecret, c.Scopes,
-		c.APIKeyHeader, c.APIKeyValue, c.BearerToken, c.Username, c.Password,
+		c.APIKeyHeader, c.APIKeyValue, c.APIKeyLocation, c.BearerToken, c.Username, c.Password,
 		c.AuthURL, c.RedirectURL, c.CodeVerifier,
 	).Scan(
 		&created.ID, &created.Name, &created.AuthType, &created.TokenURL, &created.ClientID,
-		&created.ClientSecret, &created.Scopes, &created.APIKeyHeader, &created.APIKeyValue,
+		&created.ClientSecret, &created.Scopes, &created.APIKeyHeader, &created.APIKeyValue, &created.APIKeyLocation,
 		&created.BearerToken, &created.Username, &created.Password,
 		&created.AuthURL, &created.RedirectURL, &created.CodeVerifier, &created.RefreshToken,
 		&created.ExpiresAt, &created.CreatedAt, &created.UpdatedAt,
@@ -139,20 +139,20 @@ func (r *Repository) Update(ctx context.Context, tenantID string, id uuid.UUID, 
 	err = conn.QueryRow(ctx,
 		`UPDATE oauth_credential SET
 		   name=$1, auth_type=$2, token_url=$3, client_id=$4, client_secret=$5, scopes=$6,
-		   api_key_header=$7, api_key_value=$8, bearer_token=$9, username=$10, password=$11,
-		   auth_url=$12, redirect_url=$13, code_verifier=$14, refresh_token=$15, expires_at=$16,
+		   api_key_header=$7, api_key_value=$8, api_key_location=$9, bearer_token=$10, username=$11, password=$12,
+		   auth_url=$13, redirect_url=$14, code_verifier=$15, refresh_token=$16, expires_at=$17,
 		   updated_at=NOW()
-		 WHERE id=$17
+		 WHERE id=$18
 		 RETURNING id, name, auth_type, token_url, client_id, client_secret, scopes,
-		           api_key_header, api_key_value, bearer_token, username, password,
+		           api_key_header, api_key_value, api_key_location, bearer_token, username, password,
 		           auth_url, redirect_url, code_verifier, refresh_token, expires_at,
 		           created_at, updated_at`,
 		c.Name, c.AuthType, c.TokenURL, c.ClientID, c.ClientSecret, c.Scopes,
-		c.APIKeyHeader, c.APIKeyValue, c.BearerToken, c.Username, c.Password,
+		c.APIKeyHeader, c.APIKeyValue, c.APIKeyLocation, c.BearerToken, c.Username, c.Password,
 		c.AuthURL, c.RedirectURL, c.CodeVerifier, c.RefreshToken, c.ExpiresAt, id,
 	).Scan(
 		&updated.ID, &updated.Name, &updated.AuthType, &updated.TokenURL, &updated.ClientID,
-		&updated.ClientSecret, &updated.Scopes, &updated.APIKeyHeader, &updated.APIKeyValue,
+		&updated.ClientSecret, &updated.Scopes, &updated.APIKeyHeader, &updated.APIKeyValue, &updated.APIKeyLocation,
 		&updated.BearerToken, &updated.Username, &updated.Password,
 		&updated.AuthURL, &updated.RedirectURL, &updated.CodeVerifier, &updated.RefreshToken,
 		&updated.ExpiresAt, &updated.CreatedAt, &updated.UpdatedAt,

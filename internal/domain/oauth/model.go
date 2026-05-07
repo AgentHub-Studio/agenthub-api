@@ -11,6 +11,12 @@ import (
 // ErrNotFound is returned when an OAuthCredential is not found.
 var ErrNotFound = errors.New("oauth credential not found")
 
+// ErrValidation is returned when a CreateRequest fails server-side
+// validation (empty name, unknown authType, etc). Without it the
+// service silently accepted credentials with empty name/authType
+// that were useless but persisted forever, polluting the tenant.
+var ErrValidation = errors.New("oauth credential validation failed")
+
 // AuthType represents the authentication mechanism for an OAuth credential.
 type AuthType string
 
@@ -22,6 +28,14 @@ const (
 	AuthTypeBasicAuth               AuthType = "BASIC_AUTH"
 )
 
+// APIKeyLocation indicates whether an API key is sent as an HTTP header or a query parameter.
+type APIKeyLocation string
+
+const (
+	APIKeyLocationHeader APIKeyLocation = "HEADER"
+	APIKeyLocationQuery  APIKeyLocation = "QUERY"
+)
+
 // OAuthCredential stores credentials for outbound HTTP authentication.
 type OAuthCredential struct {
 	ID           uuid.UUID `db:"id"`
@@ -31,8 +45,9 @@ type OAuthCredential struct {
 	ClientID     *string    `db:"client_id"`
 	ClientSecret *string    `db:"client_secret"`
 	Scopes       *string    `db:"scopes"`
-	APIKeyHeader *string    `db:"api_key_header"`
-	APIKeyValue  *string    `db:"api_key_value"`
+	APIKeyHeader   *string        `db:"api_key_header"`
+	APIKeyValue    *string        `db:"api_key_value"`
+	APIKeyLocation APIKeyLocation `db:"api_key_location"`
 	BearerToken  *string    `db:"bearer_token"`
 	Username     *string    `db:"username"`
 	Password     *string    `db:"password"`
@@ -55,18 +70,19 @@ type OAuthCredentialResponse struct {
 	ClientID     *string    `json:"clientId"`
 	ClientSecret *string    `json:"clientSecret"`
 	Scopes       *string    `json:"scopes"`
-	APIKeyHeader *string    `json:"apiKeyHeader"`
-	APIKeyValue  *string    `json:"apiKeyValue"`
-	BearerToken  *string    `json:"bearerToken"`
-	Username     *string    `json:"username"`
-	Password     *string    `json:"password"`
-	AuthURL      *string    `json:"authUrl"`
-	RedirectURL  *string    `json:"redirectUrl"`
-	CodeVerifier *string    `json:"codeVerifier"`
-	RefreshToken *string    `json:"refreshToken"`
-	ExpiresAt    *time.Time `json:"expiresAt"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	APIKeyHeader   *string        `json:"apiKeyHeader"`
+	APIKeyValue    *string        `json:"apiKeyValue"`
+	APIKeyLocation APIKeyLocation `json:"apiKeyLocation"`
+	BearerToken    *string        `json:"bearerToken"`
+	Username       *string        `json:"username"`
+	Password       *string        `json:"password"`
+	AuthURL        *string        `json:"authUrl"`
+	RedirectURL    *string        `json:"redirectUrl"`
+	CodeVerifier   *string        `json:"codeVerifier"`
+	RefreshToken   *string        `json:"refreshToken"`
+	ExpiresAt      *time.Time     `json:"expiresAt"`
+	CreatedAt      time.Time      `json:"createdAt"`
+	UpdatedAt      time.Time      `json:"updatedAt"`
 }
 
 // ResponseFrom converts an OAuthCredential to its public DTO, masking all secret fields.
@@ -79,8 +95,9 @@ func ResponseFrom(c OAuthCredential) OAuthCredentialResponse {
 		TokenURL:     c.TokenURL,
 		ClientID:     c.ClientID,
 		Scopes:       c.Scopes,
-		APIKeyHeader: c.APIKeyHeader,
-		Username:     c.Username,
+		APIKeyHeader:   c.APIKeyHeader,
+		APIKeyLocation: c.APIKeyLocation,
+		Username:       c.Username,
 		AuthURL:      c.AuthURL,
 		RedirectURL:  c.RedirectURL,
 		ExpiresAt:    c.ExpiresAt,
@@ -112,8 +129,9 @@ type CreateRequest struct {
 	ClientID     *string  `json:"clientId"`
 	ClientSecret *string  `json:"clientSecret"`
 	Scopes       *string  `json:"scopes"`
-	APIKeyHeader *string  `json:"apiKeyHeader"`
-	APIKeyValue  *string  `json:"apiKeyValue"`
+	APIKeyHeader   *string        `json:"apiKeyHeader"`
+	APIKeyValue    *string        `json:"apiKeyValue"`
+	APIKeyLocation APIKeyLocation `json:"apiKeyLocation"`
 	BearerToken  *string  `json:"bearerToken"`
 	Username     *string  `json:"username"`
 	Password     *string  `json:"password"`
@@ -123,8 +141,11 @@ type CreateRequest struct {
 }
 
 // ResolveResponse is the result of resolving an auth header.
+// Location indicates whether the credential should be applied as an HTTP
+// header (default) or a URL query parameter — relevant for API_KEY auth.
 type ResolveResponse struct {
-	Header string `json:"header"`
-	Value  string `json:"value"`
+	Header   string         `json:"header"`
+	Value    string         `json:"value"`
+	Location APIKeyLocation `json:"location,omitempty"`
 }
 
