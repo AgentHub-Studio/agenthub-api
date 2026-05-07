@@ -160,6 +160,17 @@ var tablesWithStatus = map[string]bool{
 	"knowledge_base": true,
 }
 
+// tablesWithSlug lists entity tables que possuem coluna `slug`.
+// knowledge_base é o único table per-tenant que NÃO tem slug — só
+// name/description. Sem este mapa, /api/search?q=test quebrava com
+// SQLSTATE 42703 ("column slug does not exist") quando atingia
+// a tabela knowledge_base.
+var tablesWithSlug = map[string]bool{
+	"agent": true,
+	"skill": true,
+	"tool":  true,
+}
+
 // searchTable queries a single table using full-text search (ts_rank) for queries >= 3 chars,
 // falling back to case-insensitive ILIKE for shorter queries.
 // Results are ranked by relevance descending.
@@ -176,6 +187,14 @@ func (r *pgRepository) searchTable(ctx context.Context, tenantID, table, resourc
 		statusExpr = "COALESCE(" + table + ".status::text,'')"
 	}
 
+	// Bug L74-fix: knowledge_base não tem coluna slug — referenciar
+	// COALESCE(slug,'') causava SQLSTATE 42703 e quebrava todo o
+	// command palette quando o user digitava query >= 3 chars.
+	slugExpr := "''"
+	if tablesWithSlug[table] {
+		slugExpr = "COALESCE(slug,'')"
+	}
+
 	var (
 		sqlStr string
 		args   []any
@@ -185,7 +204,7 @@ func (r *pgRepository) searchTable(ctx context.Context, tenantID, table, resourc
 		// Full-text search with relevance ranking.
 		// plainto_tsquery handles arbitrary input safely (no operator injection).
 		sqlStr = fmt.Sprintf(
-			`SELECT id::text, name, COALESCE(description,''), %s, COALESCE(slug,'')
+			`SELECT id::text, name, COALESCE(description,''), %s, %s
 			 FROM %s
 			 WHERE to_tsvector('portuguese', name || ' ' || COALESCE(description,''))
 			       @@ plainto_tsquery('portuguese', $1)
@@ -194,19 +213,19 @@ func (r *pgRepository) searchTable(ctx context.Context, tenantID, table, resourc
 			     plainto_tsquery('portuguese', $1)
 			 ) DESC
 			 LIMIT $2`,
-			statusExpr, table,
+			statusExpr, slugExpr, table,
 		)
 		args = []any{query, limit}
 	} else {
 		// Short query fallback: ILIKE ordered alphabetically.
 		pattern := "%" + query + "%"
 		sqlStr = fmt.Sprintf(
-			`SELECT id::text, name, COALESCE(description,''), %s, COALESCE(slug,'')
+			`SELECT id::text, name, COALESCE(description,''), %s, %s
 			 FROM %s
 			 WHERE name ILIKE $1 OR description ILIKE $1
 			 ORDER BY name ASC
 			 LIMIT $2`,
-			statusExpr, table,
+			statusExpr, slugExpr, table,
 		)
 		args = []any{pattern, limit}
 	}
