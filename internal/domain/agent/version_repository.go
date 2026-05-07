@@ -214,6 +214,11 @@ func (r *pgVersionRepository) Update(ctx context.Context, v AgentVersion) (Agent
 	return updated, nil
 }
 
+// Publish flips the version row to PUBLISHED and bumps the parent
+// agent's current_version pointer in the same transaction. Without
+// the agent update, /api/agents/{id} keeps reporting the previous
+// version even though a newer one is live — breaking rollback UX,
+// audit trails and metrics.
 func (r *pgVersionRepository) Publish(ctx context.Context, id uuid.UUID) (AgentVersion, error) {
 	conn, release, err := r.acquire(ctx)
 	if err != nil {
@@ -221,17 +226,33 @@ func (r *pgVersionRepository) Publish(ctx context.Context, id uuid.UUID) (AgentV
 	}
 	defer release()
 
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return AgentVersion{}, fmt.Errorf("agentVersion.Publish: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
 	q := fmt.Sprintf(`
 		UPDATE agent_version
 		SET status='PUBLISHED', published_at=NOW(), updated_at=NOW()
 		WHERE id=$1
 		RETURNING %s`, versionColumns)
-	v, err := scanVersion(conn.QueryRow(ctx, q, id))
+	v, err := scanVersion(tx.QueryRow(ctx, q, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentVersion{}, ErrVersionNotFound
 	}
 	if err != nil {
 		return AgentVersion{}, fmt.Errorf("agentVersion.Publish: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE agent SET current_version=$1, status='PUBLISHED', updated_at=NOW() WHERE id=$2`,
+		v.VersionNumber, v.AgentID); err != nil {
+		return AgentVersion{}, fmt.Errorf("agentVersion.Publish: update agent: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return AgentVersion{}, fmt.Errorf("agentVersion.Publish: commit: %w", err)
 	}
 	return v, nil
 }
