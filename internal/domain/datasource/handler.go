@@ -135,6 +135,13 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, err.Error())
 			return
 		}
+		// Update também passa por validateRequest — sem essa branch
+		// o operador recebia 500 quando enviava update parcial com
+		// host/type vazio.
+		if errors.Is(err, ErrValidation) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}

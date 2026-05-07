@@ -131,6 +131,13 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, err.Error())
 			return
 		}
+		// Service.Update agora valida (consistente com Create);
+		// retornar 422 em vez de 500 silencioso quando o operador
+		// envia body parcial sem name/authType.
+		if errors.Is(err, ErrValidation) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}

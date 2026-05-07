@@ -192,6 +192,13 @@ func normalizeAPIKeyLocation(loc APIKeyLocation) APIKeyLocation {
 
 // Update updates an existing OAuth credential.
 func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (OAuthCredential, error) {
+	// Reuso da validação do create — name + authType seguem mesmo
+	// contrato. Sem isso, o update aceitava body{} e zerava name/
+	// authType de uma credencial existente (deixava o tenant com
+	// integration quebrada e sem mensagem clara).
+	if err := validateCreateRequest(req); err != nil {
+		return OAuthCredential{}, err
+	}
 	existing, err := s.repo.GetByID(ctx, tenantID, id)
 	if err != nil {
 		return OAuthCredential{}, err
