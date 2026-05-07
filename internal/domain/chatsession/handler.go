@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
 const defaultSessionTTL = 30 * time.Minute
@@ -67,17 +69,17 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var payload sessionPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if payload.Token == "" || payload.TenantID == "" || payload.APIBaseURL == "" {
-		http.Error(w, "token, tenantId and apiBaseUrl are required", http.StatusBadRequest)
+		respond.Error(w, http.StatusBadRequest, "token, tenantId and apiBaseUrl are required")
 		return
 	}
 
 	key, err := newSessionKey()
 	if err != nil {
-		http.Error(w, "failed to create session", http.StatusInternalServerError)
+		respond.Error(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
 	h.store(key, payload)
@@ -92,7 +94,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 	payload, ok := h.load(key)
 	if !ok {
-		http.Error(w, "session not found", http.StatusNotFound)
+		respond.Error(w, http.StatusNotFound, "session not found")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -105,7 +107,7 @@ func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 	payload, ok := h.load(key)
 	if !ok {
-		http.Error(w, "session not found", http.StatusNotFound)
+		respond.Error(w, http.StatusNotFound, "session not found")
 		return
 	}
 
@@ -113,11 +115,11 @@ func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Token == "" {
-		http.Error(w, "token required", http.StatusBadRequest)
+		respond.Error(w, http.StatusBadRequest, "token required")
 		return
 	}
 
