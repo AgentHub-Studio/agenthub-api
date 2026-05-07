@@ -62,6 +62,16 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	cfg.MaxConnLifetime = time.Hour
 	cfg.MaxConnIdleTime = 30 * time.Minute
 
+	// Use exec_described mode: pgx still describes statements and gets
+	// type information for parameters/results, but does NOT cache plans
+	// across queries. Tenants live in distinct schemas (ah_{tenantId});
+	// the default cache_describe mode breaks with "cached plan must not
+	// change result type" (SQLSTATE 0A000) when the same SQL text is
+	// executed against different schemas on the same pooled connection.
+	// exec_described keeps typed parameters/results working (jsonb,
+	// vector, arrays) without the cross-schema staleness.
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
+
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("database: create pool: %w", err)
