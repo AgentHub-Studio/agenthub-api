@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
@@ -464,12 +465,15 @@ func (s *Service) GetDatabaseSchema(ctx context.Context, dataSourceID string) (D
 
 	dsID, err := uuid.Parse(dataSourceID)
 	if err != nil {
-		return DatabaseSchema{}, fmt.Errorf("tool: invalid dataSourceId: %w", err)
+		return DatabaseSchema{}, fmt.Errorf("%w: %v", ErrInvalidDataSourceID, err)
 	}
 
 	tenantID := s.tenantIDFn(ctx)
 	creds, err := s.dsRdr.GetDatasourceCreds(ctx, tenantID, dsID)
 	if err != nil {
+		if errors.Is(err, datasource.ErrNotFound) {
+			return DatabaseSchema{}, ErrDataSourceNotFound
+		}
 		return DatabaseSchema{}, fmt.Errorf("tool: get datasource: %w", err)
 	}
 

@@ -253,6 +253,14 @@ func (h *Handler) getDatabaseSchema(w http.ResponseWriter, r *http.Request) {
 	}
 	schema, err := h.svc.GetDatabaseSchema(r.Context(), dataSourceID)
 	if err != nil {
+		if errors.Is(err, ErrInvalidDataSourceID) {
+			respond.Error(w, http.StatusBadRequest, "invalid dataSourceId")
+			return
+		}
+		if errors.Is(err, ErrDataSourceNotFound) {
+			respond.Error(w, http.StatusNotFound, "datasource not found")
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}

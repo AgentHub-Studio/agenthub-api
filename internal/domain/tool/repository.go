@@ -27,6 +27,12 @@ var ErrDuplicateName = errors.New("tool: a tool with this name already exists")
 // ErrValidation is returned when a tool request fails business validation.
 var ErrValidation = errors.New("tool: validation failed")
 
+// ErrInvalidDataSourceID is returned when the dataSourceId query param is malformed.
+var ErrInvalidDataSourceID = errors.New("tool: invalid dataSourceId")
+
+// ErrDataSourceNotFound is returned when the datasource referenced by dataSourceId does not exist.
+var ErrDataSourceNotFound = errors.New("tool: datasource not found")
+
 // ToolRepository defines the persistence interface for Tool.
 type ToolRepository interface {
 	List(ctx context.Context, req pagination.PageRequest, toolType string) ([]Tool, int64, error)
