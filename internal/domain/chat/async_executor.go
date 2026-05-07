@@ -59,14 +59,35 @@ func resolveRunTimeout() time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
+// MetricsRecorder is the slim interface AsyncExecutor needs to persist
+// agent_metrics rows after a run completes. metrics.Service satisfies it.
+type MetricsRecorder interface {
+	Record(ctx context.Context, tenantID string, req MetricsRecord) error
+}
+
+// MetricsRecord mirrors metrics.RecordRequest with only the fields the
+// AsyncExecutor populates from RunMetadata. Defined here to avoid an
+// import cycle between chat and metrics.
+type MetricsRecord struct {
+	AgentID          uuid.UUID
+	SessionID        string
+	ModelName        string
+	Provider         string
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	LatencyMs        int64
+}
+
 // AsyncExecutor handles asynchronous execution of chat runs via RabbitMQ.
 type AsyncExecutor struct {
-	repo           Repository
-	runner         SessionRunner
-	agentLoader    AgentLoader // optional: used to enrich RunInput with agent bindings
-	connURL        string
-	runTimeout     time.Duration
-	bufferRegistry *RunEventBufferRegistry
+	repo            Repository
+	runner          SessionRunner
+	agentLoader     AgentLoader // optional: used to enrich RunInput with agent bindings
+	metricsRecorder MetricsRecorder
+	connURL         string
+	runTimeout      time.Duration
+	bufferRegistry  *RunEventBufferRegistry
 	// cancellers maps runID → context.CancelFunc for in-flight worker tasks
 	// in this process. Populated in processTask and cleared on completion.
 	// Allows the HTTP handler to abort an async run from POST /run/{id}/cancel.
@@ -74,6 +95,14 @@ type AsyncExecutor struct {
 	// cancelled records runIDs explicitly cancelled by Cancel() so processTask
 	// can distinguish a deliberate cancel from a timeout when ctx.Err() fires.
 	cancelled sync.Map
+}
+
+// WithMetricsRecorder wires the metrics service so each completed async
+// run inserts a row in agent_metrics. Without this, the table is only
+// populated by external POST /api/metrics calls.
+func (e *AsyncExecutor) WithMetricsRecorder(rec MetricsRecorder) *AsyncExecutor {
+	e.metricsRecorder = rec
+	return e
 }
 
 func NewAsyncExecutor(repo Repository, runner SessionRunner, connURL string) *AsyncExecutor {
@@ -478,6 +507,59 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 
 	_ = e.repo.MarkRunCompleted(ctx, task.RunID)
 	slog.Info("chat: background run completed", "runId", task.RunID)
+
+	// Persist agent_metrics row from the run metadata so the metrics
+	// dashboards and cost-tracking endpoints have data without requiring
+	// an out-of-band POST /api/metrics. session.AgentID is non-nil at
+	// this point — defaulted earlier in processTask if missing.
+	if e.metricsRecorder != nil && session.AgentID != nil {
+		e.recordMetricsFromRun(cleanupCtx, task, *session.AgentID)
+	}
+}
+
+// recordMetricsFromRun reads the chat_run row that processTask just
+// completed and inserts a corresponding agent_metrics row. Token totals
+// come from RunMetadata; provider/model from the same payload. Errors
+// are logged but never propagate — a failed metric must not retry the
+// whole run.
+func (e *AsyncExecutor) recordMetricsFromRun(ctx context.Context, task ChatRunTask, agentID uuid.UUID) {
+	run, err := e.repo.GetRunByID(ctx, task.RunID)
+	if err != nil {
+		slog.Warn("metrics: failed to load run for metric recording", "runId", task.RunID, "err", err)
+		return
+	}
+	if len(run.Metadata) == 0 {
+		return
+	}
+	var meta struct {
+		TotalInputTokens  int    `json:"totalInputTokens"`
+		TotalOutputTokens int    `json:"totalOutputTokens"`
+		ModelUsed         string `json:"modelUsed"`
+		ProviderUsed      string `json:"providerUsed"`
+		DurationMs        int64  `json:"durationMs"`
+	}
+	if err := json.Unmarshal(run.Metadata, &meta); err != nil {
+		slog.Warn("metrics: failed to parse run metadata", "runId", task.RunID, "err", err)
+		return
+	}
+	if meta.TotalInputTokens == 0 && meta.TotalOutputTokens == 0 {
+		// No tokens reported (provider didn't include usage) — skip the
+		// row to avoid polluting metrics with zeros.
+		return
+	}
+	tenantID := strings.TrimPrefix(task.TenantID, "ah_")
+	if err := e.metricsRecorder.Record(ctx, tenantID, MetricsRecord{
+		AgentID:          agentID,
+		SessionID:        task.SessionID.String(),
+		ModelName:        meta.ModelUsed,
+		Provider:         meta.ProviderUsed,
+		PromptTokens:     meta.TotalInputTokens,
+		CompletionTokens: meta.TotalOutputTokens,
+		TotalTokens:      meta.TotalInputTokens + meta.TotalOutputTokens,
+		LatencyMs:        meta.DurationMs,
+	}); err != nil {
+		slog.Warn("metrics: record failed", "runId", task.RunID, "err", err)
+	}
 }
 
 // providerNameRE captures the provider slug out of error strings like

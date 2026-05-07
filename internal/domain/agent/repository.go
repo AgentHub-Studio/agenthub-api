@@ -59,7 +59,11 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &pgRepository{pool: pool}
 }
 
-const agentColumns = `id, name, slug, description, status, current_version, system_prompt, model_config, permission_rules, config, enable_management, created_at, updated_at`
+// COALESCE(current_version, 0): seed agents (e.g. AgentHub Assistant
+// imported via realm initdata) may carry NULL until they are explicitly
+// published; without the COALESCE, scanAgent fails when listing agents
+// in any tenant whose seed batch left the column unset.
+const agentColumns = `id, name, slug, description, status, COALESCE(current_version, 0) AS current_version, system_prompt, model_config, permission_rules, config, enable_management, created_at, updated_at`
 
 func scanAgent(row pgx.Row) (Agent, error) {
 	var a Agent

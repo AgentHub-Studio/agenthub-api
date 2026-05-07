@@ -34,11 +34,13 @@ func NewHandler(svc metricsService) *Handler {
 	return &Handler{svc: svc}
 }
 
-// AgentRoutes returns a router for agent-scoped metric endpoints (mount under /api/agents/{agentId}).
+// AgentRoutes returns a router for agent-scoped metric endpoints. server.go
+// already mounts this under /api/agents/{agentId}/metrics, so paths here
+// must be relative to that prefix (was emitting /metrics/metrics before).
 func (h *Handler) AgentRoutes() http.Handler {
 	r := chi.NewRouter()
-	r.Get("/metrics", h.listByAgent)
-	r.Get("/metrics/summary", h.agentSummary)
+	r.Get("/", h.listByAgent)
+	r.Get("/summary", h.agentSummary)
 	return r
 }
 

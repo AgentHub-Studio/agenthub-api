@@ -149,6 +149,10 @@ type streamDelta struct {
 
 type streamEvent struct {
 	Choices []streamChoice `json:"choices"`
+	// Usage is populated on the final chunk when stream_options.include_usage
+	// is true. Older OpenAI-compatible servers omit this field; nil means the
+	// caller should fall back to its own token estimation.
+	Usage *usage `json:"usage,omitempty"`
 }
 
 // ---- ChatModel implementation ----
@@ -290,6 +294,20 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 				}
 
 				ch <- chunk
+			}
+
+			// Usage chunk: OpenAI emits a final event with no choices and a
+			// populated `usage` object when stream_options.include_usage=true.
+			// Forward it as a StreamChunk so the Runner can record tokens
+			// without a separate /usage call.
+			if event.Usage != nil && event.Usage.TotalTokens > 0 {
+				ch <- ai.StreamChunk{
+					Usage: &ai.Usage{
+						PromptTokens:     event.Usage.PromptTokens,
+						CompletionTokens: event.Usage.CompletionTokens,
+						TotalTokens:      event.Usage.TotalTokens,
+					},
+				}
 			}
 		}
 

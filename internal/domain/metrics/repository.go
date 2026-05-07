@@ -65,7 +65,10 @@ func (r *Repository) ListByAgent(ctx context.Context, tenantID string, agentID u
 	return items, total, rows.Err()
 }
 
-// Record inserts a new metrics entry.
+// Record inserts a new metrics entry. agent_execution_id is FK-constrained
+// to ah_*.agent_execution (DAG legacy table). The new agentic flow does
+// not create execution rows, so callers may leave AgentExecutionID as
+// uuid.Nil — we pass NULL in that case to honour the FK.
 func (r *Repository) Record(ctx context.Context, tenantID string, m AgentMetrics) (AgentMetrics, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
@@ -73,7 +76,13 @@ func (r *Repository) Record(ctx context.Context, tenantID string, m AgentMetrics
 	}
 	defer release()
 
+	var executionID any
+	if m.AgentExecutionID != uuid.Nil {
+		executionID = m.AgentExecutionID
+	}
+
 	var created AgentMetrics
+	var scannedExecutionID *uuid.UUID
 	err = conn.QueryRow(ctx,
 		`INSERT INTO agent_metrics
 		 (agent_id, agent_execution_id, session_id, model_name, provider,
@@ -81,13 +90,16 @@ func (r *Repository) Record(ctx context.Context, tenantID string, m AgentMetrics
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		 RETURNING id, agent_id, agent_execution_id, session_id, model_name, provider,
 		           prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd, latency_ms, created_at`,
-		m.AgentID, m.AgentExecutionID, m.SessionID, m.ModelName, m.Provider,
+		m.AgentID, executionID, m.SessionID, m.ModelName, m.Provider,
 		m.PromptTokens, m.CompletionTokens, m.TotalTokens, m.EstimatedCostUSD, m.LatencyMs,
 	).Scan(
-		&created.ID, &created.AgentID, &created.AgentExecutionID, &created.SessionID,
+		&created.ID, &created.AgentID, &scannedExecutionID, &created.SessionID,
 		&created.ModelName, &created.Provider, &created.PromptTokens, &created.CompletionTokens,
 		&created.TotalTokens, &created.EstimatedCostUSD, &created.LatencyMs, &created.CreatedAt,
 	)
+	if scannedExecutionID != nil {
+		created.AgentExecutionID = *scannedExecutionID
+	}
 	return created, err
 }
 

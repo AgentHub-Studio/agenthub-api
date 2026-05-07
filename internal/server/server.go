@@ -167,7 +167,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	oauthSvc := oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey)
 	oauthHandler := oauth.NewHandler(oauthSvc)
 	auditHandler := audit.NewHandler(auditSvc)
-	metricsHandler := metrics.NewHandler(metrics.NewService(metrics.NewRepository(pool)))
+	metricsSvc := metrics.NewService(metrics.NewRepository(pool))
+	metricsHandler := metrics.NewHandler(metricsSvc)
 	vpnSvc := vpnresource.NewService(vpnresource.NewRepository(pool))
 	vpnHandler := vpnresource.NewHandler(vpnSvc)
 	datasourceHandler := datasource.NewHandler(datasourceSvc)
@@ -203,6 +204,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 				bindingRepo: agent.NewBindingRepository(pool),
 			})
 		}
+		// Persist agent_metrics rows after every completed async run.
+		chatExecutor = chatExecutor.WithMetricsRecorder(&metricsRecorderAdapter{svc: metricsSvc})
 		go func() {
 			if err := chatExecutor.StartWorker(context.Background()); err != nil {
 				slog.Error("rabbitmq: chat worker failed", "err", err)
@@ -656,6 +659,26 @@ func buildDefaultChatModel() ai.ChatModel {
 		return openrouter.New(envCfg.OpenRouterAPIKey, envCfg.OpenRouterBaseURL, "agenthub")
 	}
 	return nil
+}
+
+// metricsRecorderAdapter bridges chat.MetricsRecorder to metrics.Service
+// without dragging the metrics package into chat (avoids import cycle).
+type metricsRecorderAdapter struct {
+	svc *metrics.Service
+}
+
+func (m *metricsRecorderAdapter) Record(ctx context.Context, tenantID string, req chat.MetricsRecord) error {
+	_, err := m.svc.Record(ctx, tenantID, metrics.RecordRequest{
+		AgentID:          req.AgentID,
+		SessionID:        req.SessionID,
+		ModelName:        req.ModelName,
+		Provider:         req.Provider,
+		PromptTokens:     req.PromptTokens,
+		CompletionTokens: req.CompletionTokens,
+		TotalTokens:      req.TotalTokens,
+		LatencyMs:        req.LatencyMs,
+	})
+	return err
 }
 
 // agentConfigAdapter adapts agent.Repository to chat.AgentLoader.
