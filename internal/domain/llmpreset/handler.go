@@ -89,6 +89,14 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httputil.Conflict(w, err.Error())
 		return
 	}
+	// ErrValidation veio de validação semantic do service (name/
+	// provider/model vazios). 422 é o status correto pra "input
+	// bem-formado mas semanticamente inválido" — alinha com
+	// agent/oauth/datasource/skill/vpn que já usam 422.
+	if errors.Is(err, ErrValidation) {
+		httputil.UnprocessableEntity(w, err.Error())
+		return
+	}
 	if err != nil {
 		httputil.BadRequest(w, err.Error())
 		return

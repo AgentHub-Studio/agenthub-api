@@ -66,13 +66,13 @@ func (s *service) Get(ctx context.Context, tenantID string, id uuid.UUID) (LLMPr
 
 func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPresetRequest) (LLMPresetResponse, error) {
 	if req.Name == "" {
-		return LLMPresetResponse{}, fmt.Errorf("name is required")
+		return LLMPresetResponse{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
 	if req.Provider == "" {
-		return LLMPresetResponse{}, fmt.Errorf("provider is required")
+		return LLMPresetResponse{}, fmt.Errorf("%w: provider is required", ErrValidation)
 	}
 	if req.Model == "" {
-		return LLMPresetResponse{}, fmt.Errorf("model is required")
+		return LLMPresetResponse{}, fmt.Errorf("%w: model is required", ErrValidation)
 	}
 	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
 	if err != nil {

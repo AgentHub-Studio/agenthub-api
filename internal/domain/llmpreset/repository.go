@@ -19,6 +19,14 @@ var ErrNotFound = errors.New("llmpreset: not found")
 // ErrDuplicateName is returned when a preset with the same name already exists for the tenant.
 var ErrDuplicateName = errors.New("llmpreset: name already exists for this tenant")
 
+// ErrValidation é retornado quando CreateLLMPresetRequest falha
+// validação server-side (name/provider/model vazios). Antes, esses
+// erros viravam 400 no handler — inconsistente com agent/oauth/
+// datasource/skill/vpn que usam 422 (semantic validation). 422 é
+// o status correto pra "input bem-formado mas semanticamente
+// inválido".
+var ErrValidation = errors.New("llmpreset: validation failed")
+
 // Repository defines persistence operations for LLMPreset.
 type Repository interface {
 	FindAll(ctx context.Context, tenantID string, req pagination.PageRequest) ([]LLMPreset, int64, error)

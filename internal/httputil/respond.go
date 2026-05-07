@@ -48,3 +48,12 @@ func InternalServerError(w http.ResponseWriter, message string) {
 func Conflict(w http.ResponseWriter, message string) {
 	Error(w, http.StatusConflict, message)
 }
+
+// UnprocessableEntity writes a 422 error response. Use for inputs
+// que são bem-formados (parse JSON ok) mas falham validação
+// semântica (campos obrigatórios vazios, enum value desconhecido,
+// limites excedidos, etc) — distingue do 400 que cobre malformed
+// requests sem alcançar a camada de service.
+func UnprocessableEntity(w http.ResponseWriter, message string) {
+	Error(w, http.StatusUnprocessableEntity, message)
+}
