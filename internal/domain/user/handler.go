@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 )
@@ -44,6 +45,10 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(id); err != nil {
+		httputil.BadRequest(w, "invalid user id")
+		return
+	}
 	u, err := h.svc.Get(r.Context(), id)
 	if errors.Is(err, ErrNotFound) {
 		httputil.NotFound(w, "user not found")
@@ -76,6 +81,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(id); err != nil {
+		httputil.BadRequest(w, "invalid user id")
+		return
+	}
 	var req UpdateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
@@ -95,6 +104,10 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(id); err != nil {
+		httputil.BadRequest(w, "invalid user id")
+		return
+	}
 	err := h.svc.Delete(r.Context(), id)
 	if errors.Is(err, ErrNotFound) {
 		httputil.NotFound(w, "user not found")
@@ -110,6 +123,10 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) assignRole(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	role := chi.URLParam(r, "role")
+	if _, err := uuid.Parse(id); err != nil {
+		httputil.BadRequest(w, "invalid user id")
+		return
+	}
 	if err := h.svc.AssignRole(r.Context(), id, role); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httputil.NotFound(w, "user not found")
@@ -124,6 +141,10 @@ func (h *Handler) assignRole(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) removeRole(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	role := chi.URLParam(r, "role")
+	if _, err := uuid.Parse(id); err != nil {
+		httputil.BadRequest(w, "invalid user id")
+		return
+	}
 	if err := h.svc.RemoveRole(r.Context(), id, role); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httputil.NotFound(w, "user not found")
@@ -137,6 +158,10 @@ func (h *Handler) removeRole(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(id); err != nil {
+		httputil.BadRequest(w, "invalid user id")
+		return
+	}
 	if err := h.svc.ResetPassword(r.Context(), id); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httputil.NotFound(w, "user not found")
