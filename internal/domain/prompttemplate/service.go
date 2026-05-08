@@ -72,6 +72,14 @@ func (s *Service) Create(ctx context.Context, agentID *uuid.UUID, req CreateRequ
 		return Response{}, fmt.Errorf("prompt template: content is required")
 	}
 
+	exists, err := s.repo.ExistsBySlug(ctx, agentID, req.Slug)
+	if err != nil {
+		return Response{}, fmt.Errorf("prompt template: check duplicate: %w", err)
+	}
+	if exists {
+		return Response{}, ErrDuplicateSlug
+	}
+
 	category := CategoryCustom
 	if req.Category != "" {
 		category = Category(req.Category)

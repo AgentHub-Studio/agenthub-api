@@ -140,6 +140,27 @@ func (r *Repository) ListAll(ctx context.Context, category string, req paginatio
 }
 
 // Create inserts a new prompt template.
+// ExistsBySlug checks if a prompt template with the given (agentID, slug) exists.
+// Handles NULL agent_id correctly using IS NOT DISTINCT FROM.
+func (r *Repository) ExistsBySlug(ctx context.Context, agentID *uuid.UUID, slug string) (bool, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+
+	var exists bool
+	err = conn.QueryRow(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM prompt_template
+			WHERE agent_id IS NOT DISTINCT FROM $1 AND slug = $2
+		)`,
+		agentID, slug,
+	).Scan(&exists)
+	return exists, err
+}
+
 func (r *Repository) Create(ctx context.Context, t PromptTemplate) (PromptTemplate, error) {
 	tenantID := tenant.FromContext(ctx)
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
