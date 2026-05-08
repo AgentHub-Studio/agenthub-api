@@ -39,6 +39,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/agents/{agentId}/triggers", h.list)
 	r.Get("/api/agents/{agentId}/triggers/{triggerId}", h.getByID)
 	r.Put("/api/agents/{agentId}/triggers/{triggerId}", h.update)
+	r.Patch("/api/agents/{agentId}/triggers/{triggerId}", h.update)
 	r.Delete("/api/agents/{agentId}/triggers/{triggerId}", h.delete)
 	r.Get("/api/agents/{agentId}/triggers/{triggerId}/runs", h.listRuns)
 }

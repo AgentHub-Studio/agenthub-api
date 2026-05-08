@@ -28,6 +28,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Post("/", h.create)
 		r.Get("/{id}", h.getByID)
 		r.Put("/{id}", h.update)
+		r.Patch("/{id}", h.update)
 		r.Delete("/{id}", h.delete)
 	})
 }
