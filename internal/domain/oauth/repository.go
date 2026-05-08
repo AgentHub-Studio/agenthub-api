@@ -85,7 +85,7 @@ func (r *Repository) GetByID(ctx context.Context, tenantID string, id uuid.UUID)
 		id,
 	).Scan(
 		&c.ID, &c.Name, &c.AuthType, &c.TokenURL, &c.ClientID, &c.ClientSecret,
-		&c.Scopes, &c.APIKeyHeader, &c.APIKeyValue, &c.BearerToken, &c.Username,
+		&c.Scopes, &c.APIKeyHeader, &c.APIKeyValue, &c.APIKeyLocation, &c.BearerToken, &c.Username,
 		&c.Password, &c.AuthURL, &c.RedirectURL, &c.CodeVerifier, &c.RefreshToken,
 		&c.ExpiresAt, &c.CreatedAt, &c.UpdatedAt,
 	)
