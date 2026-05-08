@@ -137,11 +137,15 @@ func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (Listing, error
 }
 
 // Create inserts a new listing.
+// Bug 40 fix: columns 'name', 'slug', 'type', 'created_at' são GENERATED
+// ALWAYS STORED (aliases backed by Java schema). INSERT usa apenas
+// source columns (package_*, published_at no lugar de created_at).
+// version e tags são NOT NULL — defaults via service.
 func (r *Repository) Create(ctx context.Context, l Listing) (Listing, error) {
 	const q = `INSERT INTO marketplace_listing
-	             (id, tenant_id, package_id, name, slug, description, type, category, status,
-	              avg_rating, review_count, created_at, updated_at)
-	           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+	             (id, tenant_id, package_id, package_name, package_slug, description, package_type, category, status,
+	              avg_rating, review_count, version, tags, published_at, updated_at)
+	           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'1.0.0','{}',NOW(),NOW())
 	           RETURNING id, tenant_id, package_id, name, slug, description, type, category,
 	             status, avg_rating, review_count, created_at, updated_at`
 	row := r.db.QueryRow(ctx, q,
@@ -151,9 +155,10 @@ func (r *Repository) Create(ctx context.Context, l Listing) (Listing, error) {
 }
 
 // Update updates a listing.
+// Bug 40 fix: 'name' is GENERATED — update via 'package_name' source column.
 func (r *Repository) Update(ctx context.Context, l Listing) (Listing, error) {
 	const q = `UPDATE marketplace_listing
-	           SET name=$2, description=$3, category=$4, updated_at=NOW()
+	           SET package_name=$2, description=$3, category=$4, updated_at=NOW()
 	           WHERE id=$1
 	           RETURNING id, tenant_id, package_id, name, slug, description, type, category,
 	             status, avg_rating, review_count, created_at, updated_at`
