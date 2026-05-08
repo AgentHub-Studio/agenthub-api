@@ -103,6 +103,12 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	config := req.Config
 	if isSQLToolType(req.Type) {
 		config = normalizeDataSourceID(config)
+		var cfgMap map[string]any
+		_ = json.Unmarshal(config, &cfgMap)
+		q, _ := cfgMap["query"].(string)
+		if strings.TrimSpace(q) == "" {
+			return Response{}, fmt.Errorf("%w: query is required for SQL tools", ErrValidation)
+		}
 	}
 	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
