@@ -2,10 +2,12 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
@@ -57,7 +59,15 @@ func (r *Repository) Create(ctx context.Context, rev Review) (Review, error) {
 	           VALUES ($1,$2,$3,$4,$5,NOW())
 	           RETURNING id, listing_id, tenant_id, rating, comment, created_at`
 	row := r.db.QueryRow(ctx, q, rev.ID, rev.ListingID, rev.TenantID, rev.Rating, rev.Comment)
-	return scanRow(row)
+	created, err := scanRow(row)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return Review{}, ErrDuplicate
+		}
+		return Review{}, err
+	}
+	return created, nil
 }
 
 // Delete removes a review.
