@@ -135,6 +135,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 
 	created, err := s.repo.Create(ctx, c)
 	if err != nil {
+		// Detecta unique constraint violation (SQLSTATE 23505) e
+		// retorna sentinel limpo, permitindo handler mapear para 409.
+		msg := err.Error()
+		for i := 0; i+5 <= len(msg); i++ {
+			if msg[i:i+5] == "23505" {
+				return McpServerConfigResponse{}, ErrDuplicateName
+			}
+		}
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: create: %w", err)
 	}
 

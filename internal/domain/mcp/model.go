@@ -10,6 +10,10 @@ import (
 // ErrNotFound is returned when an MCP server config cannot be found.
 var ErrNotFound = errors.New("mcp: not found")
 
+// ErrDuplicateName é retornado quando POST tenta criar mcp-server-config
+// com nome já existente. Mapeia para 409.
+var ErrDuplicateName = errors.New("mcp: name already exists")
+
 // McpServerConfig is the domain entity (table: mcp_server_config).
 // No tenant_id field — isolation is provided via schema search_path.
 type McpServerConfig struct {
