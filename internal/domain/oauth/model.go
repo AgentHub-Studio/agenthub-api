@@ -17,6 +17,10 @@ var ErrNotFound = errors.New("oauth credential not found")
 // that were useless but persisted forever, polluting the tenant.
 var ErrValidation = errors.New("oauth credential validation failed")
 
+// ErrDuplicateName é retornado quando um POST tenta criar
+// credencial com nome que já existe no tenant. Mapeia para 409.
+var ErrDuplicateName = errors.New("oauth credential: name already exists")
+
 // AuthType represents the authentication mechanism for an OAuth credential.
 type AuthType string
 

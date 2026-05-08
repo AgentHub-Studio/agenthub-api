@@ -95,6 +95,24 @@ func (r *Repository) GetByID(ctx context.Context, tenantID string, id uuid.UUID)
 	return c, err
 }
 
+// ExistsByName retorna true se já existir credencial com o mesmo
+// nome no tenant. Usado pelo service para detectar duplicatas
+// antes do INSERT (sem isso, dois POST com mesmo name geravam
+// 2 registros idênticos no listing).
+func (r *Repository) ExistsByName(ctx context.Context, tenantID, name string) (bool, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	var exists bool
+	err = conn.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM oauth_credential WHERE name = $1)`,
+		name,
+	).Scan(&exists)
+	return exists, err
+}
+
 // Create inserts a new credential for the given tenant.
 func (r *Repository) Create(ctx context.Context, tenantID string, c OAuthCredential) (OAuthCredential, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)

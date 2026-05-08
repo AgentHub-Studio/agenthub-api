@@ -22,6 +22,7 @@ import (
 type CredentialRepository interface {
 	ListAll(ctx context.Context, tenantID string, pr pagination.PageRequest) ([]OAuthCredential, int, error)
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (OAuthCredential, error)
+	ExistsByName(ctx context.Context, tenantID, name string) (bool, error)
 	Create(ctx context.Context, tenantID string, c OAuthCredential) (OAuthCredential, error)
 	Update(ctx context.Context, tenantID string, id uuid.UUID, c OAuthCredential) (OAuthCredential, error)
 	Delete(ctx context.Context, tenantID string, id uuid.UUID) error
@@ -177,6 +178,13 @@ func ptrEmpty(p *string) bool {
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (OAuthCredential, error) {
 	if err := validateCreateRequest(req); err != nil {
 		return OAuthCredential{}, err
+	}
+	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
+	if err != nil {
+		return OAuthCredential{}, fmt.Errorf("oauth: check duplicate name: %w", err)
+	}
+	if exists {
+		return OAuthCredential{}, ErrDuplicateName
 	}
 	clientSecret, err := s.encryptSecret(req.ClientSecret)
 	if err != nil {
