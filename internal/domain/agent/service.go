@@ -207,6 +207,9 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	} else if !slugPattern.MatchString(slug) {
 		return AgentResponse{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrInvalidRequest, slug)
 	}
+	if len(slug) > 255 {
+		return AgentResponse{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(slug))
+	}
 	config := req.Config
 	if len(config) == 0 {
 		config = json.RawMessage(`{}`)
