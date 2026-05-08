@@ -74,6 +74,12 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	if req.Model == "" {
 		return LLMPresetResponse{}, fmt.Errorf("%w: model is required", ErrValidation)
 	}
+	if req.Temperature < 0 || req.Temperature > 2 {
+		return LLMPresetResponse{}, fmt.Errorf("%w: temperature must be between 0 and 2 (got %v)", ErrValidation, req.Temperature)
+	}
+	if req.MaxTokens < 0 {
+		return LLMPresetResponse{}, fmt.Errorf("%w: maxTokens must be >= 0 (got %d)", ErrValidation, req.MaxTokens)
+	}
 	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
 	if err != nil {
 		return LLMPresetResponse{}, err
