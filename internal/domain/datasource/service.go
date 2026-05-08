@@ -13,6 +13,7 @@ import (
 type DataSourceRepository interface {
 	ListAll(ctx context.Context, tenantID string, pr pagination.PageRequest) ([]DataSource, int, error)
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (DataSource, error)
+	ExistsByName(ctx context.Context, tenantID, name string) (bool, error)
 	Create(ctx context.Context, tenantID string, d DataSource) (DataSource, error)
 	Update(ctx context.Context, tenantID string, id uuid.UUID, d DataSource) (DataSource, error)
 	Delete(ctx context.Context, tenantID string, id uuid.UUID) error
@@ -86,6 +87,13 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 	applyDefaults(&req)
 	if err := validateRequest(req); err != nil {
 		return DataSource{}, err
+	}
+	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
+	if err != nil {
+		return DataSource{}, fmt.Errorf("datasource: check duplicate name: %w", err)
+	}
+	if exists {
+		return DataSource{}, ErrDuplicateName
 	}
 	d := DataSource{
 		Name:          req.Name,

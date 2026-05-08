@@ -17,6 +17,10 @@ var ErrNotFound = errors.New("datasource not found")
 // como "erro do servidor" — UX terrível na UI de Datasources.
 var ErrValidation = errors.New("datasource validation failed")
 
+// ErrDuplicateName é retornado quando POST tenta criar datasource
+// com nome já existente no tenant. Mapeia para 409.
+var ErrDuplicateName = errors.New("datasource: name already exists")
+
 // DataSourceType represents the database engine type.
 type DataSourceType string
 

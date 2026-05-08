@@ -89,6 +89,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+		if errors.Is(err, ErrDuplicateName) {
+			respond.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}

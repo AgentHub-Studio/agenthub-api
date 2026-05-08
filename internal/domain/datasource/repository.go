@@ -87,6 +87,23 @@ func (r *Repository) GetByID(ctx context.Context, tenantID string, id uuid.UUID)
 	return d, err
 }
 
+// ExistsByName retorna true se já existir datasource com o mesmo
+// nome no tenant. Usado pelo service para detectar duplicatas
+// antes do INSERT.
+func (r *Repository) ExistsByName(ctx context.Context, tenantID, name string) (bool, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	var exists bool
+	err = conn.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM data_source WHERE name = $1)`,
+		name,
+	).Scan(&exists)
+	return exists, err
+}
+
 // Create inserts a new datasource.
 func (r *Repository) Create(ctx context.Context, tenantID string, d DataSource) (DataSource, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
