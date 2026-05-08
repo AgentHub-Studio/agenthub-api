@@ -11,7 +11,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/database"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // Repository provides persistence for Device records.
@@ -42,6 +44,11 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &pgRepository{pool: pool}
 }
 
+func (r *pgRepository) acquire(ctx context.Context) (*pgxpool.Conn, func(), error) {
+	tenantID := tenant.FromContext(ctx)
+	return database.AcquireWithTenant(ctx, r.pool, tenantID)
+}
+
 const listQuery = `
 	SELECT id, name, type, description,
 	       mcp_server_config_id, resource_uri,
@@ -50,7 +57,12 @@ const listQuery = `
 	FROM device`
 
 func (r *pgRepository) List(ctx context.Context, req pagination.PageRequest) (pagination.Page[Device], error) {
-	rows, err := r.pool.Query(ctx, listQuery+`
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return pagination.Page[Device]{}, fmt.Errorf("device: acquire: %w", err)
+	}
+	defer release()
+	rows, err := conn.Query(ctx, listQuery+`
 		ORDER BY name ASC LIMIT $1 OFFSET $2`,
 		req.Size, req.Offset(),
 	)
@@ -69,14 +81,19 @@ func (r *pgRepository) List(ctx context.Context, req pagination.PageRequest) (pa
 	}
 
 	var total int64
-	if err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM device`).Scan(&total); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT COUNT(*) FROM device`).Scan(&total); err != nil {
 		return pagination.Page[Device]{}, fmt.Errorf("device: list count: %w", err)
 	}
 	return pagination.NewPage(items, total, req), nil
 }
 
 func (r *pgRepository) GetByID(ctx context.Context, id uuid.UUID) (Device, error) {
-	row := r.pool.QueryRow(ctx, listQuery+` WHERE id = $1`, id)
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return Device{}, fmt.Errorf("device: acquire: %w", err)
+	}
+	defer release()
+	row := conn.QueryRow(ctx, listQuery+` WHERE id = $1`, id)
 	d, err := scanDevice(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/database"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,6 +34,11 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &repository{pool: pool}
 }
 
+func (r *repository) acquire(ctx context.Context) (*pgxpool.Conn, func(), error) {
+	tenantID := tenant.FromContext(ctx)
+	return database.AcquireWithTenant(ctx, r.pool, tenantID)
+}
+
 func scanChannel(row pgx.Row) (Channel, error) {
 	var ch Channel
 	var configBytes []byte
@@ -50,7 +57,12 @@ func scanChannel(row pgx.Row) (Channel, error) {
 
 func (r *repository) List(ctx context.Context) ([]Channel, error) {
 	q := `SELECT ` + selectChannelCols + ` FROM channel ORDER BY name ASC`
-	rows, err := r.pool.Query(ctx, q)
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("channel acquire: %w", err)
+	}
+	defer release()
+	rows, err := conn.Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("channel list: %w", err)
 	}
@@ -68,8 +80,13 @@ func (r *repository) List(ctx context.Context) ([]Channel, error) {
 }
 
 func (r *repository) GetByID(ctx context.Context, id uuid.UUID) (Channel, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return Channel{}, fmt.Errorf("channel acquire: %w", err)
+	}
+	defer release()
 	q := `SELECT ` + selectChannelCols + ` FROM channel WHERE id = $1`
-	row := r.pool.QueryRow(ctx, q, id)
+	row := conn.QueryRow(ctx, q, id)
 	ch, err := scanChannel(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -81,8 +98,13 @@ func (r *repository) GetByID(ctx context.Context, id uuid.UUID) (Channel, error)
 }
 
 func (r *repository) GetByToken(ctx context.Context, token string) (Channel, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return Channel{}, fmt.Errorf("channel acquire: %w", err)
+	}
+	defer release()
 	q := `SELECT ` + selectChannelCols + ` FROM channel WHERE token = $1`
-	row := r.pool.QueryRow(ctx, q, token)
+	row := conn.QueryRow(ctx, q, token)
 	ch, err := scanChannel(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -103,15 +125,20 @@ func (r *repository) Create(ctx context.Context, ch Channel) (Channel, error) {
 		cfgBytes = json.RawMessage(`{}`)
 	}
 
-	row := r.pool.QueryRow(ctx, q,
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return Channel{}, fmt.Errorf("channel acquire: %w", err)
+	}
+	defer release()
+	row := conn.QueryRow(ctx, q,
 		ch.Name, string(ch.Type), ch.AgentID, []byte(cfgBytes), ch.Token, ch.Enabled,
 	)
-	created, err := scanChannel(row)
-	if err != nil {
-		if isUniqueViolation(err) {
+	created, scanErr := scanChannel(row)
+	if scanErr != nil {
+		if isUniqueViolation(scanErr) {
 			return Channel{}, ErrSlugConflict
 		}
-		return Channel{}, fmt.Errorf("channel create: %w", err)
+		return Channel{}, fmt.Errorf("channel create: %w", scanErr)
 	}
 	return created, nil
 }
@@ -127,20 +154,30 @@ func (r *repository) Update(ctx context.Context, ch Channel) (Channel, error) {
 		cfgBytes = json.RawMessage(`{}`)
 	}
 
-	row := r.pool.QueryRow(ctx, q, ch.Name, ch.AgentID, []byte(cfgBytes), ch.Enabled, ch.ID)
-	updated, err := scanChannel(row)
+	conn, release, err := r.acquire(ctx)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		return Channel{}, fmt.Errorf("channel acquire: %w", err)
+	}
+	defer release()
+	row := conn.QueryRow(ctx, q, ch.Name, ch.AgentID, []byte(cfgBytes), ch.Enabled, ch.ID)
+	updated, scanErr := scanChannel(row)
+	if scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return Channel{}, ErrNotFound
 		}
-		return Channel{}, fmt.Errorf("channel update: %w", err)
+		return Channel{}, fmt.Errorf("channel update: %w", scanErr)
 	}
 	return updated, nil
 }
 
 func (r *repository) Delete(ctx context.Context, id uuid.UUID) error {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("channel acquire: %w", err)
+	}
+	defer release()
 	q := `DELETE FROM channel WHERE id = $1`
-	tag, err := r.pool.Exec(ctx, q, id)
+	tag, err := conn.Exec(ctx, q, id)
 	if err != nil {
 		return fmt.Errorf("channel delete: %w", err)
 	}
