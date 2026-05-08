@@ -260,11 +260,21 @@ func (c *keycloakClient) ListUsers(ctx context.Context, tenantID string) ([]User
 	if err := json.Unmarshal(body, &kcUsers); err != nil {
 		return nil, fmt.Errorf("keycloak: parse users: %w", err)
 	}
-	users := make([]User, len(kcUsers))
-	for i, ku := range kcUsers {
-		roles, _ := c.getUserRoles(ctx, tenantID, ku.ID)
-		users[i] = kcUserToUser(ku, roles)
+	// Pre-warm getClientUUID to avoid each goroutine racing to fetch it.
+	if _, err := c.getClientUUID(ctx, tenantID); err != nil {
+		return nil, err
 	}
+	users := make([]User, len(kcUsers))
+	var wg sync.WaitGroup
+	for i, ku := range kcUsers {
+		wg.Add(1)
+		go func(i int, ku kcUser) {
+			defer wg.Done()
+			roles, _ := c.getUserRoles(ctx, tenantID, ku.ID)
+			users[i] = kcUserToUser(ku, roles)
+		}(i, ku)
+	}
+	wg.Wait()
 	return users, nil
 }
 
