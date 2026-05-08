@@ -120,6 +120,10 @@ func (h *Handler) createHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.CreateHTTP(r.Context(), req)
 	if err != nil {
+		if errors.Is(err, tool.ErrDuplicateName) {
+			respond.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
