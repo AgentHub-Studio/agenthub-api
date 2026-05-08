@@ -282,11 +282,10 @@ func (s *Service) GetHTTP(ctx context.Context, id uuid.UUID) (HTTPResponse, erro
 	return httpResponseFromTool(item)
 }
 
-// UpdateHTTP updates the generated HTTP integration and its companion generated skill metadata when present.
+// UpdateHTTP updates the generated HTTP integration and its companion
+// generated skill metadata when present. PATCH-friendly: GetByID
+// primeiro, preserva campos vazios (true partial — backlog #216).
 func (s *Service) UpdateHTTP(ctx context.Context, id uuid.UUID, req HTTPCreateRequest) (HTTPResponse, error) {
-	if err := validateHTTPRequest(req); err != nil {
-		return HTTPResponse{}, err
-	}
 	if s.httpTools == nil || s.repo == nil {
 		return HTTPResponse{}, errors.New("integration service: HTTP management not configured")
 	}
@@ -297,6 +296,22 @@ func (s *Service) UpdateHTTP(ctx context.Context, id uuid.UUID, req HTTPCreateRe
 	}
 	if current.Type != tool.ToolTypeHTTP {
 		return HTTPResponse{}, fmt.Errorf("integration service: tool %s is not an HTTP integration", id)
+	}
+
+	// Merge: campos vazios preservam estado atual.
+	if strings.TrimSpace(req.Name) == "" {
+		req.Name = current.Name
+	}
+	if strings.TrimSpace(req.URL) == "" {
+		// Extrai URL atual da config — se já existia, mantém.
+		if cfg, ok := current.Config.(map[string]any); ok {
+			if url, ok := cfg["url"].(string); ok {
+				req.URL = url
+			}
+		}
+	}
+	if err := validateHTTPRequest(req); err != nil {
+		return HTTPResponse{}, err
 	}
 
 	httpType := tool.ToolType(tool.ToolTypeHTTP)
@@ -374,6 +389,7 @@ func validateHTTPRequest(req HTTPCreateRequest) error {
 	}
 	return nil
 }
+
 
 func buildHTTPConfig(req HTTPCreateRequest) json.RawMessage {
 	payload := map[string]any{
