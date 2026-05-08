@@ -132,6 +132,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			apierror.Write(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+		if errors.Is(err, ErrSlugConflict) {
+			apierror.Write(w, http.StatusConflict, "slug already in use")
+			return
+		}
 		apierror.Write(w, http.StatusInternalServerError, "failed to create package")
 		return
 	}

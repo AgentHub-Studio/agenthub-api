@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
@@ -14,6 +15,10 @@ import (
 
 // ErrNotFound is returned when a package is not found.
 var ErrNotFound = errors.New("package not found")
+
+// ErrSlugConflict is returned when a package slug is already in use.
+// Maps to HTTP 409 in handlers.
+var ErrSlugConflict = errors.New("package: slug already in use")
 
 // Repository provides data access for package_registry.
 type Repository struct {
@@ -120,6 +125,10 @@ func (r *Repository) Create(ctx context.Context, p Package) (Package, error) {
 	)
 	created, err := scanRow(row)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return Package{}, ErrSlugConflict
+		}
 		return Package{}, fmt.Errorf("package: create: %w", err)
 	}
 	return created, nil
