@@ -21,6 +21,7 @@ type Repository interface {
 	List(ctx context.Context, req pagination.PageRequest) ([]KnowledgeBase, int64, error)
 	GetByID(ctx context.Context, id uuid.UUID) (KnowledgeBase, error)
 	Create(ctx context.Context, k KnowledgeBase) (KnowledgeBase, error)
+	ExistsByName(ctx context.Context, name string) (bool, error)
 	Update(ctx context.Context, k KnowledgeBase) (KnowledgeBase, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	UpdateStatus(ctx context.Context, id uuid.UUID, status KnowledgeBaseStatus) (KnowledgeBase, error)
@@ -119,6 +120,20 @@ func (r *postgresRepository) GetByID(ctx context.Context, id uuid.UUID) (Knowled
 	}
 
 	return kb, nil
+}
+
+func (r *postgresRepository) ExistsByName(ctx context.Context, name string) (bool, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	var exists bool
+	err = conn.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM knowledge_base WHERE name = $1)`,
+		name,
+	).Scan(&exists)
+	return exists, err
 }
 
 func (r *postgresRepository) Create(ctx context.Context, k KnowledgeBase) (KnowledgeBase, error) {

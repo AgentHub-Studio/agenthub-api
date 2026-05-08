@@ -10,6 +10,10 @@ import (
 // ErrNotFound is returned when a knowledge base cannot be found.
 var ErrNotFound = errors.New("knowledgebase: not found")
 
+// ErrDuplicateName é retornado quando já existe uma KB com o
+// mesmo name no tenant. Mapeado para 409 no handler.
+var ErrDuplicateName = errors.New("knowledgebase: a knowledge base with this name already exists")
+
 // KnowledgeBaseStatus represents the lifecycle status of a KnowledgeBase.
 type KnowledgeBaseStatus string
 

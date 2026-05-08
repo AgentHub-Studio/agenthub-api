@@ -57,6 +57,15 @@ func (m *mockRepository) Create(_ context.Context, k knowledgebase.KnowledgeBase
 	return k, nil
 }
 
+func (m *mockRepository) ExistsByName(_ context.Context, name string) (bool, error) {
+	for _, v := range m.items {
+		if v.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *mockRepository) Update(_ context.Context, k knowledgebase.KnowledgeBase) (knowledgebase.KnowledgeBase, error) {
 	if _, ok := m.items[k.ID]; !ok {
 		return knowledgebase.KnowledgeBase{}, knowledgebase.ErrNotFound

@@ -68,6 +68,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 		}
 	}
 
+	exists, err := s.repo.ExistsByName(ctx, req.Name)
+	if err != nil {
+		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: check duplicate: %w", err)
+	}
+	if exists {
+		return KnowledgeBaseResponse{}, ErrDuplicateName
+	}
+
 	kb := KnowledgeBase{
 		Name:           req.Name,
 		Description:    req.Description,
