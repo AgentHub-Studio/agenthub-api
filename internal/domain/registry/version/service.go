@@ -2,6 +2,7 @@ package version
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -103,6 +104,11 @@ func (s *Service) Publish(ctx context.Context, packageID uuid.UUID, req PublishV
 func (s *Service) Delete(ctx context.Context, packageID uuid.UUID, versionStr string, tenantID string) error {
 	parent, err := s.pkgRepo.GetByID(ctx, packageID)
 	if err != nil {
+		// Map pkg.ErrNotFound to version.ErrNotFound so the handler
+		// returns 404 (not 500) when the parent package is missing.
+		if errors.Is(err, pkg.ErrNotFound) {
+			return ErrNotFound
+		}
 		return err
 	}
 	if parent.AuthorTenantID != tenantID {
