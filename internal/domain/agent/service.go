@@ -25,6 +25,10 @@ var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object
 // htmlTagPattern matches any remaining HTML tag including attributes.
 var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
 
+// slugPattern enforces kebab-case: lowercase letters, digits and hyphens.
+// Must start with alphanumeric to avoid leading-hyphen collisions.
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
 // stripHTML removes all HTML from s.
 // Dangerous elements (script, style, etc.) are removed including their content.
 // Other tags are stripped but their text content is preserved.
@@ -200,6 +204,8 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)
+	} else if !slugPattern.MatchString(slug) {
+		return AgentResponse{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrInvalidRequest, slug)
 	}
 	config := req.Config
 	if len(config) == 0 {

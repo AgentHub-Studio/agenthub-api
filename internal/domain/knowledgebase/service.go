@@ -50,6 +50,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 	if req.Name == "" {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name is required")
 	}
+	if len(req.Name) > 255 {
+		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name exceeds maximum length of 255 chars (got %d)", len(req.Name))
+	}
 	if req.SearchMode != "" {
 		switch req.SearchMode {
 		case "VECTOR", "KEYWORD", "HYBRID":

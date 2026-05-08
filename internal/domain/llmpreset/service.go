@@ -85,6 +85,9 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	if req.MaxTokens < 0 {
 		return LLMPresetResponse{}, fmt.Errorf("%w: maxTokens must be >= 0 (got %d)", ErrValidation, req.MaxTokens)
 	}
+	if req.ContextWindow < 0 {
+		return LLMPresetResponse{}, fmt.Errorf("%w: contextWindow must be >= 0 (got %d)", ErrValidation, req.ContextWindow)
+	}
 	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
 	if err != nil {
 		return LLMPresetResponse{}, err
