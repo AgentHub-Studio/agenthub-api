@@ -105,19 +105,24 @@ func (s *PostgresStore) TopTools(ctx context.Context, tr TimeRange, limit int) (
 	}
 	defer release()
 
+	// Schema real de tool_execution não tem tool_name/is_error/created_at
+	// — JOIN com tool para nome, derive is_error de status, usa started_at.
+	// Schema: id, node_execution_id, tool_id, status, input, output,
+	// error_message, started_at, finished_at, duration_ms.
 	q := `
 		SELECT
-			tool_name,
+			COALESCE(t.name, '<unknown>')                                         AS tool_name,
 			COUNT(*)                                                              AS executions,
-			COALESCE(AVG(duration_ms),     0)                                   AS avg_duration_ms,
+			COALESCE(AVG(te.duration_ms), 0)                                      AS avg_duration_ms,
 			COALESCE(
-				SUM(CASE WHEN is_error THEN 1 ELSE 0 END)::float8 / COUNT(*),
+				SUM(CASE WHEN te.status = 'FAILED' THEN 1 ELSE 0 END)::float8 / COUNT(*),
 				0
 			)                                                                     AS error_rate
-		FROM tool_execution
-		WHERE created_at >= $1
-		  AND created_at <= $2
-		GROUP BY tool_name
+		FROM tool_execution te
+		LEFT JOIN tool t ON t.id = te.tool_id
+		WHERE te.started_at >= $1
+		  AND te.started_at <= $2
+		GROUP BY t.name
 		ORDER BY executions DESC
 		LIMIT $3`
 
