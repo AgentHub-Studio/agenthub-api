@@ -266,6 +266,11 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 	if req.Role == "" {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: role is required")
 	}
+	switch req.Role {
+	case "user", "assistant", "system", "tool":
+	default:
+		return ChatMessageResponse{}, fmt.Errorf("chat service: role must be one of user, assistant, system, tool (got %q)", req.Role)
+	}
 	if req.Content == "" {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: content is required")
 	}
