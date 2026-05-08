@@ -82,7 +82,7 @@ func (s *Service) DeleteSuite(ctx context.Context, id uuid.UUID) error {
 // AddCase adds a test case to a suite.
 func (s *Service) AddCase(ctx context.Context, suiteID uuid.UUID, req CreateCaseRequest) (CaseResponse, error) {
 	if req.InputText == "" {
-		return CaseResponse{}, fmt.Errorf("skilleval: inputText is required")
+		return CaseResponse{}, fmt.Errorf("%w: inputText is required", ErrValidation)
 	}
 	graderType := req.GraderType
 	if graderType == "" {

@@ -129,6 +129,14 @@ func (h *Handler) addCase(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.AddCase(r.Context(), suiteID, req)
 	if err != nil {
+		if errors.Is(err, ErrValidation) {
+			writeEvalError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		if errors.Is(err, ErrSuiteNotFound) {
+			writeEvalError(w, http.StatusNotFound, "suite not found")
+			return
+		}
 		writeEvalError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
