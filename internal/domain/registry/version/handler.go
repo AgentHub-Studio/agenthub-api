@@ -104,6 +104,10 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 			apierror.Write(w, http.StatusForbidden, err.Error())
 			return
 		}
+		if errors.Is(err, ErrDuplicateVersion) {
+			apierror.Write(w, http.StatusConflict, err.Error())
+			return
+		}
 		apierror.Write(w, http.StatusInternalServerError, "failed to publish version")
 		return
 	}

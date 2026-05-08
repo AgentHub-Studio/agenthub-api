@@ -7,11 +7,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ErrNotFound is returned when a version is not found.
 var ErrNotFound = errors.New("version not found")
+
+// ErrDuplicateVersion is returned when a version with the same
+// (packageId, version) tuple already exists. Maps to 409 in handler.
+var ErrDuplicateVersion = errors.New("version: this version already exists for this package")
 
 // Repository provides data access for package_version.
 type Repository struct {
@@ -66,6 +71,10 @@ func (r *Repository) Create(ctx context.Context, v PackageVersion) (PackageVersi
 	)
 	created, err := scanRow(row)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return PackageVersion{}, ErrDuplicateVersion
+		}
 		return PackageVersion{}, fmt.Errorf("version: create: %w", err)
 	}
 	return created, nil
