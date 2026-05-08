@@ -182,6 +182,12 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s ChatSession) (
 		s.CreatedAt, s.UpdatedAt,
 	)
 	if err != nil {
+		msg := err.Error()
+		for i := 0; i+5 <= len(msg); i++ {
+			if msg[i:i+5] == "23503" {
+				return ChatSession{}, ErrAgentNotFound
+			}
+		}
 		return ChatSession{}, fmt.Errorf("chat: create session: %w", err)
 	}
 

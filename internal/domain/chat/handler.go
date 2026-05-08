@@ -142,6 +142,10 @@ func (h *Handler) createSession(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.svc.CreateSession(r.Context(), req)
 	if err != nil {
+		if errors.Is(err, ErrAgentNotFound) {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return
+		}
 		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}

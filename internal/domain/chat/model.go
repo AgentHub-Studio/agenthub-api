@@ -14,6 +14,11 @@ var ErrNotFound = errors.New("chat: not found")
 // ErrRunAlreadyActive is returned when a concurrent run is already in progress for the session.
 var ErrRunAlreadyActive = errors.New("chat: a run is already in progress for this session")
 
+// ErrAgentNotFound é retornado quando o agentId em CreateSession
+// não existe (FK 23503). Sem isso, FK violations vazavam como
+// 422 com SQL state na mensagem.
+var ErrAgentNotFound = errors.New("chat: agent not found")
+
 // ChatStatus represents the lifecycle status of a ChatSession.
 type ChatStatus string
 

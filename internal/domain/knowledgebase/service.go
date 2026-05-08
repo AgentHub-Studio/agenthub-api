@@ -50,6 +50,13 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 	if req.Name == "" {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name is required")
 	}
+	if req.SearchMode != "" {
+		switch req.SearchMode {
+		case "VECTOR", "KEYWORD", "HYBRID":
+		default:
+			return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: searchMode must be one of VECTOR, KEYWORD, HYBRID (got %q)", req.SearchMode)
+		}
+	}
 
 	kb := KnowledgeBase{
 		Name:           req.Name,
