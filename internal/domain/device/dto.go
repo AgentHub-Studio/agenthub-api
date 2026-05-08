@@ -66,6 +66,9 @@ func (r CreateDeviceRequest) validate() error {
 	if r.Name == "" {
 		return fmt.Errorf("%w: name is required", ErrValidation)
 	}
+	if r.Type == "" {
+		return fmt.Errorf("%w: type is required", ErrValidation)
+	}
 	return nil
 }
 
