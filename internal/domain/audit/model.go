@@ -11,6 +11,10 @@ import (
 // ErrNotFound is returned when an AuditLog entry is not found.
 var ErrNotFound = errors.New("audit log not found")
 
+// ErrValidation é retornado quando RecordRequest falha validação
+// server-side (entityType/action vazios).
+var ErrValidation = errors.New("audit: validation failed")
+
 // AuditAction represents the type of operation recorded in the audit log.
 type AuditAction string
 

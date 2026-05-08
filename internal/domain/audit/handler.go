@@ -111,6 +111,10 @@ func (h *Handler) record(w http.ResponseWriter, r *http.Request) {
 
 	l, err := h.svc.Record(r.Context(), tenantID, req)
 	if err != nil {
+		if errors.Is(err, ErrValidation) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}

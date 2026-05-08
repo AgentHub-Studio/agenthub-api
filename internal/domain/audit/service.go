@@ -2,6 +2,8 @@ package audit
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -37,6 +39,12 @@ func (s *Service) GetByID(ctx context.Context, tenantID string, id uuid.UUID) (A
 
 // Record appends a new audit log entry.
 func (s *Service) Record(ctx context.Context, tenantID string, req RecordRequest) (AuditLog, error) {
+	if strings.TrimSpace(req.EntityType) == "" {
+		return AuditLog{}, fmt.Errorf("%w: entityType is required", ErrValidation)
+	}
+	if strings.TrimSpace(string(req.Action)) == "" {
+		return AuditLog{}, fmt.Errorf("%w: action is required", ErrValidation)
+	}
 	l := AuditLog{
 		EntityType: req.EntityType,
 		EntityID:   req.EntityID,
