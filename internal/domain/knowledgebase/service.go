@@ -57,6 +57,13 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 			return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: searchMode must be one of VECTOR, KEYWORD, HYBRID (got %q)", req.SearchMode)
 		}
 	}
+	if req.EmbeddingModel != "" {
+		switch req.EmbeddingModel {
+		case "intfloat/multilingual-e5-large", "intfloat/multilingual-e5-base", "text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002":
+		default:
+			return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: embeddingModel %q not supported (allowed: intfloat/multilingual-e5-large, intfloat/multilingual-e5-base, text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002)", req.EmbeddingModel)
+		}
+	}
 
 	kb := KnowledgeBase{
 		Name:           req.Name,

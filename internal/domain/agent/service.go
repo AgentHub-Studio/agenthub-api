@@ -594,8 +594,8 @@ func validateModelConfig(raw json.RawMessage) error {
 	if mc.Model != "" && mc.Provider == "" {
 		return fmt.Errorf("provider is required when model is specified")
 	}
-	if mc.MaxIterations != nil && *mc.MaxIterations <= 0 {
-		return fmt.Errorf("maxIterations must be a positive integer (got %d)", *mc.MaxIterations)
+	if mc.MaxIterations != nil && (*mc.MaxIterations <= 0 || *mc.MaxIterations > 100) {
+		return fmt.Errorf("maxIterations must be between 1 and 100 (got %d)", *mc.MaxIterations)
 	}
 	if mc.MaxTokens != nil && *mc.MaxTokens <= 0 {
 		return fmt.Errorf("maxTokens must be a positive integer (got %d)", *mc.MaxTokens)
