@@ -97,21 +97,43 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 	return s.repo.Create(ctx, tenantID, d)
 }
 
-// Update updates an existing datasource.
-// If req.DBPassword is empty the existing password is preserved (never overwritten with blank).
+// Update updates an existing datasource. PATCH-friendly: campos vazios
+// no request são preservados do estado atual (true partial update).
+// Backlog #186: handler PATCH delega para Update; sem este merge,
+// PATCH {"name":"x"} falhava por type/host required.
 func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (DataSource, error) {
-	applyDefaults(&req)
-	if err := validateRequest(req); err != nil {
+	existing, err := s.repo.GetByID(ctx, tenantID, id)
+	if err != nil {
 		return DataSource{}, err
 	}
-	// Preserve existing password when the request omits it.
+	// Merge: campos vazios no request mantêm o valor atual.
+	if req.Name == "" {
+		req.Name = existing.Name
+	}
+	if req.Type == "" {
+		req.Type = existing.Type
+	}
+	if req.Host == "" {
+		req.Host = existing.Host
+	}
+	if req.Port == 0 {
+		req.Port = existing.Port
+	}
+	if req.Database == "" {
+		req.Database = existing.Database
+	}
+	if req.DBUser == "" {
+		req.DBUser = existing.DBUser
+	}
 	password := req.DBPassword
 	if password == "" {
-		existing, err := s.repo.GetByID(ctx, tenantID, id)
-		if err != nil {
-			return DataSource{}, err
-		}
 		password = existing.DBPassword
+	}
+	if req.VpnResourceID == nil {
+		req.VpnResourceID = existing.VpnResourceID
+	}
+	if err := validateRequest(req); err != nil {
+		return DataSource{}, err
 	}
 	d := DataSource{
 		Name:          req.Name,
