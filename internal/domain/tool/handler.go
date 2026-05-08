@@ -217,7 +217,9 @@ func (h *Handler) generateCode(w http.ResponseWriter, r *http.Request) {
 	}
 	code, err := h.svc.GenerateCode(r.Context(), req.Prompt, req.Language)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		// LLM provider failures (no key configured, network error, rate limit)
+		// são erros upstream, não internal server errors. Retorna 502 Bad Gateway.
+		respond.JSON(w, http.StatusBadGateway, map[string]string{"error": "llm provider error: " + err.Error()})
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -239,7 +241,7 @@ func (h *Handler) generateBlockly(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.svc.GenerateBlockly(r.Context(), req.Prompt)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.JSON(w, http.StatusBadGateway, map[string]string{"error": "llm provider error: " + err.Error()})
 		return
 	}
 	respond.JSON(w, http.StatusOK, result)
