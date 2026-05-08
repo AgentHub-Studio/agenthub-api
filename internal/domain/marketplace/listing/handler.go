@@ -78,6 +78,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.Create(r.Context(), tenantID, req)
 	if err != nil {
+		if errors.Is(err, ErrDuplicateSlug) {
+			respond.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}

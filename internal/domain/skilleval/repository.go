@@ -15,6 +15,7 @@ import (
 type Repository interface {
 	// Suite operations
 	CreateSuite(ctx context.Context, suite EvalSuite) (EvalSuite, error)
+	SuiteExistsByName(ctx context.Context, skillID uuid.UUID, name string) (bool, error)
 	ListSuites(ctx context.Context, skillID *uuid.UUID) ([]EvalSuite, error)
 	GetSuiteByID(ctx context.Context, id uuid.UUID) (EvalSuite, error)
 	DeleteSuite(ctx context.Context, id uuid.UUID) error
@@ -51,6 +52,15 @@ func (r *repository) CreateSuite(ctx context.Context, s EvalSuite) (EvalSuite, e
 	      RETURNING id, skill_id, name, description, created_at, updated_at`
 	row := r.pool.QueryRow(ctx, q, s.SkillID, s.Name, s.Description)
 	return scanSuite(row)
+}
+
+func (r *repository) SuiteExistsByName(ctx context.Context, skillID uuid.UUID, name string) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM skill_eval_suite WHERE skill_id = $1 AND name = $2)`,
+		skillID, name,
+	).Scan(&exists)
+	return exists, err
 }
 
 func (r *repository) ListSuites(ctx context.Context, skillID *uuid.UUID) ([]EvalSuite, error) {

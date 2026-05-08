@@ -72,6 +72,10 @@ func (h *Handler) createSuite(w http.ResponseWriter, r *http.Request) {
 			writeEvalError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+		if errors.Is(err, ErrDuplicateName) {
+			writeEvalError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeEvalError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

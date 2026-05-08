@@ -24,6 +24,10 @@ var ErrRunNotFound = errors.New("skilleval: run not found")
 // Maps to HTTP 422 in handlers.
 var ErrValidation = errors.New("skilleval: validation failed")
 
+// ErrDuplicateName é retornado quando já existe uma suite com o
+// mesmo name+skillId. Mapeado para 409 no handler.
+var ErrDuplicateName = errors.New("skilleval: a suite with this name already exists for this skill")
+
 // GraderType identifies the comparison strategy for an eval case.
 type GraderType string
 

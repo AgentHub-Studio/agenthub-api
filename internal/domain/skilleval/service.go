@@ -33,6 +33,13 @@ func (s *Service) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suit
 	if req.SkillID == uuid.Nil {
 		return SuiteResponse{}, fmt.Errorf("%w: skillId is required", ErrValidation)
 	}
+	exists, err := s.repo.SuiteExistsByName(ctx, req.SkillID, req.Name)
+	if err != nil {
+		return SuiteResponse{}, fmt.Errorf("skilleval: check duplicate: %w", err)
+	}
+	if exists {
+		return SuiteResponse{}, ErrDuplicateName
+	}
 	suite, err := s.repo.CreateSuite(ctx, EvalSuite{
 		SkillID:     req.SkillID,
 		Name:        req.Name,

@@ -39,6 +39,15 @@ func (r *memRepo) CreateSuite(_ context.Context, s skilleval.EvalSuite) (skillev
 	return s, nil
 }
 
+func (r *memRepo) SuiteExistsByName(_ context.Context, skillID uuid.UUID, name string) (bool, error) {
+	for _, s := range r.suites {
+		if s.SkillID == skillID && s.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *memRepo) ListSuites(_ context.Context, skillID *uuid.UUID) ([]skilleval.EvalSuite, error) {
 	out := []skilleval.EvalSuite{}
 	for _, s := range r.suites {

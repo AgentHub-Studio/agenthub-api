@@ -2,11 +2,13 @@ package listing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
@@ -97,6 +99,10 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateListing
 	}
 	created, err := s.repo.Create(ctx, l)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ListingResponse{}, ErrDuplicateSlug
+		}
 		return ListingResponse{}, fmt.Errorf("listing: create: %w", err)
 	}
 	return ResponseFrom(created), nil

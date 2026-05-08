@@ -11,6 +11,10 @@ import (
 // ErrNotFound is returned when a listing is not found.
 var ErrNotFound = errors.New("listing not found")
 
+// ErrDuplicateSlug é retornado quando já existe um listing com o
+// mesmo packageId+slug. Mapeado para 409 no handler.
+var ErrDuplicateSlug = errors.New("listing: a listing with this slug already exists for this package")
+
 // PackageType represents the category of a marketplace listing.
 type PackageType string
 
