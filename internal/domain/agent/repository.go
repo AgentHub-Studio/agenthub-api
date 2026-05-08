@@ -30,6 +30,9 @@ var ErrInvalidSkillIDs = errors.New("agent: invalid skill IDs")
 // ErrInvalidKnowledgeBaseIDs is returned when one or more KB IDs do not exist.
 var ErrInvalidKnowledgeBaseIDs = errors.New("agent: invalid knowledge base IDs")
 
+// ErrInvalidMCPServerIDs is returned when one or more MCP server IDs do not exist.
+var ErrInvalidMCPServerIDs = errors.New("agent: invalid mcp server IDs")
+
 // ErrInvalidRequest is returned for user-supplied request body validation errors
 // that should map to HTTP 422 (e.g. nested modelConfig, missing required fields).
 var ErrInvalidRequest = errors.New("agent: invalid request")

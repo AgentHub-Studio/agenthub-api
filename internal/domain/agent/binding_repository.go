@@ -95,7 +95,7 @@ func (r *pgBindingRepository) SyncSkills(ctx context.Context, agentID uuid.UUID,
 			agentID, sid, i,
 		); err != nil {
 			if database.IsPgError(err, database.PgErrForeignKeyViolation) {
-				return fmt.Errorf("skill not found: %s", sid)
+				return fmt.Errorf("%w: skill %s does not exist", ErrInvalidSkillIDs, sid)
 			}
 			return fmt.Errorf("agent.SyncSkills: insert %s: %w", sid, err)
 		}
@@ -272,6 +272,10 @@ func (r *pgBindingRepository) SyncMCPServers(ctx context.Context, agentID uuid.U
 			`INSERT INTO agent_mcp_server (agent_id, mcp_server_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
 			agentID, mcpID,
 		); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				return fmt.Errorf("%w: mcp server %s does not exist", ErrInvalidMCPServerIDs, mcpID)
+			}
 			return fmt.Errorf("agent.SyncMCPServers: insert %s: %w", mcpID, err)
 		}
 	}

@@ -99,6 +99,10 @@ func (h *BindingHandler) syncSkills(w http.ResponseWriter, r *http.Request) {
 		req.IDs = []uuid.UUID{}
 	}
 	if err := h.bindingRepo.SyncSkills(r.Context(), agentID, req.IDs); err != nil {
+		if errors.Is(err, ErrInvalidSkillIDs) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -138,6 +142,10 @@ func (h *BindingHandler) syncKnowledgeBases(w http.ResponseWriter, r *http.Reque
 		req.IDs = []uuid.UUID{}
 	}
 	if err := h.bindingRepo.SyncKnowledgeBases(r.Context(), agentID, req.IDs); err != nil {
+		if errors.Is(err, ErrInvalidKnowledgeBaseIDs) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -176,6 +184,10 @@ func (h *BindingHandler) syncMCPServers(w http.ResponseWriter, r *http.Request) 
 		req.IDs = []uuid.UUID{}
 	}
 	if err := h.bindingRepo.SyncMCPServers(r.Context(), agentID, req.IDs); err != nil {
+		if errors.Is(err, ErrInvalidMCPServerIDs) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
