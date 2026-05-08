@@ -341,6 +341,10 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 				respond.Error(w, http.StatusConflict, "a run is already in progress for this session")
 				return
 			}
+			if errors.Is(err, ErrNotFound) {
+				respond.Error(w, http.StatusNotFound, "chat session not found")
+				return
+			}
 			respond.Error(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue run: %v", err))
 			return
 		}

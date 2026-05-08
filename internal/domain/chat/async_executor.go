@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -198,6 +200,13 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 		Status:    ChatRunStatusQueued,
 	})
 	if err != nil {
+		// FK violation (23503) significa session_id inexistente.
+		// Mapeia para ErrNotFound para que handler retorne 404 em
+		// vez de vazar 500 com SQL error exposto.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return uuid.Nil, ErrNotFound
+		}
 		return uuid.Nil, err
 	}
 
