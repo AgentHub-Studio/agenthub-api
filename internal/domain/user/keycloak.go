@@ -409,6 +409,9 @@ func (c *keycloakClient) manageRole(ctx context.Context, tenantID, userID, role,
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("keycloak: manage role %s %d: %s", method, resp.StatusCode, string(b))
