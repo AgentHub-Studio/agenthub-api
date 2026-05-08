@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -11,6 +12,9 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+// slugPattern enforces kebab-case (skill canonical format).
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // ErrSkillBoundToAgents is returned when a skill cannot be deleted because one or
 // more agents still reference it. P-C185-1: management executor must not bypass this check.
@@ -87,6 +91,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)
+	} else if !slugPattern.MatchString(slug) {
+		return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrValidation, slug)
 	}
 
 	// ensure slug uniqueness within tenant

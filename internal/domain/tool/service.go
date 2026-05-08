@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,9 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
+
+// slugPattern enforces kebab-case + underscore for tool slugs (ToSlug uses _).
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // SettingsReader is a minimal interface for reading tenant settings.
 type SettingsReader interface {
@@ -113,6 +117,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
 		slug = ToSlug(req.Name)
+	} else if !slugPattern.MatchString(slug) {
+		return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-_]* (got %q)", ErrValidation, slug)
 	}
 	t := Tool{
 		Name:        req.Name,
