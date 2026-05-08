@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
+	"time"
 )
 
 // ErrNotFound is returned when the user cannot be found.
@@ -39,6 +41,8 @@ type keycloakClient struct {
 	adminRealm     string
 	frontendClient string
 	httpClient     *http.Client
+	clientUUIDMu   sync.RWMutex
+	clientUUIDs    map[string]string
 }
 
 // KeycloakClientConfig holds configuration for the Keycloak Admin API client.
@@ -69,7 +73,8 @@ func NewKeycloakUserClient(cfg KeycloakClientConfig) KeycloakUserClient {
 		adminClientID:  cfg.AdminClientID,
 		adminRealm:     cfg.AdminRealm,
 		frontendClient: cfg.FrontendClient,
-		httpClient:     &http.Client{},
+		httpClient:     &http.Client{Timeout: 15 * time.Second},
+		clientUUIDs:    make(map[string]string),
 	}
 }
 
@@ -154,6 +159,14 @@ func kcUserToUser(k kcUser, roles []string) User {
 }
 
 func (c *keycloakClient) getClientUUID(ctx context.Context, tenantID string) (string, error) {
+	// Cache: clientUUID is stable for the lifetime of agenthub-frontend client.
+	c.clientUUIDMu.RLock()
+	if cached, ok := c.clientUUIDs[tenantID]; ok {
+		c.clientUUIDMu.RUnlock()
+		return cached, nil
+	}
+	c.clientUUIDMu.RUnlock()
+
 	path := fmt.Sprintf("/admin/realms/%s/clients?clientId=%s", tenantID, c.frontendClient)
 	resp, err := c.adminRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
@@ -170,7 +183,11 @@ func (c *keycloakClient) getClientUUID(ctx context.Context, tenantID string) (st
 	if err := json.Unmarshal(body, &clients); err != nil || len(clients) == 0 {
 		return "", fmt.Errorf("keycloak: client %q not found in realm %s", c.frontendClient, tenantID)
 	}
-	return clients[0].ID, nil
+	uuid := clients[0].ID
+	c.clientUUIDMu.Lock()
+	c.clientUUIDs[tenantID] = uuid
+	c.clientUUIDMu.Unlock()
+	return uuid, nil
 }
 
 func (c *keycloakClient) getUserRoles(ctx context.Context, tenantID, userID string) ([]string, error) {
