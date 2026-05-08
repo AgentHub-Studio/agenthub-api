@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
@@ -149,6 +151,14 @@ func (s *Service) ListDeliveries(ctx context.Context, webhookID uuid.UUID, filte
 func (s *Service) IngestWebhook(ctx context.Context, token, sourceType string, payload []byte, signature, eventType string) (WebhookDeliveryLog, error) {
 	w, err := s.repo.GetBySecret(ctx, token)
 	if err != nil {
+		// Endpoint público (sem JWT/tenant context) → search_path é
+		// public, mas webhook_config só existe em schemas ah_*. Mapeia
+		// "relation does not exist" para ErrNotFound (404) em vez de
+		// vazar 500. Backlog #198: cross-schema lookup ou tabela global.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return WebhookDeliveryLog{}, ErrNotFound
+		}
 		return WebhookDeliveryLog{}, err
 	}
 
