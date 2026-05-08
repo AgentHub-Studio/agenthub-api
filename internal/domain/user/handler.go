@@ -72,6 +72,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httputil.Conflict(w, "user already exists")
 		return
 	}
+	if errors.Is(err, ErrValidation) {
+		httputil.UnprocessableEntity(w, err.Error())
+		return
+	}
 	if err != nil {
 		httputil.BadRequest(w, err.Error())
 		return

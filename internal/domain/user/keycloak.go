@@ -19,6 +19,10 @@ var ErrNotFound = errors.New("user: not found")
 // ErrAlreadyExists is returned when the username/email is already taken.
 var ErrAlreadyExists = errors.New("user: already exists")
 
+// ErrValidation indicates a request payload failed validation.
+// Maps to HTTP 422 in handler.
+var ErrValidation = errors.New("user: validation failed")
+
 // KeycloakUserClient defines the Keycloak Admin API operations for users.
 type KeycloakUserClient interface {
 	ListUsers(ctx context.Context, tenantID string) ([]User, error)

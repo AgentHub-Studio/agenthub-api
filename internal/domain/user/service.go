@@ -67,7 +67,7 @@ func (s *service) Get(ctx context.Context, userID string) (UserResponse, error) 
 
 func (s *service) Create(ctx context.Context, req CreateUserRequest) (UserResponse, error) {
 	if req.Username == "" {
-		return UserResponse{}, fmt.Errorf("username is required")
+		return UserResponse{}, fmt.Errorf("%w: username is required", ErrValidation)
 	}
 	tenantID, err := s.tenantID(ctx)
 	if err != nil {
