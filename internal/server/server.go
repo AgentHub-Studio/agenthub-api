@@ -326,6 +326,20 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
 
+	// JSON 404/405 handlers para consistência. Sem isso, chi default
+	// retorna text/plain "404 page not found" que quebra clientes que
+	// só lidam com JSON.
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"status":404,"message":"not found"}`))
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte(`{"status":405,"message":"method not allowed"}`))
+	})
+
 	// CORS must be at root level so OPTIONS preflight requests are handled
 	// before chi's router can return 405 Method Not Allowed.
 	// BUG-DEPR2 fix: removed r.Options("/*") wildcard — the CORS middleware now
