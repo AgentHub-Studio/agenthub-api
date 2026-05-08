@@ -81,6 +81,13 @@ func (s *service) Create(ctx context.Context, req CreateChannelRequest) (Channel
 	default:
 		return ChannelTokenResponse{}, fmt.Errorf("%w: type must be one of WEBHOOK|SLACK|TELEGRAM|DISCORD|CUSTOM (got %q)", ErrValidation, req.Type)
 	}
+	exists, err := s.repo.ExistsByName(ctx, req.Name)
+	if err != nil {
+		return ChannelTokenResponse{}, fmt.Errorf("channel: check duplicate name: %w", err)
+	}
+	if exists {
+		return ChannelTokenResponse{}, ErrSlugConflict
+	}
 
 	token, err := generateToken()
 	if err != nil {

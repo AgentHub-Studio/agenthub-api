@@ -18,6 +18,7 @@ type Repository interface {
 	List(ctx context.Context) ([]Channel, error)
 	GetByID(ctx context.Context, id uuid.UUID) (Channel, error)
 	GetByToken(ctx context.Context, token string) (Channel, error)
+	ExistsByName(ctx context.Context, name string) (bool, error)
 	Create(ctx context.Context, ch Channel) (Channel, error)
 	Update(ctx context.Context, ch Channel) (Channel, error)
 	Delete(ctx context.Context, id uuid.UUID) error
@@ -113,6 +114,17 @@ func (r *repository) GetByToken(ctx context.Context, token string) (Channel, err
 		return Channel{}, fmt.Errorf("channel get by token: %w", err)
 	}
 	return ch, nil
+}
+
+func (r *repository) ExistsByName(ctx context.Context, name string) (bool, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	var exists bool
+	err = conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM channel WHERE name = $1)`, name).Scan(&exists)
+	return exists, err
 }
 
 func (r *repository) Create(ctx context.Context, ch Channel) (Channel, error) {
