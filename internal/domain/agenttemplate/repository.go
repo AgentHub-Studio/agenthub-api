@@ -8,6 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/database"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // Repository defines persistence operations for AgentTemplate.
@@ -46,8 +49,13 @@ func scan(row pgx.Row) (AgentTemplate, error) {
 }
 
 func (r *repository) ListAll(ctx context.Context) ([]AgentTemplate, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	q := `SELECT ` + selectCols + ` FROM agent_template ORDER BY is_builtin DESC, name ASC`
-	rows, err := r.pool.Query(ctx, q)
+	rows, err := conn.Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("agent_template list: %w", err)
 	}
@@ -56,8 +64,13 @@ func (r *repository) ListAll(ctx context.Context) ([]AgentTemplate, error) {
 }
 
 func (r *repository) ListByCategory(ctx context.Context, category string) ([]AgentTemplate, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	q := `SELECT ` + selectCols + ` FROM agent_template WHERE category = $1 ORDER BY is_builtin DESC, name ASC`
-	rows, err := r.pool.Query(ctx, q, category)
+	rows, err := conn.Query(ctx, q, category)
 	if err != nil {
 		return nil, fmt.Errorf("agent_template list by category: %w", err)
 	}
@@ -66,8 +79,13 @@ func (r *repository) ListByCategory(ctx context.Context, category string) ([]Age
 }
 
 func (r *repository) GetBySlug(ctx context.Context, slug string) (AgentTemplate, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return AgentTemplate{}, err
+	}
+	defer release()
 	q := `SELECT ` + selectCols + ` FROM agent_template WHERE slug = $1`
-	row := r.pool.QueryRow(ctx, q, slug)
+	row := conn.QueryRow(ctx, q, slug)
 	t, err := scan(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -79,6 +97,11 @@ func (r *repository) GetBySlug(ctx context.Context, slug string) (AgentTemplate,
 }
 
 func (r *repository) Create(ctx context.Context, t AgentTemplate) (AgentTemplate, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return AgentTemplate{}, err
+	}
+	defer release()
 	q := `INSERT INTO agent_template (name, slug, description, category, is_builtin, definition_json)
 		  VALUES ($1, $2, $3, $4, $5, $6)
 		  RETURNING ` + selectCols
@@ -88,7 +111,7 @@ func (r *repository) Create(ctx context.Context, t AgentTemplate) (AgentTemplate
 		defJSON = json.RawMessage(`{}`)
 	}
 
-	row := r.pool.QueryRow(ctx, q, t.Name, t.Slug, t.Description, t.Category, t.IsBuiltin, []byte(defJSON))
+	row := conn.QueryRow(ctx, q, t.Name, t.Slug, t.Description, t.Category, t.IsBuiltin, []byte(defJSON))
 	created, err := scan(row)
 	if err != nil {
 		if isUniqueViolation(err) {
