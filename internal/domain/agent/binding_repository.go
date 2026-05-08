@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/database"
@@ -151,6 +153,10 @@ func (r *pgBindingRepository) SyncKnowledgeBases(ctx context.Context, agentID uu
 			`INSERT INTO agent_knowledge_base (agent_id, knowledge_base_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
 			agentID, kbID,
 		); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				return fmt.Errorf("%w: knowledge base %s does not exist", ErrInvalidKnowledgeBaseIDs, kbID)
+			}
 			return fmt.Errorf("agent.SyncKnowledgeBases: insert %s: %w", kbID, err)
 		}
 	}

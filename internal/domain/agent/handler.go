@@ -560,6 +560,7 @@ func (h *VersionHandler) rollbackVersion(w http.ResponseWriter, r *http.Request)
 func isValidationError(err error) bool {
 	return errors.Is(err, ErrInvalidModelConfig) ||
 		errors.Is(err, ErrInvalidSkillIDs) ||
+		errors.Is(err, ErrInvalidKnowledgeBaseIDs) ||
 		errors.Is(err, ErrSlugConflict) ||
 		errors.Is(err, ErrUnsupportedProvider) ||
 		errors.Is(err, ErrInvalidRequest) ||

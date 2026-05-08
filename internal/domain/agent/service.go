@@ -245,7 +245,10 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if len(req.KnowledgeBaseIDs) > 0 {
 		if syncErr := s.bindingRepo.SyncKnowledgeBases(ctx, created.ID, req.KnowledgeBaseIDs); syncErr != nil {
 			_ = s.repo.Delete(ctx, created.ID)
-			return AgentResponse{}, fmt.Errorf("invalid knowledge base IDs: %w", syncErr)
+			if errors.Is(syncErr, ErrInvalidKnowledgeBaseIDs) {
+				return AgentResponse{}, syncErr
+			}
+			return AgentResponse{}, fmt.Errorf("%w: %w", ErrInvalidKnowledgeBaseIDs, syncErr)
 		}
 		resp.KnowledgeBaseIDs = req.KnowledgeBaseIDs
 	}
