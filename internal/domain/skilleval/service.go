@@ -28,10 +28,10 @@ func (s *Service) WithRunner(r *Runner) *Service {
 // CreateSuite creates a new eval suite.
 func (s *Service) CreateSuite(ctx context.Context, req CreateSuiteRequest) (SuiteResponse, error) {
 	if req.Name == "" {
-		return SuiteResponse{}, fmt.Errorf("skilleval: suite name is required")
+		return SuiteResponse{}, fmt.Errorf("%w: suite name is required", ErrValidation)
 	}
 	if req.SkillID == uuid.Nil {
-		return SuiteResponse{}, fmt.Errorf("skilleval: skillId is required")
+		return SuiteResponse{}, fmt.Errorf("%w: skillId is required", ErrValidation)
 	}
 	suite, err := s.repo.CreateSuite(ctx, EvalSuite{
 		SkillID:     req.SkillID,

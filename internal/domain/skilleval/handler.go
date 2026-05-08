@@ -68,6 +68,10 @@ func (h *Handler) createSuite(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.CreateSuite(r.Context(), req)
 	if err != nil {
+		if errors.Is(err, ErrValidation) {
+			writeEvalError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		writeEvalError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

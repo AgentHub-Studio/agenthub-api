@@ -20,6 +20,10 @@ var ErrCaseNotFound = errors.New("skilleval: case not found")
 // ErrRunNotFound is returned when an eval run cannot be found.
 var ErrRunNotFound = errors.New("skilleval: run not found")
 
+// ErrValidation indicates a request payload failed validation.
+// Maps to HTTP 422 in handlers.
+var ErrValidation = errors.New("skilleval: validation failed")
+
 // GraderType identifies the comparison strategy for an eval case.
 type GraderType string
 
