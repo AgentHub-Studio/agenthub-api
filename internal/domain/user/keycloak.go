@@ -47,6 +47,9 @@ type keycloakClient struct {
 	httpClient     *http.Client
 	clientUUIDMu   sync.RWMutex
 	clientUUIDs    map[string]string
+	tokenMu        sync.Mutex
+	cachedToken    string
+	tokenExpiresAt time.Time
 }
 
 // KeycloakClientConfig holds configuration for the Keycloak Admin API client.
@@ -83,7 +86,17 @@ func NewKeycloakUserClient(cfg KeycloakClientConfig) KeycloakUserClient {
 }
 
 // getAdminToken obtains a short-lived admin access token from the master realm.
+// Caches the token in-memory until ~5s before expiry to avoid re-login per request
+// (P-C292: GET /api/users took 24s because each Admin API call triggered a fresh
+// password grant; 60s token TTL × N+1 user role lookups compounded the latency).
 func (c *keycloakClient) getAdminToken(ctx context.Context) (string, error) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+
+	if c.cachedToken != "" && time.Now().Before(c.tokenExpiresAt) {
+		return c.cachedToken, nil
+	}
+
 	tokenURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token", c.baseURL, c.adminRealm)
 	data := url.Values{}
 	data.Set("grant_type", "password")
@@ -108,11 +121,18 @@ func (c *keycloakClient) getAdminToken(ctx context.Context) (string, error) {
 	}
 	var result struct {
 		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", fmt.Errorf("keycloak: parse token: %w", err)
 	}
-	return result.AccessToken, nil
+	c.cachedToken = result.AccessToken
+	ttl := time.Duration(result.ExpiresIn) * time.Second
+	if ttl <= 5*time.Second {
+		ttl = 60 * time.Second
+	}
+	c.tokenExpiresAt = time.Now().Add(ttl - 5*time.Second)
+	return c.cachedToken, nil
 }
 
 func (c *keycloakClient) adminRequest(ctx context.Context, method, path string, bodyV any) (*http.Response, error) {
