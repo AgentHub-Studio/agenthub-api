@@ -114,6 +114,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 	if req.TransportType == "stdio" {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: stdio transport is no longer supported, use http")
 	}
+	if req.TransportType != "http" {
+		return McpServerConfigResponse{}, fmt.Errorf("mcp service: transport type must be 'http' (got %q)", req.TransportType)
+	}
 
 	c := McpServerConfig{
 		Name:              req.Name,
