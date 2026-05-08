@@ -15,6 +15,10 @@ var ErrNotFound = errors.New("trigger: not found")
 // POST /api/agents/{agentId}/triggers não existe (FK 23503).
 var ErrAgentNotFound = errors.New("trigger: agent not found")
 
+// ErrDuplicateName é retornado quando já existe um trigger com o
+// mesmo name para o agente. Mapeado para 409 no handler.
+var ErrDuplicateName = errors.New("trigger: a trigger with this name already exists for the agent")
+
 // RunStatus represents the state of a trigger run.
 type RunStatus string
 

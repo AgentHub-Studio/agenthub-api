@@ -36,6 +36,15 @@ func (m *mockRepo) Create(_ context.Context, t trigger.AgentTrigger) (trigger.Ag
 	return t, nil
 }
 
+func (m *mockRepo) ExistsByName(_ context.Context, agentID uuid.UUID, name string) (bool, error) {
+	for _, t := range m.triggers {
+		if t.AgentID == agentID && t.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *mockRepo) GetByID(_ context.Context, id uuid.UUID) (trigger.AgentTrigger, error) {
 	t, ok := m.triggers[id]
 	if !ok {

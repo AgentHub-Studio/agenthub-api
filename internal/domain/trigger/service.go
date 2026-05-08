@@ -39,6 +39,14 @@ func (s *Service) Create(ctx context.Context, agentID uuid.UUID, req CreateTrigg
 		return AgentTrigger{}, fmt.Errorf("trigger: invalid cron expression: %w", err)
 	}
 
+	exists, err := s.repo.ExistsByName(ctx, agentID, req.Name)
+	if err != nil {
+		return AgentTrigger{}, err
+	}
+	if exists {
+		return AgentTrigger{}, ErrDuplicateName
+	}
+
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled

@@ -19,6 +19,7 @@ import (
 // TriggerRepository defines the persistence interface for agent triggers.
 type TriggerRepository interface {
 	Create(ctx context.Context, t AgentTrigger) (AgentTrigger, error)
+	ExistsByName(ctx context.Context, agentID uuid.UUID, name string) (bool, error)
 	GetByID(ctx context.Context, id uuid.UUID) (AgentTrigger, error)
 	ListByAgent(ctx context.Context, agentID uuid.UUID, page pagination.PageRequest) (pagination.Page[AgentTrigger], error)
 	Update(ctx context.Context, t AgentTrigger) (AgentTrigger, error)
@@ -75,6 +76,23 @@ func (r *Repository) Create(ctx context.Context, t AgentTrigger) (AgentTrigger, 
 		}
 	}
 	return created, err
+}
+
+// ExistsByName checks if a trigger with the given name exists for the agent.
+func (r *Repository) ExistsByName(ctx context.Context, agentID uuid.UUID, name string) (bool, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+
+	var exists bool
+	err = conn.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM agent_trigger WHERE agent_id = $1 AND name = $2)`,
+		agentID, name,
+	).Scan(&exists)
+	return exists, err
 }
 
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (AgentTrigger, error) {
