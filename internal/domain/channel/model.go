@@ -29,6 +29,7 @@ var ErrValidation = errors.New("channel: validation failed")
 type ChannelType string
 
 const (
+	ChannelTypeWebhook  ChannelType = "WEBHOOK"
 	ChannelTypeSlack    ChannelType = "SLACK"
 	ChannelTypeTelegram ChannelType = "TELEGRAM"
 	ChannelTypeDiscord  ChannelType = "DISCORD"

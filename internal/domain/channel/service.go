@@ -75,6 +75,12 @@ func (s *service) Create(ctx context.Context, req CreateChannelRequest) (Channel
 	if req.Type == "" {
 		return ChannelTokenResponse{}, fmt.Errorf("%w: type is required", ErrValidation)
 	}
+	switch req.Type {
+	case ChannelTypeWebhook, ChannelTypeSlack, ChannelTypeTelegram, ChannelTypeDiscord, ChannelTypeCustom:
+		// ok
+	default:
+		return ChannelTokenResponse{}, fmt.Errorf("%w: type must be one of WEBHOOK|SLACK|TELEGRAM|DISCORD|CUSTOM (got %q)", ErrValidation, req.Type)
+	}
 
 	token, err := generateToken()
 	if err != nil {
