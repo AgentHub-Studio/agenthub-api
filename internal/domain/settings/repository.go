@@ -15,6 +15,10 @@ import (
 // ErrNotFound is returned when the setting cannot be found.
 var ErrNotFound = errors.New("settings: not found")
 
+// ErrUpstream is returned when an external provider (OpenAI, Anthropic,
+// Ollama, OpenRouter) fails to respond. Maps to HTTP 502 Bad Gateway.
+var ErrUpstream = errors.New("settings: upstream provider error")
+
 // Repository defines persistence operations for Setting.
 type Repository interface {
 	FindAll(ctx context.Context) ([]Setting, error)

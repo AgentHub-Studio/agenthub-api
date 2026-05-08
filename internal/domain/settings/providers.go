@@ -111,13 +111,13 @@ func ListOllamaModels(ctx context.Context, baseURL string) ([]ModelInfo, error) 
 
 	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("ollama: %w", err)
+		return nil, fmt.Errorf("%w: ollama: %v", ErrUpstream, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama: status %d: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("%w: ollama: status %d: %s", ErrUpstream, resp.StatusCode, body)
 	}
 
 	var result struct {

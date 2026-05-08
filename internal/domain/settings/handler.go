@@ -162,6 +162,10 @@ func (h *Handler) listOllamaModels(w http.ResponseWriter, r *http.Request) {
 	baseURL := r.URL.Query().Get("baseUrl")
 	models, err := ListOllamaModels(r.Context(), baseURL)
 	if err != nil {
+		if errors.Is(err, ErrUpstream) {
+			httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
 		httputil.InternalServerError(w, err.Error())
 		return
 	}
