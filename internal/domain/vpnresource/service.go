@@ -79,8 +79,29 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 	return s.repo.Create(ctx, tenantID, v)
 }
 
-// Update updates an existing VPN resource.
+// Update updates an existing VPN resource. PATCH-friendly: campos vazios
+// preservam valor atual (true partial update — backlog #186 pattern).
 func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (VpnResource, error) {
+	existing, err := s.repo.GetByID(ctx, tenantID, id)
+	if err != nil {
+		return VpnResource{}, err
+	}
+	// Merge: preserve current value when request omits the field.
+	if strings.TrimSpace(req.Name) == "" {
+		req.Name = existing.Name
+	}
+	if req.Description == "" {
+		req.Description = existing.Description
+	}
+	if req.OvpnConfigPath == "" {
+		req.OvpnConfigPath = existing.OvpnConfigPath
+	}
+	if req.AuthFilePath == "" {
+		req.AuthFilePath = existing.AuthFilePath
+	}
+	if req.SecretName == "" {
+		req.SecretName = existing.SecretName
+	}
 	if strings.TrimSpace(req.Name) == "" {
 		return VpnResource{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
