@@ -81,6 +81,22 @@ func (r *Repository) GetByID(ctx context.Context, tenantID string, id uuid.UUID)
 	return v, err
 }
 
+// ExistsByName retorna true se já existir VpnResource com mesmo
+// nome no tenant. Detecção de duplicatas antes do INSERT.
+func (r *Repository) ExistsByName(ctx context.Context, tenantID, name string) (bool, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	var exists bool
+	err = conn.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM vpn_resource WHERE name = $1)`,
+		name,
+	).Scan(&exists)
+	return exists, err
+}
+
 // Create inserts a new VPN resource.
 func (r *Repository) Create(ctx context.Context, tenantID string, v VpnResource) (VpnResource, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)

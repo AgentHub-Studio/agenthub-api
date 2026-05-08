@@ -17,6 +17,10 @@ var ErrNotFound = errors.New("vpn resource not found")
 // que criava VpnResource com name="" persistido no banco.
 var ErrValidation = errors.New("vpn resource validation failed")
 
+// ErrDuplicateName é retornado quando POST tenta criar VpnResource
+// com nome já existente no tenant. Mapeia para 409.
+var ErrDuplicateName = errors.New("vpn resource: name already exists")
+
 // VpnResource represents an OpenVPN tunnel configuration.
 type VpnResource struct {
 	ID             uuid.UUID `db:"id"`

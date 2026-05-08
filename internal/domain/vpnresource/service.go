@@ -23,6 +23,7 @@ type StorageClient interface {
 type VpnRepository interface {
 	ListAll(ctx context.Context, tenantID string, pr pagination.PageRequest) ([]VpnResource, int, error)
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (VpnResource, error)
+	ExistsByName(ctx context.Context, tenantID, name string) (bool, error)
 	Create(ctx context.Context, tenantID string, v VpnResource) (VpnResource, error)
 	Update(ctx context.Context, tenantID string, id uuid.UUID, v VpnResource) (VpnResource, error)
 	Delete(ctx context.Context, tenantID string, id uuid.UUID) error
@@ -67,6 +68,13 @@ func (s *Service) GetByID(ctx context.Context, tenantID string, id uuid.UUID) (V
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (VpnResource, error) {
 	if strings.TrimSpace(req.Name) == "" {
 		return VpnResource{}, fmt.Errorf("%w: name is required", ErrValidation)
+	}
+	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
+	if err != nil {
+		return VpnResource{}, fmt.Errorf("vpn: check duplicate name: %w", err)
+	}
+	if exists {
+		return VpnResource{}, ErrDuplicateName
 	}
 	v := VpnResource{
 		Name:           req.Name,
