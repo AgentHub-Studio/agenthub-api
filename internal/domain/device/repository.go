@@ -105,13 +105,18 @@ func (r *pgRepository) GetByID(ctx context.Context, id uuid.UUID) (Device, error
 }
 
 func (r *pgRepository) Create(ctx context.Context, d Device) (Device, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return Device{}, fmt.Errorf("device: acquire: %w", err)
+	}
+	defer release()
 	d.ID = uuid.New()
 	caps, _ := capabilitiesJSON(d.Capabilities)
 	meta := d.Metadata
 	if len(meta) == 0 {
 		meta = []byte("{}")
 	}
-	err := r.pool.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		INSERT INTO device
 		  (id, name, type, description, mcp_server_config_id, resource_uri,
 		   capabilities, status, metadata, enabled, created_at, updated_at)
@@ -139,12 +144,17 @@ func (r *pgRepository) Create(ctx context.Context, d Device) (Device, error) {
 }
 
 func (r *pgRepository) Update(ctx context.Context, d Device) (Device, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return Device{}, fmt.Errorf("device: acquire: %w", err)
+	}
+	defer release()
 	caps, _ := capabilitiesJSON(d.Capabilities)
 	meta := d.Metadata
 	if len(meta) == 0 {
 		meta = []byte("{}")
 	}
-	err := r.pool.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		UPDATE device SET
 		  name=$2, description=$3, resource_uri=$4,
 		  capabilities=$5::jsonb, status=$6, metadata=$7::jsonb,
@@ -172,7 +182,12 @@ func (r *pgRepository) Update(ctx context.Context, d Device) (Device, error) {
 }
 
 func (r *pgRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM device WHERE id = $1`, id)
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("device: acquire: %w", err)
+	}
+	defer release()
+	tag, err := conn.Exec(ctx, `DELETE FROM device WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("device: delete: %w", err)
 	}
@@ -183,7 +198,12 @@ func (r *pgRepository) Delete(ctx context.Context, id uuid.UUID) error {
 }
 
 func (r *pgRepository) Heartbeat(ctx context.Context, id uuid.UUID, status DeviceStatus, now time.Time) error {
-	tag, err := r.pool.Exec(ctx,
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("device: acquire: %w", err)
+	}
+	defer release()
+	tag, err := conn.Exec(ctx,
 		`UPDATE device SET status=$2, last_seen_at=$3, updated_at=NOW() WHERE id=$1`,
 		id, string(status), now,
 	)
@@ -197,7 +217,12 @@ func (r *pgRepository) Heartbeat(ctx context.Context, id uuid.UUID, status Devic
 }
 
 func (r *pgRepository) ListByAgent(ctx context.Context, agentID uuid.UUID) ([]Device, error) {
-	rows, err := r.pool.Query(ctx, listQuery+`
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("device: acquire: %w", err)
+	}
+	defer release()
+	rows, err := conn.Query(ctx, listQuery+`
 		JOIN agent_device ad ON ad.device_id = device.id
 		WHERE ad.agent_id = $1
 		ORDER BY device.name ASC`, agentID)
@@ -218,7 +243,12 @@ func (r *pgRepository) ListByAgent(ctx context.Context, agentID uuid.UUID) ([]De
 }
 
 func (r *pgRepository) AttachToAgent(ctx context.Context, agentID, deviceID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx,
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("device: acquire: %w", err)
+	}
+	defer release()
+	_, err = conn.Exec(ctx,
 		`INSERT INTO agent_device (agent_id, device_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
 		agentID, deviceID,
 	)
@@ -226,7 +256,12 @@ func (r *pgRepository) AttachToAgent(ctx context.Context, agentID, deviceID uuid
 }
 
 func (r *pgRepository) DetachFromAgent(ctx context.Context, agentID, deviceID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx,
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("device: acquire: %w", err)
+	}
+	defer release()
+	_, err = conn.Exec(ctx,
 		`DELETE FROM agent_device WHERE agent_id=$1 AND device_id=$2`,
 		agentID, deviceID,
 	)
