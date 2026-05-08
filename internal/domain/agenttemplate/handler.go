@@ -54,7 +54,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusConflict, "slug already in use")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		// Validações server-side (slug pattern, name vazio) → 422.
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)

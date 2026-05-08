@@ -3,11 +3,14 @@ package agenttemplate
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 )
+
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // agentCreator is a narrow interface for creating agents from a template definition.
 // Implemented by *agent.service — declared here to avoid a circular dependency.
@@ -71,6 +74,8 @@ func (s *Service) Create(ctx context.Context, req CreateTemplateRequest) (Templa
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)
+	} else if !slugPattern.MatchString(slug) {
+		return TemplateResponse{}, fmt.Errorf("agent template: slug must match [a-z0-9][a-z0-9-]* (got %q)", slug)
 	}
 	t := AgentTemplate{
 		Name:           req.Name,

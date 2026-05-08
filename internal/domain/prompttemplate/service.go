@@ -3,11 +3,14 @@ package prompttemplate
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // Service encapsulates prompt template business logic.
 type Service struct {
@@ -61,6 +64,9 @@ func (s *Service) Create(ctx context.Context, agentID *uuid.UUID, req CreateRequ
 	}
 	if req.Slug == "" {
 		return Response{}, fmt.Errorf("prompt template: slug is required")
+	}
+	if !slugPattern.MatchString(req.Slug) {
+		return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrValidation, req.Slug)
 	}
 	if req.Content == "" {
 		return Response{}, fmt.Errorf("prompt template: content is required")

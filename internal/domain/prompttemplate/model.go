@@ -15,6 +15,10 @@ var ErrNotFound = fmt.Errorf("prompt template: not found")
 // ErrDuplicateSlug is returned when a slug already exists for the agent.
 var ErrDuplicateSlug = fmt.Errorf("prompt template: duplicate slug")
 
+// ErrValidation é retornado quando CreateRequest falha validação
+// (slug com formato errado, name/content vazios).
+var ErrValidation = fmt.Errorf("prompt template: validation failed")
+
 // Category represents the template category.
 type Category string
 
