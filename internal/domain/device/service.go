@@ -58,6 +58,13 @@ func (s *service) Create(ctx context.Context, req CreateDeviceRequest) (DeviceRe
 	if err := req.validate(); err != nil {
 		return DeviceResponse{}, err
 	}
+	exists, err := s.repo.ExistsByName(ctx, req.Name)
+	if err != nil {
+		return DeviceResponse{}, fmt.Errorf("device: check duplicate name: %w", err)
+	}
+	if exists {
+		return DeviceResponse{}, ErrNameConflict
+	}
 	d := req.toDevice()
 	created, err := s.repo.Create(ctx, d)
 	if err != nil {

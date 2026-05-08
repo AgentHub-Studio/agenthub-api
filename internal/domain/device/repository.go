@@ -20,6 +20,7 @@ import (
 type Repository interface {
 	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[Device], error)
 	GetByID(ctx context.Context, id uuid.UUID) (Device, error)
+	ExistsByName(ctx context.Context, name string) (bool, error)
 	Create(ctx context.Context, d Device) (Device, error)
 	Update(ctx context.Context, d Device) (Device, error)
 	Delete(ctx context.Context, id uuid.UUID) error
@@ -102,6 +103,17 @@ func (r *pgRepository) GetByID(ctx context.Context, id uuid.UUID) (Device, error
 		return Device{}, fmt.Errorf("device: get: %w", err)
 	}
 	return d, nil
+}
+
+func (r *pgRepository) ExistsByName(ctx context.Context, name string) (bool, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	var exists bool
+	err = conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM device WHERE name = $1)`, name).Scan(&exists)
+	return exists, err
 }
 
 func (r *pgRepository) Create(ctx context.Context, d Device) (Device, error) {
