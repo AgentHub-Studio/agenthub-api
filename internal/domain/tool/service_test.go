@@ -370,7 +370,7 @@ func TestNormalizeDataSourceID_CamelCaseConvertedToSnakeCase(t *testing.T) {
 	created, err := svc.Create(context.Background(), tool.CreateRequest{
 		Name:   "SQL Query",
 		Type:   tool.ToolTypeSQL,
-		Config: json.RawMessage(`{"datasourceId":"abc-123","query":"SELECT 1"}`),
+		Config: json.RawMessage(`{"datasourceId":"00000000-0000-0000-0000-000000000001","query":"SELECT 1"}`),
 	})
 	require.NoError(t, err)
 
@@ -384,7 +384,7 @@ func TestNormalizeDataSourceID_AlreadySnakeCase_Unchanged(t *testing.T) {
 	created, err := svc.Create(context.Background(), tool.CreateRequest{
 		Name:   "SQL Query 2",
 		Type:   tool.ToolTypeSQL,
-		Config: json.RawMessage(`{"datasource_id":"abc-123","query":"SELECT 1"}`),
+		Config: json.RawMessage(`{"datasource_id":"00000000-0000-0000-0000-000000000002","query":"SELECT 1"}`),
 	})
 	require.NoError(t, err)
 

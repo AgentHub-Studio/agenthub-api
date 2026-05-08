@@ -68,6 +68,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 		}
 	}
 
+	if req.ContextWindow < 0 {
+		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: contextWindow must be >= 0 (got %d)", req.ContextWindow)
+	}
+
 	exists, err := s.repo.ExistsByName(ctx, req.Name)
 	if err != nil {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: check duplicate: %w", err)

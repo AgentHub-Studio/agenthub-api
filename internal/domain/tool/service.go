@@ -122,6 +122,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		if strings.TrimSpace(dsID) == "" {
 			return Response{}, fmt.Errorf("%w: datasourceId is required for SQL tools", ErrValidation)
 		}
+		if _, err := uuid.Parse(strings.TrimSpace(dsID)); err != nil {
+			return Response{}, fmt.Errorf("%w: datasourceId must be a valid UUID (got %q)", ErrValidation, dsID)
+		}
 	}
 	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
