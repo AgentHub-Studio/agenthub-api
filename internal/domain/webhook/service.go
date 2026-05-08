@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -60,7 +61,10 @@ func (s *Service) List(ctx context.Context) ([]WebhookConfig, error) {
 // Create creates a new webhook configuration.
 func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (WebhookConfig, error) {
 	if req.Name == "" || req.URL == "" {
-		return WebhookConfig{}, fmt.Errorf("webhook: name and url are required")
+		return WebhookConfig{}, fmt.Errorf("%w: name and url are required", ErrValidation)
+	}
+	if u, err := url.Parse(req.URL); err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+		return WebhookConfig{}, fmt.Errorf("%w: url must be a valid http(s) URL with host", ErrValidation)
 	}
 	enabled := true
 	if req.Enabled != nil {

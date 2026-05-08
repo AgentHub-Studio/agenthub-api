@@ -18,6 +18,10 @@ import (
 // ErrNotFound is returned when a webhook is not found.
 var ErrNotFound = errors.New("webhook: not found")
 
+// ErrValidation indicates a request payload failed validation.
+// Maps to HTTP 422 in handlers.
+var ErrValidation = errors.New("webhook: validation failed")
+
 // WebhookRepository defines the persistence interface for WebhookConfig.
 type WebhookRepository interface {
 	List(ctx context.Context) ([]WebhookConfig, error)
