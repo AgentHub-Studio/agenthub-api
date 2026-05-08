@@ -66,6 +66,13 @@ func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (Webhook
 	if u, err := url.Parse(req.URL); err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
 		return WebhookConfig{}, fmt.Errorf("%w: url must be a valid http(s) URL with host", ErrValidation)
 	}
+	exists, err := s.repo.ExistsByName(ctx, req.Name)
+	if err != nil {
+		return WebhookConfig{}, fmt.Errorf("webhook: check duplicate name: %w", err)
+	}
+	if exists {
+		return WebhookConfig{}, ErrDuplicateName
+	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled

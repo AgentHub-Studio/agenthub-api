@@ -22,9 +22,14 @@ var ErrNotFound = errors.New("webhook: not found")
 // Maps to HTTP 422 in handlers.
 var ErrValidation = errors.New("webhook: validation failed")
 
+// ErrDuplicateName é retornado quando POST tenta criar webhook
+// com nome já existente no tenant. Mapeia para 409.
+var ErrDuplicateName = errors.New("webhook: name already exists")
+
 // WebhookRepository defines the persistence interface for WebhookConfig.
 type WebhookRepository interface {
 	List(ctx context.Context) ([]WebhookConfig, error)
+	ExistsByName(ctx context.Context, name string) (bool, error)
 	Create(ctx context.Context, w WebhookConfig) (WebhookConfig, error)
 	GetByID(ctx context.Context, id uuid.UUID) (WebhookConfig, error)
 	GetBySecret(ctx context.Context, secret string) (WebhookConfig, error)
@@ -63,6 +68,23 @@ func (r *Repository) List(ctx context.Context) ([]WebhookConfig, error) {
 	}
 	defer rows.Close()
 	return scanConfigRows(rows)
+}
+
+// ExistsByName retorna true se já existir webhook com mesmo nome
+// no tenant (detecção de duplicata antes do INSERT).
+func (r *Repository) ExistsByName(ctx context.Context, name string) (bool, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	var exists bool
+	err = conn.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM webhook_config WHERE name = $1)`,
+		name,
+	).Scan(&exists)
+	return exists, err
 }
 
 // Create inserts a new webhook configuration.
