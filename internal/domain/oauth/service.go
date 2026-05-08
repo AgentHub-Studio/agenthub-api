@@ -128,17 +128,50 @@ func validateCreateRequest(req CreateRequest) error {
 		return fmt.Errorf("%w: name is required", ErrValidation)
 	}
 	switch req.AuthType {
-	case AuthTypeOAuth2ClientCredentials,
-		AuthTypeOAuth2AuthorizationCode,
-		AuthTypeAPIKey,
-		AuthTypeBearerToken,
-		AuthTypeBasicAuth:
-		// supported
+	case AuthTypeOAuth2ClientCredentials:
+		if ptrEmpty(req.TokenURL) {
+			return fmt.Errorf("%w: tokenUrl is required for OAUTH2_CLIENT_CREDENTIALS", ErrValidation)
+		}
+		if ptrEmpty(req.ClientID) {
+			return fmt.Errorf("%w: clientId is required for OAUTH2_CLIENT_CREDENTIALS", ErrValidation)
+		}
+		if ptrEmpty(req.ClientSecret) {
+			return fmt.Errorf("%w: clientSecret is required for OAUTH2_CLIENT_CREDENTIALS", ErrValidation)
+		}
+	case AuthTypeOAuth2AuthorizationCode:
+		if ptrEmpty(req.AuthURL) {
+			return fmt.Errorf("%w: authUrl is required for OAUTH2_AUTHORIZATION_CODE", ErrValidation)
+		}
+		if ptrEmpty(req.TokenURL) {
+			return fmt.Errorf("%w: tokenUrl is required for OAUTH2_AUTHORIZATION_CODE", ErrValidation)
+		}
+		if ptrEmpty(req.ClientID) {
+			return fmt.Errorf("%w: clientId is required for OAUTH2_AUTHORIZATION_CODE", ErrValidation)
+		}
+	case AuthTypeAPIKey:
+		if ptrEmpty(req.APIKeyValue) {
+			return fmt.Errorf("%w: apiKeyValue is required for API_KEY", ErrValidation)
+		}
+	case AuthTypeBearerToken:
+		if ptrEmpty(req.BearerToken) {
+			return fmt.Errorf("%w: bearerToken is required for BEARER_TOKEN", ErrValidation)
+		}
+	case AuthTypeBasicAuth:
+		if ptrEmpty(req.Username) {
+			return fmt.Errorf("%w: username is required for BASIC_AUTH", ErrValidation)
+		}
+		if ptrEmpty(req.Password) {
+			return fmt.Errorf("%w: password is required for BASIC_AUTH", ErrValidation)
+		}
 	default:
 		return fmt.Errorf("%w: authType must be one of OAUTH2_CLIENT_CREDENTIALS|OAUTH2_AUTHORIZATION_CODE|API_KEY|BEARER_TOKEN|BASIC_AUTH (got %q)",
 			ErrValidation, req.AuthType)
 	}
 	return nil
+}
+
+func ptrEmpty(p *string) bool {
+	return p == nil || strings.TrimSpace(*p) == ""
 }
 
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (OAuthCredential, error) {
