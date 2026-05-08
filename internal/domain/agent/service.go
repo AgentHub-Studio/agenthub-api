@@ -177,6 +177,9 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if req.Name == "" {
 		return AgentResponse{}, fmt.Errorf("name is required")
 	}
+	if len(req.Name) > 255 {
+		return AgentResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(req.Name))
+	}
 	// ACT-F3-05: enforce maximum system prompt size.
 	if req.SystemPrompt != nil && len(*req.SystemPrompt) > maxSystemPromptChars {
 		return AgentResponse{}, fmt.Errorf("%w: systemPrompt exceeds maximum length of %d chars (got %d)", ErrInvalidRequest, maxSystemPromptChars, len(*req.SystemPrompt))

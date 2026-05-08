@@ -75,6 +75,9 @@ func validateRequest(req CreateRequest) error {
 	if req.Host == "" {
 		return fmt.Errorf("%w: host is required", ErrValidation)
 	}
+	if req.Port < 1 || req.Port > 65535 {
+		return fmt.Errorf("%w: port must be between 1 and 65535 (got %d)", ErrValidation, req.Port)
+	}
 	return nil
 }
 
