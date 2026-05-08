@@ -141,7 +141,7 @@ func TestToolService_GetByID_NotFound(t *testing.T) {
 
 func TestToolService_BindToSkill_Success(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
-	created, err := svc.Create(context.Background(), tool.CreateRequest{Name: "SQL Query", Type: "SQL"})
+	created, err := svc.Create(context.Background(), tool.CreateRequest{Name: "SQL Query", Type: "SQL", Config: json.RawMessage(`{"query":"SELECT 1","datasourceId":"00000000-0000-0000-0000-000000000001"}`)})
 	require.NoError(t, err)
 	skillID := uuid.New()
 	binding, err := svc.BindToSkill(context.Background(), skillID, tool.BindRequest{ToolID: created.ID, Priority: 1})
@@ -151,7 +151,7 @@ func TestToolService_BindToSkill_Success(t *testing.T) {
 
 func TestToolService_BindToSkill_AlreadyBound(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
-	created, err := svc.Create(context.Background(), tool.CreateRequest{Name: "SQL Query", Type: "SQL"})
+	created, err := svc.Create(context.Background(), tool.CreateRequest{Name: "SQL Query", Type: "SQL", Config: json.RawMessage(`{"query":"SELECT 1","datasourceId":"00000000-0000-0000-0000-000000000001"}`)})
 	require.NoError(t, err)
 	skillID := uuid.New()
 	_, err = svc.BindToSkill(context.Background(), skillID, tool.BindRequest{ToolID: created.ID, Priority: 1})
@@ -205,18 +205,19 @@ func TestToolService_Create_WithLabels(t *testing.T) {
 
 func TestToolService_Create_ValidTypes(t *testing.T) {
 	httpConfig := json.RawMessage(`{"url":"https://api.example.com/endpoint"}`)
+	sqlConfig := json.RawMessage(`{"query":"SELECT 1","datasourceId":"00000000-0000-0000-0000-000000000001"}`)
 	validTypes := []struct {
 		typ    string
 		config json.RawMessage
 	}{
 		{tool.ToolTypeHTTP, httpConfig},
-		{tool.ToolTypeSQL, nil},
+		{tool.ToolTypeSQL, sqlConfig},
 		{tool.ToolTypeDocumentSearch, nil},
 		{tool.ToolTypeCustom, nil},
 		{tool.ToolTypeBlockly, nil},
 		{tool.ToolTypeComposite, nil},
 		{tool.ToolTypeCode, nil},
-		{tool.ToolTypeDatabase, nil},
+		{tool.ToolTypeDatabase, sqlConfig},
 		{tool.ToolTypeDocuments, nil},
 	}
 	for _, tc := range validTypes {
@@ -255,6 +256,7 @@ func TestPatchTool_OnlyNameSent_TypeAndDescPreserved(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
 	created, err := svc.Create(context.Background(), tool.CreateRequest{
 		Name: "old-name", Type: tool.ToolTypeSQL, Description: "keep me",
+		Config: json.RawMessage(`{"query":"SELECT 1","datasourceId":"00000000-0000-0000-0000-000000000001"}`),
 	})
 	require.NoError(t, err)
 
@@ -288,7 +290,7 @@ func TestToolService_List_FilterByType(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
 	_, err := svc.Create(context.Background(), tool.CreateRequest{Name: "HTTP", Type: "HTTP", Config: json.RawMessage(`{"url":"https://api.example.com/v1"}`)})
 	require.NoError(t, err)
-	_, err = svc.Create(context.Background(), tool.CreateRequest{Name: "SQL", Type: "SQL"})
+	_, err = svc.Create(context.Background(), tool.CreateRequest{Name: "SQL", Type: "SQL", Config: json.RawMessage(`{"query":"SELECT 1","datasourceId":"00000000-0000-0000-0000-000000000001"}`)})
 	require.NoError(t, err)
 	page, err := svc.List(context.Background(), pagination.PageRequest{Page: 0, Size: 20}, "HTTP")
 	require.NoError(t, err)
@@ -340,8 +342,9 @@ func TestToolService_Update_HTTPRemoveURL_Rejected(t *testing.T) {
 func TestToolService_NonHTTP_NoURLRequired(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
 	_, err := svc.Create(context.Background(), tool.CreateRequest{
-		Name: "SQL Tool",
-		Type: tool.ToolTypeSQL,
+		Name:   "SQL Tool",
+		Type:   tool.ToolTypeSQL,
+		Config: json.RawMessage(`{"query":"SELECT 1","datasourceId":"00000000-0000-0000-0000-000000000001"}`),
 	})
 	require.NoError(t, err)
 }
@@ -367,7 +370,7 @@ func TestNormalizeDataSourceID_CamelCaseConvertedToSnakeCase(t *testing.T) {
 	created, err := svc.Create(context.Background(), tool.CreateRequest{
 		Name:   "SQL Query",
 		Type:   tool.ToolTypeSQL,
-		Config: json.RawMessage(`{"datasourceId":"abc-123","sql":"SELECT 1"}`),
+		Config: json.RawMessage(`{"datasourceId":"abc-123","query":"SELECT 1"}`),
 	})
 	require.NoError(t, err)
 
@@ -381,7 +384,7 @@ func TestNormalizeDataSourceID_AlreadySnakeCase_Unchanged(t *testing.T) {
 	created, err := svc.Create(context.Background(), tool.CreateRequest{
 		Name:   "SQL Query 2",
 		Type:   tool.ToolTypeSQL,
-		Config: json.RawMessage(`{"datasource_id":"abc-123","sql":"SELECT 1"}`),
+		Config: json.RawMessage(`{"datasource_id":"abc-123","query":"SELECT 1"}`),
 	})
 	require.NoError(t, err)
 

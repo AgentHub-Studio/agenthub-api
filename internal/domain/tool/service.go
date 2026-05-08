@@ -113,6 +113,15 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		if strings.TrimSpace(q) == "" {
 			return Response{}, fmt.Errorf("%w: query is required for SQL tools", ErrValidation)
 		}
+		dsID, _ := cfgMap["datasource_id"].(string)
+		if strings.TrimSpace(dsID) == "" {
+			if v, _ := cfgMap["datasourceId"].(string); strings.TrimSpace(v) != "" {
+				dsID = v
+			}
+		}
+		if strings.TrimSpace(dsID) == "" {
+			return Response{}, fmt.Errorf("%w: datasourceId is required for SQL tools", ErrValidation)
+		}
 	}
 	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
