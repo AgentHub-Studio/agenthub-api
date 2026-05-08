@@ -57,7 +57,11 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := h.svc.Create(r.Context(), agentID, req)
 	if err != nil {
-		respond.Error(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, ErrAgentNotFound) {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	respond.JSON(w, http.StatusCreated, t)

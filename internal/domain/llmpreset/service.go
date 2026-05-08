@@ -71,6 +71,11 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	if req.Provider == "" {
 		return LLMPresetResponse{}, fmt.Errorf("%w: provider is required", ErrValidation)
 	}
+	switch req.Provider {
+	case "openai", "anthropic", "ollama", "openrouter", "google", "azure", "bedrock", "vertex", "groq", "mistral":
+	default:
+		return LLMPresetResponse{}, fmt.Errorf("%w: provider must be one of openai, anthropic, ollama, openrouter, google, azure, bedrock, vertex, groq, mistral (got %q)", ErrValidation, req.Provider)
+	}
 	if req.Model == "" {
 		return LLMPresetResponse{}, fmt.Errorf("%w: model is required", ErrValidation)
 	}

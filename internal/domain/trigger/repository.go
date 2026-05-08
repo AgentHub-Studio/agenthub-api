@@ -65,7 +65,16 @@ func (r *Repository) Create(ctx context.Context, t AgentTrigger) (AgentTrigger, 
 		RETURNING ` + triggerColumns
 
 	row := conn.QueryRow(ctx, query, t.AgentID, t.Name, t.CronExpression, t.Enabled, t.InputTemplate, t.NextRunAt)
-	return scanTrigger(row)
+	created, err := scanTrigger(row)
+	if err != nil {
+		msg := err.Error()
+		for i := 0; i+5 <= len(msg); i++ {
+			if msg[i:i+5] == "23503" {
+				return AgentTrigger{}, ErrAgentNotFound
+			}
+		}
+	}
+	return created, err
 }
 
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (AgentTrigger, error) {

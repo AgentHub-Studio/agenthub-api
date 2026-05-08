@@ -11,6 +11,10 @@ import (
 // ErrNotFound is returned when a trigger cannot be found.
 var ErrNotFound = errors.New("trigger: not found")
 
+// ErrAgentNotFound é retornado quando o agentId em
+// POST /api/agents/{agentId}/triggers não existe (FK 23503).
+var ErrAgentNotFound = errors.New("trigger: agent not found")
+
 // RunStatus represents the state of a trigger run.
 type RunStatus string
 
