@@ -221,7 +221,10 @@ func DefaultRunConfig() RunConfig {
 		MaxTokensPerCall:           4096,
 		ContextWindowSize:          200000,
 		CompactThreshold:           0.75,
-		ToolTimeout:                30 * time.Second,
+		// Bug 220: aumentado para 120s. DOCUMENT_SEARCH em CPU leva
+		// ~28s (embedding 22s + pgvector 5s + overhead) — limite de 30s
+		// causava EOF intermitente entre agenthub-api e skill-runtime.
+		ToolTimeout: 120 * time.Second,
 		// TotalTimeout must be ≥ LLMCallTimeout; otherwise agents running
 		// slow providers (Ollama on CPU) abort mid-LLM-call. Both align with
 		// the async_executor runTimeout (15 min) to avoid contradictory
