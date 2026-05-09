@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -89,6 +90,8 @@ func (s *Service) Create(ctx context.Context, req CreateTemplateRequest) (Templa
 	if len(req.Description) > 32000 {
 		return TemplateResponse{}, fmt.Errorf("agent template: description exceeds maximum length of 32000 chars (got %d)", len(req.Description))
 	}
+	// Bug 180: strip HTML do description (XSS prevention cross-cutting).
+	req.Description = sanitize.StripHTML(req.Description)
 	// Bug 167: cap definition (JSONB) em 256KB. Templates reais
 	// (system_prompt + tool refs + model_config) cabem em <32KB;
 	// 500KB+ é storage waste e perf hit em listagens.

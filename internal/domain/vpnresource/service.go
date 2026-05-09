@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 // StorageClient abstracts object-storage uploads for VPN config files.
@@ -77,6 +78,8 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 	if len(req.Description) > 32000 {
 		return VpnResource{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
+	// Bug 180: strip HTML do description (XSS prevention cross-cutting).
+	req.Description = sanitize.StripHTML(req.Description)
 	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
 	if err != nil {
 		return VpnResource{}, fmt.Errorf("vpn: check duplicate name: %w", err)
@@ -113,6 +116,9 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		req.Description = existing.Description
 	} else if len(req.Description) > 32000 {
 		return VpnResource{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	} else {
+		// Bug 180: strip HTML (XSS prevention).
+		req.Description = sanitize.StripHTML(req.Description)
 	}
 	if req.OvpnConfigPath == "" {
 		req.OvpnConfigPath = existing.OvpnConfigPath

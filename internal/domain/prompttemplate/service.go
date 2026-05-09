@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -88,6 +89,8 @@ func (s *Service) Create(ctx context.Context, agentID *uuid.UUID, req CreateRequ
 	if len(req.Description) > 32000 {
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
+	// Bug 180: strip HTML do description (XSS prevention).
+	req.Description = sanitize.StripHTML(req.Description)
 
 	exists, err := s.repo.ExistsBySlug(ctx, agentID, req.Slug)
 	if err != nil {
@@ -160,7 +163,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if len(*req.Description) > 32000 {
 			return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
 		}
-		existing.Description = *req.Description
+		// Bug 180: strip HTML (XSS prevention).
+		existing.Description = sanitize.StripHTML(*req.Description)
 	}
 	if req.Content != nil {
 		// Bug 113: content="" deixa o template inutilizável (renderiza

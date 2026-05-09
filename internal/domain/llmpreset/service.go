@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 // Service defines business logic operations for LLMPreset.
@@ -106,6 +107,8 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	if len(req.Description) > 32000 {
 		return LLMPresetResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
+	// Bug 180: strip HTML do description (XSS prevention).
+	req.Description = sanitize.StripHTML(req.Description)
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 4096
@@ -152,7 +155,8 @@ func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		if len(*req.Description) > 32000 {
 			return LLMPresetResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
 		}
-		p.Description = *req.Description
+		// Bug 180: strip HTML (XSS prevention).
+		p.Description = sanitize.StripHTML(*req.Description)
 	}
 	if req.Provider != nil {
 		// Bug 111: Update precisa do mesmo enum gate que Create.

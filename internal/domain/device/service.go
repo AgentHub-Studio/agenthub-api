@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 // Service manages the Device Node Network.
@@ -65,6 +66,8 @@ func (s *service) Create(ctx context.Context, req CreateDeviceRequest) (DeviceRe
 	if exists {
 		return DeviceResponse{}, ErrNameConflict
 	}
+	// Bug 180: strip HTML do description (XSS prevention cross-cutting).
+	req.Description = sanitize.StripHTML(req.Description)
 	d := req.toDevice()
 	created, err := s.repo.Create(ctx, d)
 	if err != nil {
@@ -96,7 +99,8 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateDeviceRequ
 		if len(*req.Description) > 32000 {
 			return DeviceResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
 		}
-		existing.Description = *req.Description
+		// Bug 180: strip HTML (XSS prevention).
+		existing.Description = sanitize.StripHTML(*req.Description)
 	}
 	if req.ResourceURI != nil {
 		existing.ResourceURI = *req.ResourceURI
