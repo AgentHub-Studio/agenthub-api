@@ -15,6 +15,10 @@ import (
 // ErrNotFound is returned when the setting cannot be found.
 var ErrNotFound = errors.New("settings: not found")
 
+// ErrValidation is returned when the setting key/value fails validation.
+// Maps to HTTP 422 Unprocessable Entity.
+var ErrValidation = errors.New("settings: validation failed")
+
 // ErrUpstream is returned when an external provider (OpenAI, Anthropic,
 // Ollama, OpenRouter) fails to respond. Maps to HTTP 502 Bad Gateway.
 var ErrUpstream = errors.New("settings: upstream provider error")

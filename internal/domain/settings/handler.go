@@ -95,6 +95,10 @@ func (h *Handler) upsert(w http.ResponseWriter, r *http.Request) {
 	}
 	s, err := h.svc.Upsert(r.Context(), key, req)
 	if err != nil {
+		if errors.Is(err, ErrValidation) {
+			httputil.UnprocessableEntity(w, err.Error())
+			return
+		}
 		httputil.BadRequest(w, err.Error())
 		return
 	}

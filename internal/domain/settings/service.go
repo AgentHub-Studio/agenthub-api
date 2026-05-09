@@ -2,7 +2,11 @@ package settings
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
 // Service defines business logic operations for Setting.
@@ -44,10 +48,24 @@ func (s *service) Get(ctx context.Context, key string) (SettingResponse, error) 
 
 func (s *service) Upsert(ctx context.Context, key string, req UpdateSettingRequest) (SettingResponse, error) {
 	if key == "" {
-		return SettingResponse{}, fmt.Errorf("key is required")
+		return SettingResponse{}, fmt.Errorf("%w: key is required", ErrValidation)
 	}
 	if len(req.Value) == 0 {
-		return SettingResponse{}, fmt.Errorf("value is required")
+		return SettingResponse{}, fmt.Errorf("%w: value is required", ErrValidation)
+	}
+
+	// Bug 102 (CRÍTICO): qualquer chave terminando em ".baseUrl" é consumida
+	// pelo model_factory para construir o cliente LLM. Sem SSRF, um admin
+	// malicioso (ou comprometido) poderia redirecionar todas as chamadas
+	// LLM para localhost / 169.254 / cluster DNS e exfiltrar prompts.
+	if strings.HasSuffix(strings.ToLower(key), ".baseurl") {
+		var url string
+		if err := json.Unmarshal(req.Value, &url); err != nil {
+			return SettingResponse{}, fmt.Errorf("%w: %s must be a JSON string URL", ErrValidation, key)
+		}
+		if err := ssrf.ValidateURL(url); err != nil {
+			return SettingResponse{}, fmt.Errorf("%w: %s invalid (%v)", ErrValidation, key, err)
+		}
 	}
 
 	var description string
