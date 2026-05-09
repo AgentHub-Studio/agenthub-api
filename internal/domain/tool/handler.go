@@ -30,14 +30,32 @@ type toolService interface {
 	GetDatabaseSchema(ctx context.Context, dataSourceID string) (DatabaseSchema, error)
 }
 
+// SkillExister é a slice mínima do skill.Repository usada para validar
+// existência da skill em listBySkill (bug 209).
+type SkillExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) (any, error)
+}
+
 // Handler exposes tool HTTP endpoints.
 type Handler struct {
-	svc toolService
+	svc       toolService
+	skillRepo skillExisterAdapter // optional: bug 209
+}
+
+// skillExisterAdapter is a thin contract: returns nil if skill exists, error otherwise.
+type skillExisterAdapter interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
 }
 
 // NewHandler creates a new Handler.
 func NewHandler(svc toolService) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithSkillExister wires skill existence checker for bug 209 listBySkill validation.
+func (h *Handler) WithSkillExister(s skillExisterAdapter) *Handler {
+	h.skillRepo = s
+	return h
 }
 
 // RegisterRoutes mounts tool routes on the given router.
@@ -323,6 +341,14 @@ func (h *Handler) listBySkill(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid skillId")
 		return
+	}
+	// Bug 209: validar skill existence; antes retornava 200+empty arr
+	// para qualquer UUID. Mesmo padrão de bugs 204/205/208.
+	if h.skillRepo != nil {
+		if err := h.skillRepo.GetByID(r.Context(), skillID); err != nil {
+			respond.Error(w, http.StatusNotFound, "skill not found")
+			return
+		}
 	}
 	resp, err := h.svc.ListBySkill(r.Context(), skillID)
 	if err != nil {

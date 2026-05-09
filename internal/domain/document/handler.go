@@ -21,14 +21,26 @@ type documentService interface {
 	Reprocess(ctx context.Context, id uuid.UUID) (DocumentResponse, error)
 }
 
+// kbExister verifies parent knowledge-base existence (bug 209 batch).
+type kbExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler handles HTTP requests for documents.
 type Handler struct {
 	svc documentService
+	kb  kbExister
 }
 
 // NewHandler creates a new Handler.
 func NewHandler(svc documentService) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithKBExister wires KB existence checker for parent-resource validation.
+func (h *Handler) WithKBExister(kb kbExister) *Handler {
+	h.kb = kb
+	return h
 }
 
 // RegisterRoutes mounts document routes onto the given router.
@@ -45,6 +57,13 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid knowledge base id")
 		return
+	}
+
+	if h.kb != nil {
+		if err := h.kb.GetByID(r.Context(), kbID); err != nil {
+			respond.Error(w, http.StatusNotFound, "knowledge base not found")
+			return
+		}
 	}
 
 	req := pagination.ParsePageRequest(r)

@@ -64,11 +64,18 @@ type updateHookRequest struct {
 // HookHandler manages REST endpoints for agent hooks.
 type HookHandler struct {
 	pool *pgxpool.Pool
+	svc  Service // optional: parent-agent existence checker (bug 209 batch)
 }
 
 // NewHookHandler creates a HookHandler backed by a connection pool.
 func NewHookHandler(pool *pgxpool.Pool) *HookHandler {
 	return &HookHandler{pool: pool}
+}
+
+// WithAgentService wires the agent service so list can validate parent existence.
+func (h *HookHandler) WithAgentService(s Service) *HookHandler {
+	h.svc = s
+	return h
 }
 
 // RegisterRoutes mounts hook routes under /api/agents/{id}/hooks.
@@ -90,6 +97,16 @@ func (h *HookHandler) list(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid agent id")
 		return
+	}
+	if h.svc != nil {
+		if _, err := h.svc.Get(r.Context(), agentID); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				respond.Error(w, http.StatusNotFound, "agent not found")
+				return
+			}
+			respond.Error(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 	}
 	conn, release, err := h.acquire(r.Context())
 	if err != nil {

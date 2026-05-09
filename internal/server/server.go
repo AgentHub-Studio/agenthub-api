@@ -153,7 +153,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	toolSvc := tool.NewService(toolRepo).
 		WithSettings(&toolSettingsAdapter{repo: settingsRepo}).
 		WithDatasource(&toolDatasourceAdapter{svc: datasourceSvc}, tenantctx.FromContext)
-	toolHandler := tool.NewHandler(toolSvc)
+	toolHandler := tool.NewHandler(toolSvc).
+		WithSkillExister(&skillExisterAdapter{repo: skillRepo})
 	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool)))
 	promptTemplateHandler := prompttemplate.NewHandler(prompttemplate.NewService(prompttemplate.NewRepository(pool)))
 	agentTemplateSvc := agenttemplate.NewService(agenttemplate.NewRepository(pool)).WithAgentCreator(agentSvc)
@@ -164,7 +165,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
 	// BUG-TRIGGER-NOT-MOUNTED: trigger domain was fully implemented but never wired.
-	triggerHandler := trigger.NewHandler(trigger.NewService(trigger.NewRepository(pool), trigger.NewSimpleCronParser()))
+	triggerHandler := trigger.NewHandler(trigger.NewService(trigger.NewRepository(pool), trigger.NewSimpleCronParser())).
+		WithAgentExister(&agentExisterAdapter{svc: agentSvc})
 	oauthSvc := oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey)
 	oauthHandler := oauth.NewHandler(oauthSvc)
 	auditHandler := audit.NewHandler(auditSvc)
@@ -280,7 +282,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			slog.Info("rabbitmq: document event publisher connected")
 		}
 	}
-	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher, cfg.MinIO.DocumentsBucket))
+	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher, cfg.MinIO.DocumentsBucket)).
+		WithKBExister(&kbExisterAdapter{repo: kbRepo})
 	kbHandler := knowledgebase.NewHandler(knowledgebase.NewService(kbRepo))
 	if cfg.EmbeddingURL != "" {
 		kbHandler.WithSearchClient(knowledge.NewPgDocumentSearchClient(pool, cfg.EmbeddingURL))
@@ -386,7 +389,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			func(*http.Request) (string, string, []string) { return "", "", nil },
 			auth.FeatureFlags{RBAC: true},
 		).RegisterRoutes(r)
-		agent.NewHookHandler(pool).RegisterRoutes(r)
+		agent.NewHookHandler(pool).WithAgentService(agentSvc).RegisterRoutes(r)
 		agentVersionHandler.RegisterVersionRoutes(r)
 		agentBindingHandler.RegisterBindingRoutes(r)
 		agentBundleHandler.RegisterBundleRoutes(r)
@@ -525,6 +528,39 @@ func (a *promptTemplateAdapter) ResolvePromptTemplate(ctx context.Context, agent
 		return "", false, err
 	}
 	return tpl.Content, true, nil
+}
+
+// skillExisterAdapter wraps skill.Repository so tool.Handler can validate
+// parent-skill existence before listing skill→tool bindings (bug 209).
+type skillExisterAdapter struct {
+	repo *skill.Repository
+}
+
+func (a *skillExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
+	_, err := a.repo.GetByID(ctx, id)
+	return err
+}
+
+// kbExisterAdapter wraps knowledgebase.Repository so document.Handler can
+// validate parent-KB existence before listing documents (bug 209 batch).
+type kbExisterAdapter struct {
+	repo knowledgebase.Repository
+}
+
+func (a *kbExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
+	_, err := a.repo.GetByID(ctx, id)
+	return err
+}
+
+// agentExisterAdapter wraps agent.Service so handlers in other domains
+// (trigger, hooks) can validate parent-agent existence (bug 209 batch).
+type agentExisterAdapter struct {
+	svc agent.Service
+}
+
+func (a *agentExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
+	_, err := a.svc.Get(ctx, id)
+	return err
 }
 
 // Get satisfies agent.TemplateGetter, allowing the agent handler to

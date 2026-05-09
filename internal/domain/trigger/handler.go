@@ -23,14 +23,26 @@ type triggerService interface {
 	ListRuns(ctx context.Context, triggerID uuid.UUID, page pagination.PageRequest) (pagination.Page[AgentTriggerRun], error)
 }
 
+// agentExister verifies parent agent existence (bug 209 batch).
+type agentExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler exposes HTTP endpoints for agent triggers.
 type Handler struct {
-	svc triggerService
+	svc   triggerService
+	agent agentExister
 }
 
 // NewHandler creates a new trigger Handler.
 func NewHandler(svc triggerService) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithAgentExister wires agent existence checker for parent-resource validation.
+func (h *Handler) WithAgentExister(a agentExister) *Handler {
+	h.agent = a
+	return h
 }
 
 // RegisterRoutes mounts trigger endpoints on the router.
@@ -76,6 +88,12 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid agent id")
 		return
+	}
+	if h.agent != nil {
+		if err := h.agent.GetByID(r.Context(), agentID); err != nil {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return
+		}
 	}
 	page := pagination.ParsePageRequest(r)
 	result, err := h.svc.List(r.Context(), agentID, page)
