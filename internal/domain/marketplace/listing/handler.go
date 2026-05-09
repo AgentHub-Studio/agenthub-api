@@ -124,6 +124,11 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "listing not found")
 			return
 		}
+		// Bug 114: ErrValidation no Update precisa de mapping 422.
+		if errors.Is(err, ErrValidation) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}

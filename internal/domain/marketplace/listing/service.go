@@ -118,6 +118,11 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, tenantID string, req
 		return ListingResponse{}, fmt.Errorf("listing: forbidden")
 	}
 	if req.Name != nil {
+		// Bug 114: name não pode ser vazio. Sem este gate admin pode
+		// limpar via PATCH (Create rejeita name vazio).
+		if *req.Name == "" {
+			return ListingResponse{}, fmt.Errorf("%w: name cannot be empty", ErrValidation)
+		}
 		l.Name = *req.Name
 	}
 	if req.Description != nil {

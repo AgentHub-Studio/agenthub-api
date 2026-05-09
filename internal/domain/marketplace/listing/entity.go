@@ -15,6 +15,14 @@ var ErrNotFound = errors.New("listing not found")
 // mesmo packageId+slug. Mapeado para 409 no handler.
 var ErrDuplicateSlug = errors.New("listing: a listing with this slug already exists for this package")
 
+// ErrValidation é retornado quando o request falha validação semantic
+// (ex: name vazio em Update). Mapeado para 422 no handler.
+var ErrValidation = errors.New("listing: validation failed")
+
+// ErrForbidden é retornado quando o tenant não pode operar sobre o
+// listing (cross-tenant). Mapeado para 403 no handler.
+var ErrForbidden = errors.New("listing: forbidden")
+
 // PackageType represents the category of a marketplace listing.
 type PackageType string
 
