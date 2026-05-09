@@ -160,15 +160,22 @@ func TestSkillService_Update_Success(t *testing.T) {
 
 // --- IMPROVEMENT-TASK-01: validação de instructions no Update ---
 
-func TestSkillService_Update_InertSkill_Rejected(t *testing.T) {
-	svc := skill.NewService(newMockRepo())
+func TestSkillService_Update_InstructionsEmpty_Preserved(t *testing.T) {
+	// Bug 122: PATCH semantics — req.Instructions=="" significa "preservar",
+	// não "wipe". Sem este merge, PATCH parcial caía em ErrSkillInert false
+	// positive porque Instructions virava "" e AllowedTools (existing vazio)
+	// disparava o gate de inert. Comportamento correto: instructions atuais
+	// permanecem; nenhum erro.
+	repo := newMockRepo()
+	svc := skill.NewService(repo)
 	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Skill", Category: "misc", Instructions: "Do something."})
 	require.NoError(t, err)
 
-	// Attempt to clear instructions without providing AllowedTools.
-	_, err = svc.Update(context.Background(), created.ID, skill.UpdateRequest{Name: "Skill", Instructions: ""})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, skill.ErrSkillInert)
+	_, err = svc.Update(context.Background(), created.ID, skill.UpdateRequest{Name: "Renamed"})
+	require.NoError(t, err)
+	got, err := svc.GetByID(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Do something.", got.Instructions)
 }
 
 func TestSkillService_Update_AllowedToolsNoInstructions_Accepted(t *testing.T) {

@@ -183,6 +183,14 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 
 	// DX-01-H: normalize whitespace-only instructions.
 	req.Instructions = strings.TrimSpace(req.Instructions)
+	// Bug 122: PATCH true-partial — quando o cliente omite "instructions",
+	// preservar o valor atual em vez de tratar como "wipe". Sem este merge,
+	// PATCH com apenas {"name":"..."} cai em ErrSkillInert porque Instructions
+	// vira "" e AllowedTools (recém-mergeado) também é vazio para skills
+	// instructions-only — false positive de inert.
+	if req.Instructions == "" {
+		req.Instructions = existing.Instructions
+	}
 
 	// ACT-F3-05: enforce maximum instructions size (32K chars).
 	const maxInstructionsChars = 32000
