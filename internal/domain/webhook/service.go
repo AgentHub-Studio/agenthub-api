@@ -119,7 +119,16 @@ func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (Webhook
 		Enabled:    enabled,
 		RetryCount: retryCount,
 	}
-	return s.repo.Create(ctx, w)
+	created, err := s.repo.Create(ctx, w)
+	if err != nil {
+		return WebhookConfig{}, err
+	}
+	// Bug 154: secret é write-only — usado para HMAC signature mas nunca
+	// retornado. List/GetByID já mascaram; Create esquecia, vazando para
+	// quem cria o webhook (ainda assim é leak — frontend logging, request
+	// inspect, etc.).
+	created.Secret = nil
+	return created, nil
 }
 
 // GetByID returns a single webhook (secret omitted).
