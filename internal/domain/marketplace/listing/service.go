@@ -80,11 +80,21 @@ func (s *Service) GetBySlug(ctx context.Context, slug string) (ListingResponse, 
 // Create publishes a new marketplace listing.
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateListingRequest) (ListingResponse, error) {
 	if req.Name == "" {
-		return ListingResponse{}, fmt.Errorf("listing: name is required")
+		return ListingResponse{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
 	// Bug 131: name varchar(255) — gate length antes do INSERT.
 	if len(req.Name) > 255 {
-		return ListingResponse{}, fmt.Errorf("listing: name exceeds maximum length of 255 chars (got %d)", len(req.Name))
+		return ListingResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
+	// Bug 143: type field era armazenado sem validação (silenciosamente
+	// aceitando "INVALID" ou "" no banco). Gate enum + obrigatoriedade.
+	if req.Type == "" {
+		return ListingResponse{}, fmt.Errorf("%w: type is required (one of AGENT, SKILL, TOOL, KNOWLEDGE_BASE)", ErrValidation)
+	}
+	switch PackageType(req.Type) {
+	case PackageTypeAgent, PackageTypeSkill, PackageTypeTool, PackageTypeKnowledgeBase:
+	default:
+		return ListingResponse{}, fmt.Errorf("%w: type must be one of AGENT, SKILL, TOOL, KNOWLEDGE_BASE (got %q)", ErrValidation, req.Type)
 	}
 	slug := req.Slug
 	if slug == "" {
