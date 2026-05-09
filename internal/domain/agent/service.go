@@ -645,11 +645,13 @@ func validateModelConfig(raw json.RawMessage) error {
 	if mc.MaxIterations != nil && (*mc.MaxIterations <= 0 || *mc.MaxIterations > 100) {
 		return fmt.Errorf("maxIterations must be between 1 and 100 (got %d)", *mc.MaxIterations)
 	}
-	if mc.MaxTokens != nil && *mc.MaxTokens <= 0 {
-		return fmt.Errorf("maxTokens must be a positive integer (got %d)", *mc.MaxTokens)
+	if mc.MaxTokens != nil && (*mc.MaxTokens <= 0 || *mc.MaxTokens > 2_000_000) {
+		// Bug 152: cap em 2M — LLMs reais aceitam até ~128k-1M; valor
+		// maior é payload malformado e gera custo/timeout no provider.
+		return fmt.Errorf("maxTokens must be between 1 and 2000000 (got %d)", *mc.MaxTokens)
 	}
-	if mc.ContextWindow != nil && *mc.ContextWindow <= 0 {
-		return fmt.Errorf("contextWindow must be a positive integer (got %d)", *mc.ContextWindow)
+	if mc.ContextWindow != nil && (*mc.ContextWindow <= 0 || *mc.ContextWindow > 2_000_000) {
+		return fmt.Errorf("contextWindow must be between 1 and 2000000 (got %d)", *mc.ContextWindow)
 	}
 	if mc.MaxDepth != nil && *mc.MaxDepth < 0 {
 		return fmt.Errorf("maxDepth must be a non-negative integer (got %d)", *mc.MaxDepth)
