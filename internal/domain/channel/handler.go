@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -45,7 +46,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.List(r.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		// Bug 195: nunca expor err.Error() em fallback 500.
+		slog.Error("channel: list failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "list failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
@@ -70,7 +73,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("channel: create failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "create failed")
 		return
 	}
 	writeJSON(w, http.StatusCreated, resp)
@@ -89,7 +93,8 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "channel not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("channel: getByID failed", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "get failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -119,7 +124,8 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("channel: update failed", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "update failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -137,7 +143,8 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "channel not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("channel: delete failed", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

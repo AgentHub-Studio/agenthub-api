@@ -57,7 +57,9 @@ func (h *Handler) RegisterPublicRoutes(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	items, err := h.svc.List(r.Context())
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		// Bug 195: nunca expor err.Error() em fallback 500.
+		slog.Error("webhook: list failed", "err", err)
+		respond.Error(w, http.StatusInternalServerError, "list failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, items)
@@ -93,7 +95,8 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "webhook not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("webhook: getByID failed", "id", id, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "get failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -120,7 +123,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -137,7 +140,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "webhook not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.NoContent(w)
@@ -156,7 +159,7 @@ func (h *Handler) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := h.svc.ListDeliveries(r.Context(), id, filter, req)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, page)
@@ -226,7 +229,7 @@ func (h *Handler) sendTest(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "webhook not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)
