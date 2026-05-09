@@ -13,7 +13,14 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
+
+func init() {
+	// Tests use httptest.NewServer which binds to 127.0.0.1.
+	// Production must never allow loopback — this only affects test builds.
+	ssrf.AllowHost("127.0.0.1")
+}
 
 type mockWebhookRepo struct {
 	configs    map[uuid.UUID]webhook.WebhookConfig

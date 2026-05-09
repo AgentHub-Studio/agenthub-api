@@ -46,6 +46,17 @@ func init() {
 	}
 }
 
+// AllowHost adds a host to the in-memory allowlist. Used by test harnesses
+// (httptest.NewServer returns 127.0.0.1 URLs that would otherwise be blocked).
+// Production code should never call this — set SSRF_ALLOWED_HOSTS env var
+// instead.
+func AllowHost(host string) {
+	if host == "" {
+		return
+	}
+	allowedHosts[strings.ToLower(host)] = struct{}{}
+}
+
 // ValidateURL performs static SSRF checks on rawURL:
 //   - Blocks *.svc.cluster.local and *.cluster.local hostnames.
 //   - Blocks any URL whose host parses directly as a private/reserved IP.
@@ -73,6 +84,12 @@ func ValidateURL(rawURL string) error {
 	if strings.HasSuffix(host, ".svc.cluster.local") ||
 		strings.HasSuffix(host, ".cluster.local") {
 		return fmt.Errorf("URL targets internal cluster DNS: %s", host)
+	}
+
+	// Block well-known loopback hostnames that don't parse as IPs.
+	lowerHost := strings.ToLower(host)
+	if lowerHost == "localhost" || lowerHost == "ip6-localhost" || lowerHost == "ip6-loopback" {
+		return fmt.Errorf("URL targets loopback hostname: %s", host)
 	}
 
 	// If the URL host is a literal IP address, check it directly.
