@@ -50,6 +50,10 @@ func (s *service) Upsert(ctx context.Context, key string, req UpdateSettingReque
 	if key == "" {
 		return SettingResponse{}, fmt.Errorf("%w: key is required", ErrValidation)
 	}
+	// Bug 134: key varchar(255) — gate length antes do INSERT.
+	if len(key) > 255 {
+		return SettingResponse{}, fmt.Errorf("%w: key exceeds maximum length of 255 chars (got %d)", ErrValidation, len(key))
+	}
 	if len(req.Value) == 0 {
 		return SettingResponse{}, fmt.Errorf("%w: value is required", ErrValidation)
 	}
