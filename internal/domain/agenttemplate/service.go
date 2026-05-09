@@ -81,6 +81,10 @@ func (s *Service) Create(ctx context.Context, req CreateTemplateRequest) (Templa
 	} else if !slugPattern.MatchString(slug) {
 		return TemplateResponse{}, fmt.Errorf("agent template: slug must match [a-z0-9][a-z0-9-]* (got %q)", slug)
 	}
+	// Bug 133: slug varchar(255) — gate length antes do INSERT.
+	if len(slug) > 255 {
+		return TemplateResponse{}, fmt.Errorf("agent template: slug exceeds maximum length of 255 chars (got %d)", len(slug))
+	}
 	t := AgentTemplate{
 		Name:           req.Name,
 		Slug:           slug,

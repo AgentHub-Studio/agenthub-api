@@ -72,6 +72,10 @@ func (s *Service) Create(ctx context.Context, agentID *uuid.UUID, req CreateRequ
 	if !slugPattern.MatchString(req.Slug) {
 		return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrValidation, req.Slug)
 	}
+	// Bug 133: slug varchar(255) — gate length antes do INSERT.
+	if len(req.Slug) > 255 {
+		return Response{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Slug))
+	}
 	if req.Content == "" {
 		return Response{}, fmt.Errorf("prompt template: content is required")
 	}

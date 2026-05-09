@@ -111,6 +111,11 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	} else if !slugPattern.MatchString(slug) {
 		return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrValidation, slug)
 	}
+	// Bug 133: slug varchar(255) — gate length antes do INSERT
+	// (slugPattern aceita qualquer tamanho desde que match os chars).
+	if len(slug) > 255 {
+		return Response{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrValidation, len(slug))
+	}
 
 	// ensure slug uniqueness within tenant
 	base := slug
