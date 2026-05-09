@@ -2,6 +2,7 @@ package tool
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,9 +76,26 @@ type SkillToolResponse struct {
 // or tool results. P-C239-1: auth_token must not appear in any tool response body.
 var sensitiveToolConfigKeys = []string{
 	"auth_token", "authToken", "password", "secret", "apiKey", "api_key",
+	"clientSecret", "client_secret", "bearerToken", "bearer_token",
 }
 
-// SanitizeToolConfig removes credential keys from a raw tool config JSON blob.
+// sensitiveHeaderKeys lists HTTP header names whose values must be masked in
+// tool config responses. Bug 156: tool config.headers exposed Authorization,
+// X-API-Key, etc — credentials any read-access user could harvest.
+var sensitiveHeaderKeys = map[string]bool{
+	"authorization":   true,
+	"proxy-authorization": true,
+	"x-api-key":       true,
+	"x-api-token":     true,
+	"x-auth-token":    true,
+	"x-access-token":  true,
+	"x-secret":        true,
+	"cookie":          true,
+	"set-cookie":      true,
+}
+
+// SanitizeToolConfig removes credential keys from a raw tool config JSON blob
+// and masks sensitive HTTP header values inside config.headers.
 // Returns the sanitized JSON; on parse error returns the original input unchanged.
 // Safe to call on nil or empty input.
 func SanitizeToolConfig(raw json.RawMessage) json.RawMessage {
@@ -90,6 +108,17 @@ func SanitizeToolConfig(raw json.RawMessage) json.RawMessage {
 	}
 	for _, k := range sensitiveToolConfigKeys {
 		delete(m, k)
+	}
+	// Bug 156: mask sensitive headers (Authorization, X-API-Key, etc).
+	if hdrs, ok := m["headers"].(map[string]interface{}); ok {
+		for k, v := range hdrs {
+			if sensitiveHeaderKeys[strings.ToLower(k)] {
+				if s, ok := v.(string); ok && s != "" {
+					hdrs[k] = "***"
+				}
+			}
+		}
+		m["headers"] = hdrs
 	}
 	sanitized, err := json.Marshal(m)
 	if err != nil {
