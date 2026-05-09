@@ -276,10 +276,16 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 	if req.Role == "" {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: role is required")
 	}
+	// Bug 185: clientes só podem postar role=user. Mensagens do tipo
+	// assistant/system/tool são responsabilidade do runtime agêntico —
+	// permitir client-side seria vetor de prompt injection (override
+	// do system_prompt do agent) e poluição de histórico.
 	switch req.Role {
-	case "user", "assistant", "system", "tool":
+	case "user":
+	case "assistant", "system", "tool":
+		return ChatMessageResponse{}, fmt.Errorf("chat service: role %q is reserved for the agentic runtime; only \"user\" is allowed from clients", req.Role)
 	default:
-		return ChatMessageResponse{}, fmt.Errorf("chat service: role must be one of user, assistant, system, tool (got %q)", req.Role)
+		return ChatMessageResponse{}, fmt.Errorf("chat service: role must be \"user\" (got %q)", req.Role)
 	}
 	if req.Content == "" {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: content is required")
