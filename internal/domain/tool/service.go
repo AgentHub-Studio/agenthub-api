@@ -166,6 +166,15 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if len(req.Description) > 32000 {
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
+	// Bug 166: cap config + inputSchema em 64KB cada (JSONB raw bytes).
+	// Config real (HTTP/SQL/DOCUMENT_SEARCH) cabe em <2KB; inputSchema
+	// JSON Schema cabe em <16KB; 500KB+ é storage waste e perf hit.
+	if len(req.Config) > 64*1024 {
+		return Response{}, fmt.Errorf("%w: config exceeds maximum size of 65536 bytes (got %d)", ErrValidation, len(req.Config))
+	}
+	if len(req.InputSchema) > 64*1024 {
+		return Response{}, fmt.Errorf("%w: inputSchema exceeds maximum size of 65536 bytes (got %d)", ErrValidation, len(req.InputSchema))
+	}
 	t := Tool{
 		Name:        req.Name,
 		Slug:        slug,
@@ -245,9 +254,16 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.Type = *req.Type
 	}
 	if len(req.Config) > 0 {
+		// Bug 166: cap em Update também (cross-cutting com Create).
+		if len(req.Config) > 64*1024 {
+			return Response{}, fmt.Errorf("%w: config exceeds maximum size of 65536 bytes (got %d)", ErrValidation, len(req.Config))
+		}
 		existing.Config = req.Config
 	}
 	if len(req.InputSchema) > 0 {
+		if len(req.InputSchema) > 64*1024 {
+			return Response{}, fmt.Errorf("%w: inputSchema exceeds maximum size of 65536 bytes (got %d)", ErrValidation, len(req.InputSchema))
+		}
 		existing.InputSchema = req.InputSchema
 	}
 	if req.Description != nil {
