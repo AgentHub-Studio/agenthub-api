@@ -268,7 +268,55 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	if req.AuthType == "" {
 		req.AuthType = existing.AuthType
 	}
-	// Validação após merge: name + authType ainda obrigatórios.
+	// Bug 139: per-authType fields (TokenURL, ClientID, etc.) também
+	// precisam ser merged do existing para PATCH partial não fazer
+	// validateCreateRequest falhar com "tokenUrl is required" quando
+	// o usuário só está mudando name/description. Pointers nil no req
+	// herdam do existing.
+	if req.TokenURL == nil {
+		req.TokenURL = existing.TokenURL
+	}
+	if req.ClientID == nil {
+		req.ClientID = existing.ClientID
+	}
+	if req.Scopes == nil {
+		req.Scopes = existing.Scopes
+	}
+	if req.APIKeyHeader == nil {
+		req.APIKeyHeader = existing.APIKeyHeader
+	}
+	if req.APIKeyLocation == "" {
+		req.APIKeyLocation = existing.APIKeyLocation
+	}
+	if req.AuthURL == nil {
+		req.AuthURL = existing.AuthURL
+	}
+	if req.RedirectURL == nil {
+		req.RedirectURL = existing.RedirectURL
+	}
+	if req.CodeVerifier == nil {
+		req.CodeVerifier = existing.CodeVerifier
+	}
+	if req.Username == nil {
+		req.Username = existing.Username
+	}
+	// Bug 139: secrets também precisam ser merged para passar pela
+	// validação per-authType ("clientSecret is required for ..."),
+	// mesmo quando o usuário não está rotacionando o segredo. O
+	// resolveUpdatedSecret depois trata essa rota corretamente.
+	if req.ClientSecret == nil {
+		req.ClientSecret = existing.ClientSecret
+	}
+	if req.APIKeyValue == nil {
+		req.APIKeyValue = existing.APIKeyValue
+	}
+	if req.BearerToken == nil {
+		req.BearerToken = existing.BearerToken
+	}
+	if req.Password == nil {
+		req.Password = existing.Password
+	}
+	// Validação após merge: name + authType + per-authType requirements.
 	if err := validateCreateRequest(req); err != nil {
 		return OAuthCredential{}, err
 	}
