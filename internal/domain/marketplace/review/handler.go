@@ -78,6 +78,14 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid listingId")
 		return
 	}
+	// Bug 215: valida listing antes de criar review (evita 422 com
+	// "listing not found" — semântica REST esperada é 404).
+	if h.listing != nil {
+		if err := h.listing.GetByID(r.Context(), listingID); err != nil {
+			respond.Error(w, http.StatusNotFound, "marketplace listing not found")
+			return
+		}
+	}
 	var req CreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")

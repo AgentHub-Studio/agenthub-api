@@ -3,6 +3,7 @@ package document
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -83,6 +84,16 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bug 212: valida KB antes de upload (evita 422 com leak de FK
+	// constraint do PostgreSQL — "document_knowledge_base_id_fkey",
+	// SQLSTATE 23503).
+	if h.kb != nil {
+		if err := h.kb.GetByID(r.Context(), kbID); err != nil {
+			respond.Error(w, http.StatusNotFound, "knowledge base not found")
+			return
+		}
+	}
+
 	// Accept multipart/form-data with a "file" field.
 	const maxUploadSize = 100 << 20 // 100 MB
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
@@ -112,7 +123,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.svc.Upload(r.Context(), req)
 	if err != nil {
-		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		// Bug 212: nunca expor mensagens de erro raw do PostgreSQL.
+		// Falha de validação semântica genérica → 422 sem .Error().
+		slog.Warn("document: upload failed", "err", err, "kbId", kbID)
+		respond.Error(w, http.StatusUnprocessableEntity, "upload failed")
 		return
 	}
 

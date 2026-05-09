@@ -129,6 +129,18 @@ func (h *HookHandler) create(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid agent id")
 		return
 	}
+	// Bug 213: valida agente antes de tentar inserir hook (FK violation
+	// retornava 500 — UX confuso e potencial info-disclosure no log).
+	if h.svc != nil {
+		if _, err := h.svc.Get(r.Context(), agentID); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				respond.Error(w, http.StatusNotFound, "agent not found")
+				return
+			}
+			respond.Error(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
 	var req createHookRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")

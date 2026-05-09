@@ -105,6 +105,14 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
+	// Bug 214: valida package antes de tentar publicar version (evita 500
+	// genérico quando packageId não existe).
+	if h.pkg != nil {
+		if err := h.pkg.GetByID(r.Context(), packageID); err != nil {
+			apierror.Write(w, http.StatusNotFound, "package not found")
+			return
+		}
+	}
 	var req PublishVersionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid request body")
