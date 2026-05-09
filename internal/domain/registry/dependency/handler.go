@@ -21,14 +21,26 @@ type dependencyService interface {
 	Resolve(ctx context.Context, packageID uuid.UUID) (ResolvedDependency, error)
 }
 
+// packageExister verifies parent package existence (bug 210 batch).
+type packageExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler exposes the HTTP interface for package dependencies.
 type Handler struct {
 	svc dependencyService
+	pkg packageExister
 }
 
 // NewHandler creates a new dependency Handler.
 func NewHandler(svc dependencyService) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithPackageExister wires the parent-package existence checker.
+func (h *Handler) WithPackageExister(p packageExister) *Handler {
+	h.pkg = p
+	return h
 }
 
 // RegisterRoutes mounts dependency endpoints on the router.
@@ -45,6 +57,12 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
+	}
+	if h.pkg != nil {
+		if err := h.pkg.GetByID(r.Context(), packageID); err != nil {
+			apierror.Write(w, http.StatusNotFound, "package not found")
+			return
+		}
 	}
 	deps, err := h.svc.List(r.Context(), packageID)
 	if err != nil {

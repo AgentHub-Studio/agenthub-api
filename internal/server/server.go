@@ -322,10 +322,14 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		regStorage = &regInstallation.NoopStorage{}
 	}
 	pkgRepo := regPackage.NewRepository(pool)
+	pkgExister := &packageExisterAdapter{repo: pkgRepo}
 	regPackageHandler := regPackage.NewHandler(regPackage.NewService(pkgRepo))
-	regVersionHandler := regVersion.NewHandler(regVersion.NewService(regVersion.NewRepository(pool), pkgRepo))
-	regDependencyHandler := regDependency.NewHandler(regDependency.NewService(regDependency.NewRepository(pool), pkgRepo))
-	regInstallationHandler := regInstallation.NewHandler(regInstallation.NewService(regInstallation.NewRepository(pool), regStorage))
+	regVersionHandler := regVersion.NewHandler(regVersion.NewService(regVersion.NewRepository(pool), pkgRepo)).
+		WithPackageExister(pkgExister)
+	regDependencyHandler := regDependency.NewHandler(regDependency.NewService(regDependency.NewRepository(pool), pkgRepo)).
+		WithPackageExister(pkgExister)
+	regInstallationHandler := regInstallation.NewHandler(regInstallation.NewService(regInstallation.NewRepository(pool), regStorage)).
+		WithPackageExister(pkgExister)
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
@@ -560,6 +564,17 @@ type agentExisterAdapter struct {
 
 func (a *agentExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
 	_, err := a.svc.Get(ctx, id)
+	return err
+}
+
+// packageExisterAdapter wraps regPackage.Repository so version/dependency/
+// installation handlers can validate parent package existence (bug 210).
+type packageExisterAdapter struct {
+	repo *regPackage.Repository
+}
+
+func (a *packageExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
+	_, err := a.repo.GetByID(ctx, id)
 	return err
 }
 

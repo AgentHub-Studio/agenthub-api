@@ -21,14 +21,26 @@ type versionService interface {
 	Delete(ctx context.Context, packageID uuid.UUID, versionStr string, tenantID string) error
 }
 
+// packageExister verifies parent package existence (bug 210 batch).
+type packageExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler exposes the HTTP interface for package versions.
 type Handler struct {
 	svc versionService
+	pkg packageExister
 }
 
 // NewHandler creates a new version Handler.
 func NewHandler(svc versionService) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithPackageExister wires the parent-package existence checker.
+func (h *Handler) WithPackageExister(p packageExister) *Handler {
+	h.pkg = p
+	return h
 }
 
 // RegisterRoutes mounts version endpoints on the router.
@@ -46,6 +58,12 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
+	}
+	if h.pkg != nil {
+		if err := h.pkg.GetByID(r.Context(), packageID); err != nil {
+			apierror.Write(w, http.StatusNotFound, "package not found")
+			return
+		}
 	}
 	versions, err := h.svc.ListByPackage(r.Context(), packageID)
 	if err != nil {

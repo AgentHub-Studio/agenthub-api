@@ -21,14 +21,26 @@ type installationService interface {
 	DownloadURL(ctx context.Context, assetID uuid.UUID) (AssetDownloadResponse, error)
 }
 
+// packageExister verifies parent package existence (bug 210 batch).
+type packageExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler exposes the HTTP interface for package assets.
 type Handler struct {
 	svc installationService
+	pkg packageExister
 }
 
 // NewHandler creates a new installation Handler.
 func NewHandler(svc installationService) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithPackageExister wires the parent-package existence checker.
+func (h *Handler) WithPackageExister(p packageExister) *Handler {
+	h.pkg = p
+	return h
 }
 
 // RegisterPublicRoutes mounts read-only asset routes.
@@ -48,6 +60,13 @@ func (h *Handler) listAssets(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
+	}
+
+	if h.pkg != nil {
+		if err := h.pkg.GetByID(r.Context(), packageID); err != nil {
+			apierror.Write(w, http.StatusNotFound, "package not found")
+			return
+		}
 	}
 
 	var versionID *uuid.UUID
