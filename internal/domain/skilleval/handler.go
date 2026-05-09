@@ -51,7 +51,7 @@ func (h *Handler) listSuites(w http.ResponseWriter, r *http.Request) {
 	}
 	suites, err := h.svc.ListSuites(r.Context(), skillID)
 	if err != nil {
-		writeEvalError(w, http.StatusInternalServerError, err.Error())
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if suites == nil {
@@ -76,7 +76,7 @@ func (h *Handler) createSuite(w http.ResponseWriter, r *http.Request) {
 			writeEvalError(w, http.StatusConflict, err.Error())
 			return
 		}
-		writeEvalError(w, http.StatusInternalServerError, err.Error())
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeEvalJSON(w, http.StatusCreated, resp)
@@ -94,7 +94,7 @@ func (h *Handler) getSuite(w http.ResponseWriter, r *http.Request) {
 			writeEvalError(w, http.StatusNotFound, "suite not found")
 			return
 		}
-		writeEvalError(w, http.StatusInternalServerError, err.Error())
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeEvalJSON(w, http.StatusOK, map[string]any{
@@ -114,7 +114,7 @@ func (h *Handler) deleteSuite(w http.ResponseWriter, r *http.Request) {
 			writeEvalError(w, http.StatusNotFound, "suite not found")
 			return
 		}
-		writeEvalError(w, http.StatusInternalServerError, err.Error())
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -141,7 +141,7 @@ func (h *Handler) addCase(w http.ResponseWriter, r *http.Request) {
 			writeEvalError(w, http.StatusNotFound, "suite not found")
 			return
 		}
-		writeEvalError(w, http.StatusInternalServerError, err.Error())
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeEvalJSON(w, http.StatusCreated, resp)
@@ -158,7 +158,7 @@ func (h *Handler) deleteCase(w http.ResponseWriter, r *http.Request) {
 			writeEvalError(w, http.StatusNotFound, "case not found")
 			return
 		}
-		writeEvalError(w, http.StatusInternalServerError, err.Error())
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -176,7 +176,7 @@ func (h *Handler) runSuite(w http.ResponseWriter, r *http.Request) {
 			writeEvalError(w, http.StatusNotFound, "suite not found")
 			return
 		}
-		writeEvalError(w, http.StatusInternalServerError, err.Error())
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeEvalJSON(w, http.StatusOK, resp)
@@ -190,7 +190,7 @@ func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	runs, err := h.svc.ListRuns(r.Context(), suiteID)
 	if err != nil {
-		writeEvalError(w, http.StatusInternalServerError, err.Error())
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if runs == nil {
@@ -211,7 +211,7 @@ func (h *Handler) getRun(w http.ResponseWriter, r *http.Request) {
 			writeEvalError(w, http.StatusNotFound, "run not found")
 			return
 		}
-		writeEvalError(w, http.StatusInternalServerError, err.Error())
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeEvalJSON(w, http.StatusOK, resp)

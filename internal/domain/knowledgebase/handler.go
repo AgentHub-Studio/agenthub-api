@@ -232,7 +232,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 
 	results, err := h.searchClient.Search(r.Context(), req.Query, []uuid.UUID{kbID}, req.Limit)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, "search failed: "+err.Error())
+		respond.Error(w, http.StatusInternalServerError, "search failed")
 		return
 	}
 
