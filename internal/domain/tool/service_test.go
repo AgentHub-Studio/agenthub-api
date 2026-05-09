@@ -206,19 +206,20 @@ func TestToolService_Create_WithLabels(t *testing.T) {
 func TestToolService_Create_ValidTypes(t *testing.T) {
 	httpConfig := json.RawMessage(`{"url":"https://api.example.com/endpoint"}`)
 	sqlConfig := json.RawMessage(`{"query":"SELECT 1","datasourceId":"00000000-0000-0000-0000-000000000001"}`)
+	docConfig := json.RawMessage(`{"kbId":"00000000-0000-0000-0000-000000000002"}`)
 	validTypes := []struct {
 		typ    string
 		config json.RawMessage
 	}{
 		{tool.ToolTypeHTTP, httpConfig},
 		{tool.ToolTypeSQL, sqlConfig},
-		{tool.ToolTypeDocumentSearch, nil},
+		{tool.ToolTypeDocumentSearch, docConfig},
 		{tool.ToolTypeCustom, nil},
 		{tool.ToolTypeBlockly, nil},
 		{tool.ToolTypeComposite, nil},
 		{tool.ToolTypeCode, nil},
 		{tool.ToolTypeDatabase, sqlConfig},
-		{tool.ToolTypeDocuments, nil},
+		{tool.ToolTypeDocuments, docConfig},
 	}
 	for _, tc := range validTypes {
 		t.Run(tc.typ, func(t *testing.T) {

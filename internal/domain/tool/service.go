@@ -133,6 +133,25 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 			return Response{}, fmt.Errorf("%w: datasourceId must be a valid UUID (got %q)", ErrValidation, dsID)
 		}
 	}
+	// Bug 147: DOCUMENT_SEARCH tool requer kbId (UUID válido). Sem isso,
+	// frontend criava tools que nunca funcionavam — silenciosamente
+	// quebrados. Espelha gate SQL.datasourceId (bug 88).
+	if req.Type == ToolTypeDocumentSearch || req.Type == ToolTypeDocuments {
+		var cfgMap map[string]any
+		_ = json.Unmarshal(req.Config, &cfgMap)
+		kbID, _ := cfgMap["kbId"].(string)
+		if strings.TrimSpace(kbID) == "" {
+			if v, _ := cfgMap["knowledgeBaseId"].(string); strings.TrimSpace(v) != "" {
+				kbID = v
+			}
+		}
+		if strings.TrimSpace(kbID) == "" {
+			return Response{}, fmt.Errorf("%w: kbId is required for DOCUMENT_SEARCH tools", ErrValidation)
+		}
+		if _, err := uuid.Parse(strings.TrimSpace(kbID)); err != nil {
+			return Response{}, fmt.Errorf("%w: kbId must be a valid UUID (got %q)", ErrValidation, kbID)
+		}
+	}
 	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
 		slug = ToSlug(req.Name)
