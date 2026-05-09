@@ -156,6 +156,15 @@ func validateCreateRequest(req CreateRequest) error {
 		if err := ssrf.ValidateURL(*req.TokenURL); err != nil {
 			return fmt.Errorf("%w: tokenUrl invalid (%v)", ErrValidation, err)
 		}
+		// Bug 105: redirectUrl deve passar pelo mesmo gate SSRF que
+		// tokenUrl/authUrl. É opcional (nem todo flow OAuth2 usa
+		// redirect_uri customizado), mas se vier, não pode apontar
+		// para localhost / 169.254 / cluster DNS.
+		if !ptrEmpty(req.RedirectURL) {
+			if err := ssrf.ValidateURL(*req.RedirectURL); err != nil {
+				return fmt.Errorf("%w: redirectUrl invalid (%v)", ErrValidation, err)
+			}
+		}
 		if ptrEmpty(req.ClientID) {
 			return fmt.Errorf("%w: clientId is required for OAUTH2_AUTHORIZATION_CODE", ErrValidation)
 		}
