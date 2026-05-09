@@ -263,6 +263,20 @@ func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bug 204: validate session existence before listing messages.
+	// Antes retornava 200+empty para session inexistente, vetor de
+	// probing (ataque tentava UUIDs até bater num que retornasse
+	// dados, indicando session existente em outro tenant — embora
+	// schema isolation já bloquearia, o endpoint UX ficava confuso).
+	if _, err := h.svc.GetSession(r.Context(), sessionID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to list messages")
+		return
+	}
+
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.ListMessages(r.Context(), sessionID, req)
 	if err != nil {
