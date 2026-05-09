@@ -188,6 +188,16 @@ func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
 		writeEvalError(w, http.StatusBadRequest, "invalid suiteId")
 		return
 	}
+	// Bug 211: valida suite antes de listar runs (evita 200+empty para
+	// suite inexistente).
+	if _, _, err := h.svc.GetSuite(r.Context(), suiteID); err != nil {
+		if errors.Is(err, ErrSuiteNotFound) {
+			writeEvalError(w, http.StatusNotFound, "suite not found")
+			return
+		}
+		writeEvalError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	runs, err := h.svc.ListRuns(r.Context(), suiteID)
 	if err != nil {
 		writeEvalError(w, http.StatusInternalServerError, "internal error")

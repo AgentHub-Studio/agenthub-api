@@ -783,6 +783,15 @@ func (h *Handler) listPermissionAudit(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
+	// Bug 211: valida session antes de listar permission-audit (evita 200+empty).
+	if _, err := h.svc.GetSession(r.Context(), sessionID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to list permission audit")
+		return
+	}
 	entries, err := h.permAuditReader.ListBySession(r.Context(), sessionID, 0)
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "failed to list permission audit")

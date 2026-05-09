@@ -21,14 +21,26 @@ type reviewService interface {
 	Delete(ctx context.Context, listingID uuid.UUID, reviewID uuid.UUID, tenantID string) error
 }
 
+// listingExister verifies parent marketplace listing existence (bug 211 batch).
+type listingExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler exposes review HTTP endpoints.
 type Handler struct {
-	svc reviewService
+	svc     reviewService
+	listing listingExister
 }
 
 // NewHandler creates a new Handler.
 func NewHandler(svc reviewService) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithListingExister wires parent-listing existence checker.
+func (h *Handler) WithListingExister(l listingExister) *Handler {
+	h.listing = l
+	return h
 }
 
 // RegisterRoutes mounts review routes on the given router.
@@ -43,6 +55,12 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid listingId")
 		return
+	}
+	if h.listing != nil {
+		if err := h.listing.GetByID(r.Context(), listingID); err != nil {
+			respond.Error(w, http.StatusNotFound, "marketplace listing not found")
+			return
+		}
 	}
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.ListByListing(r.Context(), listingID, req)

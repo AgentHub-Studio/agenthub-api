@@ -152,6 +152,16 @@ func (h *Handler) listDeliveries(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid id")
 		return
 	}
+	// Bug 211: valida webhook antes de listar deliveries (evita 200+empty
+	// para webhook inexistente — UX e probing consistency).
+	if _, err := h.svc.GetByID(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "webhook not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	req := pagination.ParsePageRequest(r)
 	filter := DeliveryFilter{
 		Status:    r.URL.Query().Get("status"),

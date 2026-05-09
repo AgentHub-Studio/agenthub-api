@@ -296,7 +296,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Marketplace handlers.
 	mkplListingHandler := mkplListing.NewHandler(mkplListing.NewService(mkplListing.NewRepository(pool)))
-	mkplReviewHandler := mkplReview.NewHandler(mkplReview.NewService(mkplReview.NewRepository(pool), mkplListing.NewRepository(pool)))
+	mkplListingRepo := mkplListing.NewRepository(pool)
+	mkplReviewHandler := mkplReview.NewHandler(mkplReview.NewService(mkplReview.NewRepository(pool), mkplListingRepo)).
+		WithListingExister(&listingExisterAdapter{repo: mkplListingRepo})
 	mkplInstallationHandler := mkplInstallation.NewHandler(mkplInstallation.NewService(mkplInstallation.NewRepository(pool)))
 
 	// Registry handlers — storage backend selected based on MinIO config.
@@ -575,6 +577,17 @@ type packageExisterAdapter struct {
 
 func (a *packageExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
 	_, err := a.repo.GetByID(ctx, id)
+	return err
+}
+
+// listingExisterAdapter wraps mkplListing.Repository so review.Handler can
+// validate parent marketplace listing existence (bug 211).
+type listingExisterAdapter struct {
+	repo *mkplListing.Repository
+}
+
+func (a *listingExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
+	_, err := a.repo.FindByID(ctx, id)
 	return err
 }
 
