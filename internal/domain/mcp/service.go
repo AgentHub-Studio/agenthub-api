@@ -170,6 +170,14 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.TransportType = *req.TransportType
 	}
 	if req.HTTPBaseURL != nil {
+		// Bug 104: Update precisa do mesmo gate SSRF que Create —
+		// senão admin malicioso podia criar config benigno e depois
+		// PATCH para http://localhost:9000/mcp.
+		if strings.TrimSpace(*req.HTTPBaseURL) != "" {
+			if err := ssrf.ValidateURL(*req.HTTPBaseURL); err != nil {
+				return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl invalid (%v)", err)
+			}
+		}
 		existing.HTTPBaseURL = req.HTTPBaseURL
 	}
 	if req.Command != nil {

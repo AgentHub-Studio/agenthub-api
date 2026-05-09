@@ -127,6 +127,12 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateWebhookReq
 		existing.Name = *req.Name
 	}
 	if req.URL != nil {
+		// Bug 104: Update precisa do mesmo gate SSRF que Create —
+		// senão admin malicioso cria webhook benigno e depois PATCH
+		// para http://localhost ou 169.254.169.254.
+		if err := ssrf.ValidateURL(*req.URL); err != nil {
+			return WebhookConfig{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
+		}
 		existing.URL = *req.URL
 	}
 	if req.Events != nil {
