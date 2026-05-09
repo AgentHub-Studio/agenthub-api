@@ -169,8 +169,12 @@ func (h *Handler) inbound(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "channel not found")
 			return
 		}
-		// Signature / verification failure → 401.
-		writeError(w, http.StatusUnauthorized, err.Error())
+		// Bug 187: nunca expor `err.Error()` em endpoint público —
+		// pode vazar SQL state, file paths, internal details. Endpoint
+		// de inbound é não-autenticado, qualquer atacante chama com
+		// token aleatório. Mensagem genérica preserva confidencialidade.
+		// Logs internos retêm o erro completo para debugging.
+		writeError(w, http.StatusUnauthorized, "invalid token or signature")
 		return
 	}
 
