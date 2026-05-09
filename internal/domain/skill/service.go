@@ -96,6 +96,11 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if req.Instructions == "" && len(req.AllowedTools) == 0 {
 		return Response{}, ErrSkillInert
 	}
+	// Bug 169: cap allowedTools count em 100. Skills reais expõem
+	// <20 tools; 1000+ é abuso e perf hit no prompt do LLM.
+	if len(req.AllowedTools) > 100 {
+		return Response{}, fmt.Errorf("%w: allowedTools exceeds maximum of 100 entries (got %d)", ErrValidation, len(req.AllowedTools))
+	}
 
 	// Bug 126: contextMode aceita só "inline" ou "fork" (varchar(10) na DB).
 	// Sem este gate, valor inválido > 10 chars vazava SQL error 22001 (500)

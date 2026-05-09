@@ -221,6 +221,14 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if len(slug) > 255 {
 		return AgentResponse{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(slug))
 	}
+	// Bug 169: cap skillIds/kbIds count em 100 cada. Agents reais
+	// bind <20 skills/kbs; 1000+ é abuso e perf hit no SyncSkills loop.
+	if len(req.SkillIDs) > 100 {
+		return AgentResponse{}, fmt.Errorf("%w: skillIds exceeds maximum of 100 entries (got %d)", ErrInvalidRequest, len(req.SkillIDs))
+	}
+	if len(req.KnowledgeBaseIDs) > 100 {
+		return AgentResponse{}, fmt.Errorf("%w: knowledgeBaseIds exceeds maximum of 100 entries (got %d)", ErrInvalidRequest, len(req.KnowledgeBaseIDs))
+	}
 	config := req.Config
 	if len(config) == 0 {
 		config = json.RawMessage(`{}`)
