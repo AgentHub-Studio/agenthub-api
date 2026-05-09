@@ -127,6 +127,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, tenantID string, req
 		if *req.Name == "" {
 			return ListingResponse{}, fmt.Errorf("%w: name cannot be empty", ErrValidation)
 		}
+		// Bug 140: name varchar(255) — gate length em Update.
+		if len(*req.Name) > 255 {
+			return ListingResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
+		}
 		l.Name = *req.Name
 	}
 	if req.Description != nil {

@@ -94,6 +94,11 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateTriggerReq
 	}
 
 	if req.Name != nil {
+		// Bug 140: name varchar(255) — gate length em Update (sem isso
+		// 422 vazava SQL 22001 message para o cliente).
+		if len(*req.Name) > 255 {
+			return AgentTrigger{}, fmt.Errorf("trigger: name exceeds maximum length of 255 chars (got %d)", len(*req.Name))
+		}
 		existing.Name = *req.Name
 	}
 	if req.CronExpression != nil {
