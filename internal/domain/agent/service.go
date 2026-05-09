@@ -284,7 +284,9 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		// P-C280-1: strip HTML from user-supplied text fields.
 		trimmed := strings.TrimSpace(stripHTML(*req.Name))
 		if trimmed == "" {
-			return AgentResponse{}, fmt.Errorf("name is required")
+			// Bug 116: era 500 — wrap em ErrInvalidRequest pra
+			// handler mapear → 422.
+			return AgentResponse{}, fmt.Errorf("%w: name is required", ErrInvalidRequest)
 		}
 		a.Name = trimmed
 	}
