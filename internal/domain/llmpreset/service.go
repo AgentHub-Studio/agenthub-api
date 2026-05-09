@@ -148,6 +148,10 @@ func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		p.Name = *req.Name
 	}
 	if req.Description != nil {
+		// Bug 176: cap em Update (cross-cutting com Create — bug 160).
+		if len(*req.Description) > 32000 {
+			return LLMPresetResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
+		}
 		p.Description = *req.Description
 	}
 	if req.Provider != nil {
