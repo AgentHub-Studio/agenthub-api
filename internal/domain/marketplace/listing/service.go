@@ -82,6 +82,10 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateListing
 	if req.Name == "" {
 		return ListingResponse{}, fmt.Errorf("listing: name is required")
 	}
+	// Bug 131: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return ListingResponse{}, fmt.Errorf("listing: name exceeds maximum length of 255 chars (got %d)", len(req.Name))
+	}
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)

@@ -42,8 +42,16 @@ func (s *Service) Record(ctx context.Context, tenantID string, req RecordRequest
 	if strings.TrimSpace(req.EntityType) == "" {
 		return AuditLog{}, fmt.Errorf("%w: entityType is required", ErrValidation)
 	}
+	// Bug 131: entityType varchar(100), action varchar(50) — gate length
+	// antes do INSERT (sem isso 500 SQL error 22001 vazava para o cliente).
+	if len(req.EntityType) > 100 {
+		return AuditLog{}, fmt.Errorf("%w: entityType exceeds maximum length of 100 chars (got %d)", ErrValidation, len(req.EntityType))
+	}
 	if strings.TrimSpace(string(req.Action)) == "" {
 		return AuditLog{}, fmt.Errorf("%w: action is required", ErrValidation)
+	}
+	if len(req.Action) > 50 {
+		return AuditLog{}, fmt.Errorf("%w: action exceeds maximum length of 50 chars (got %d)", ErrValidation, len(req.Action))
 	}
 	l := AuditLog{
 		EntityType: req.EntityType,

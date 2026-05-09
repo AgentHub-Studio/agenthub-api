@@ -62,6 +62,10 @@ func (s *Service) Create(ctx context.Context, agentID *uuid.UUID, req CreateRequ
 	if req.Name == "" {
 		return Response{}, fmt.Errorf("prompt template: name is required")
 	}
+	// Bug 131: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	if req.Slug == "" {
 		return Response{}, fmt.Errorf("prompt template: slug is required")
 	}

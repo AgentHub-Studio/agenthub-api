@@ -71,6 +71,10 @@ func (s *Service) Create(ctx context.Context, req CreateTemplateRequest) (Templa
 	if req.Name == "" {
 		return TemplateResponse{}, fmt.Errorf("name is required")
 	}
+	// Bug 131: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return TemplateResponse{}, fmt.Errorf("name exceeds maximum length of 255 chars (got %d)", len(req.Name))
+	}
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)

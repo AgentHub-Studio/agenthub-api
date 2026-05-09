@@ -167,6 +167,10 @@ func validateCreate(req CreatePackageRequest) error {
 	if strings.TrimSpace(req.Name) == "" {
 		return &ValidationError{Field: "name", Message: "name is required"}
 	}
+	// Bug 131: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return &ValidationError{Field: "name", Message: fmt.Sprintf("name exceeds maximum length of 255 chars (got %d)", len(req.Name))}
+	}
 	if strings.TrimSpace(req.Slug) == "" {
 		return &ValidationError{Field: "slug", Message: "slug is required"}
 	}
