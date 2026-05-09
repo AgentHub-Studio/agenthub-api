@@ -387,6 +387,10 @@ func validateHTTPRequest(req HTTPCreateRequest) error {
 	if strings.TrimSpace(req.URL) == "" {
 		return fmt.Errorf("integration service: url is required")
 	}
+	// Bug 164: cap URL em 2048 chars (RFC standard).
+	if len(req.URL) > 2048 {
+		return fmt.Errorf("integration service: url exceeds maximum length of 2048 chars (got %d)", len(req.URL))
+	}
 	// Bug 161: cap bodyTemplate em 32KB. Templates 200KB+ explodem o
 	// HTTP request body cada vez que o tool executa.
 	if len(req.BodyTemplate) > 32000 {

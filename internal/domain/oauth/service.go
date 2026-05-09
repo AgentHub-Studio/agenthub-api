@@ -133,6 +133,16 @@ func validateCreateRequest(req CreateRequest) error {
 	if len(req.Name) > 255 {
 		return fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
 	}
+	// Bug 164: cap URLs em 2048 chars (RFC standard).
+	if !ptrEmpty(req.TokenURL) && len(*req.TokenURL) > 2048 {
+		return fmt.Errorf("%w: tokenUrl exceeds maximum length of 2048 chars (got %d)", ErrValidation, len(*req.TokenURL))
+	}
+	if !ptrEmpty(req.AuthURL) && len(*req.AuthURL) > 2048 {
+		return fmt.Errorf("%w: authUrl exceeds maximum length of 2048 chars (got %d)", ErrValidation, len(*req.AuthURL))
+	}
+	if !ptrEmpty(req.RedirectURL) && len(*req.RedirectURL) > 2048 {
+		return fmt.Errorf("%w: redirectUrl exceeds maximum length of 2048 chars (got %d)", ErrValidation, len(*req.RedirectURL))
+	}
 	switch req.AuthType {
 	case AuthTypeOAuth2ClientCredentials:
 		if ptrEmpty(req.TokenURL) {

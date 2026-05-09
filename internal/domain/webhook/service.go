@@ -79,6 +79,11 @@ func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (Webhook
 			return WebhookConfig{}, fmt.Errorf("%w: events must not contain empty strings", ErrValidation)
 		}
 	}
+	// Bug 164: cap URL em 2048 chars (RFC standard; webhook URLs reais
+	// não passam disso). Sem isso, 200KB+ silenciosamente aceito.
+	if len(req.URL) > 2048 {
+		return WebhookConfig{}, fmt.Errorf("%w: url exceeds maximum length of 2048 chars (got %d)", ErrValidation, len(req.URL))
+	}
 	if u, err := url.Parse(req.URL); err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
 		return WebhookConfig{}, fmt.Errorf("%w: url must be a valid http(s) URL with host", ErrValidation)
 	}
