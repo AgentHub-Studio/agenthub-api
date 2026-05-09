@@ -57,6 +57,51 @@ func AllowHost(host string) {
 	allowedHosts[strings.ToLower(host)] = struct{}{}
 }
 
+// ValidateHost performs narrower SSRF checks suitable for *database hosts*.
+// Unlike ValidateURL, it allows RFC1918 private addresses (10.0.0.0/8,
+// 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10) since those are legitimate
+// targets for user-managed on-prem databases reached via VPN. Still blocks:
+//   - "localhost" / "ip6-localhost" / "ip6-loopback" hostnames
+//   - 127.0.0.0/8 (loopback)
+//   - 169.254.0.0/16 (link-local / AWS metadata)
+//   - ::1 (IPv6 loopback)
+//   - *.svc.cluster.local / *.cluster.local
+//
+// Bug 103: SQL tool executor connects to data_source.host from inside the
+// cluster. Without this gate, an admin could exfil cluster secrets by pointing
+// a datasource at the AWS metadata endpoint or k8s service DNS.
+func ValidateHost(host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("host is empty")
+	}
+
+	if _, ok := allowedHosts[strings.ToLower(host)]; ok {
+		return nil
+	}
+
+	lowerHost := strings.ToLower(host)
+	if lowerHost == "localhost" || lowerHost == "ip6-localhost" || lowerHost == "ip6-loopback" {
+		return fmt.Errorf("host targets loopback hostname: %s", host)
+	}
+	if strings.HasSuffix(lowerHost, ".svc.cluster.local") ||
+		strings.HasSuffix(lowerHost, ".cluster.local") {
+		return fmt.Errorf("host targets internal cluster DNS: %s", host)
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		// Loopback (127.0.0.0/8 + ::1)
+		if ip.IsLoopback() {
+			return fmt.Errorf("host targets loopback address: %s", host)
+		}
+		// Link-local (169.254.0.0/16) — covers AWS / GCP / Azure instance metadata
+		if ip.IsLinkLocalUnicast() {
+			return fmt.Errorf("host targets link-local / metadata address: %s", host)
+		}
+	}
+	return nil
+}
+
 // ValidateURL performs static SSRF checks on rawURL:
 //   - Blocks *.svc.cluster.local and *.cluster.local hostnames.
 //   - Blocks any URL whose host parses directly as a private/reserved IP.

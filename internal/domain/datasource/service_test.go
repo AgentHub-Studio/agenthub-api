@@ -2,6 +2,7 @@ package datasource_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -49,6 +50,15 @@ func (m *mockDSRepo) Update(_ context.Context, _ string, id uuid.UUID, d datasou
 	d.ID = id
 	m.data[id] = d
 	return d, nil
+}
+
+func (m *mockDSRepo) ExistsByName(_ context.Context, _ string, name string) (bool, error) {
+	for _, d := range m.data {
+		if d.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *mockDSRepo) Delete(_ context.Context, _ string, id uuid.UUID) error {
@@ -142,7 +152,7 @@ func TestDataSourceService_ListAll(t *testing.T) {
 	svc := datasource.NewService(newMockRepo())
 	for i := 0; i < 2; i++ {
 		_, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
-			Name: "DB", Type: datasource.DataSourceTypePostgreSQL, Host: "pg", Database: "db", DBUser: "u",
+			Name: fmt.Sprintf("DB-%d", i), Type: datasource.DataSourceTypePostgreSQL, Host: "pg", Database: "db", DBUser: "u",
 		})
 		require.NoError(t, err)
 	}

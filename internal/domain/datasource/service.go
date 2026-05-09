@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
 // DataSourceRepository defines the persistence interface for DataSource.
@@ -75,6 +76,14 @@ func validateRequest(req CreateRequest) error {
 	}
 	if req.Host == "" {
 		return fmt.Errorf("%w: host is required", ErrValidation)
+	}
+	// Bug 103: SQL tool executor abre conexão para data_source.host.
+	// Sem esta gate, admin podia apontar para localhost / 169.254 (AWS meta) /
+	// k8s service DNS e acessar serviços internos do cluster. RFC1918 (10.x,
+	// 172.16-31.x, 192.168.x) é permitido — DBs on-prem alcançados via VPN
+	// usam essas faixas legitimamente.
+	if err := ssrf.ValidateHost(req.Host); err != nil {
+		return fmt.Errorf("%w: host invalid (%v)", ErrValidation, err)
 	}
 	if req.Port < 1 || req.Port > 65535 {
 		return fmt.Errorf("%w: port must be between 1 and 65535 (got %d)", ErrValidation, req.Port)
