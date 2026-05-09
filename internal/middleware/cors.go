@@ -6,19 +6,51 @@ import (
 )
 
 // CORS returns a middleware that sets CORS headers for the given allowed origins.
+// Supports literal entries (e.g. "https://app.cezar.dev") and wildcard subdomain
+// entries (e.g. "https://*.cezar.dev") that match any single-label subdomain.
 func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 	originsMap := make(map[string]bool, len(allowedOrigins))
+	wildcardSuffixes := make([]string, 0)
 	for _, o := range allowedOrigins {
 		origin := strings.TrimSpace(o)
-		if origin != "" && origin != "*" {
-			originsMap[origin] = true
+		if origin == "" || origin == "*" {
+			continue
 		}
+		// Wildcard form: scheme://*.domain → match scheme://<sub>.domain.
+		if strings.Contains(origin, "://*.") {
+			wildcardSuffixes = append(wildcardSuffixes, strings.Replace(origin, "://*.", "://.", 1))
+			continue
+		}
+		originsMap[origin] = true
+	}
+
+	allowed := func(origin string) bool {
+		if originsMap[origin] {
+			return true
+		}
+		for _, suf := range wildcardSuffixes {
+			// suf = "https://.cezar.dev"; require exactly one leading subdomain label.
+			schemeIdx := strings.Index(suf, "://")
+			if schemeIdx < 0 || !strings.HasPrefix(origin, suf[:schemeIdx+3]) {
+				continue
+			}
+			host := origin[schemeIdx+3:]
+			suffix := suf[schemeIdx+3:] // ".cezar.dev"
+			if !strings.HasSuffix(host, suffix) {
+				continue
+			}
+			label := strings.TrimSuffix(host, suffix)
+			if label != "" && !strings.ContainsAny(label, "./") {
+				return true
+			}
+		}
+		return false
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-			if origin != "" && originsMap[origin] {
+			if origin != "" && allowed(origin) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")

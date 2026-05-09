@@ -43,7 +43,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.ListByTenant(r.Context(), tenantID, req)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, page)
@@ -76,7 +76,7 @@ func (h *Handler) uninstall(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "installation not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.NoContent(w)

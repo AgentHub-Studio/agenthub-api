@@ -20,6 +20,7 @@ func init() {
 	// Tests use httptest.NewServer which binds to 127.0.0.1.
 	// Production must never allow loopback — this only affects test builds.
 	ssrf.AllowHost("127.0.0.1")
+	ssrf.AllowHost("localhost")
 }
 
 type mockWebhookRepo struct {

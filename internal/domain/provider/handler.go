@@ -29,7 +29,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	kind := r.URL.Query().Get("kind")
 	providers, err := h.svc.ListAll(r.Context(), kind)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, providers)
@@ -43,7 +43,7 @@ func (h *Handler) getBySlug(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "provider not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)

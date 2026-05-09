@@ -58,7 +58,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 	items, total, err := h.svc.ListAll(r.Context(), tenantID, pr)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -91,7 +91,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusConflict, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, ResponseFrom(created))
@@ -111,7 +111,7 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ResponseFrom(v))
@@ -143,7 +143,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ResponseFrom(updated))
@@ -162,7 +162,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.NoContent(w)
@@ -182,7 +182,7 @@ func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, res)

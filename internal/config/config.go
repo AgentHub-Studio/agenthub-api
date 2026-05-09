@@ -73,7 +73,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: KEYCLOAK_BASE_URL is required")
 	}
 
-	corsOrigins := getEnv("CORS_ORIGINS", "https://app.cezar.dev,https://test.cezar.dev,https://chat.cezar.dev")
+	corsOrigins := getEnv("CORS_ORIGINS", "https://app.cezar.dev,https://test.cezar.dev,https://chat.cezar.dev,https://*.cezar.dev")
 	cfg.CORSOrigins = strings.Split(corsOrigins, ",")
 
 	cfg.OAuthEncryptionKey = os.Getenv("OAUTH_ENCRYPTION_KEY")

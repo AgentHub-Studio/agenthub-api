@@ -59,6 +59,24 @@ func (m *mockTenantRepo) UpdateStatus(_ context.Context, id string, status tenan
 	return nil
 }
 
+func (m *mockTenantRepo) UpdateName(_ context.Context, id string, name string) error {
+	t, ok := m.data[id]
+	if !ok {
+		return tenant.ErrNotFound
+	}
+	t.Name = name
+	m.data[id] = t
+	return nil
+}
+
+func (m *mockTenantRepo) Delete(_ context.Context, id string) error {
+	if _, ok := m.data[id]; !ok {
+		return tenant.ErrNotFound
+	}
+	delete(m.data, id)
+	return nil
+}
+
 // noopProvisioner is a successful no-op.
 type noopProvisioner struct{}
 

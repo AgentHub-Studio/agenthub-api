@@ -72,7 +72,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q") // P-C210-1: filter by name/description
 	page, err := h.svc.List(r.Context(), status, q, req)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, page)
@@ -114,7 +114,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -149,7 +149,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -166,7 +166,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.NoContent(w)
@@ -189,7 +189,7 @@ func (h *Handler) bulkDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	count, err := h.svc.BulkDelete(r.Context(), req.IDs)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, map[string]int{"deleted": count})
@@ -211,7 +211,7 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -229,7 +229,7 @@ func (h *Handler) archive(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -251,7 +251,7 @@ func (h *Handler) restore(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -284,7 +284,7 @@ func (h *Handler) clone(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)
@@ -356,7 +356,7 @@ func (h *Handler) applyTemplate(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -401,7 +401,7 @@ func (h *VersionHandler) listVersions(w http.ResponseWriter, r *http.Request) {
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.ListVersions(r.Context(), agentID, req)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, page)
@@ -426,7 +426,7 @@ func (h *VersionHandler) createDraft(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrDraftAlreadyExists):
 			respond.Error(w, http.StatusConflict, err.Error())
 		default:
-			respond.Error(w, http.StatusInternalServerError, err.Error())
+			respond.Error(w, http.StatusInternalServerError, "internal error")
 		}
 		return
 	}
@@ -445,7 +445,7 @@ func (h *VersionHandler) getDraft(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "no draft version found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -463,7 +463,7 @@ func (h *VersionHandler) getLatestPublished(w http.ResponseWriter, r *http.Reque
 			respond.Error(w, http.StatusNotFound, "no published version found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -481,7 +481,7 @@ func (h *VersionHandler) getVersionByID(w http.ResponseWriter, r *http.Request) 
 			respond.Error(w, http.StatusNotFound, "version not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -506,7 +506,7 @@ func (h *VersionHandler) updateDraft(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrVersionImmutable):
 			respond.Error(w, http.StatusConflict, err.Error())
 		default:
-			respond.Error(w, http.StatusInternalServerError, err.Error())
+			respond.Error(w, http.StatusInternalServerError, "internal error")
 		}
 		return
 	}
@@ -527,7 +527,7 @@ func (h *VersionHandler) publishVersion(w http.ResponseWriter, r *http.Request) 
 		case errors.Is(err, ErrVersionImmutable):
 			respond.Error(w, http.StatusConflict, err.Error())
 		default:
-			respond.Error(w, http.StatusInternalServerError, err.Error())
+			respond.Error(w, http.StatusInternalServerError, "internal error")
 		}
 		return
 	}
@@ -553,7 +553,7 @@ func (h *VersionHandler) rollbackVersion(w http.ResponseWriter, r *http.Request)
 		case errors.Is(err, ErrRollbackBlockedByDraft):
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		default:
-			respond.Error(w, http.StatusInternalServerError, err.Error())
+			respond.Error(w, http.StatusInternalServerError, "internal error")
 		}
 		return
 	}

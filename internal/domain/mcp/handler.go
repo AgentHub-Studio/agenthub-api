@@ -197,7 +197,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "MCP server not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -217,7 +217,7 @@ func (h *Handler) listTools(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "MCP server not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -257,7 +257,7 @@ func (h *Handler) getConnectURL(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "MCP server not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 

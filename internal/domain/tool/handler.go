@@ -70,7 +70,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	toolType := r.URL.Query().Get("type")
 	page, err := h.svc.List(r.Context(), req, toolType)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, page)
@@ -79,7 +79,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) listLabels(w http.ResponseWriter, r *http.Request) {
 	labels, err := h.svc.ListLabels(r.Context())
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, labels)
@@ -106,7 +106,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)
@@ -124,7 +124,7 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "tool not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -155,7 +155,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -172,7 +172,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "tool not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.NoContent(w)
@@ -194,7 +194,7 @@ func (h *Handler) testTool(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "tool not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -263,7 +263,7 @@ func (h *Handler) getDatabaseSchema(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "datasource not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, schema)
@@ -290,7 +290,7 @@ func (h *Handler) bindToSkill(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "tool not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)
@@ -312,7 +312,7 @@ func (h *Handler) unbindFromSkill(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "binding not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.NoContent(w)
@@ -326,7 +326,7 @@ func (h *Handler) listBySkill(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.ListBySkill(r.Context(), skillID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)

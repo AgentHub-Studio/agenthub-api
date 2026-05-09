@@ -93,14 +93,14 @@ func (h *HookHandler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, release, err := h.acquire(r.Context())
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	defer release()
 
 	hooks, err := findHooksByAgent(r.Context(), conn, agentID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, hooks)
@@ -135,14 +135,14 @@ func (h *HookHandler) create(w http.ResponseWriter, r *http.Request) {
 
 	conn, release, err := h.acquire(r.Context())
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	defer release()
 
 	hook, err := insertHook(r.Context(), conn, agentID, req, enabled)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, hook)
@@ -161,7 +161,7 @@ func (h *HookHandler) get(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, release, err := h.acquire(r.Context())
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	defer release()
@@ -172,7 +172,7 @@ func (h *HookHandler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, hook)
@@ -197,7 +197,7 @@ func (h *HookHandler) update(w http.ResponseWriter, r *http.Request) {
 
 	conn, release, err := h.acquire(r.Context())
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	defer release()
@@ -208,7 +208,7 @@ func (h *HookHandler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, hook)
@@ -228,7 +228,7 @@ func (h *HookHandler) delete(w http.ResponseWriter, r *http.Request) {
 
 	conn, release, err := h.acquire(r.Context())
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	defer release()
@@ -238,7 +238,7 @@ func (h *HookHandler) delete(w http.ResponseWriter, r *http.Request) {
 		hookID, agentID,
 	)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if tag.RowsAffected() == 0 {

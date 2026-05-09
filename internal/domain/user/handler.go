@@ -37,7 +37,7 @@ func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	users, err := h.svc.List(r.Context())
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, users)
@@ -55,7 +55,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, u)
@@ -100,7 +100,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, u)
@@ -118,7 +118,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -136,7 +136,7 @@ func (h *Handler) assignRole(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "user not found")
 			return
 		}
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -154,7 +154,7 @@ func (h *Handler) removeRole(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "user not found")
 			return
 		}
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -171,7 +171,7 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "user not found")
 			return
 		}
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -180,7 +180,7 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) listRoles(w http.ResponseWriter, r *http.Request) {
 	roles, err := h.svc.ListRoles(r.Context())
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, roles)

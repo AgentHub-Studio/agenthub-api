@@ -52,7 +52,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.svc.Search(r.Context(), tenantID, q, entityType, limit)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, res)

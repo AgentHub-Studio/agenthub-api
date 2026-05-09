@@ -46,7 +46,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.List(r.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
@@ -86,7 +86,7 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "device not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -132,7 +132,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "device not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -168,7 +168,7 @@ func (h *Handler) listByAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	devices, err := h.svc.ListByAgent(r.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, devices)
@@ -190,7 +190,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "device not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -208,7 +208,7 @@ func (h *Handler) detach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.DetachFromAgent(r.Context(), agentID, deviceID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

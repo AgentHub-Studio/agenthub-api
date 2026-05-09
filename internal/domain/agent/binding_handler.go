@@ -66,7 +66,7 @@ func (h *BindingHandler) parseAndValidateAgentID(w http.ResponseWriter, r *http.
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return uuid.UUID{}, false
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return uuid.UUID{}, false
 	}
 	return id, true
@@ -79,7 +79,7 @@ func (h *BindingHandler) listSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	ids, err := h.bindingRepo.ListSkillIDs(r.Context(), agentID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ids)
@@ -103,13 +103,13 @@ func (h *BindingHandler) syncSkills(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	// Return the new state.
 	ids, err := h.bindingRepo.ListSkillIDs(r.Context(), agentID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ids)
@@ -122,7 +122,7 @@ func (h *BindingHandler) listKnowledgeBases(w http.ResponseWriter, r *http.Reque
 	}
 	ids, err := h.bindingRepo.ListKnowledgeBaseIDs(r.Context(), agentID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ids)
@@ -146,12 +146,12 @@ func (h *BindingHandler) syncKnowledgeBases(w http.ResponseWriter, r *http.Reque
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	ids, err := h.bindingRepo.ListKnowledgeBaseIDs(r.Context(), agentID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ids)
@@ -164,7 +164,7 @@ func (h *BindingHandler) listMCPServers(w http.ResponseWriter, r *http.Request) 
 	}
 	ids, err := h.bindingRepo.ListMCPServerIDs(r.Context(), agentID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ids)
@@ -188,12 +188,12 @@ func (h *BindingHandler) syncMCPServers(w http.ResponseWriter, r *http.Request) 
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	ids, err := h.bindingRepo.ListMCPServerIDs(r.Context(), agentID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ids)

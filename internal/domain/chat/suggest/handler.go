@@ -33,7 +33,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	suggestions, err := h.svc.Generate(r.Context(), limit)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, suggestions)

@@ -32,7 +32,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	category := r.URL.Query().Get("category")
 	templates, err := h.svc.ListAll(r.Context(), category)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, templates)
@@ -69,7 +69,7 @@ func (h *Handler) getBySlug(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent template not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -87,7 +87,7 @@ func (h *Handler) instantiate(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent template not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)

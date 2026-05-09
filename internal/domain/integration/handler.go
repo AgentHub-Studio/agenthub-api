@@ -62,7 +62,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 	page, err := h.svc.List(r.Context(), pagination.ParsePageRequest(r), filters)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 

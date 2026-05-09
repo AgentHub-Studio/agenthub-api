@@ -66,7 +66,7 @@ func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	settings, err := h.svc.List(r.Context())
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, settings)
@@ -80,7 +80,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, s)
@@ -113,7 +113,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -146,7 +146,7 @@ func (h *Handler) listOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	}
 	models, err := ListOpenAIModels(r.Context(), apiKey)
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, models)
@@ -156,7 +156,7 @@ func (h *Handler) listAnthropicModels(w http.ResponseWriter, r *http.Request) {
 	apiKey := r.Header.Get("X-Claude-API-Key")
 	models, err := ListAnthropicModels(r.Context(), apiKey)
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, models)
@@ -170,7 +170,7 @@ func (h *Handler) listOllamaModels(w http.ResponseWriter, r *http.Request) {
 			httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, models)
@@ -180,7 +180,7 @@ func (h *Handler) listOpenRouterModels(w http.ResponseWriter, r *http.Request) {
 	apiKey := r.Header.Get("X-OpenRouter-API-Key")
 	models, err := ListOpenRouterModels(r.Context(), apiKey)
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, models)
@@ -190,7 +190,7 @@ func (h *Handler) listOpenRouterEmbeddingModels(w http.ResponseWriter, r *http.R
 	apiKey := r.Header.Get("X-OpenRouter-API-Key")
 	models, err := ListOpenRouterEmbeddingModels(r.Context(), apiKey)
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, models)
@@ -208,7 +208,7 @@ func (h *Handler) testSmtp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := TestSMTPConnection(r.Context(), req); err != nil {
-		httputil.InternalServerError(w, err.Error())
+		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

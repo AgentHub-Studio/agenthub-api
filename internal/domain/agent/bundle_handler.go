@@ -42,7 +42,7 @@ func (h *BundleHandler) exportBundle(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, bundle)

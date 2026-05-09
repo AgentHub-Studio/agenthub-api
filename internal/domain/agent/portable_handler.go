@@ -38,7 +38,7 @@ func (h *Handler) exportPortable(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "agent not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	var skillIDs, kbIDs []uuid.UUID
@@ -49,7 +49,7 @@ func (h *Handler) exportPortable(w http.ResponseWriter, r *http.Request) {
 	portable := ToPortable(responseToAgent(resp), skillIDs, kbIDs)
 	data, err := MarshalPortableYAML(portable)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.Header().Set("Content-Type", "application/yaml")

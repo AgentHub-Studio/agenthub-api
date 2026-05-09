@@ -63,7 +63,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		page, err = h.svc.ListAll(r.Context(), req)
 	}
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, page)
@@ -100,7 +100,7 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "listing not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -129,7 +129,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
@@ -147,7 +147,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "listing not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.NoContent(w)

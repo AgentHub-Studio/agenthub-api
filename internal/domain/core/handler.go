@@ -28,7 +28,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 func (h *Handler) listAgents(w http.ResponseWriter, r *http.Request) {
 	agents, err := h.agentLoader.LoadAll(r.Context())
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
