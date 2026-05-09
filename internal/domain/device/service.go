@@ -97,6 +97,14 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateDeviceRequ
 		existing.Capabilities = req.Capabilities
 	}
 	if req.Status != nil {
+		// Bug 127: status PATCH aceitava qualquer string. Heartbeat
+		// já gateava para ONLINE/OFFLINE; PATCH /devices/:id ignorava.
+		// Update permite UNKNOWN também (estado inicial pré-heartbeat).
+		switch DeviceStatus(*req.Status) {
+		case DeviceStatusOnline, DeviceStatusOffline, DeviceStatusUnknown:
+		default:
+			return DeviceResponse{}, fmt.Errorf("%w: status must be one of ONLINE|OFFLINE|UNKNOWN (got %q)", ErrValidation, *req.Status)
+		}
 		existing.Status = DeviceStatus(*req.Status)
 	}
 	if len(req.Metadata) > 2 {
