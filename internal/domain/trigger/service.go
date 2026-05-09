@@ -42,6 +42,11 @@ func (s *Service) Create(ctx context.Context, agentID uuid.UUID, req CreateTrigg
 	if err := s.cron.Validate(req.CronExpression); err != nil {
 		return AgentTrigger{}, fmt.Errorf("trigger: invalid cron expression: %w", err)
 	}
+	// Bug 161: cap inputTemplate em 32KB. Sem isso, trigger com 200KB+
+	// payload é renderizado a cada cron tick — perf hit + storage waste.
+	if len(req.InputTemplate) > 32000 {
+		return AgentTrigger{}, fmt.Errorf("trigger: inputTemplate exceeds maximum length of 32000 chars (got %d)", len(req.InputTemplate))
+	}
 
 	exists, err := s.repo.ExistsByName(ctx, agentID, req.Name)
 	if err != nil {

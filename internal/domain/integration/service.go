@@ -387,6 +387,11 @@ func validateHTTPRequest(req HTTPCreateRequest) error {
 	if strings.TrimSpace(req.URL) == "" {
 		return fmt.Errorf("integration service: url is required")
 	}
+	// Bug 161: cap bodyTemplate em 32KB. Templates 200KB+ explodem o
+	// HTTP request body cada vez que o tool executa.
+	if len(req.BodyTemplate) > 32000 {
+		return fmt.Errorf("integration service: bodyTemplate exceeds maximum length of 32000 chars (got %d)", len(req.BodyTemplate))
+	}
 	return nil
 }
 
