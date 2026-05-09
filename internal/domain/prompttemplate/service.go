@@ -79,6 +79,11 @@ func (s *Service) Create(ctx context.Context, agentID *uuid.UUID, req CreateRequ
 	if req.Content == "" {
 		return Response{}, fmt.Errorf("prompt template: content is required")
 	}
+	// Bug 158: cap content em 32KB. Sem isso, prompt-template aceita
+	// 200KB+ silenciosamente (DoS storage + perf hit).
+	if len(req.Content) > 32000 {
+		return Response{}, fmt.Errorf("%w: content exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Content))
+	}
 
 	exists, err := s.repo.ExistsBySlug(ctx, agentID, req.Slug)
 	if err != nil {

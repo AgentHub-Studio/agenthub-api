@@ -206,6 +206,12 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	// P-C280-1: strip HTML from user-supplied text fields before persisting.
 	req.Name = stripHTML(req.Name)
 	req.Description = stripHTML(req.Description)
+	// Bug 158: cap description em 32KB (espelha skill.instructions cap).
+	// Sem isso 200KB+ aceita silenciosamente — DoS storage e perf
+	// hit em listings.
+	if len(req.Description) > 32000 {
+		return AgentResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrInvalidRequest, len(req.Description))
+	}
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)
@@ -308,7 +314,12 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	}
 	if req.Description != nil {
 		// P-C280-1: strip HTML from user-supplied text fields.
-		a.Description = stripHTML(*req.Description)
+		desc := stripHTML(*req.Description)
+		// Bug 158: mesmo cap 32KB do Create.
+		if len(desc) > 32000 {
+			return AgentResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrInvalidRequest, len(desc))
+		}
+		a.Description = desc
 	}
 	if req.SystemPrompt != nil {
 		a.SystemPrompt = req.SystemPrompt
