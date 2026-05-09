@@ -3,10 +3,12 @@ package tenantsignup
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -36,11 +38,19 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.svc.Signup(r.Context(), req)
 	if err != nil {
-		if errors.Is(err, ErrWeakTenantID) {
+		if errors.Is(err, ErrWeakTenantID) || errors.Is(err, ErrValidation) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		if errors.Is(err, tenant.ErrAlreadyExists) {
+			respond.Error(w, http.StatusConflict, "tenant already exists")
+			return
+		}
+		// Bug 188: endpoint público — nunca expor err.Error() em failure
+		// interno (vaza package names, SQL state, Keycloak details). Log
+		// completo para debug; resposta opaca para o cliente.
+		slog.Error("tenantsignup: internal failure", "err", err)
+		respond.Error(w, http.StatusInternalServerError, "signup failed")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)

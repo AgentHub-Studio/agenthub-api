@@ -22,6 +22,11 @@ import (
 // ErrWeakTenantID is returned when the supplied tenant slug fails validation.
 var ErrWeakTenantID = errors.New("tenant id must be kebab-case (lowercase, digits, hyphens)")
 
+// ErrValidation is the sentinel for client-facing validation errors. Bug 188:
+// the handler maps this to 422; anything else escapes as an opaque 500 so
+// public callers cannot probe internal package/SQL state.
+var ErrValidation = errors.New("validation failed")
+
 // tenantCreator is the narrow slice of tenant.Service we need.
 type tenantCreator interface {
 	Create(ctx context.Context, req tenant.CreateTenantRequest) (tenant.TenantResponse, error)
@@ -60,13 +65,13 @@ func (s *Service) Signup(ctx context.Context, req SignupRequest) (SignupResponse
 		return SignupResponse{}, ErrWeakTenantID
 	}
 	if strings.TrimSpace(req.TenantName) == "" {
-		return SignupResponse{}, fmt.Errorf("tenantName is required")
+		return SignupResponse{}, fmt.Errorf("%w: tenantName is required", ErrValidation)
 	}
 	if _, err := mail.ParseAddress(req.AdminEmail); err != nil {
-		return SignupResponse{}, fmt.Errorf("adminEmail is invalid")
+		return SignupResponse{}, fmt.Errorf("%w: adminEmail is invalid", ErrValidation)
 	}
 	if strings.TrimSpace(req.AdminFirstName) == "" {
-		return SignupResponse{}, fmt.Errorf("adminFirstName is required")
+		return SignupResponse{}, fmt.Errorf("%w: adminFirstName is required", ErrValidation)
 	}
 
 	// 1. Create tenant (Keycloak realm + schema migration + LLM preset seed).
