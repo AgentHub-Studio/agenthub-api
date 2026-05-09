@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"testing"
@@ -41,6 +42,15 @@ func (m *mockRepo) Create(_ context.Context, _ string, c oauth.OAuthCredential) 
 	c.ID = uuid.New()
 	m.creds[c.ID] = c
 	return c, nil
+}
+
+func (m *mockRepo) ExistsByName(_ context.Context, _ string, name string) (bool, error) {
+	for _, c := range m.creds {
+		if c.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *mockRepo) Update(_ context.Context, _ string, id uuid.UUID, c oauth.OAuthCredential) (oauth.OAuthCredential, error) {
@@ -108,7 +118,7 @@ func TestOAuthService_Delete_NotFound(t *testing.T) {
 func TestOAuthService_ListAll(t *testing.T) {
 	svc := oauth.NewService(newMockRepo())
 	for i := 0; i < 3; i++ {
-		createCred(t, svc, oauth.CreateRequest{Name: "c", AuthType: oauth.AuthTypeAPIKey})
+		createCred(t, svc, oauth.CreateRequest{Name: fmt.Sprintf("c-%d", i), AuthType: oauth.AuthTypeAPIKey, APIKeyValue: strPtr("v")})
 	}
 	items, total, err := svc.ListAll(context.Background(), tenantID, pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)

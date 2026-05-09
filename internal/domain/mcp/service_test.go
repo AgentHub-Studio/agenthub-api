@@ -21,6 +21,8 @@ func newMockRepo() *mockMCPRepo {
 	return &mockMCPRepo{data: make(map[uuid.UUID]mcp.McpServerConfig)}
 }
 
+func strPtr(s string) *string { return &s }
+
 func (m *mockMCPRepo) List(_ context.Context) ([]mcp.McpServerConfig, error) {
 	out := make([]mcp.McpServerConfig, 0, len(m.data))
 	for _, c := range m.data {
@@ -124,7 +126,7 @@ func TestMCPService_Create_Success(t *testing.T) {
 	svc := mcp.NewService(newMockRepo())
 	c, err := svc.Create(context.Background(), mcp.CreateRequest{
 		Name:          "filesystem",
-		TransportType: "http",
+		TransportType: "http", HTTPBaseURL: strPtr("https://example.com/mcp"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "filesystem", c.Name)
@@ -146,9 +148,9 @@ func TestMCPService_Delete_NotFound(t *testing.T) {
 func TestMCPService_ListAutoStart(t *testing.T) {
 	svc := mcp.NewService(newMockRepo())
 	autoStart := true
-	_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: "auto", TransportType: "http", AutoStart: autoStart})
+	_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: "auto", TransportType: "http", HTTPBaseURL: strPtr("https://example.com/mcp"), AutoStart: autoStart})
 	require.NoError(t, err)
-	_, err = svc.Create(context.Background(), mcp.CreateRequest{Name: "manual", TransportType: "http"})
+	_, err = svc.Create(context.Background(), mcp.CreateRequest{Name: "manual", TransportType: "http", HTTPBaseURL: strPtr("https://example.com/mcp")})
 	require.NoError(t, err)
 	items, err := svc.ListAutoStart(context.Background())
 	require.NoError(t, err)
@@ -158,7 +160,7 @@ func TestMCPService_ListAutoStart(t *testing.T) {
 func TestMCPService_List(t *testing.T) {
 	svc := mcp.NewService(newMockRepo())
 	for _, name := range []string{"fs", "github", "slack"} {
-		_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: name, TransportType: "http"})
+		_, err := svc.Create(context.Background(), mcp.CreateRequest{Name: name, TransportType: "http", HTTPBaseURL: strPtr("https://example.com/mcp")})
 		require.NoError(t, err)
 	}
 	items, err := svc.List(context.Background())

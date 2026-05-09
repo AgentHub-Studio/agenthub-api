@@ -16,6 +16,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/crypto"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
 // CredentialRepository defines the persistence interface for OAuthCredential.
@@ -133,6 +134,9 @@ func validateCreateRequest(req CreateRequest) error {
 		if ptrEmpty(req.TokenURL) {
 			return fmt.Errorf("%w: tokenUrl is required for OAUTH2_CLIENT_CREDENTIALS", ErrValidation)
 		}
+		if err := ssrf.ValidateURL(*req.TokenURL); err != nil {
+			return fmt.Errorf("%w: tokenUrl invalid (%v)", ErrValidation, err)
+		}
 		if ptrEmpty(req.ClientID) {
 			return fmt.Errorf("%w: clientId is required for OAUTH2_CLIENT_CREDENTIALS", ErrValidation)
 		}
@@ -143,8 +147,14 @@ func validateCreateRequest(req CreateRequest) error {
 		if ptrEmpty(req.AuthURL) {
 			return fmt.Errorf("%w: authUrl is required for OAUTH2_AUTHORIZATION_CODE", ErrValidation)
 		}
+		if err := ssrf.ValidateURL(*req.AuthURL); err != nil {
+			return fmt.Errorf("%w: authUrl invalid (%v)", ErrValidation, err)
+		}
 		if ptrEmpty(req.TokenURL) {
 			return fmt.Errorf("%w: tokenUrl is required for OAUTH2_AUTHORIZATION_CODE", ErrValidation)
+		}
+		if err := ssrf.ValidateURL(*req.TokenURL); err != nil {
+			return fmt.Errorf("%w: tokenUrl invalid (%v)", ErrValidation, err)
 		}
 		if ptrEmpty(req.ClientID) {
 			return fmt.Errorf("%w: clientId is required for OAUTH2_AUTHORIZATION_CODE", ErrValidation)

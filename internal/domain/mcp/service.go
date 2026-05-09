@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
@@ -119,6 +120,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 	}
 	if req.HTTPBaseURL == nil || strings.TrimSpace(*req.HTTPBaseURL) == "" {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl is required for http transport")
+	}
+	if err := ssrf.ValidateURL(*req.HTTPBaseURL); err != nil {
+		return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl invalid (%v)", err)
 	}
 
 	c := McpServerConfig{
