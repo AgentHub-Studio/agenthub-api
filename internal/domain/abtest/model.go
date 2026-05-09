@@ -16,6 +16,9 @@ var ErrNotFound = errors.New("abtest: not found")
 // ErrNameConflict is returned when a test name is already taken for the agent.
 var ErrNameConflict = errors.New("abtest: name already in use for this agent")
 
+// ErrValidation is the sentinel for request validation failures (HTTP 422).
+var ErrValidation = errors.New("abtest: validation error")
+
 // Variant identifies which branch a session was assigned to.
 type Variant string
 

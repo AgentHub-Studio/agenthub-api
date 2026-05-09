@@ -81,6 +81,13 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateABTestRequ
 	}
 
 	if req.Name != nil {
+		if *req.Name == "" {
+			return ABTestResponse{}, fmt.Errorf("%w: name cannot be empty", ErrValidation)
+		}
+		// Bug 141: name varchar(255) — gate length em Update.
+		if len(*req.Name) > 255 {
+			return ABTestResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
+		}
 		existing.Name = *req.Name
 	}
 	if req.Description != nil {
@@ -88,7 +95,7 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateABTestRequ
 	}
 	if req.TrafficPercent != nil {
 		if *req.TrafficPercent < 0 || *req.TrafficPercent > 100 {
-			return ABTestResponse{}, fmt.Errorf("abtest: traffic_percent must be 0–100")
+			return ABTestResponse{}, fmt.Errorf("%w: traffic_percent must be 0–100", ErrValidation)
 		}
 		existing.TrafficPercent = *req.TrafficPercent
 	}

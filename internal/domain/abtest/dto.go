@@ -53,13 +53,17 @@ type CreateABTestRequest struct {
 
 func (r CreateABTestRequest) validate() error {
 	if r.Name == "" {
-		return fmt.Errorf("abtest: name is required")
+		return fmt.Errorf("%w: name is required", ErrValidation)
+	}
+	// Bug 141: name varchar(255) — gate length antes do INSERT.
+	if len(r.Name) > 255 {
+		return fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(r.Name))
 	}
 	if r.VariantVersionID == uuid.Nil {
-		return fmt.Errorf("abtest: variantVersionId is required")
+		return fmt.Errorf("%w: variantVersionId is required", ErrValidation)
 	}
 	if r.TrafficPercent < 0 || r.TrafficPercent > 100 {
-		return fmt.Errorf("abtest: trafficPercent must be 0–100")
+		return fmt.Errorf("%w: trafficPercent must be 0–100", ErrValidation)
 	}
 	return nil
 }
