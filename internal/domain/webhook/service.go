@@ -159,6 +159,17 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateWebhookReq
 		existing.URL = *req.URL
 	}
 	if req.Events != nil {
+		// Bug 145: mesmo gate do Create — events não pode ser vazio
+		// nem conter strings vazias. Sem isso, UPDATE cria webhook
+		// zumbi a partir de webhook válido.
+		if len(req.Events) == 0 {
+			return WebhookConfig{}, fmt.Errorf("%w: events must contain at least one event type", ErrValidation)
+		}
+		for _, e := range req.Events {
+			if strings.TrimSpace(e) == "" {
+				return WebhookConfig{}, fmt.Errorf("%w: events must not contain empty strings", ErrValidation)
+			}
+		}
 		existing.Events = req.Events
 	}
 	if req.Secret != nil {
