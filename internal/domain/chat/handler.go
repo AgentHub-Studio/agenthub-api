@@ -551,6 +551,14 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 			respond.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 			return
 		}
+		// Bug 207: antes de aplicar UPDATE de cancellation no DB, verificar
+		// que o run de fato existe — caso contrário retornávamos 200
+		// "cancelled" mesmo para UUIDs inexistentes (UPDATE SET status WHERE
+		// id=X afeta 0 rows mas não erra).
+		if _, getErr := h.executor.repo.GetRunByID(r.Context(), runUUID); getErr != nil {
+			respond.Error(w, http.StatusNotFound, "run not found")
+			return
+		}
 		// Run not in-flight on this pod — best-effort: persist the
 		// cancellation in the DB so a poll on /status surfaces the right
 		// state even if the worker already finished or runs on another pod.
