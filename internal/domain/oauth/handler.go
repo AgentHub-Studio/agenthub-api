@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -13,6 +15,35 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
+
+// safeRedirectTarget returns the value to redirect to or empty string if rejected.
+// Bug 203: o callback OAuth aceitava qualquer URL em ?redirect_ui — vetor de
+// open redirect (atacante envia link legítimo do callback que redirige para
+// site de phishing após auth). Aceita apenas:
+//   - paths relativos ("/agents/123") sem schema
+//   - URLs absolute apontando para o frontend known (cezar.dev domains)
+func safeRedirectTarget(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	// Reject control chars and protocol relative ("//evil.com").
+	if strings.ContainsAny(raw, "\r\n\t") || strings.HasPrefix(raw, "//") {
+		return ""
+	}
+	// Relative path: safe.
+	if strings.HasPrefix(raw, "/") {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "app.cezar.dev" || host == "test.cezar.dev" || strings.HasSuffix(host, ".cezar.dev") {
+		return raw
+	}
+	return ""
+}
 
 // service is the interface required by the Handler.
 type service interface {
@@ -217,10 +248,12 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect back to the UI (e.g. to a success page or back to MCP list)
-	redirectUI := r.URL.Query().Get("redirect_ui")
+	// Redirect back to the UI (e.g. to a success page or back to MCP list).
+	// Bug 203: validate redirect_ui is same-origin or whitelisted to prevent
+	// open redirect / phishing via legit callback URL.
+	redirectUI := safeRedirectTarget(r.URL.Query().Get("redirect_ui"))
 	if redirectUI == "" {
-		// Default fallback
+		// Default fallback (also reached when raw URL is rejected).
 		w.Header().Set("Content-Type", "text/html")
 		w.Write([]byte("<h1>Authentication Successful!</h1><p>You can close this window now.</p>"))
 		return
