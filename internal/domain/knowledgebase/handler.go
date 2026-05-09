@@ -223,6 +223,12 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	if req.Limit <= 0 {
 		req.Limit = 5
 	}
+	// Bug 146: cap em 100 para evitar query >18s quando cliente envia
+	// limit absurdo. Search vetorial/keyword é O(N) sobre chunks; sem
+	// cap, payload malicioso degrada o cluster.
+	if req.Limit > 100 {
+		req.Limit = 100
+	}
 
 	results, err := h.searchClient.Search(r.Context(), req.Query, []uuid.UUID{kbID}, req.Limit)
 	if err != nil {
