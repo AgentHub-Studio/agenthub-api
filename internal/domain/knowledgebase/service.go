@@ -121,6 +121,13 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.SearchMode = *req.SearchMode
 	}
 	if req.ContextWindow != nil {
+		// Bug 110: Update precisa do mesmo gate >= 0 que Create —
+		// senão admin podia criar KB com contextWindow=2048 e depois
+		// PATCH para -100, e o RAG retriever silenciosamente filtraria
+		// nenhum chunk (negative > any positive count).
+		if *req.ContextWindow < 0 {
+			return KnowledgeBaseResponse{}, fmt.Errorf("%w: contextWindow must be >= 0 (got %d)", ErrValidation, *req.ContextWindow)
+		}
 		existing.ContextWindow = *req.ContextWindow
 	}
 

@@ -14,6 +14,10 @@ var ErrNotFound = errors.New("knowledgebase: not found")
 // mesmo name no tenant. Mapeado para 409 no handler.
 var ErrDuplicateName = errors.New("knowledgebase: a knowledge base with this name already exists")
 
+// ErrValidation is returned when the create/update request fails server-side
+// validation (e.g. contextWindow < 0). Mapped to HTTP 422 by the handler.
+var ErrValidation = errors.New("knowledgebase: validation failed")
+
 // KnowledgeBaseStatus represents the lifecycle status of a KnowledgeBase.
 type KnowledgeBaseStatus string
 

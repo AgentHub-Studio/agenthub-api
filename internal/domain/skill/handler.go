@@ -135,7 +135,12 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "skill not found")
 			return
 		}
-		if errors.Is(err, ErrSkillInert) {
+		// Bug 109: ErrValidation no Update precisa do mesmo mapeamento
+		// 422 que Create (linha 93). Sem essa branch, payload inválido
+		// (instructions > 32K, slug fora do pattern) caía em 500 e o
+		// frontend mostrava "erro do servidor" em vez de feedback de
+		// formulário.
+		if errors.Is(err, ErrSkillInert) || errors.Is(err, ErrValidation) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
