@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -84,7 +85,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 	items, total, err := h.svc.ListAll(r.Context(), tenantID, f, pr)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		// Bug 194: nunca expor err.Error() em fallback 500.
+		slog.Error("audit: list failed", "tenantID", tenantID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "list failed")
 		return
 	}
 
@@ -115,7 +118,8 @@ func (h *Handler) record(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("audit: record failed", "tenantID", tenantID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "record failed")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, ResponseFrom(l))
@@ -132,10 +136,11 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 	l, err := h.svc.GetByID(r.Context(), tenantID, id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			respond.Error(w, http.StatusNotFound, err.Error())
+			respond.Error(w, http.StatusNotFound, "audit log not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("audit: getByID failed", "tenantID", tenantID, "id", id, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "get failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ResponseFrom(l))

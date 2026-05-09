@@ -3,6 +3,7 @@ package llmpreset
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -40,7 +41,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.List(r.Context(), tenantID, req)
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		// Bug 194: nunca expor err.Error() em fallback 500.
+		slog.Error("llmpreset: list failed", "tenantID", tenantID, "err", err)
+		httputil.InternalServerError(w, "list failed")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, page)
@@ -71,7 +74,8 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		slog.Error("llmpreset: get failed", "tenantID", tenantID, "id", id, "err", err)
+		httputil.InternalServerError(w, "get failed")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, p)
@@ -130,7 +134,8 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		slog.Error("llmpreset: update failed", "tenantID", tenantID, "id", id, "err", err)
+		httputil.InternalServerError(w, "update failed")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, p)
@@ -149,7 +154,8 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		slog.Error("llmpreset: delete failed", "tenantID", tenantID, "id", id, "err", err)
+		httputil.InternalServerError(w, "delete failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -167,7 +173,8 @@ func (h *Handler) setDefault(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "preset not found")
 			return
 		}
-		httputil.InternalServerError(w, err.Error())
+		slog.Error("llmpreset: setDefault failed", "tenantID", tenantID, "id", id, "err", err)
+		httputil.InternalServerError(w, "set default failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
