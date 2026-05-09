@@ -205,6 +205,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 			if !slugPattern.MatchString(trimmed) {
 				return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-_]* (got %q)", ErrValidation, trimmed)
 			}
+			// Bug 138: slug varchar(255) — gate length em Update.
+			if len(trimmed) > 255 {
+				return Response{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrValidation, len(trimmed))
+			}
 			existing.Slug = trimmed
 		}
 	}
