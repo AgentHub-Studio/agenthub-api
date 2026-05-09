@@ -162,6 +162,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if len(slug) > 255 {
 		return Response{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrValidation, len(slug))
 	}
+	// Bug 159: cap description em 32KB.
+	if len(req.Description) > 32000 {
+		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	}
 	t := Tool{
 		Name:        req.Name,
 		Slug:        slug,

@@ -96,6 +96,10 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateListing
 	default:
 		return ListingResponse{}, fmt.Errorf("%w: type must be one of AGENT, SKILL, TOOL, KNOWLEDGE_BASE (got %q)", ErrValidation, req.Type)
 	}
+	// Bug 159: cap description em 32KB.
+	if len(req.Description) > 32000 {
+		return ListingResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	}
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)

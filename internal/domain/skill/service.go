@@ -86,6 +86,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if len(req.Instructions) > maxInstructionsChars {
 		return Response{}, fmt.Errorf("%w: instructions exceeds maximum length of %d chars (got %d)", ErrValidation, maxInstructionsChars, len(req.Instructions))
 	}
+	// Bug 159: cap description em 32KB (cross-cutting com agent/prompt-template).
+	if len(req.Description) > 32000 {
+		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	}
 
 	// DX-01-J (ACT-F3-04): reject skills that are completely inert — no instructions
 	// AND no tool restrictions means binding this skill to an agent has no effect.

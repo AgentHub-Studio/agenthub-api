@@ -72,6 +72,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: contextWindow must be >= 0 (got %d)", req.ContextWindow)
 	}
 
+	// Bug 159: cap description em 32KB.
+	if len(req.Description) > 32000 {
+		return KnowledgeBaseResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	}
 	exists, err := s.repo.ExistsByName(ctx, req.Name)
 	if err != nil {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: check duplicate: %w", err)
