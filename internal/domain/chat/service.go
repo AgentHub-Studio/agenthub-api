@@ -279,11 +279,23 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 	if req.Content == "" {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: content is required")
 	}
+	// Bug 151: messageType era silenciosamente coerced para "text" quando
+	// o cliente passava qualquer string. Frontend que enviasse messageType
+	// errado nunca via o erro — comportamento ficava confuso e bugs ficavam
+	// invisíveis.
+	if req.MessageType != "" {
+		switch req.MessageType {
+		case MessageTypeText, MessageTypeToolUse, MessageTypeToolResult, MessageTypeSystem, MessageTypeCompactSummary:
+		default:
+			return ChatMessageResponse{}, fmt.Errorf("chat service: messageType must be one of text, tool_use, tool_result, system, compact_summary (got %q)", req.MessageType)
+		}
+	}
 
 	m := ChatMessage{
-		SessionID: sessionID,
-		Role:      req.Role,
-		Content:   req.Content,
+		SessionID:   sessionID,
+		Role:        req.Role,
+		Content:     req.Content,
+		MessageType: req.MessageType,
 	}
 
 	created, err := s.repo.CreateMessage(ctx, m)
