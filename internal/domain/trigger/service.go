@@ -116,6 +116,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateTriggerReq
 		existing.Enabled = *req.Enabled
 	}
 	if req.InputTemplate != nil {
+		// Bug 177: cap em Update (cross-cutting com Create — bug 161).
+		if len(*req.InputTemplate) > 32000 {
+			return AgentTrigger{}, fmt.Errorf("trigger: inputTemplate exceeds maximum length of 32000 chars (got %d)", len(*req.InputTemplate))
+		}
 		existing.InputTemplate = *req.InputTemplate
 	}
 
