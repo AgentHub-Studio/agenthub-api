@@ -113,6 +113,12 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "channel not found")
 			return
 		}
+		// Bug 112: ErrValidation no Update precisa do mesmo mapeamento
+		// 422 que Create já fazia em linha 69.
+		if errors.Is(err, ErrValidation) {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

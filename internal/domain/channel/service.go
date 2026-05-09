@@ -126,6 +126,12 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateChannelReq
 	}
 
 	if req.Name != nil {
+		// Bug 112: empty name nunca foi válido — Create rejeita via L62
+		// (bug 12). Sem este gate, admin podia limpar o name via PATCH e
+		// ficar com "channel sem nome" na UI.
+		if *req.Name == "" {
+			return ChannelResponse{}, fmt.Errorf("%w: name cannot be empty", ErrValidation)
+		}
 		existing.Name = *req.Name
 	}
 	if req.AgentID != nil {

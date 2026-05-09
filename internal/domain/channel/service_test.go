@@ -72,6 +72,15 @@ func (r *memRepo) Update(_ context.Context, ch channel.Channel) (channel.Channel
 	return ch, nil
 }
 
+func (r *memRepo) ExistsByName(_ context.Context, name string) (bool, error) {
+	for _, c := range r.channels {
+		if c.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *memRepo) Delete(_ context.Context, id uuid.UUID) error {
 	ch, ok := r.channels[id]
 	if !ok {
