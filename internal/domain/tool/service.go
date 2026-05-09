@@ -259,6 +259,38 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	// P-C249-1: normalize SQL tool config on update as well.
 	if isSQLToolType(existing.Type) {
 		existing.Config = normalizeDataSourceID(existing.Config)
+		var cfgMap map[string]any
+		_ = json.Unmarshal(existing.Config, &cfgMap)
+		dsID, _ := cfgMap["datasource_id"].(string)
+		if strings.TrimSpace(dsID) == "" {
+			if v, _ := cfgMap["datasourceId"].(string); strings.TrimSpace(v) != "" {
+				dsID = v
+			}
+		}
+		if strings.TrimSpace(dsID) != "" {
+			if _, err := uuid.Parse(strings.TrimSpace(dsID)); err != nil {
+				return Response{}, fmt.Errorf("%w: datasourceId must be a valid UUID (got %q)", ErrValidation, dsID)
+			}
+		}
+	}
+
+	// Bug 148: DOCUMENT_SEARCH UPDATE precisa do mesmo gate de Create —
+	// senão PATCH pode salvar kbId malformed e tool quebra silenciosamente.
+	if existing.Type == ToolTypeDocumentSearch || existing.Type == ToolTypeDocuments {
+		var cfgMap map[string]any
+		_ = json.Unmarshal(existing.Config, &cfgMap)
+		kbID, _ := cfgMap["kbId"].(string)
+		if strings.TrimSpace(kbID) == "" {
+			if v, _ := cfgMap["knowledgeBaseId"].(string); strings.TrimSpace(v) != "" {
+				kbID = v
+			}
+		}
+		if strings.TrimSpace(kbID) == "" {
+			return Response{}, fmt.Errorf("%w: kbId is required for DOCUMENT_SEARCH tools", ErrValidation)
+		}
+		if _, err := uuid.Parse(strings.TrimSpace(kbID)); err != nil {
+			return Response{}, fmt.Errorf("%w: kbId must be a valid UUID (got %q)", ErrValidation, kbID)
+		}
 	}
 
 	// P-C220-1 / P-C221-1 / P-C254-1: re-validate URL when type or config changed.
