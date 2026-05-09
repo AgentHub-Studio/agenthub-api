@@ -183,6 +183,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 	if req.Name == "" {
 		req.Name = existing.Name
+	} else if len(req.Name) > 255 {
+		// Bug 137: name varchar(255) — gate length em Update.
+		return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
 	}
 	if req.Description == "" {
 		req.Description = existing.Description

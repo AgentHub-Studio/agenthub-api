@@ -170,6 +170,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if *req.Name == "" {
 			return McpServerConfigResponse{}, fmt.Errorf("mcp service: name cannot be empty")
 		}
+		// Bug 137: name varchar(255) — gate length em Update.
+		if len(*req.Name) > 255 {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: name exceeds maximum length of 255 chars (got %d)", len(*req.Name))
+		}
 		existing.Name = *req.Name
 	}
 	if req.TransportType != nil {

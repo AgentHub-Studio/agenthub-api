@@ -85,6 +85,10 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateDeviceRequ
 		if *req.Name == "" {
 			return DeviceResponse{}, fmt.Errorf("%w: name cannot be empty", ErrValidation)
 		}
+		// Bug 137: name varchar(255) — gate length em Update.
+		if len(*req.Name) > 255 {
+			return DeviceResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
+		}
 		existing.Name = *req.Name
 	}
 	if req.Description != nil {

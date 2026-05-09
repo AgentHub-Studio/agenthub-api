@@ -101,6 +101,9 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	// Merge: preserve current value when request omits the field.
 	if strings.TrimSpace(req.Name) == "" {
 		req.Name = existing.Name
+	} else if len(req.Name) > 255 {
+		// Bug 137: name varchar(255) — gate length em Update.
+		return VpnResource{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
 	}
 	if req.Description == "" {
 		req.Description = existing.Description

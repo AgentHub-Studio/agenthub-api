@@ -134,6 +134,10 @@ func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		return LLMPresetResponse{}, err
 	}
 	if req.Name != nil {
+		// Bug 137: name varchar(255) — gate length em Update.
+		if len(*req.Name) > 255 {
+			return LLMPresetResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
+		}
 		p.Name = *req.Name
 	}
 	if req.Description != nil {
