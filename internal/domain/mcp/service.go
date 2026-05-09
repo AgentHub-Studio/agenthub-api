@@ -125,6 +125,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 	if req.HTTPBaseURL == nil || strings.TrimSpace(*req.HTTPBaseURL) == "" {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl is required for http transport")
 	}
+	// Bug 165: cap URL em 2048 chars (RFC standard). Cross-cutting com bug 164.
+	if len(*req.HTTPBaseURL) > 2048 {
+		return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl exceeds maximum length of 2048 chars (got %d)", len(*req.HTTPBaseURL))
+	}
 	if err := ssrf.ValidateURL(*req.HTTPBaseURL); err != nil {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl invalid (%v)", err)
 	}
@@ -194,6 +198,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		// o campo (PATCH true-partial) — não enviar string vazia.
 		if strings.TrimSpace(*req.HTTPBaseURL) == "" {
 			return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl cannot be empty for http transport")
+		}
+		// Bug 165: cap URL em 2048 chars (cross-cutting com Create).
+		if len(*req.HTTPBaseURL) > 2048 {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl exceeds maximum length of 2048 chars (got %d)", len(*req.HTTPBaseURL))
 		}
 		// Bug 104: Update precisa do mesmo gate SSRF que Create —
 		// senão admin malicioso podia criar config benigno e depois

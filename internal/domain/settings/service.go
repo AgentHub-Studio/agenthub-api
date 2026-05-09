@@ -57,6 +57,11 @@ func (s *service) Upsert(ctx context.Context, key string, req UpdateSettingReque
 	if len(req.Value) == 0 {
 		return SettingResponse{}, fmt.Errorf("%w: value is required", ErrValidation)
 	}
+	// Bug 165: cap value em 64KB. Settings armazenam URLs/api keys/JSON
+	// configs — todos cabem confortavelmente; 200KB+ é storage waste.
+	if len(req.Value) > 64*1024 {
+		return SettingResponse{}, fmt.Errorf("%w: value exceeds maximum size of 65536 bytes (got %d)", ErrValidation, len(req.Value))
+	}
 
 	// Bug 102 (CRÍTICO): qualquer chave terminando em ".baseUrl" é consumida
 	// pelo model_factory para construir o cliente LLM. Sem SSRF, um admin

@@ -74,9 +74,17 @@ func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (Webhook
 	if len(req.Events) == 0 {
 		return WebhookConfig{}, fmt.Errorf("%w: events must contain at least one event type", ErrValidation)
 	}
+	// Bug 165: cap events count em 50. Webhook real escuta poucos eventos;
+	// 1000+ é payload malformado.
+	if len(req.Events) > 50 {
+		return WebhookConfig{}, fmt.Errorf("%w: events list exceeds maximum of 50 entries (got %d)", ErrValidation, len(req.Events))
+	}
 	for _, e := range req.Events {
 		if strings.TrimSpace(e) == "" {
 			return WebhookConfig{}, fmt.Errorf("%w: events must not contain empty strings", ErrValidation)
+		}
+		if len(e) > 100 {
+			return WebhookConfig{}, fmt.Errorf("%w: event name exceeds maximum length of 100 chars (got %d)", ErrValidation, len(e))
 		}
 	}
 	// Bug 164: cap URL em 2048 chars (RFC standard; webhook URLs reais
