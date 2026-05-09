@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 // Service provides business logic for the Skill Evaluation Framework.
@@ -27,6 +29,8 @@ func (s *Service) WithRunner(r *Runner) *Service {
 
 // CreateSuite creates a new eval suite.
 func (s *Service) CreateSuite(ctx context.Context, req CreateSuiteRequest) (SuiteResponse, error) {
+	// Bug 182: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" {
 		return SuiteResponse{}, fmt.Errorf("%w: suite name is required", ErrValidation)
 	}

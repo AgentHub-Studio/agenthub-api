@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 // CronParser computes the next run time from a cron expression.
@@ -29,6 +30,8 @@ func NewService(repo TriggerRepository, cron CronParser) *Service {
 
 // Create creates a new trigger and computes the initial next_run_at.
 func (s *Service) Create(ctx context.Context, agentID uuid.UUID, req CreateTriggerRequest) (AgentTrigger, error) {
+	// Bug 182: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" {
 		return AgentTrigger{}, fmt.Errorf("trigger: name is required")
 	}
@@ -104,7 +107,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateTriggerReq
 		if len(*req.Name) > 255 {
 			return AgentTrigger{}, fmt.Errorf("trigger: name exceeds maximum length of 255 chars (got %d)", len(*req.Name))
 		}
-		existing.Name = *req.Name
+		// Bug 182: strip HTML (XSS prevention).
+		existing.Name = sanitize.StripHTML(*req.Name)
 	}
 	if req.CronExpression != nil {
 		if err := s.cron.Validate(*req.CronExpression); err != nil {

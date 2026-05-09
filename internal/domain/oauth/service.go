@@ -16,6 +16,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/crypto"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
@@ -209,6 +210,8 @@ func ptrEmpty(p *string) bool {
 }
 
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (OAuthCredential, error) {
+	// Bug 182: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if err := validateCreateRequest(req); err != nil {
 		return OAuthCredential{}, err
 	}
@@ -274,6 +277,9 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	}
 	if strings.TrimSpace(req.Name) == "" {
 		req.Name = existing.Name
+	} else {
+		// Bug 182: strip HTML (XSS prevention).
+		req.Name = sanitize.StripHTML(req.Name)
 	}
 	if req.AuthType == "" {
 		req.AuthType = existing.AuthType

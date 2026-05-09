@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
@@ -121,6 +122,8 @@ func validateRequest(req CreateRequest) error {
 // Create creates a new datasource.
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (DataSource, error) {
 	applyDefaults(&req)
+	// Bug 182: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if err := validateRequest(req); err != nil {
 		return DataSource{}, err
 	}
@@ -156,6 +159,9 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	// Merge: campos vazios no request mantêm o valor atual.
 	if req.Name == "" {
 		req.Name = existing.Name
+	} else {
+		// Bug 182: strip HTML (XSS prevention).
+		req.Name = sanitize.StripHTML(req.Name)
 	}
 	if req.Type == "" {
 		req.Type = existing.Type
