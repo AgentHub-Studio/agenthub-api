@@ -112,6 +112,16 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 				return Response{}, fmt.Errorf("%w: method must be one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS (got %q)", ErrValidation, m)
 			}
 		}
+		// Bug 97: validate HTTP timeoutSeconds in [1, 600] when present.
+		if v, ok := httpCfg["timeoutSeconds"]; ok {
+			n, isNum := v.(float64)
+			if !isNum {
+				return Response{}, fmt.Errorf("%w: timeoutSeconds must be a number", ErrValidation)
+			}
+			if n < 1 || n > 600 {
+				return Response{}, fmt.Errorf("%w: timeoutSeconds must be between 1 and 600 (got %d)", ErrValidation, int(n))
+			}
+		}
 	}
 	// P-C249-1: normalize SQL tool config — accept both datasourceId and datasource_id.
 	config := req.Config
