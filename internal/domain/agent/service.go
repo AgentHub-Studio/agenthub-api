@@ -291,6 +291,15 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		a.Name = trimmed
 	}
 	if req.Slug != nil {
+		// Bug 121: Update precisa do mesmo gate que Create —
+		// pattern [a-z0-9][a-z0-9-]* + length <= 255. Sem isso admin
+		// podia salvar slug="INVALID!" via PATCH e quebrar lookups.
+		if !slugPattern.MatchString(*req.Slug) {
+			return AgentResponse{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrInvalidRequest, *req.Slug)
+		}
+		if len(*req.Slug) > 255 {
+			return AgentResponse{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(*req.Slug))
+		}
 		a.Slug = *req.Slug
 	}
 	if req.Description != nil {

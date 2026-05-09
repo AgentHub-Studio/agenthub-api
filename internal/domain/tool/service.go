@@ -187,6 +187,12 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	if req.Slug != nil {
 		trimmed := strings.TrimSpace(*req.Slug)
 		if trimmed != "" {
+			// Bug 121: Update precisa do mesmo gate que Create —
+			// pattern [a-z0-9][a-z0-9_-]*. Sem isso admin podia
+			// salvar slug="INVALID!" via PATCH e quebrar lookups.
+			if !slugPattern.MatchString(trimmed) {
+				return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-_]* (got %q)", ErrValidation, trimmed)
+			}
 			existing.Slug = trimmed
 		}
 	}
