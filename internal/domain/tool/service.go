@@ -191,6 +191,12 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		}
 	}
 	if req.Type != nil {
+		// Bug 119c: type aceita só HTTP/SQL/DATABASE/DOCUMENT_SEARCH/
+		// CUSTOM. Sem este gate admin podia salvar type="INVALID"
+		// e o tool executor não saberia que executor montar.
+		if !IsValidToolType(*req.Type) {
+			return Response{}, fmt.Errorf("%w: unsupported type: %s", ErrValidation, *req.Type)
+		}
 		existing.Type = *req.Type
 	}
 	if len(req.Config) > 0 {

@@ -169,19 +169,29 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.Name = *req.Name
 	}
 	if req.TransportType != nil {
-		if *req.TransportType == "stdio" {
-			return McpServerConfigResponse{}, fmt.Errorf("mcp service: stdio transport is no longer supported, use http")
+		// Bug 119a: aceita só "http" (stdio foi removido). Sem este
+		// gate, admin podia salvar transportType="INVALID" e o
+		// runtime do MCP client falharia ao montar o transporte.
+		if *req.TransportType != "http" {
+			if *req.TransportType == "stdio" {
+				return McpServerConfigResponse{}, fmt.Errorf("mcp service: stdio transport is no longer supported, use http")
+			}
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: transport type must be 'http' (got %q)", *req.TransportType)
 		}
 		existing.TransportType = *req.TransportType
 	}
 	if req.HTTPBaseURL != nil {
+		// Bug 119b: httpBaseUrl="" deixa config inválido para http
+		// transport. Se admin quer manter o valor anterior, deve omitir
+		// o campo (PATCH true-partial) — não enviar string vazia.
+		if strings.TrimSpace(*req.HTTPBaseURL) == "" {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl cannot be empty for http transport")
+		}
 		// Bug 104: Update precisa do mesmo gate SSRF que Create —
 		// senão admin malicioso podia criar config benigno e depois
 		// PATCH para http://localhost:9000/mcp.
-		if strings.TrimSpace(*req.HTTPBaseURL) != "" {
-			if err := ssrf.ValidateURL(*req.HTTPBaseURL); err != nil {
-				return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl invalid (%v)", err)
-			}
+		if err := ssrf.ValidateURL(*req.HTTPBaseURL); err != nil {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl invalid (%v)", err)
 		}
 		existing.HTTPBaseURL = req.HTTPBaseURL
 	}
