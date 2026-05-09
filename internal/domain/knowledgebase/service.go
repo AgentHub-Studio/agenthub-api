@@ -118,6 +118,15 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.EmbeddingModel = *req.EmbeddingModel
 	}
 	if req.SearchMode != nil {
+		// Bug 118: searchMode aceita só VECTOR, KEYWORD, HYBRID.
+		// Create rejeita; Update precisa do mesmo gate. Sem isso,
+		// admin podia salvar "INVALID" e o RAG retriever falharia
+		// em runtime ao montar a query.
+		switch *req.SearchMode {
+		case "VECTOR", "KEYWORD", "HYBRID":
+		default:
+			return KnowledgeBaseResponse{}, fmt.Errorf("%w: searchMode must be one of VECTOR, KEYWORD, HYBRID (got %q)", ErrValidation, *req.SearchMode)
+		}
 		existing.SearchMode = *req.SearchMode
 	}
 	if req.ContextWindow != nil {
