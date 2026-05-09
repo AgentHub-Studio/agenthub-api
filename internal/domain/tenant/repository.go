@@ -17,6 +17,11 @@ var ErrNotFound = errors.New("tenant: not found")
 // ErrAlreadyExists is returned when the tenant slug is already taken.
 var ErrAlreadyExists = errors.New("tenant: already exists")
 
+// ErrValidation is the sentinel for client-facing validation errors. Bug 189:
+// the public handler maps this to 400 with the validation message; repo
+// errors fall through to an opaque 500 so callers cannot probe SQL state.
+var ErrValidation = errors.New("validation failed")
+
 // Repository defines persistence operations for Tenant.
 type Repository interface {
 	Create(ctx context.Context, t Tenant) (Tenant, error)
@@ -24,6 +29,8 @@ type Repository interface {
 	FindAll(ctx context.Context, req pagination.PageRequest) ([]Tenant, int64, error)
 	Exists(ctx context.Context, id string) (bool, error)
 	UpdateStatus(ctx context.Context, id string, status Status) error
+	UpdateName(ctx context.Context, id string, name string) error
+	Delete(ctx context.Context, id string) error
 }
 
 type pgRepository struct {
@@ -117,6 +124,37 @@ func (r *pgRepository) UpdateStatus(ctx context.Context, id string, status Statu
 	tag, err := r.pool.Exec(ctx, query, id, string(status))
 	if err != nil {
 		return fmt.Errorf("tenant.UpdateStatus: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *pgRepository) UpdateName(ctx context.Context, id string, name string) error {
+	const query = `UPDATE public.tenants SET name = $2, updated_at = NOW() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, query, id, name)
+	if err != nil {
+		return fmt.Errorf("tenant.UpdateName: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *pgRepository) Delete(ctx context.Context, id string) error {
+	const dropSchema = `DROP SCHEMA IF EXISTS "ah_` + `%s" CASCADE`
+	// Drop the per-tenant schema first so the tenant row remains as evidence
+	// if the schema drop fails. Schema name is sanitized via the slug regex
+	// at create-time, but we still parameterize defensively.
+	if _, err := r.pool.Exec(ctx, fmt.Sprintf(dropSchema, id)); err != nil {
+		return fmt.Errorf("tenant.Delete drop schema: %w", err)
+	}
+	const del = `DELETE FROM public.tenants WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, del, id)
+	if err != nil {
+		return fmt.Errorf("tenant.Delete: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

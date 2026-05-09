@@ -61,13 +61,13 @@ func (s *service) WithSchemaMigrator(sm SchemaMigrator) *service {
 
 func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantResponse, error) {
 	if req.ID == "" {
-		return TenantResponse{}, fmt.Errorf("id is required")
+		return TenantResponse{}, fmt.Errorf("%w: id is required", ErrValidation)
 	}
 	if req.Name == "" {
-		return TenantResponse{}, fmt.Errorf("name is required")
+		return TenantResponse{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
 	if !slugRegexp.MatchString(req.ID) {
-		return TenantResponse{}, fmt.Errorf("id must be a kebab-case slug (^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$)")
+		return TenantResponse{}, fmt.Errorf("%w: id must be a kebab-case slug (^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$)", ErrValidation)
 	}
 
 	t := Tenant{

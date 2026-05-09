@@ -3,6 +3,7 @@ package tenant
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -39,8 +40,15 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httputil.Conflict(w, "tenant already exists")
 		return
 	}
-	if err != nil {
+	if errors.Is(err, ErrValidation) {
 		httputil.BadRequest(w, err.Error())
+		return
+	}
+	if err != nil {
+		// Bug 189: endpoint público — não vazar repo wrapper (`tenant.Create:
+		// %w`), SQL state ou Keycloak details. Log completo internamente.
+		slog.Error("tenant: internal create failure", "err", err)
+		httputil.InternalServerError(w, "tenant create failed")
 		return
 	}
 	httputil.JSON(w, http.StatusCreated, resp)
@@ -50,7 +58,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.List(r.Context(), req)
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		// Bug 189: endpoint público — repo error pode conter SQLSTATE.
+		slog.Error("tenant: list failed", "err", err)
+		httputil.InternalServerError(w, "list failed")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, page)
@@ -60,7 +70,9 @@ func (h *Handler) exists(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	ok, err := h.svc.Exists(r.Context(), id)
 	if err != nil {
-		httputil.InternalServerError(w, err.Error())
+		// Bug 189: endpoint público de login flow — não vazar repo error.
+		slog.Error("tenant: exists check failed", "id", id, "err", err)
+		httputil.InternalServerError(w, "exists check failed")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, ExistsResponse{Exists: ok})
