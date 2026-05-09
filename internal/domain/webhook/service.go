@@ -69,6 +69,16 @@ func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (Webhook
 	if len(req.Name) > 255 {
 		return WebhookConfig{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
 	}
+	// Bug 144: events filter — webhook sem eventos nunca dispara (filtro
+	// nunca casa). Permitir era criar entry zumbi no banco.
+	if len(req.Events) == 0 {
+		return WebhookConfig{}, fmt.Errorf("%w: events must contain at least one event type", ErrValidation)
+	}
+	for _, e := range req.Events {
+		if strings.TrimSpace(e) == "" {
+			return WebhookConfig{}, fmt.Errorf("%w: events must not contain empty strings", ErrValidation)
+		}
+	}
 	if u, err := url.Parse(req.URL); err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
 		return WebhookConfig{}, fmt.Errorf("%w: url must be a valid http(s) URL with host", ErrValidation)
 	}
