@@ -220,6 +220,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 	if len(req.AllowedTools) == 0 {
 		req.AllowedTools = existing.AllowedTools
+	} else if len(req.AllowedTools) > 100 {
+		// Bug 171: cap em Update (cross-cutting com Create — bug 169).
+		return Response{}, fmt.Errorf("%w: allowedTools exceeds maximum of 100 entries (got %d)", ErrValidation, len(req.AllowedTools))
 	}
 
 	// DX-01-H: normalize whitespace-only instructions.
