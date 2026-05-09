@@ -107,10 +107,10 @@ func validateRequest(req CreateRequest) error {
 		return fmt.Errorf("%w: database exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Database))
 	}
 	if req.DBUser == "" {
-		return fmt.Errorf("%w: username is required", ErrValidation)
+		return fmt.Errorf("%w: dbUser is required", ErrValidation)
 	}
 	if len(req.DBUser) > 255 {
-		return fmt.Errorf("%w: username exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.DBUser))
+		return fmt.Errorf("%w: dbUser exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.DBUser))
 	}
 	if len(req.Host) > 255 {
 		return fmt.Errorf("%w: host exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Host))
