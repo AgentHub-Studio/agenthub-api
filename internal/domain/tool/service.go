@@ -96,6 +96,8 @@ func (s *Service) ListLabels(ctx context.Context) ([]string, error) {
 
 // Create creates a new tool.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, error) {
+	// Bug 181: strip HTML do name (XSS prevention cross-cutting).
+	req.Name = stripHTML(req.Name)
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return Response{}, fmt.Errorf("%w: name is required", ErrValidation)

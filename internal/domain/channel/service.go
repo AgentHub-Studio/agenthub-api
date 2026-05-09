@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
@@ -69,6 +70,8 @@ func (s *service) GetByID(ctx context.Context, id uuid.UUID) (ChannelResponse, e
 }
 
 func (s *service) Create(ctx context.Context, req CreateChannelRequest) (ChannelTokenResponse, error) {
+	// Bug 181: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" {
 		return ChannelTokenResponse{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
@@ -145,7 +148,8 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateChannelReq
 		if len(*req.Name) > 255 {
 			return ChannelResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
 		}
-		existing.Name = *req.Name
+		// Bug 181: strip HTML (XSS prevention).
+		existing.Name = sanitize.StripHTML(*req.Name)
 	}
 	if req.AgentID != nil {
 		existing.AgentID = *req.AgentID

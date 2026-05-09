@@ -107,8 +107,9 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	if len(req.Description) > 32000 {
 		return LLMPresetResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
-	// Bug 180: strip HTML do description (XSS prevention).
+	// Bug 180+181: strip HTML do description e name (XSS prevention).
 	req.Description = sanitize.StripHTML(req.Description)
+	req.Name = sanitize.StripHTML(req.Name)
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 4096
@@ -148,7 +149,8 @@ func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		if len(*req.Name) > 255 {
 			return LLMPresetResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
 		}
-		p.Name = *req.Name
+		// Bug 181: strip HTML (XSS prevention).
+		p.Name = sanitize.StripHTML(*req.Name)
 	}
 	if req.Description != nil {
 		// Bug 176: cap em Update (cross-cutting com Create — bug 160).

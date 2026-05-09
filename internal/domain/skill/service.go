@@ -83,6 +83,8 @@ func (s *Service) List(ctx context.Context, category *string, req pagination.Pag
 
 // Create creates a new skill, auto-generating the slug if not provided.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, error) {
+	// Bug 181: strip HTML do name (XSS prevention cross-cutting com agent).
+	req.Name = stripHTML(req.Name)
 	// Bug 130: name varchar(255) — gate length antes do INSERT
 	// (sem este gate Create vazava SQL 22001 com 500).
 	if len(req.Name) > 255 {
@@ -208,6 +210,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	} else if len(req.Name) > 255 {
 		// Bug 137: name varchar(255) — gate length em Update.
 		return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	} else {
+		// Bug 181: strip HTML do name (XSS prevention).
+		req.Name = stripHTML(req.Name)
 	}
 	if req.Description == "" {
 		req.Description = existing.Description

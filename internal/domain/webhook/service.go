@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
@@ -61,6 +62,8 @@ func (s *Service) List(ctx context.Context) ([]WebhookConfig, error) {
 
 // Create creates a new webhook configuration.
 func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (WebhookConfig, error) {
+	// Bug 181: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" || req.URL == "" {
 		return WebhookConfig{}, fmt.Errorf("%w: name and url are required", ErrValidation)
 	}
@@ -164,6 +167,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateWebhookReq
 		return WebhookConfig{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
 	}
 	if req.Name != nil {
+		// Bug 181: strip HTML (XSS prevention).
+		stripped := sanitize.StripHTML(*req.Name)
+		req.Name = &stripped
 		// Bug 115: name vazio salvo na DB causa label vazio na UI.
 		// Create rejeita; Update precisa do mesmo gate.
 		if *req.Name == "" {

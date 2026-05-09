@@ -56,6 +56,8 @@ func (s *service) GetByID(ctx context.Context, id uuid.UUID) (DeviceResponse, er
 }
 
 func (s *service) Create(ctx context.Context, req CreateDeviceRequest) (DeviceResponse, error) {
+	// Bug 181: strip HTML do name (XSS prevention cross-cutting).
+	req.Name = sanitize.StripHTML(req.Name)
 	if err := req.validate(); err != nil {
 		return DeviceResponse{}, err
 	}

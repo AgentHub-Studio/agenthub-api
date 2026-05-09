@@ -67,6 +67,8 @@ func (s *Service) GetByID(ctx context.Context, tenantID string, id uuid.UUID) (V
 // para que body {} não persista um VpnResource com name="" (lixo
 // inerte que polui a tela de VPNs sem efeito útil).
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest) (VpnResource, error) {
+	// Bug 181: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if strings.TrimSpace(req.Name) == "" {
 		return VpnResource{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
@@ -111,6 +113,9 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	} else if len(req.Name) > 255 {
 		// Bug 137: name varchar(255) — gate length em Update.
 		return VpnResource{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	} else {
+		// Bug 181: strip HTML (XSS prevention).
+		req.Name = sanitize.StripHTML(req.Name)
 	}
 	if req.Description == "" {
 		req.Description = existing.Description

@@ -69,6 +69,8 @@ func (s *Service) GetBySlug(ctx context.Context, slug string) (TemplateResponse,
 
 // Create stores a new tenant-owned (non-builtin) template.
 func (s *Service) Create(ctx context.Context, req CreateTemplateRequest) (TemplateResponse, error) {
+	// Bug 181: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" {
 		return TemplateResponse{}, fmt.Errorf("name is required")
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
@@ -106,6 +107,8 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (McpServerConfigRes
 
 // Create creates a new MCP server config.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfigResponse, error) {
+	// Bug 181: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: name is required")
 	}
@@ -186,7 +189,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if len(*req.Name) > 255 {
 			return McpServerConfigResponse{}, fmt.Errorf("mcp service: name exceeds maximum length of 255 chars (got %d)", len(*req.Name))
 		}
-		existing.Name = *req.Name
+		// Bug 181: strip HTML (XSS prevention).
+		existing.Name = sanitize.StripHTML(*req.Name)
 	}
 	if req.TransportType != nil {
 		// Bug 119a: aceita só "http" (stdio foi removido). Sem este

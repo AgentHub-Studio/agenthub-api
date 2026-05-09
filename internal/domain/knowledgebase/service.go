@@ -57,6 +57,8 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (KnowledgeBaseRespo
 
 // Create creates a new knowledge base.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseResponse, error) {
+	// Bug 181: strip HTML do name (XSS prevention cross-cutting).
+	req.Name = stripHTML(req.Name)
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name is required")
@@ -122,7 +124,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 
 	if req.Name != nil {
-		trimmed := strings.TrimSpace(*req.Name)
+		// Bug 181: strip HTML do name (XSS prevention).
+		trimmed := strings.TrimSpace(stripHTML(*req.Name))
 		if trimmed == "" {
 			return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name cannot be empty")
 		}

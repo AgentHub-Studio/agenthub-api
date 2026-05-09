@@ -60,6 +60,8 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Response, error) {
 
 // Create creates a new prompt template.
 func (s *Service) Create(ctx context.Context, agentID *uuid.UUID, req CreateRequest) (Response, error) {
+	// Bug 181: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" {
 		return Response{}, fmt.Errorf("prompt template: name is required")
 	}
@@ -140,7 +142,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if len(*req.Name) > 255 {
 			return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
 		}
-		existing.Name = *req.Name
+		// Bug 181: strip HTML (XSS prevention).
+		existing.Name = sanitize.StripHTML(*req.Name)
 	}
 	if req.Slug != nil {
 		// Bug 120: Update precisa do mesmo gate que Create — pattern
