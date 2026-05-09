@@ -89,6 +89,12 @@ func (s *Service) Create(ctx context.Context, req CreateTemplateRequest) (Templa
 	if len(req.Description) > 32000 {
 		return TemplateResponse{}, fmt.Errorf("agent template: description exceeds maximum length of 32000 chars (got %d)", len(req.Description))
 	}
+	// Bug 167: cap definition (JSONB) em 256KB. Templates reais
+	// (system_prompt + tool refs + model_config) cabem em <32KB;
+	// 500KB+ é storage waste e perf hit em listagens.
+	if len(req.Definition) > 256*1024 {
+		return TemplateResponse{}, fmt.Errorf("agent template: definition exceeds maximum size of 262144 bytes (got %d)", len(req.Definition))
+	}
 	t := AgentTemplate{
 		Name:           req.Name,
 		Slug:           slug,

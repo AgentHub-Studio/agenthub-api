@@ -396,6 +396,14 @@ func validateHTTPRequest(req HTTPCreateRequest) error {
 	if len(req.BodyTemplate) > 32000 {
 		return fmt.Errorf("integration service: bodyTemplate exceeds maximum length of 32000 chars (got %d)", len(req.BodyTemplate))
 	}
+	// Bug 167: cap headers count em 50. Integrations reais usam <10
+	// headers; 1000+ é payload malformado e perf hit em request loop.
+	if len(req.Headers) > 0 {
+		var hm map[string]any
+		if err := json.Unmarshal(req.Headers, &hm); err == nil && len(hm) > 50 {
+			return fmt.Errorf("integration service: headers exceeds maximum of 50 entries (got %d)", len(hm))
+		}
+	}
 	return nil
 }
 
