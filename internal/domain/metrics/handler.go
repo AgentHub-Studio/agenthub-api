@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -65,7 +66,9 @@ func (h *Handler) listByAgent(w http.ResponseWriter, r *http.Request) {
 
 	items, total, err := h.svc.ListByAgent(r.Context(), tenantID, agentID, pr)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		// Bug 193: nunca expor err.Error() em fallback 500.
+		slog.Error("metrics: listByAgent failed", "tenantID", tenantID, "agentID", agentID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "list failed")
 		return
 	}
 
@@ -86,7 +89,8 @@ func (h *Handler) agentSummary(w http.ResponseWriter, r *http.Request) {
 
 	s, err := h.svc.GetAgentSummary(r.Context(), tenantID, agentID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("metrics: agentSummary failed", "tenantID", tenantID, "agentID", agentID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "summary failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, s)
@@ -97,7 +101,8 @@ func (h *Handler) tenantSummary(w http.ResponseWriter, r *http.Request) {
 
 	s, err := h.svc.GetTenantSummary(r.Context(), tenantID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("metrics: tenantSummary failed", "tenantID", tenantID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "summary failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, s)
@@ -114,7 +119,8 @@ func (h *Handler) topAgents(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.svc.TopAgents(r.Context(), tenantID, limit)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("metrics: topAgents failed", "tenantID", tenantID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "top agents failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, result)
@@ -125,7 +131,8 @@ func (h *Handler) costBreakdown(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.svc.CostBreakdown(r.Context(), tenantID)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("metrics: costBreakdown failed", "tenantID", tenantID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "cost breakdown failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, result)
@@ -142,7 +149,8 @@ func (h *Handler) record(w http.ResponseWriter, r *http.Request) {
 
 	m, err := h.svc.Record(r.Context(), tenantID, req)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("metrics: record failed", "tenantID", tenantID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "record failed")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, ResponseFrom(m))
