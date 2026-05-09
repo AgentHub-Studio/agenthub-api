@@ -30,6 +30,10 @@ func (s *Service) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suit
 	if req.Name == "" {
 		return SuiteResponse{}, fmt.Errorf("%w: suite name is required", ErrValidation)
 	}
+	// Bug 132: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return SuiteResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	if req.SkillID == uuid.Nil {
 		return SuiteResponse{}, fmt.Errorf("%w: skillId is required", ErrValidation)
 	}

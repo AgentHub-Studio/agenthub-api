@@ -32,6 +32,10 @@ func (s *Service) Create(ctx context.Context, agentID uuid.UUID, req CreateTrigg
 	if req.Name == "" {
 		return AgentTrigger{}, fmt.Errorf("trigger: name is required")
 	}
+	// Bug 132: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return AgentTrigger{}, fmt.Errorf("trigger: name exceeds maximum length of 255 chars (got %d)", len(req.Name))
+	}
 	if req.CronExpression == "" {
 		return AgentTrigger{}, fmt.Errorf("trigger: cron expression is required")
 	}

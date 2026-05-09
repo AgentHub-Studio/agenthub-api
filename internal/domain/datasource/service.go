@@ -102,8 +102,18 @@ func validateRequest(req CreateRequest) error {
 	if req.Database == "" {
 		return fmt.Errorf("%w: database is required", ErrValidation)
 	}
+	// Bug 132: database/dbUser varchar(255) — gate length.
+	if len(req.Database) > 255 {
+		return fmt.Errorf("%w: database exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Database))
+	}
 	if req.DBUser == "" {
 		return fmt.Errorf("%w: username is required", ErrValidation)
+	}
+	if len(req.DBUser) > 255 {
+		return fmt.Errorf("%w: username exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.DBUser))
+	}
+	if len(req.Host) > 255 {
+		return fmt.Errorf("%w: host exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Host))
 	}
 	return nil
 }
