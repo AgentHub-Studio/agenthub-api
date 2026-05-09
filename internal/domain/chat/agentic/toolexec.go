@@ -393,7 +393,7 @@ func (e *StreamingToolExecutor) executeParallel(
 			toolInput := json.RawMessage(tc.Function.Arguments)
 			if vErr := ValidateToolInput(tc.Function.Name, toolInput); vErr != "" {
 				errMsg := vErr
-				validationResult := ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
+				validationResult := ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name, EmittedToStream: true}
 				tt.complete(validationResult)
 				results[i] = validationResult
 				ch <- NewRunEvent(EventToolProgress, ToolProgressData{
@@ -408,6 +408,7 @@ func (e *StreamingToolExecutor) executeParallel(
 				if cached := e.cache.Get(tc.Function.Name, toolInput); cached != nil {
 					tt.complete(*cached)
 					results[i] = truncateToolResult(*cached, e.config.MaxToolResultChars)
+					results[i].EmittedToStream = true
 					ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 						ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
 					})
@@ -513,6 +514,7 @@ func (e *StreamingToolExecutor) executeParallel(
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 				ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
 			})
+			results[i].EmittedToStream = true
 			e.emitToolResult(ch, tt, results[i])
 
 			// Post-tool hooks. Prompt hooks may inject extra text into the
@@ -577,7 +579,7 @@ func (e *StreamingToolExecutor) executeToolCall(
 	// Inspired by Claude Code's Tool.ts two-phase validateInput/checkPermissions.
 	if vErr := ValidateToolInput(tc.Function.Name, json.RawMessage(tc.Function.Arguments)); vErr != "" {
 		errMsg := vErr
-		validationResult := ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
+		validationResult := ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name, EmittedToStream: true}
 		tt.complete(validationResult)
 		*result = validationResult
 		ch <- NewRunEvent(EventToolProgress, ToolProgressData{
@@ -649,6 +651,10 @@ func (e *StreamingToolExecutor) executeToolCall(
 		ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
 	})
 	e.emitToolResult(ch, tt, *result)
+	// Bug 198: marca EmittedToStream para o runner pular re-emissão
+	// no main loop (runner.go:1311). Sem essa flag, tool_result era
+	// emitido 2x na SSE com durationMs ligeiramente diferente.
+	result.EmittedToStream = true
 
 	// Post-tool hooks.
 	if e.hookExecutor != nil {
