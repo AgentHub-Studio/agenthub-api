@@ -8,6 +8,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 // ReviewRepository is the persistence interface for reviews.
@@ -54,12 +55,14 @@ func (s *Service) Create(ctx context.Context, listingID uuid.UUID, tenantID stri
 		return ReviewResponse{}, err
 	}
 	_ = l
+	// Bug 184: strip HTML do comment (XSS prevention) — comentários
+	// públicos do marketplace são renderizados na UI sem escape garantido.
 	rev := Review{
 		ID:        uuid.New(),
 		ListingID: listingID,
 		TenantID:  tenantID,
 		Rating:    req.Rating,
-		Comment:   req.Comment,
+		Comment:   sanitize.StripHTML(req.Comment),
 	}
 	created, err := s.reviews.Create(ctx, rev)
 	if err != nil {
