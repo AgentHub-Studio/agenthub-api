@@ -161,6 +161,11 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 
 	if req.Name != nil {
+		// Bug 115: name vazio causa server config sem label na UI.
+		// Create rejeita; Update precisa do mesmo gate.
+		if *req.Name == "" {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: name cannot be empty")
+		}
 		existing.Name = *req.Name
 	}
 	if req.TransportType != nil {

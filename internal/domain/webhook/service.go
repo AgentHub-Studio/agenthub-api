@@ -124,6 +124,11 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateWebhookReq
 		return WebhookConfig{}, err
 	}
 	if req.Name != nil {
+		// Bug 115: name vazio salvo na DB causa label vazio na UI.
+		// Create rejeita; Update precisa do mesmo gate.
+		if *req.Name == "" {
+			return WebhookConfig{}, fmt.Errorf("%w: name cannot be empty", ErrValidation)
+		}
 		existing.Name = *req.Name
 	}
 	if req.URL != nil {
