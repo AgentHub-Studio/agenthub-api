@@ -88,6 +88,18 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		return Response{}, ErrSkillInert
 	}
 
+	// Bug 126: contextMode aceita só "inline" ou "fork" (varchar(10) na DB).
+	// Sem este gate, valor inválido > 10 chars vazava SQL error 22001 (500)
+	// para o cliente. Mesmo com tamanho válido, "INVALID_MODE" silencioso
+	// quebrava o agentic runner que tem switch sobre os dois valores.
+	if req.ContextMode != "" {
+		switch req.ContextMode {
+		case "inline", "fork":
+		default:
+			return Response{}, fmt.Errorf("%w: contextMode must be one of inline|fork (got %q)", ErrValidation, req.ContextMode)
+		}
+	}
+
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)
@@ -170,6 +182,13 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 	if req.ContextMode == "" {
 		req.ContextMode = existing.ContextMode
+	} else {
+		// Bug 126: gate enum em Update — mesmas razões do Create.
+		switch req.ContextMode {
+		case "inline", "fork":
+		default:
+			return Response{}, fmt.Errorf("%w: contextMode must be one of inline|fork (got %q)", ErrValidation, req.ContextMode)
+		}
 	}
 	if req.WhenToUse == nil {
 		req.WhenToUse = existing.WhenToUse
