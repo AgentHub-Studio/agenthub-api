@@ -527,6 +527,12 @@ func (s *service) Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest
 	if name == "" {
 		name = original.Name + " (copy)"
 	}
+	// Bug 128: name varchar(255). Sem este gate, Clone com name >255 chars
+	// retornava 500 com SQL error 22001 vazando para o cliente. Mesmo gate
+	// que Create deveria aplicar — falha rápido, mensagem útil, 422.
+	if len(name) > 255 {
+		return AgentResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(name))
+	}
 	clone := Agent{
 		ID:              uuid.New(),
 		Name:            name,

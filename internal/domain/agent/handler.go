@@ -278,6 +278,12 @@ func (h *Handler) clone(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusConflict, err.Error())
 			return
 		}
+		// Bug 128: Clone com name >255 retorna ErrInvalidRequest (em vez
+		// de 500 SQL leak). Outros validation errors também caem aqui.
+		if errors.Is(err, ErrInvalidRequest) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
