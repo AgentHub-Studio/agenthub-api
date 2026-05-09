@@ -300,12 +300,14 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 	// o cliente passava qualquer string. Frontend que enviasse messageType
 	// errado nunca via o erro — comportamento ficava confuso e bugs ficavam
 	// invisíveis.
-	if req.MessageType != "" {
-		switch req.MessageType {
-		case MessageTypeText, MessageTypeToolUse, MessageTypeToolResult, MessageTypeSystem, MessageTypeCompactSummary:
-		default:
-			return ChatMessageResponse{}, fmt.Errorf("chat service: messageType must be one of text, tool_use, tool_result, system, compact_summary (got %q)", req.MessageType)
-		}
+	//
+	// Bug 186: cliente só pode postar messageType="text". Os demais tipos
+	// (tool_use, tool_result, system, compact_summary) são produzidos pelo
+	// runtime agêntico (Runner persiste via repo.CreateMessage diretamente,
+	// bypassa este gate). Aceitar tool_use/tool_result de cliente permitia
+	// spoofar fake tool history — vetor de prompt injection.
+	if req.MessageType != "" && req.MessageType != MessageTypeText {
+		return ChatMessageResponse{}, fmt.Errorf("chat service: messageType %q is reserved for the agentic runtime; only \"text\" is allowed from clients", req.MessageType)
 	}
 
 	m := ChatMessage{
