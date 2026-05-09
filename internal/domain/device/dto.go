@@ -81,6 +81,10 @@ func (r CreateDeviceRequest) validate() error {
 	default:
 		return fmt.Errorf("%w: type must be one of SENSOR|ACTUATOR|GATEWAY|COMPUTE (got %q)", ErrValidation, r.Type)
 	}
+	// Bug 160: cap description em 32KB (cross-cutting com agent/skill/tool/KB).
+	if len(r.Description) > 32000 {
+		return fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(r.Description))
+	}
 	return nil
 }
 

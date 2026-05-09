@@ -102,6 +102,10 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	if exists {
 		return LLMPresetResponse{}, ErrDuplicateName
 	}
+	// Bug 160: cap description em 32KB.
+	if len(req.Description) > 32000 {
+		return LLMPresetResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 4096
