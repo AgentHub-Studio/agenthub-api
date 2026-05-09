@@ -132,6 +132,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 	if err := ssrf.ValidateURL(*req.HTTPBaseURL); err != nil {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl invalid (%v)", err)
 	}
+	// Bug 168: cap env map em 50 entries. MCP env real usa <10 vars;
+	// 1000+ é storage waste e perf hit ao montar processos do client.
+	if len(req.Env) > 50 {
+		return McpServerConfigResponse{}, fmt.Errorf("mcp service: env exceeds maximum of 50 entries (got %d)", len(req.Env))
+	}
+	if len(req.Args) > 100 {
+		return McpServerConfigResponse{}, fmt.Errorf("mcp service: args exceeds maximum of 100 entries (got %d)", len(req.Args))
+	}
 
 	c := McpServerConfig{
 		Name:              req.Name,
@@ -215,9 +223,17 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.Command = req.Command
 	}
 	if req.Args != nil {
+		// Bug 168: cap args 100 (cross-cutting com Create).
+		if len(*req.Args) > 100 {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: args exceeds maximum of 100 entries (got %d)", len(*req.Args))
+		}
 		existing.Args = *req.Args
 	}
 	if req.Env != nil {
+		// Bug 168: cap env 50 (cross-cutting com Create).
+		if len(*req.Env) > 50 {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: env exceeds maximum of 50 entries (got %d)", len(*req.Env))
+		}
 		existing.Env = *req.Env
 	}
 	if req.OAuthCredentialID != nil {

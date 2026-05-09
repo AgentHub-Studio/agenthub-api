@@ -85,6 +85,11 @@ func (s *service) Create(ctx context.Context, req CreateChannelRequest) (Channel
 	default:
 		return ChannelTokenResponse{}, fmt.Errorf("%w: type must be one of WEBHOOK|SLACK|TELEGRAM|DISCORD|CUSTOM (got %q)", ErrValidation, req.Type)
 	}
+	// Bug 168: cap config (JSONB) em 64KB. Configs reais cabem em
+	// <2KB; 500KB+ é storage waste.
+	if len(req.Config) > 64*1024 {
+		return ChannelTokenResponse{}, fmt.Errorf("%w: config exceeds maximum size of 65536 bytes (got %d)", ErrValidation, len(req.Config))
+	}
 	exists, err := s.repo.ExistsByName(ctx, req.Name)
 	if err != nil {
 		return ChannelTokenResponse{}, fmt.Errorf("channel: check duplicate name: %w", err)
