@@ -38,6 +38,15 @@ func (m *mockWebhookRepo) Create(_ context.Context, w webhook.WebhookConfig) (we
 	return w, nil
 }
 
+func (m *mockWebhookRepo) ExistsByName(_ context.Context, name string) (bool, error) {
+	for _, w := range m.configs {
+		if w.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *mockWebhookRepo) GetByID(_ context.Context, id uuid.UUID) (webhook.WebhookConfig, error) {
 	w, ok := m.configs[id]
 	if !ok {

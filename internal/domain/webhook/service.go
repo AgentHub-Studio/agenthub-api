@@ -79,6 +79,9 @@ func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (Webhook
 	}
 	retryCount := 3
 	if req.RetryCount != nil {
+		if *req.RetryCount < 0 || *req.RetryCount > 10 {
+			return WebhookConfig{}, fmt.Errorf("%w: retryCount must be between 0 and 10 (got %d)", ErrValidation, *req.RetryCount)
+		}
 		retryCount = *req.RetryCount
 	}
 	events := req.Events
@@ -129,6 +132,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateWebhookReq
 		existing.Enabled = *req.Enabled
 	}
 	if req.RetryCount != nil {
+		if *req.RetryCount < 0 || *req.RetryCount > 10 {
+			return WebhookConfig{}, fmt.Errorf("%w: retryCount must be between 0 and 10 (got %d)", ErrValidation, *req.RetryCount)
+		}
 		existing.RetryCount = *req.RetryCount
 	}
 	updated, err := s.repo.Update(ctx, existing)
