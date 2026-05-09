@@ -267,6 +267,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.InputSchema = req.InputSchema
 	}
 	if req.Description != nil {
+		// Bug 174: cap em Update (cross-cutting com Create — bug 159).
+		if len(*req.Description) > 32000 {
+			return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
+		}
 		existing.Description = *req.Description
 	}
 	if req.Labels != nil {
