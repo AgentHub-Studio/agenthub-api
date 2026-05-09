@@ -69,6 +69,14 @@ func (r CreateDeviceRequest) validate() error {
 	if r.Type == "" {
 		return fmt.Errorf("%w: type is required", ErrValidation)
 	}
+	// Bug 125: type aceitava qualquer string, salvando enum inválido.
+	// Frontend filtra/groupa por type; sem este gate device com type
+	// "INVALID_TYPE" sumia da UI mas continuava ocupando lookups.
+	switch DeviceType(r.Type) {
+	case DeviceTypeSensor, DeviceTypeActuator, DeviceTypeGateway, DeviceTypeCompute:
+	default:
+		return fmt.Errorf("%w: type must be one of SENSOR|ACTUATOR|GATEWAY|COMPUTE (got %q)", ErrValidation, r.Type)
+	}
 	return nil
 }
 
