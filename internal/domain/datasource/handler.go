@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -59,7 +60,10 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 	items, total, err := h.svc.ListAll(r.Context(), tenantID, pr)
 	if err != nil {
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		// Bug 192: nunca expor err.Error() em endpoint de datasource —
+		// repo wrapper pode conter SQLSTATE/host/db internals.
+		slog.Error("datasource: list failed", "tenantID", tenantID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "list failed")
 		return
 	}
 
@@ -93,7 +97,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusConflict, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("datasource: create failed", "tenantID", tenantID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "create failed")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, ResponseFrom(created))
@@ -110,10 +115,11 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 	d, err := h.svc.GetByID(r.Context(), tenantID, id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			respond.Error(w, http.StatusNotFound, err.Error())
+			respond.Error(w, http.StatusNotFound, "datasource not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("datasource: getByID failed", "tenantID", tenantID, "id", id, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "get failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ResponseFrom(d))
@@ -136,7 +142,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	updated, err := h.svc.Update(r.Context(), tenantID, id, req)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			respond.Error(w, http.StatusNotFound, err.Error())
+			respond.Error(w, http.StatusNotFound, "datasource not found")
 			return
 		}
 		// Update também passa por validateRequest — sem essa branch
@@ -146,7 +152,8 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("datasource: update failed", "tenantID", tenantID, "id", id, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "update failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ResponseFrom(updated))
@@ -162,10 +169,11 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.svc.Delete(r.Context(), tenantID, id); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			respond.Error(w, http.StatusNotFound, err.Error())
+			respond.Error(w, http.StatusNotFound, "datasource not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Error("datasource: delete failed", "tenantID", tenantID, "id", id, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
 	respond.NoContent(w)
@@ -184,10 +192,12 @@ func (h *Handler) getCredentials(w http.ResponseWriter, r *http.Request) {
 	creds, err := h.svc.GetCredentials(r.Context(), tenantID, id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			respond.Error(w, http.StatusNotFound, err.Error())
+			respond.Error(w, http.StatusNotFound, "datasource not found")
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		// Endpoint interno (proxy service token) — sanitizar mesmo aqui.
+		slog.Error("datasource: getCredentials failed", "tenantID", tenantID, "id", id, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "credentials lookup failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, creds)
