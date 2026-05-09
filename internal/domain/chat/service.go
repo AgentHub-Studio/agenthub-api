@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 // AgentLoader returns agent configuration needed by the Runner.
@@ -164,6 +165,8 @@ func (s *Service) GetSession(ctx context.Context, id uuid.UUID) (ChatSessionResp
 
 // CreateSession creates a new chat session.
 func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (ChatSessionResponse, error) {
+	// Bug 183: strip HTML do title (XSS prevention).
+	req.Title = sanitize.StripHTML(req.Title)
 	if req.Title == "" {
 		return ChatSessionResponse{}, fmt.Errorf("chat service: title is required")
 	}
@@ -221,6 +224,8 @@ func (s *Service) ArchiveSession(ctx context.Context, id uuid.UUID) (ChatSession
 
 // RenameSession updates a session's title.
 func (s *Service) RenameSession(ctx context.Context, id uuid.UUID, title string) (ChatSessionResponse, error) {
+	// Bug 183: strip HTML do title (XSS prevention).
+	title = sanitize.StripHTML(title)
 	session, err := s.repo.UpdateSessionTitle(ctx, id, title)
 	if err != nil {
 		return ChatSessionResponse{}, err

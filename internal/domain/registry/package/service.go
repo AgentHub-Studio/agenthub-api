@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 var slugRegex = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -81,6 +82,8 @@ func (s *Service) ListByTenant(ctx context.Context, tenantID string, req paginat
 
 // Create validates and creates a new package.
 func (s *Service) Create(ctx context.Context, req CreatePackageRequest, tenantID string) (PackageResponse, error) {
+	// Bug 183: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if err := validateCreate(req); err != nil {
 		return PackageResponse{}, err
 	}
@@ -121,7 +124,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdatePackageReq
 	visibility := string(existing.Visibility)
 
 	if req.Name != nil {
-		name = *req.Name
+		// Bug 183: strip HTML (XSS prevention).
+		name = sanitize.StripHTML(*req.Name)
 	}
 	if req.Description != nil {
 		description = *req.Description

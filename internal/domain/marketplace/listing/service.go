@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
 // Service implements business logic for marketplace listings.
@@ -79,6 +80,8 @@ func (s *Service) GetBySlug(ctx context.Context, slug string) (ListingResponse, 
 
 // Create publishes a new marketplace listing.
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateListingRequest) (ListingResponse, error) {
+	// Bug 183: strip HTML do name (XSS prevention).
+	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" {
 		return ListingResponse{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
@@ -145,7 +148,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, tenantID string, req
 		if len(*req.Name) > 255 {
 			return ListingResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
 		}
-		l.Name = *req.Name
+		// Bug 183: strip HTML (XSS prevention).
+		l.Name = sanitize.StripHTML(*req.Name)
 	}
 	if req.Description != nil {
 		l.Description = *req.Description
