@@ -88,6 +88,18 @@ func validateRequest(req CreateRequest) error {
 	if req.Port < 1 || req.Port > 65535 {
 		return fmt.Errorf("%w: port must be between 1 and 65535 (got %d)", ErrValidation, req.Port)
 	}
+	// Bug 124: SQL tool executor abre conexão para esses campos. Sem
+	// estes gates, admin podia criar datasource com database/username
+	// vazios e o erro ("role \"\" does not exist") só aparecia em runtime
+	// quando o agent disparava a tool — feedback errado (parecia bug
+	// do agent, não config inválida).
+	// Password é opcional (trust auth do Postgres / IAM auth).
+	if req.Database == "" {
+		return fmt.Errorf("%w: database is required", ErrValidation)
+	}
+	if req.DBUser == "" {
+		return fmt.Errorf("%w: username is required", ErrValidation)
+	}
 	return nil
 }
 
