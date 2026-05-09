@@ -301,7 +301,10 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 			userOnlySkills = append(userOnlySkills, sk)
 			continue
 		}
-		t, callable, err := b.skillToLLMTool(ctx, sk)
+		// Bug 199: skill com 2+ tools agora expõe cada tool individualmente
+		// (slug do tool + schema do tool). Skill com 1 tool mantém aggregator
+		// pattern (skill slug + first tool schema).
+		llmTools, callable, err := b.skillToLLMTools(ctx, sk)
 		if err != nil {
 			return nil, err
 		}
@@ -311,18 +314,20 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 		if !callable {
 			continue
 		}
-		// Skill-level ShouldDefer (3rd progressive disclosure layer): if the skill
-		// itself is marked should_defer, set the flag regardless of bound tool flags.
-		if sk.ShouldDefer {
-			t.ShouldDefer = true
-		}
-		// Populate per-skill token budget from the agent_skill binding.
-		if budgetMap != nil {
-			if budget, ok := budgetMap[sk.ID]; ok {
-				t.TokenBudget = budget
+		for i := range llmTools {
+			// Skill-level ShouldDefer (3rd progressive disclosure layer): if the skill
+			// itself is marked should_defer, set the flag regardless of bound tool flags.
+			if sk.ShouldDefer {
+				llmTools[i].ShouldDefer = true
+			}
+			// Populate per-skill token budget from the agent_skill binding.
+			if budgetMap != nil {
+				if budget, ok := budgetMap[sk.ID]; ok {
+					llmTools[i].TokenBudget = budget
+				}
 			}
 		}
-		tools = append(tools, t)
+		tools = append(tools, llmTools...)
 	}
 	// Store user-only skills for prompt announcement (accessible via lastUserOnlySkills).
 	b.lastUserOnlySkills = userOnlySkills
@@ -649,6 +654,101 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		InterruptBehavior:      interruptBehavior,
 		IsSearchOrRead:         isSearchOrRead,
 	}, hasActiveTool, nil
+}
+
+// skillToLLMTools converts a skill to one or more LLM-callable tool definitions.
+//
+// Bug 199 fix: when a skill has 2+ active bound tools, this returns one LLMTool
+// per tool (slug = tool.slug, schema = tool.inputSchema). When the skill has 1
+// tool, it returns the legacy aggregator pattern (slug = skill.slug). Skills
+// with no active tools return (nil, false, nil).
+//
+// The skill-runtime resolver was extended to fall back to tool.slug lookup
+// when skill.slug doesn't match (see resolver.go ResolveSkill bug 199 path),
+// so individual tool exposure routes correctly to the executor.
+func (b *ToolSchemaBuilder) skillToLLMTools(ctx context.Context, sk skill.Skill) ([]LLMTool, bool, error) {
+	if b.tools == nil {
+		t, callable, err := b.skillToLLMTool(ctx, sk)
+		if err != nil || !callable {
+			return nil, callable, err
+		}
+		return []LLMTool{t}, true, nil
+	}
+	bindings, boundTools, err := b.tools.ListBySkill(ctx, sk.ID)
+	if err != nil {
+		return nil, false, fmt.Errorf("toolschema: list tools for skill %s: %w", sk.Slug, err)
+	}
+	// Filter active bindings.
+	var activeIdx []int
+	for i, bt := range bindings {
+		if bt.IsActive && i < len(boundTools) {
+			activeIdx = append(activeIdx, i)
+		}
+	}
+	// Single-tool skill or no tools: keep legacy aggregator path (skill slug as
+	// LLM tool name) — preserves backwards compatibility for existing agents.
+	if len(activeIdx) <= 1 {
+		t, callable, err := b.skillToLLMTool(ctx, sk)
+		if err != nil || !callable {
+			return nil, callable, err
+		}
+		return []LLMTool{t}, true, nil
+	}
+	// 2+ tools: expose each individually. Use tool.slug + tool.inputSchema.
+	skillDesc := strings.TrimSpace(sk.Description)
+	if skillDesc == "" {
+		skillDesc = sk.Name
+	}
+	if sk.Instructions != "" {
+		skillDesc = fmt.Sprintf("%s\n\nSkill instructions:\n%s", skillDesc, sk.Instructions)
+	}
+	out := make([]LLMTool, 0, len(activeIdx))
+	for _, i := range activeIdx {
+		bt := boundTools[i]
+		toolDesc := strings.TrimSpace(bt.Description)
+		desc := skillDesc
+		if toolDesc != "" {
+			desc = fmt.Sprintf("%s\n\nTool: %s", desc, toolDesc)
+		}
+		schema := bt.InputSchema
+		if len(schema) <= 2 {
+			schema = deriveSchemaFromToolConfig(bt)
+		}
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		readOnly := IsReadOnlyTool(bt.Slug) || bt.ReadOnly
+		concurrencySafe := bt.ConcurrencySafe != nil && *bt.ConcurrencySafe
+		searchHint := ""
+		if bt.SearchHint != nil {
+			searchHint = *bt.SearchHint
+		}
+		maxResultChars := 0
+		if bt.MaxResultChars != nil {
+			maxResultChars = *bt.MaxResultChars
+		}
+		interruptBehavior := ""
+		if bt.InterruptBehavior != nil {
+			interruptBehavior = *bt.InterruptBehavior
+		}
+		out = append(out, LLMTool{
+			Name:                   bt.Slug,
+			Description:            desc,
+			InputSchema:            schema,
+			ReadOnly:               readOnly,
+			MaxResultChars:         maxResultChars,
+			ShouldDefer:            bt.ShouldDefer,
+			IsDestructive:          bt.IsDestructive,
+			SearchHint:             searchHint,
+			AllowedTools:           sk.AllowedTools,
+			AlwaysLoad:             bt.AlwaysLoad,
+			DisableModelInvocation: sk.DisableModelInvocation,
+			ConcurrencySafe:        concurrencySafe,
+			InterruptBehavior:      interruptBehavior,
+			IsSearchOrRead:         bt.IsSearchOrRead,
+		})
+	}
+	return out, true, nil
 }
 
 // normaliseSchema ensures the raw bytes are a valid JSON Schema object, or returns nil.
