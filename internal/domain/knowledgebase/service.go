@@ -3,12 +3,23 @@ package knowledgebase
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+// Bug 179: stripHTML cross-cutting com agent/service.go (P-C280-1).
+var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
+var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
+
+func stripHTML(s string) string {
+	s = htmlDangerousPattern.ReplaceAllString(s, "")
+	s = htmlTagPattern.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
 
 // Service provides business logic for KnowledgeBase operations.
 type Service struct {
@@ -76,6 +87,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 	if len(req.Description) > 32000 {
 		return KnowledgeBaseResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
+	// Bug 179: strip HTML do description (XSS prevention cross-cutting).
+	req.Description = stripHTML(req.Description)
 	exists, err := s.repo.ExistsByName(ctx, req.Name)
 	if err != nil {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: check duplicate: %w", err)
@@ -124,7 +137,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if len(*req.Description) > 32000 {
 			return KnowledgeBaseResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
 		}
-		existing.Description = *req.Description
+		// Bug 179: strip HTML do description (XSS prevention).
+		existing.Description = stripHTML(*req.Description)
 	}
 	if req.EmbeddingModel != nil {
 		// Bug 149: embeddingModel aceita só lista pré-aprovada (Create

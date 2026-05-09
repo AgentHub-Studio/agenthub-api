@@ -20,6 +20,16 @@ import (
 // slugPattern enforces kebab-case + underscore for tool slugs (ToSlug uses _).
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
+// Bug 179: stripHTML cross-cutting com agent/service.go (P-C280-1).
+var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
+var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
+
+func stripHTML(s string) string {
+	s = htmlDangerousPattern.ReplaceAllString(s, "")
+	s = htmlTagPattern.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
+
 // SettingsReader is a minimal interface for reading tenant settings.
 type SettingsReader interface {
 	FindSettingByKey(ctx context.Context, key string) ([]byte, error)
@@ -166,6 +176,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if len(req.Description) > 32000 {
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
+	// Bug 179: strip HTML do description (XSS prevention cross-cutting).
+	req.Description = stripHTML(req.Description)
 	// Bug 166: cap config + inputSchema em 64KB cada (JSONB raw bytes).
 	// Config real (HTTP/SQL/DOCUMENT_SEARCH) cabe em <2KB; inputSchema
 	// JSON Schema cabe em <16KB; 500KB+ é storage waste e perf hit.
@@ -271,7 +283,8 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if len(*req.Description) > 32000 {
 			return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
 		}
-		existing.Description = *req.Description
+		// Bug 179: strip HTML do description (XSS prevention).
+		existing.Description = stripHTML(*req.Description)
 	}
 	if req.Labels != nil {
 		existing.Labels = req.Labels

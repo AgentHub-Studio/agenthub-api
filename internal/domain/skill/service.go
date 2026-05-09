@@ -16,6 +16,17 @@ import (
 // slugPattern enforces kebab-case (skill canonical format).
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
+// Bug 179: stripHTML cross-cutting com agent/service.go (P-C280-1).
+// Previne stored XSS quando description é renderizada na UI.
+var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
+var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
+
+func stripHTML(s string) string {
+	s = htmlDangerousPattern.ReplaceAllString(s, "")
+	s = htmlTagPattern.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
+
 // ErrSkillBoundToAgents is returned when a skill cannot be deleted because one or
 // more agents still reference it. P-C185-1: management executor must not bypass this check.
 var ErrSkillBoundToAgents = errors.New("skill: cannot delete — skill is bound to one or more agents")
@@ -90,6 +101,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if len(req.Description) > 32000 {
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
+	// Bug 179: strip HTML do description (XSS prevention cross-cutting).
+	req.Description = stripHTML(req.Description)
 
 	// DX-01-J (ACT-F3-04): reject skills that are completely inert — no instructions
 	// AND no tool restrictions means binding this skill to an agent has no effect.
@@ -201,6 +214,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	} else if len(req.Description) > 32000 {
 		// Bug 174: cap em Update (cross-cutting com Create — bug 159).
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	} else {
+		// Bug 179: strip HTML do description (XSS prevention).
+		req.Description = stripHTML(req.Description)
 	}
 	if req.Category == "" {
 		req.Category = existing.Category
