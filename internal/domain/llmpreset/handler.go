@@ -121,6 +121,14 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		httputil.NotFound(w, "preset not found")
 		return
 	}
+	// Bug 111: ErrValidation no Update precisa do mesmo mapeamento
+	// 422 que Create. Sem essa branch, payload inválido (provider
+	// fora do enum, temperature fora de range) caía em 500 e
+	// o frontend mostrava "erro do servidor" em vez de feedback.
+	if errors.Is(err, ErrValidation) {
+		httputil.UnprocessableEntity(w, err.Error())
+		return
+	}
 	if err != nil {
 		httputil.InternalServerError(w, err.Error())
 		return

@@ -136,18 +136,38 @@ func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		p.Description = *req.Description
 	}
 	if req.Provider != nil {
+		// Bug 111: Update precisa do mesmo enum gate que Create.
+		switch *req.Provider {
+		case "openai", "anthropic", "ollama", "openrouter", "google", "azure", "bedrock", "vertex", "groq", "mistral":
+		default:
+			return LLMPresetResponse{}, fmt.Errorf("%w: provider must be one of openai, anthropic, ollama, openrouter, google, azure, bedrock, vertex, groq, mistral (got %q)", ErrValidation, *req.Provider)
+		}
 		p.Provider = *req.Provider
 	}
 	if req.Model != nil {
 		p.Model = *req.Model
 	}
 	if req.MaxTokens != nil {
+		// Bug 111: maxTokens >= 0 (Create rejeita negativos via L55).
+		if *req.MaxTokens < 0 {
+			return LLMPresetResponse{}, fmt.Errorf("%w: maxTokens must be >= 0 (got %d)", ErrValidation, *req.MaxTokens)
+		}
 		p.MaxTokens = *req.MaxTokens
 	}
 	if req.ContextWindow != nil {
+		// Bug 111: contextWindow >= 0 (mesmo gate que Create).
+		if *req.ContextWindow < 0 {
+			return LLMPresetResponse{}, fmt.Errorf("%w: contextWindow must be >= 0 (got %d)", ErrValidation, *req.ContextWindow)
+		}
 		p.ContextWindow = *req.ContextWindow
 	}
 	if req.Temperature != nil {
+		// Bug 111: temperature 0-2 (mesmo gate que Create). Sem isso, admin
+		// pode setar 99.9 via PATCH e o LLM client falhará em runtime
+		// com erro opaco.
+		if *req.Temperature < 0 || *req.Temperature > 2 {
+			return LLMPresetResponse{}, fmt.Errorf("%w: temperature must be between 0 and 2 (got %v)", ErrValidation, *req.Temperature)
+		}
 		p.Temperature = *req.Temperature
 	}
 	if req.ConfigJSON != nil {
