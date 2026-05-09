@@ -121,6 +121,12 @@ func validatePublish(req PublishVersionRequest) error {
 	if strings.TrimSpace(req.Version) == "" {
 		return &ValidationError{Field: "version", Message: "version is required"}
 	}
+	// Bug 142: package_version.version is VARCHAR(50). Gate length antes
+	// do INSERT — sem isso, semver com 300+ zeros (ex: "1.0." + "0"*300)
+	// passava o regex e quebrava no SQL com 500 genérico.
+	if len(req.Version) > 50 {
+		return &ValidationError{Field: "version", Message: fmt.Sprintf("version exceeds maximum length of 50 chars (got %d)", len(req.Version))}
+	}
 	if !semverRegex.MatchString(req.Version) {
 		return &ValidationError{Field: "version", Message: "version must follow semver (e.g. 1.2.3)"}
 	}
