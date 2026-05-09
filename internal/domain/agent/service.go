@@ -198,6 +198,11 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if err := validateModelConfig(req.ModelConfig); err != nil {
 		return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidModelConfig, err)
 	}
+	// P-C297-1: validate config.maxIterations even when nested in agent config
+	// (separate from modelConfig). Range [1, 100].
+	if err := validateConfigMaxIterations(req.Config); err != nil {
+		return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
+	}
 	// P-C280-1: strip HTML from user-supplied text fields before persisting.
 	req.Name = stripHTML(req.Name)
 	req.Description = stripHTML(req.Description)
@@ -879,6 +884,32 @@ func (s *versionService) GetVersionByID(ctx context.Context, versionID uuid.UUID
 		return AgentVersionResponse{}, ErrVersionNotFound
 	}
 	return VersionResponseFrom(v), nil
+}
+
+// validateConfigMaxIterations checks that config.maxIterations (when present)
+// is in the range [1, 100]. Mirror of the modelConfig.maxIterations check but
+// applied to the agent config blob. Bug 96: previously bypassed when sent
+// in config instead of modelConfig.
+func validateConfigMaxIterations(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	v, ok := cfg["maxIterations"]
+	if !ok {
+		return nil
+	}
+	n, ok := v.(float64)
+	if !ok {
+		return nil
+	}
+	if n < 1 || n > 100 {
+		return fmt.Errorf("config.maxIterations must be between 1 and 100 (got %d)", int(n))
+	}
+	return nil
 }
 
 // hasNestedModelConfig returns true when the given config JSON blob contains a
