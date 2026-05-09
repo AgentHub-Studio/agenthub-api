@@ -167,6 +167,11 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if req.Title == "" {
 		return ChatSessionResponse{}, fmt.Errorf("chat service: title is required")
 	}
+	// Bug 135: title varchar(500) — gate length antes do INSERT
+	// (sem isso 422 vazava SQL 22001 para o cliente).
+	if len(req.Title) > 500 {
+		return ChatSessionResponse{}, fmt.Errorf("chat service: title exceeds maximum length of 500 chars (got %d)", len(req.Title))
+	}
 
 	session := ChatSession{
 		AgentID: req.AgentID,
