@@ -102,25 +102,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		if err := ssrf.ValidateURL(u); err != nil {
 			return Response{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
 		}
-		// Bug 95: validate HTTP method enum (when present).
-		var httpCfg map[string]any
-		_ = json.Unmarshal(req.Config, &httpCfg)
-		if m, ok := httpCfg["method"].(string); ok && m != "" {
-			switch strings.ToUpper(strings.TrimSpace(m)) {
-			case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS":
-			default:
-				return Response{}, fmt.Errorf("%w: method must be one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS (got %q)", ErrValidation, m)
-			}
-		}
-		// Bug 97: validate HTTP timeoutSeconds in [1, 600] when present.
-		if v, ok := httpCfg["timeoutSeconds"]; ok {
-			n, isNum := v.(float64)
-			if !isNum {
-				return Response{}, fmt.Errorf("%w: timeoutSeconds must be a number", ErrValidation)
-			}
-			if n < 1 || n > 600 {
-				return Response{}, fmt.Errorf("%w: timeoutSeconds must be between 1 and 600 (got %d)", ErrValidation, int(n))
-			}
+		if err := validateHTTPMethodAndTimeout(req.Config); err != nil {
+			return Response{}, err
 		}
 	}
 	// P-C249-1: normalize SQL tool config — accept both datasourceId and datasource_id.
@@ -241,6 +224,13 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if err := ssrf.ValidateURL(u); err != nil {
 			return Response{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
 		}
+		// Bug 108: Update precisa do mesmo gate de method enum + timeout
+		// que Create — senão admin podia criar tool são e depois PATCH
+		// com method=BLAH ou timeoutSeconds=99999 (nunca executa, ou
+		// trava o request por 27h).
+		if err := validateHTTPMethodAndTimeout(existing.Config); err != nil {
+			return Response{}, err
+		}
 	}
 
 	t, err := s.repo.Update(ctx, id, existing)
@@ -248,6 +238,36 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		return Response{}, err
 	}
 	return ResponseFrom(t), nil
+}
+
+// validateHTTPMethodAndTimeout checks the optional "method" and
+// "timeoutSeconds" fields of an HTTP tool config. Bug 95/97/108: same
+// rules used by both Create and Update so PATCH can't bypass.
+func validateHTTPMethodAndTimeout(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	if m, ok := cfg["method"].(string); ok && m != "" {
+		switch strings.ToUpper(strings.TrimSpace(m)) {
+		case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS":
+		default:
+			return fmt.Errorf("%w: method must be one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS (got %q)", ErrValidation, m)
+		}
+	}
+	if v, ok := cfg["timeoutSeconds"]; ok {
+		n, isNum := v.(float64)
+		if !isNum {
+			return fmt.Errorf("%w: timeoutSeconds must be a number", ErrValidation)
+		}
+		if n < 1 || n > 600 {
+			return fmt.Errorf("%w: timeoutSeconds must be between 1 and 600 (got %d)", ErrValidation, int(n))
+		}
+	}
+	return nil
 }
 
 // extractURLFromConfig extracts the "url" field from a JSON config blob.
