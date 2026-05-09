@@ -360,6 +360,10 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	}
 	resp := ResponseFrom(updated)
 	if req.SkillIDs != nil {
+		// Bug 173: cap em Update (cross-cutting com Create — bug 169).
+		if len(req.SkillIDs) > 100 {
+			return AgentResponse{}, fmt.Errorf("%w: skillIds exceeds maximum of 100 entries (got %d)", ErrInvalidRequest, len(req.SkillIDs))
+		}
 		if syncErr := s.bindingRepo.SyncSkills(ctx, id, req.SkillIDs); syncErr != nil {
 			return AgentResponse{}, syncErr
 		}
@@ -369,6 +373,10 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	}
 	// P-C285-1: sync knowledge base bindings when KnowledgeBaseIDs is explicitly provided.
 	if req.KnowledgeBaseIDs != nil {
+		// Bug 173: cap em Update (cross-cutting com Create — bug 169).
+		if len(req.KnowledgeBaseIDs) > 100 {
+			return AgentResponse{}, fmt.Errorf("%w: knowledgeBaseIds exceeds maximum of 100 entries (got %d)", ErrInvalidRequest, len(req.KnowledgeBaseIDs))
+		}
 		if syncErr := s.bindingRepo.SyncKnowledgeBases(ctx, id, req.KnowledgeBaseIDs); syncErr != nil {
 			return AgentResponse{}, syncErr
 		}
