@@ -356,7 +356,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	// localEmitError wraps emitError to record the error for deferred persistence.
 	// P-C96-1: emit the friendly message to the SSE stream instead of the raw error,
 	// so the frontend and the DB history receive consistent, user-facing messages.
+	//
+	// Bug 201: detecta context cancellation antes de qualquer code específico.
+	// Quando o usuário cancela o run, o erro original é context.Canceled mas
+	// o code emitido era específico da operação em curso (load_history,
+	// llm_call, prompt_build etc), gerando mensagens confusas. Override para
+	// "context_cancelled" garante mensagem correta "A solicitação foi cancelada".
 	localEmitError := func(code string, err error) {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			code = "context_cancelled"
+		}
 		rawMsg := err.Error()
 		lastRunError = &ErrorData{Message: rawMsg, Code: code}
 		slog.Warn("agentic: run error", "code", code, "error", rawMsg)
@@ -552,15 +561,9 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 	toolResult, err := toolBuilder.BuildWithDeferred(ctx, in.AgentID)
 	if err != nil {
-		// Bug 200: cancel mid-build retornava code "tool_schema_build" que
-		// renderizava como "Ocorreu um erro ao carregar as ferramentas".
-		// Detecta context cancellation e usa code "context_cancelled" para
-		// resposta correta "A solicitação foi cancelada".
-		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-			localEmitError("context_cancelled", err)
-		} else {
-			localEmitError("tool_schema_build", err)
-		}
+		// localEmitError auto-detecta context.Canceled (bug 201) e força
+		// code "context_cancelled" para mensagem correta ao usuário.
+		localEmitError("tool_schema_build", err)
 		return
 	}
 	for _, w := range toolResult.Warnings {
