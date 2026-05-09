@@ -121,7 +121,10 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "trigger not found")
 			return
 		}
-		respond.Error(w, http.StatusBadRequest, err.Error())
+		// Bug 117: erros de validação (cron inválido, name vazio,
+		// etc.) devem ser 422 — Create já mapeia assim. Mantemos
+		// 422 como default; reservamos 500 para erros de repo.
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	respond.JSON(w, http.StatusOK, t)
