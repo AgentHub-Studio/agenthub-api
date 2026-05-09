@@ -66,6 +66,10 @@ func (r CreateDeviceRequest) validate() error {
 	if r.Name == "" {
 		return fmt.Errorf("%w: name is required", ErrValidation)
 	}
+	// Bug 129: name varchar(255) — gate length antes do INSERT.
+	if len(r.Name) > 255 {
+		return fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(r.Name))
+	}
 	if r.Type == "" {
 		return fmt.Errorf("%w: type is required", ErrValidation)
 	}

@@ -69,6 +69,11 @@ func validateRequest(req CreateRequest) error {
 	if req.Name == "" {
 		return fmt.Errorf("%w: name is required", ErrValidation)
 	}
+	// Bug 129: name varchar(255) — sem este gate o INSERT vazava SQL
+	// error 22001 (500) para o cliente quando admin enviava string longa.
+	if len(req.Name) > 255 {
+		return fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	switch req.Type {
 	case DataSourceTypePostgreSQL, DataSourceTypeMySQL, DataSourceTypeSQLServer:
 	default:

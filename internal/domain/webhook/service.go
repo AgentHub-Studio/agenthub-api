@@ -64,6 +64,11 @@ func (s *Service) Create(ctx context.Context, req CreateWebhookRequest) (Webhook
 	if req.Name == "" || req.URL == "" {
 		return WebhookConfig{}, fmt.Errorf("%w: name and url are required", ErrValidation)
 	}
+	// Bug 129: name varchar(255) — gate length antes do INSERT
+	// (era 422 mas com SQL error 22001 vazando para o cliente).
+	if len(req.Name) > 255 {
+		return WebhookConfig{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	if u, err := url.Parse(req.URL); err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
 		return WebhookConfig{}, fmt.Errorf("%w: url must be a valid http(s) URL with host", ErrValidation)
 	}

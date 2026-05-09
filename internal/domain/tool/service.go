@@ -90,6 +90,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	if req.Name == "" {
 		return Response{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
+	// Bug 129: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	if !IsValidToolType(req.Type) {
 		return Response{}, fmt.Errorf("%w: unsupported type: %s", ErrValidation, req.Type)
 	}

@@ -129,6 +129,10 @@ func validateCreateRequest(req CreateRequest) error {
 	if strings.TrimSpace(req.Name) == "" {
 		return fmt.Errorf("%w: name is required", ErrValidation)
 	}
+	// Bug 129: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	switch req.AuthType {
 	case AuthTypeOAuth2ClientCredentials:
 		if ptrEmpty(req.TokenURL) {
