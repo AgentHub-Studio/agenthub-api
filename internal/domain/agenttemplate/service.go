@@ -85,6 +85,10 @@ func (s *Service) Create(ctx context.Context, req CreateTemplateRequest) (Templa
 	if len(slug) > 255 {
 		return TemplateResponse{}, fmt.Errorf("agent template: slug exceeds maximum length of 255 chars (got %d)", len(slug))
 	}
+	// Bug 162: cap description em 32KB.
+	if len(req.Description) > 32000 {
+		return TemplateResponse{}, fmt.Errorf("agent template: description exceeds maximum length of 32000 chars (got %d)", len(req.Description))
+	}
 	t := AgentTemplate{
 		Name:           req.Name,
 		Slug:           slug,

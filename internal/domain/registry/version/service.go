@@ -130,6 +130,10 @@ func validatePublish(req PublishVersionRequest) error {
 	if !semverRegex.MatchString(req.Version) {
 		return &ValidationError{Field: "version", Message: "version must follow semver (e.g. 1.2.3)"}
 	}
+	// Bug 162: cap changelog em 32KB. 200KB+ é storage waste.
+	if len(req.Changelog) > 32000 {
+		return &ValidationError{Field: "changelog", Message: fmt.Sprintf("changelog exceeds maximum length of 32000 chars (got %d)", len(req.Changelog))}
+	}
 	return nil
 }
 
