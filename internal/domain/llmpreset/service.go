@@ -86,11 +86,14 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	if req.Temperature < 0 || req.Temperature > 2 {
 		return LLMPresetResponse{}, fmt.Errorf("%w: temperature must be between 0 and 2 (got %v)", ErrValidation, req.Temperature)
 	}
-	if req.MaxTokens < 0 {
-		return LLMPresetResponse{}, fmt.Errorf("%w: maxTokens must be >= 0 (got %d)", ErrValidation, req.MaxTokens)
+	if req.MaxTokens < 0 || req.MaxTokens > 2_000_000 {
+		// Bug 153: cap em 2M (espelha bug 152 em agent modelConfig).
+		// LLMs reais aceitam ~128k-1M no max; valor maior é payload
+		// malformado e gera custo/timeout no provider.
+		return LLMPresetResponse{}, fmt.Errorf("%w: maxTokens must be between 0 and 2000000 (got %d)", ErrValidation, req.MaxTokens)
 	}
-	if req.ContextWindow < 0 {
-		return LLMPresetResponse{}, fmt.Errorf("%w: contextWindow must be >= 0 (got %d)", ErrValidation, req.ContextWindow)
+	if req.ContextWindow < 0 || req.ContextWindow > 2_000_000 {
+		return LLMPresetResponse{}, fmt.Errorf("%w: contextWindow must be between 0 and 2000000 (got %d)", ErrValidation, req.ContextWindow)
 	}
 	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
 	if err != nil {
@@ -156,16 +159,17 @@ func (s *service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		p.Model = *req.Model
 	}
 	if req.MaxTokens != nil {
-		// Bug 111: maxTokens >= 0 (Create rejeita negativos via L55).
-		if *req.MaxTokens < 0 {
-			return LLMPresetResponse{}, fmt.Errorf("%w: maxTokens must be >= 0 (got %d)", ErrValidation, *req.MaxTokens)
+		// Bug 111+153: maxTokens [0, 2M] (Create rejeita negativos e
+		// valores absurdos > 2M).
+		if *req.MaxTokens < 0 || *req.MaxTokens > 2_000_000 {
+			return LLMPresetResponse{}, fmt.Errorf("%w: maxTokens must be between 0 and 2000000 (got %d)", ErrValidation, *req.MaxTokens)
 		}
 		p.MaxTokens = *req.MaxTokens
 	}
 	if req.ContextWindow != nil {
-		// Bug 111: contextWindow >= 0 (mesmo gate que Create).
-		if *req.ContextWindow < 0 {
-			return LLMPresetResponse{}, fmt.Errorf("%w: contextWindow must be >= 0 (got %d)", ErrValidation, *req.ContextWindow)
+		// Bug 111+153: contextWindow [0, 2M] (mesmo gate que Create).
+		if *req.ContextWindow < 0 || *req.ContextWindow > 2_000_000 {
+			return LLMPresetResponse{}, fmt.Errorf("%w: contextWindow must be between 0 and 2000000 (got %d)", ErrValidation, *req.ContextWindow)
 		}
 		p.ContextWindow = *req.ContextWindow
 	}
