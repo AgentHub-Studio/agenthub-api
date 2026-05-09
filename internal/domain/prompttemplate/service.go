@@ -156,6 +156,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.Slug = *req.Slug
 	}
 	if req.Description != nil {
+		// Bug 175: cap em Update (cross-cutting com Create — bug 159).
+		if len(*req.Description) > 32000 {
+			return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
+		}
 		existing.Description = *req.Description
 	}
 	if req.Content != nil {
@@ -163,6 +167,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		// vazio). Create rejeita; Update precisa do mesmo gate.
 		if *req.Content == "" {
 			return Response{}, fmt.Errorf("%w: content cannot be empty", ErrValidation)
+		}
+		// Bug 175: cap em Update (cross-cutting com Create — bug 158).
+		if len(*req.Content) > 32000 {
+			return Response{}, fmt.Errorf("%w: content exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Content))
 		}
 		existing.Content = *req.Content
 	}

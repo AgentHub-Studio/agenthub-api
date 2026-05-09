@@ -92,6 +92,10 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateDeviceRequ
 		existing.Name = *req.Name
 	}
 	if req.Description != nil {
+		// Bug 175: cap em Update (cross-cutting com Create — bug 160).
+		if len(*req.Description) > 32000 {
+			return DeviceResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
+		}
 		existing.Description = *req.Description
 	}
 	if req.ResourceURI != nil {
