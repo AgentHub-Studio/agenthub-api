@@ -279,6 +279,12 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 	if req.Content == "" {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: content is required")
 	}
+	// Bug 163: cap content em 64KB. Chat messages podem ser longas (code
+	// blocks, JSON inline) mas 1MB+ é DoS — cada mensagem vai pra LLM
+	// e custa tokens absurdos, além de inflar storage por session.
+	if len(req.Content) > 64000 {
+		return ChatMessageResponse{}, fmt.Errorf("chat service: content exceeds maximum length of 64000 chars (got %d)", len(req.Content))
+	}
 	// Bug 151: messageType era silenciosamente coerced para "text" quando
 	// o cliente passava qualquer string. Frontend que enviasse messageType
 	// errado nunca via o erro — comportamento ficava confuso e bugs ficavam
