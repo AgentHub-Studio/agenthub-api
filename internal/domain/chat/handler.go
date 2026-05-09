@@ -721,6 +721,15 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
+	// Bug 205: validate session existence (mesmo padrão de listMessages bug 204).
+	if _, err := h.svc.GetSession(r.Context(), sessionID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to list tasks")
+		return
+	}
 	req := pagination.ParsePageRequest(r)
 	tasks, total, err := h.taskRepo.ListBySession(r.Context(), sessionID, req)
 	if err != nil {
