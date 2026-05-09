@@ -119,6 +119,14 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.Description = *req.Description
 	}
 	if req.EmbeddingModel != nil {
+		// Bug 149: embeddingModel aceita só lista pré-aprovada (Create
+		// gateava; Update bypass deixava admin salvar "NOT-A-MODEL" e
+		// embedding-job falhava silenciosamente em runtime).
+		switch *req.EmbeddingModel {
+		case "intfloat/multilingual-e5-large", "intfloat/multilingual-e5-base", "text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002":
+		default:
+			return KnowledgeBaseResponse{}, fmt.Errorf("%w: embeddingModel %q not supported (allowed: intfloat/multilingual-e5-large, intfloat/multilingual-e5-base, text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002)", ErrValidation, *req.EmbeddingModel)
+		}
 		existing.EmbeddingModel = *req.EmbeddingModel
 	}
 	if req.SearchMode != nil {
