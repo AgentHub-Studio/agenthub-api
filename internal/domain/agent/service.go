@@ -597,13 +597,16 @@ func validateModelConfig(raw json.RawMessage) error {
 	}
 	// Must be a valid JSON object (not a string, array, etc.)
 	var mc struct {
-		Provider      string   `json:"provider"`
-		Model         string   `json:"model"`
-		MaxIterations *int     `json:"maxIterations"`
-		MaxTokens     *int     `json:"maxTokens"`
-		ContextWindow *int     `json:"contextWindow"`
-		MaxDepth      *int     `json:"maxDepth"`
-		Temperature   *float64 `json:"temperature"`
+		Provider         string   `json:"provider"`
+		Model            string   `json:"model"`
+		MaxIterations    *int     `json:"maxIterations"`
+		MaxTokens        *int     `json:"maxTokens"`
+		ContextWindow    *int     `json:"contextWindow"`
+		MaxDepth         *int     `json:"maxDepth"`
+		Temperature      *float64 `json:"temperature"`
+		TopP             *float64 `json:"topP"`
+		FrequencyPenalty *float64 `json:"frequencyPenalty"`
+		PresencePenalty  *float64 `json:"presencePenalty"`
 	}
 	if err := json.Unmarshal(raw, &mc); err != nil {
 		return fmt.Errorf("must be a valid JSON object")
@@ -643,6 +646,18 @@ func validateModelConfig(raw json.RawMessage) error {
 	}
 	if mc.Temperature != nil && (*mc.Temperature < 0 || *mc.Temperature > 2.0) {
 		return fmt.Errorf("temperature must be between 0.0 and 2.0 (got %g)", *mc.Temperature)
+	}
+	// Bug 123: validar topP/frequencyPenalty/presencePenalty contra os ranges
+	// da spec OpenAI/Anthropic — provider silenciosamente coerce ou falha
+	// em runtime se valores absurdos chegarem ao LLM.
+	if mc.TopP != nil && (*mc.TopP < 0 || *mc.TopP > 1.0) {
+		return fmt.Errorf("topP must be between 0.0 and 1.0 (got %g)", *mc.TopP)
+	}
+	if mc.FrequencyPenalty != nil && (*mc.FrequencyPenalty < -2.0 || *mc.FrequencyPenalty > 2.0) {
+		return fmt.Errorf("frequencyPenalty must be between -2.0 and 2.0 (got %g)", *mc.FrequencyPenalty)
+	}
+	if mc.PresencePenalty != nil && (*mc.PresencePenalty < -2.0 || *mc.PresencePenalty > 2.0) {
+		return fmt.Errorf("presencePenalty must be between -2.0 and 2.0 (got %g)", *mc.PresencePenalty)
 	}
 	return nil
 }
