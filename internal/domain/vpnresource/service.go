@@ -73,6 +73,10 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 	if len(req.Name) > 255 {
 		return VpnResource{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
 	}
+	// Bug 170: cap description em 32KB (espelha cross-cutting cap).
+	if len(req.Description) > 32000 {
+		return VpnResource{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	}
 	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
 	if err != nil {
 		return VpnResource{}, fmt.Errorf("vpn: check duplicate name: %w", err)
@@ -107,6 +111,8 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	}
 	if req.Description == "" {
 		req.Description = existing.Description
+	} else if len(req.Description) > 32000 {
+		return VpnResource{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
 	if req.OvpnConfigPath == "" {
 		req.OvpnConfigPath = existing.OvpnConfigPath
