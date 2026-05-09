@@ -128,6 +128,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateWebhookReq
 	if err != nil {
 		return WebhookConfig{}, err
 	}
+	if req.Name != nil && len(*req.Name) > 255 {
+		return WebhookConfig{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
+	}
 	if req.Name != nil {
 		// Bug 115: name vazio salvo na DB causa label vazio na UI.
 		// Create rejeita; Update precisa do mesmo gate.

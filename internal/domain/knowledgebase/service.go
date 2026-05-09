@@ -109,6 +109,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if trimmed == "" {
 			return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name cannot be empty")
 		}
+		// Bug 136: name varchar(255) — gate length em Update.
+		if len(trimmed) > 255 {
+			return KnowledgeBaseResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(trimmed))
+		}
 		existing.Name = trimmed
 	}
 	if req.Description != nil {

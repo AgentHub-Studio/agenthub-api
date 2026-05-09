@@ -190,6 +190,10 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 
 	// Merge only the fields that were explicitly included in the request.
 	if req.Name != nil {
+		// Bug 136: name varchar(255) — gate length em Update.
+		if len(*req.Name) > 255 {
+			return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
+		}
 		existing.Name = *req.Name
 	}
 	if req.Slug != nil {

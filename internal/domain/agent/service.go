@@ -288,6 +288,10 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 			// handler mapear → 422.
 			return AgentResponse{}, fmt.Errorf("%w: name is required", ErrInvalidRequest)
 		}
+		// Bug 136: name varchar(255) — gate length em Update (Create já gateava).
+		if len(trimmed) > 255 {
+			return AgentResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(trimmed))
+		}
 		a.Name = trimmed
 	}
 	if req.Slug != nil {
