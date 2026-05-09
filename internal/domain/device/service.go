@@ -80,6 +80,11 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateDeviceRequ
 	}
 
 	if req.Name != nil {
+		// Bug 113: device.name não pode ser vazio. Sem este gate, admin
+		// pode limpar o name via PATCH (Create rejeita name vazio).
+		if *req.Name == "" {
+			return DeviceResponse{}, fmt.Errorf("%w: name cannot be empty", ErrValidation)
+		}
 		existing.Name = *req.Name
 	}
 	if req.Description != nil {

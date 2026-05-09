@@ -111,6 +111,11 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 
 	if req.Name != nil {
+		// Bug 113: name não pode ser vazio. Sem este gate admin podia
+		// limpar via PATCH (Create rejeita name vazio).
+		if *req.Name == "" {
+			return Response{}, fmt.Errorf("%w: name cannot be empty", ErrValidation)
+		}
 		existing.Name = *req.Name
 	}
 	if req.Slug != nil {
@@ -120,6 +125,11 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.Description = *req.Description
 	}
 	if req.Content != nil {
+		// Bug 113: content="" deixa o template inutilizável (renderiza
+		// vazio). Create rejeita; Update precisa do mesmo gate.
+		if *req.Content == "" {
+			return Response{}, fmt.Errorf("%w: content cannot be empty", ErrValidation)
+		}
 		existing.Content = *req.Content
 	}
 	if req.Category != nil {

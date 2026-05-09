@@ -109,6 +109,12 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "device not found")
 			return
 		}
+		// Bug 113: ErrValidation no Update precisa do mesmo mapeamento
+		// 422 que Create já fazia em linha 67.
+		if errors.Is(err, ErrValidation) {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
