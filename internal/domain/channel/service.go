@@ -151,6 +151,10 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateChannelReq
 		existing.AgentID = *req.AgentID
 	}
 	if len(req.Config) > 0 {
+		// Bug 172: cap em Update (cross-cutting com Create — bug 168).
+		if len(req.Config) > 64*1024 {
+			return ChannelResponse{}, fmt.Errorf("%w: config exceeds maximum size of 65536 bytes (got %d)", ErrValidation, len(req.Config))
+		}
 		existing.Config = req.Config
 	}
 	if req.Enabled != nil {

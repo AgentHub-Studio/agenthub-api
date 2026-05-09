@@ -187,9 +187,16 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateWebhookReq
 		if len(req.Events) == 0 {
 			return WebhookConfig{}, fmt.Errorf("%w: events must contain at least one event type", ErrValidation)
 		}
+		// Bug 172: cap em Update (cross-cutting com Create — bug 165).
+		if len(req.Events) > 50 {
+			return WebhookConfig{}, fmt.Errorf("%w: events list exceeds maximum of 50 entries (got %d)", ErrValidation, len(req.Events))
+		}
 		for _, e := range req.Events {
 			if strings.TrimSpace(e) == "" {
 				return WebhookConfig{}, fmt.Errorf("%w: events must not contain empty strings", ErrValidation)
+			}
+			if len(e) > 100 {
+				return WebhookConfig{}, fmt.Errorf("%w: event name exceeds maximum length of 100 chars (got %d)", ErrValidation, len(e))
 			}
 		}
 		existing.Events = req.Events
