@@ -65,6 +65,16 @@ func (s *Service) UploadAsset(
 		return AssetResponse{}, &ValidationError{Field: "filename", Message: "filename is required"}
 	}
 
+	// Bug 191: filename é client-controlled. path.Join + Clean colapsa `..`,
+	// permitindo escapar do uuid directory. Usa só basename para isolar.
+	filename = path.Base(filename)
+	if filename == "." || filename == "/" || filename == ".." || strings.ContainsAny(filename, "\x00\\") {
+		return AssetResponse{}, &ValidationError{Field: "filename", Message: "invalid filename"}
+	}
+	if len(filename) > 255 {
+		return AssetResponse{}, &ValidationError{Field: "filename", Message: "filename exceeds 255 chars"}
+	}
+
 	// Build a unique storage key: packages/{packageId}/assets/{uuid}/{filename}
 	storageKey := path.Join("packages", packageID.String(), "assets", uuid.New().String(), filename)
 

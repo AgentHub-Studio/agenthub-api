@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -58,6 +60,19 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentRespon
 	if req.FileName == "" {
 		return DocumentResponse{}, fmt.Errorf("document service: file name is required")
 	}
+
+	// Bug 191: header.Filename é client-controlled. `../` ou `\` permite
+	// path traversal no bucket S3 (escapa do docID directory). Toma só o
+	// basename e rejeita NUL/separators residuais para neutralizar o vetor.
+	safeName := filepath.Base(filepath.ToSlash(req.FileName))
+	if safeName == "." || safeName == "/" || safeName == ".." || safeName == "" ||
+		strings.ContainsAny(safeName, "\x00/\\") {
+		return DocumentResponse{}, fmt.Errorf("document service: invalid file name")
+	}
+	if len(safeName) > 255 {
+		return DocumentResponse{}, fmt.Errorf("document service: file name exceeds 255 chars (got %d)", len(safeName))
+	}
+	req.FileName = safeName
 
 	// Derive a stable storage key before uploading so the DB record and the object share the same path.
 	docID := uuid.New()
