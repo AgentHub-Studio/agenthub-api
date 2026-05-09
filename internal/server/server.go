@@ -136,7 +136,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentHandler := agent.NewHandler(agentSvc).
 		WithTemplateGetter(&promptTemplateAdapter{repo: promptTemplateRepo}).
 		WithPortableBindings(agentBindingRepo)
-	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionServiceWithAudit(agentRepo, agent.NewVersionRepository(pool), auditSvc))
+	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionServiceWithAudit(agentRepo, agent.NewVersionRepository(pool), auditSvc)).
+		WithAgentService(agentSvc)
 	agentBindingHandler := agent.NewBindingHandler(agentRepo, agentBindingRepo)
 	skillSvc := skill.NewService(skillRepo)
 	skillHandler := skill.NewHandler(skillSvc).WithRepository(skillRepo)

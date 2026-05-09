@@ -364,12 +364,20 @@ func (h *Handler) applyTemplate(w http.ResponseWriter, r *http.Request) {
 
 // VersionHandler exposes agent version HTTP endpoints.
 type VersionHandler struct {
-	svc VersionService
+	svc      VersionService
+	agentSvc Service // optional: bug 208 — used by listVersions to verify agent existence
 }
 
 // NewVersionHandler creates a new VersionHandler.
 func NewVersionHandler(svc VersionService) *VersionHandler {
 	return &VersionHandler{svc: svc}
+}
+
+// WithAgentService wires the agent Service for parent-resource validation
+// (bug 208 listVersions returns 404 for bogus agentId).
+func (h *VersionHandler) WithAgentService(s Service) *VersionHandler {
+	h.agentSvc = s
+	return h
 }
 
 // RegisterVersionRoutes mounts version routes under /api/agents/{agentId}/versions.
@@ -397,6 +405,18 @@ func (h *VersionHandler) listVersions(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid agentId")
 		return
+	}
+	// Bug 208: validar agent existence; antes retornava 200+empty page
+	// para qualquer UUID. Mesmo padrão de bugs 204/205.
+	if h.agentSvc != nil {
+		if _, err := h.agentSvc.Get(r.Context(), agentID); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				respond.Error(w, http.StatusNotFound, "agent not found")
+				return
+			}
+			respond.Error(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 	}
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.ListVersions(r.Context(), agentID, req)
