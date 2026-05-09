@@ -605,6 +605,12 @@ func validateModelConfig(raw json.RawMessage) error {
 	if len(raw) == 0 {
 		return nil
 	}
+	// Bug 157: cap modelConfig em 16KB — qualquer config LLM real cabe
+	// folgado nesse limite; 1MB+ é payload malformado e degrada perf
+	// (cada agent load + serialize fica O(N) com N de modelConfig).
+	if len(raw) > 16*1024 {
+		return fmt.Errorf("modelConfig exceeds maximum size of 16KB (got %d bytes)", len(raw))
+	}
 	// Must be a valid JSON object (not a string, array, etc.)
 	var mc struct {
 		Provider         string   `json:"provider"`
