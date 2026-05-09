@@ -68,6 +68,10 @@ func (s *service) Create(ctx context.Context, tenantID string, req CreateLLMPres
 	if req.Name == "" {
 		return LLMPresetResponse{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
+	// Bug 130: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return LLMPresetResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	if req.Provider == "" {
 		return LLMPresetResponse{}, fmt.Errorf("%w: provider is required", ErrValidation)
 	}

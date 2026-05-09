@@ -109,6 +109,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 	if req.Name == "" {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: name is required")
 	}
+	// Bug 130: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return McpServerConfigResponse{}, fmt.Errorf("mcp service: name exceeds maximum length of 255 chars (got %d)", len(req.Name))
+	}
 	if req.TransportType == "" {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: transport type is required")
 	}

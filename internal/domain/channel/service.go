@@ -72,6 +72,10 @@ func (s *service) Create(ctx context.Context, req CreateChannelRequest) (Channel
 	if req.Name == "" {
 		return ChannelTokenResponse{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
+	// Bug 130: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return ChannelTokenResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	if req.Type == "" {
 		return ChannelTokenResponse{}, fmt.Errorf("%w: type is required", ErrValidation)
 	}

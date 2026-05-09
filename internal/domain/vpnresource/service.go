@@ -69,6 +69,10 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 	if strings.TrimSpace(req.Name) == "" {
 		return VpnResource{}, fmt.Errorf("%w: name is required", ErrValidation)
 	}
+	// Bug 130: name varchar(255) — gate length antes do INSERT.
+	if len(req.Name) > 255 {
+		return VpnResource{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	exists, err := s.repo.ExistsByName(ctx, tenantID, req.Name)
 	if err != nil {
 		return VpnResource{}, fmt.Errorf("vpn: check duplicate name: %w", err)

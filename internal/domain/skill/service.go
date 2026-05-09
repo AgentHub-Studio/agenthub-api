@@ -72,6 +72,11 @@ func (s *Service) List(ctx context.Context, category *string, req pagination.Pag
 
 // Create creates a new skill, auto-generating the slug if not provided.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, error) {
+	// Bug 130: name varchar(255) — gate length antes do INSERT
+	// (sem este gate Create vazava SQL 22001 com 500).
+	if len(req.Name) > 255 {
+		return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+	}
 	// DX-01-H: normalize whitespace-only instructions so they don't appear as
 	// non-empty but produce no LLM guidance.
 	req.Instructions = strings.TrimSpace(req.Instructions)
