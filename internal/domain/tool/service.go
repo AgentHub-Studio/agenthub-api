@@ -102,6 +102,16 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		if err := ssrf.ValidateURL(u); err != nil {
 			return Response{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
 		}
+		// Bug 95: validate HTTP method enum (when present).
+		var httpCfg map[string]any
+		_ = json.Unmarshal(req.Config, &httpCfg)
+		if m, ok := httpCfg["method"].(string); ok && m != "" {
+			switch strings.ToUpper(strings.TrimSpace(m)) {
+			case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS":
+			default:
+				return Response{}, fmt.Errorf("%w: method must be one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS (got %q)", ErrValidation, m)
+			}
+		}
 	}
 	// P-C249-1: normalize SQL tool config — accept both datasourceId and datasource_id.
 	config := req.Config
