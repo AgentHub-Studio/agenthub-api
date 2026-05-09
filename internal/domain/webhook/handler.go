@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -203,7 +204,11 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 			respond.JSON(w, http.StatusOK, map[string]string{"status": "filtered"})
 			return
 		}
-		respond.Error(w, http.StatusInternalServerError, err.Error())
+		// Bug 190: endpoint público — repo error (não-42P01) ou falha em
+		// CreateDelivery não pode vazar SQLSTATE/wrappers. Log completo;
+		// resposta opaca preserva confidencialidade.
+		slog.Error("webhook: ingest internal failure", "sourceType", sourceType, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "ingest failed")
 		return
 	}
 	respond.JSON(w, http.StatusAccepted, log)
