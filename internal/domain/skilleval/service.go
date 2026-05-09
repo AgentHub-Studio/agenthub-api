@@ -37,6 +37,10 @@ func (s *Service) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suit
 	if req.SkillID == uuid.Nil {
 		return SuiteResponse{}, fmt.Errorf("%w: skillId is required", ErrValidation)
 	}
+	// Bug 178: cap description em 32KB (cross-cutting com bug 159).
+	if len(req.Description) > 32000 {
+		return SuiteResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	}
 	exists, err := s.repo.SuiteExistsByName(ctx, req.SkillID, req.Name)
 	if err != nil {
 		return SuiteResponse{}, fmt.Errorf("skilleval: check duplicate: %w", err)
