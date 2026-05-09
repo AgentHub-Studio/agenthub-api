@@ -552,7 +552,15 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 	toolResult, err := toolBuilder.BuildWithDeferred(ctx, in.AgentID)
 	if err != nil {
-		localEmitError("tool_schema_build", err)
+		// Bug 200: cancel mid-build retornava code "tool_schema_build" que
+		// renderizava como "Ocorreu um erro ao carregar as ferramentas".
+		// Detecta context cancellation e usa code "context_cancelled" para
+		// resposta correta "A solicitação foi cancelada".
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			localEmitError("context_cancelled", err)
+		} else {
+			localEmitError("tool_schema_build", err)
+		}
 		return
 	}
 	for _, w := range toolResult.Warnings {
