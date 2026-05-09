@@ -308,6 +308,13 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		a.PermissionRules = req.PermissionRules
 	}
 	if len(req.Config) > 0 {
+		// Bug 107: Update precisa do mesmo gate de validateConfigMaxIterations
+		// que Create — senão admin podia criar agent sano e depois PATCH
+		// com maxIterations=-5 (loop sai imediatamente) ou =99999 (custos
+		// LLM descontrolados).
+		if err := validateConfigMaxIterations(req.Config); err != nil {
+			return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
+		}
 		a.Config = req.Config
 	}
 	if req.EnableManagement != nil {
