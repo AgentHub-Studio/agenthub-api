@@ -119,6 +119,15 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.Name = *req.Name
 	}
 	if req.Slug != nil {
+		// Bug 120: Update precisa do mesmo gate que Create — pattern
+		// `[a-z0-9][a-z0-9-]*` + não vazio. Sem isso admin podia salvar
+		// slug="" ou slug="INVALID!" via PATCH e quebrar lookups por slug.
+		if *req.Slug == "" {
+			return Response{}, fmt.Errorf("%w: slug cannot be empty", ErrValidation)
+		}
+		if !slugPattern.MatchString(*req.Slug) {
+			return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrValidation, *req.Slug)
+		}
 		existing.Slug = *req.Slug
 	}
 	if req.Description != nil {
