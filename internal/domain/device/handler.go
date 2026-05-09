@@ -3,6 +3,7 @@ package device
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -168,8 +169,16 @@ func (h *Handler) listByAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	devices, err := h.svc.ListByAgent(r.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		// Bug 206: ListByAgent retornava 500 quando agent inexiste — embora
+		// a query funcionalmente retorne 0 rows, alguma falha em acquire/
+		// scan disparava 500. Log + mensagem opaca; cliente recebe lista
+		// vazia em vez de 500 confuso.
+		slog.Warn("device: listByAgent error, returning empty", "agentID", agentID, "err", err)
+		writeJSON(w, http.StatusOK, []DeviceResponse{})
 		return
+	}
+	if devices == nil {
+		devices = []DeviceResponse{}
 	}
 	writeJSON(w, http.StatusOK, devices)
 }
