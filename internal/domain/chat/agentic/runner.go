@@ -461,7 +461,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		if err != nil {
 			slog.Warn("runner: memory recall failed, continuing without memories",
 				"agentID", in.AgentID, "error", err)
-			emitWarning(ch, "memory_recall", err.Error())
+			emitWarning(ch, "memory_recall", scrubInternalNetwork(err.Error()))
 		}
 	}
 
@@ -2580,7 +2580,9 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 				} else {
 					rec, err := r.memory.Recall(ctx, in.AgentID, args.Query)
 					if err != nil {
-						recallResult = "Memory recall failed: " + err.Error()
+						// Bug 288: scrub internal URLs/IPs before exposing
+						// the error to the LLM (and ultimately the client).
+						recallResult = "Memory recall failed: " + scrubInternalNetwork(err.Error())
 					} else if rec == "" {
 						recallResult = "No relevant memories found for this query."
 					} else {
@@ -2791,15 +2793,19 @@ func computeToolCallSignature(calls []ai.ToolCall) string {
 }
 
 func emitError(ch chan<- RunEvent, code string, err error) {
+	// Bug 289: defensive scrub — every emitError reaches the SSE client,
+	// so any error string carrying an internal URL/IP/svc is a network
+	// disclosure. Apply scrubInternalNetwork as a safety net even when
+	// the caller forgets.
 	ch <- NewRunEvent(EventError, ErrorData{
-		Message: err.Error(),
+		Message: scrubInternalNetwork(err.Error()),
 		Code:    code,
 	})
 }
 
 func emitWarning(ch chan<- RunEvent, code string, message string) {
 	ch <- NewRunEvent(EventWarning, WarningData{
-		Message: message,
+		Message: scrubInternalNetwork(message),
 		Code:    code,
 	})
 }
