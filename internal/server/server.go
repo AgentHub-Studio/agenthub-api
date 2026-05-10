@@ -66,6 +66,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
 	apikc "github.com/AgentHub-Studio/agenthub-api/internal/keycloak"
 	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
@@ -170,8 +171,14 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
 	// BUG-TRIGGER-NOT-MOUNTED: trigger domain was fully implemented but never wired.
-	triggerHandler := trigger.NewHandler(trigger.NewService(trigger.NewRepository(pool), trigger.NewSimpleCronParser())).
+	triggerRepo := trigger.NewRepository(pool)
+	triggerCron := trigger.NewSimpleCronParser()
+	triggerHandler := trigger.NewHandler(trigger.NewService(triggerRepo, triggerCron)).
 		WithAgentExister(&agentExisterAdapter{svc: agentSvc})
+	// Bug 237 (fase 1): scheduler tick para detectar triggers due. Por
+	// ora apenas loga; fase 2 fará fire real (criar chat session/run).
+	triggerScheduler := trigger.NewScheduler(pool, &triggerTenantListerAdapter{repo: tenant.NewRepository(pool)}, triggerRepo, triggerCron)
+	triggerScheduler.Start(context.Background())
 	oauthSvc := oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey)
 	oauthHandler := oauth.NewHandler(oauthSvc)
 	auditHandler := audit.NewHandler(auditSvc)
@@ -577,6 +584,26 @@ type agentExisterAdapter struct {
 func (a *agentExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
 	_, err := a.svc.Get(ctx, id)
 	return err
+}
+
+// triggerTenantListerAdapter expõe um subset minimal de tenant.Repository
+// para o trigger.Scheduler: apenas listAll IDs (bug 237 fase 1).
+type triggerTenantListerAdapter struct {
+	repo tenant.Repository
+}
+
+func (a *triggerTenantListerAdapter) ListAllIDs(ctx context.Context) ([]string, error) {
+	// Page grande o suficiente p/ ambientes desenvolvimento; tenant count
+	// real em produção provavelmente exigirá paginação.
+	tenants, _, err := a.repo.FindAll(ctx, pagination.PageRequest{Page: 0, Size: 500})
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(tenants))
+	for i, t := range tenants {
+		ids[i] = t.ID
+	}
+	return ids, nil
 }
 
 // packageExisterAdapter wraps regPackage.Repository so version/dependency/
