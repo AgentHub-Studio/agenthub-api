@@ -142,10 +142,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentBindingHandler := agent.NewBindingHandler(agentRepo, agentBindingRepo)
 	skillSvc := skill.NewService(skillRepo)
 	skillHandler := skill.NewHandler(skillSvc).WithRepository(skillRepo)
-	agentBundleHandler := agent.NewBundleHandler(
-		agent.NewExporter(agentSvc, skillRepo, agentBindingRepo),
-		agent.NewImporter(agentSvc, skillSvc, agentBindingRepo),
-	)
+	// agentBundleHandler is wired after toolSvc — bug 294 needs both the tool
+	// repo (export) and the tool service (import) to ship/restore tool defs.
 	datasourceSvc := datasource.NewService(datasource.NewRepository(pool))
 	toolRepo := tool.NewRepository(pool)
 	// kbRepo é usado pelo toolSvc (KBExister, bug 231) e pelo kbHandler;
@@ -160,6 +158,10 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		WithKBExister(&kbExisterAdapter{repo: kbRepo})
 	toolHandler := tool.NewHandler(toolSvc).
 		WithSkillExister(&skillExisterAdapter{repo: skillRepo})
+	agentBundleHandler := agent.NewBundleHandler(
+		agent.NewExporter(agentSvc, skillRepo, agentBindingRepo).WithToolRepo(toolRepo),
+		agent.NewImporter(agentSvc, skillSvc, agentBindingRepo).WithToolSvc(toolSvc),
+	)
 	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool))).
 		WithAgentExister(&agentExisterAdapter{svc: agentSvc})
 	promptTemplateHandler := prompttemplate.NewHandler(prompttemplate.NewService(prompttemplate.NewRepository(pool)))
