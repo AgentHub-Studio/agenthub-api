@@ -50,6 +50,11 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
+			// Bug 277: Vary: Origin é obrigatório sempre que a resposta DEPENDE do
+			// header Origin (independente de allowed/rejected). Sem isso, proxies
+			// compartilhados podem servir resposta CORS de uma origem para outra.
+			// Add (não Set) preserva qualquer Vary já setado downstream.
+			w.Header().Add("Vary", "Origin")
 			if origin != "" && allowed(origin) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")

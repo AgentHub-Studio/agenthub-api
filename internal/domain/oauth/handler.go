@@ -254,7 +254,10 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 	redirectUI := safeRedirectTarget(r.URL.Query().Get("redirect_ui"))
 	if redirectUI == "" {
 		// Default fallback (also reached when raw URL is rejected).
-		w.Header().Set("Content-Type", "text/html")
+		// Bug 278: CSP restritiva no único endpoint que retorna HTML. Sem
+		// scripts, styles inline ou iframes — só texto estático seguro.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
 		w.Write([]byte("<h1>Authentication Successful!</h1><p>You can close this window now.</p>"))
 		return
 	}
