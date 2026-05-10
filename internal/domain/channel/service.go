@@ -19,6 +19,13 @@ type AgentDispatcher interface {
 	Dispatch(ctx context.Context, agentID uuid.UUID, userText, tenantID string) (string, error)
 }
 
+// TenantLister enumerates tenant IDs for cross-tenant token lookup
+// (bug 240b). Public inbound endpoint não tem JWT/tenant context, então
+// precisa varrer todos os schemas ah_* até achar o channel pelo token.
+type TenantLister interface {
+	ListAllIDs(ctx context.Context) ([]string, error)
+}
+
 // Service defines business logic for Channel management.
 type Service interface {
 	List(ctx context.Context, req pagination.PageRequest) (pagination.Page[ChannelResponse], error)
@@ -33,9 +40,10 @@ type Service interface {
 }
 
 type service struct {
-	repo       Repository
-	registry   *Registry
-	dispatcher AgentDispatcher
+	repo         Repository
+	registry     *Registry
+	dispatcher   AgentDispatcher
+	tenantLister TenantLister
 }
 
 // NewService creates a new channel Service.
@@ -46,6 +54,13 @@ func NewService(repo Repository, registry *Registry) *service {
 // WithDispatcher wires an agent dispatcher used by HandleInbound.
 func (s *service) WithDispatcher(d AgentDispatcher) *service {
 	s.dispatcher = d
+	return s
+}
+
+// WithTenantLister wires a tenant lister enabling cross-tenant token
+// lookup at the public inbound endpoint (bug 240b).
+func (s *service) WithTenantLister(t TenantLister) *service {
+	s.tenantLister = t
 	return s
 }
 
@@ -176,10 +191,46 @@ func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repo.Delete(ctx, id)
 }
 
+// lookupChannelByToken finds the channel that owns the given token.
+// If the request already has a tenant in context (rare for inbound), tries
+// that tenant first. Otherwise iterates all tenants from the registry,
+// promoting ctx to each tenant in turn.
+func (s *service) lookupChannelByToken(ctx context.Context, token string) (Channel, string, error) {
+	// 1) Try the tenant in ctx (fast path; valid for tests/internal callers).
+	if tid := tenantctx.FromContext(ctx); tid != "" {
+		if ch, err := s.repo.GetByToken(ctx, token); err == nil {
+			return ch, tid, nil
+		}
+	}
+	// 2) Iterate all tenants. Public inbound endpoint has no tenant context.
+	if s.tenantLister == nil {
+		return Channel{}, "", ErrTokenNotFound
+	}
+	tids, err := s.tenantLister.ListAllIDs(ctx)
+	if err != nil {
+		return Channel{}, "", fmt.Errorf("channel: list tenants: %w", err)
+	}
+	for _, tid := range tids {
+		tctx := tenantctx.NewContext(ctx, tid)
+		if ch, err := s.repo.GetByToken(tctx, token); err == nil {
+			return ch, tid, nil
+		}
+	}
+	return Channel{}, "", ErrTokenNotFound
+}
+
 func (s *service) HandleInbound(ctx context.Context, token string, headers map[string]string, body []byte) (InboundMessage, error) {
-	ch, err := s.repo.GetByToken(ctx, token)
+	// Bug 240b: endpoint público não tem JWT → tenant.FromContext vazio →
+	// repo.GetByToken falha (channel está em ah_* schema, não em public).
+	// Quando o ctx não tem tenant, iteramos todos os tenants até match.
+	ch, resolvedTenant, err := s.lookupChannelByToken(ctx, token)
 	if err != nil {
 		return InboundMessage{}, err
+	}
+	// Promove ctx ao tenant onde o channel foi encontrado, garantindo
+	// search_path correto para queries downstream (audit, dispatch, etc).
+	if resolvedTenant != "" {
+		ctx = tenantctx.NewContext(ctx, resolvedTenant)
 	}
 
 	if !ch.Enabled {

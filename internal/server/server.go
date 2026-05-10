@@ -257,7 +257,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// CustomAdapter que valida apenas via token na URL.
 	channelRegistry.Register(channel.ChannelTypeWebhook, &channel.CustomAdapter{})
 	channelSvc := channel.NewService(channel.NewRepository(pool), channelRegistry).
-		WithDispatcher(&chatAgentDispatcher{chatSvc: chatSvc})
+		WithDispatcher(&chatAgentDispatcher{chatSvc: chatSvc}).
+		WithTenantLister(&triggerTenantListerAdapter{repo: tenant.NewRepository(pool)}) // bug 240b
 	channelHandler := channel.NewHandler(channelSvc)
 
 	// A/B Testing — route sessions to challenger agent versions.
