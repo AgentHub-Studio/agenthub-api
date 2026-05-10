@@ -253,7 +253,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// Production callers can inject a concrete Evaluator via the skilleval.Runner.
 	skillevalRepo := skilleval.NewRepository(pool)
 	skillevalRunner := skilleval.NewRunner(skillevalRepo, &noopSkillEvaluator{}, nil)
-	skillevalSvc := skilleval.NewService(skillevalRepo).WithRunner(skillevalRunner)
+	skillevalSvc := skilleval.NewService(skillevalRepo).
+		WithRunner(skillevalRunner).
+		WithSkillExister(&skillExisterAdapter{repo: skillRepo})
 	skillevalHandler := skilleval.NewHandler(skillevalSvc)
 	var docStorage document.StorageClient
 	if cfg.MinIO.IsConfigured() {

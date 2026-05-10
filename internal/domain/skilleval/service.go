@@ -9,10 +9,16 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
+// SkillExister verifies a skill exists in the tenant (bug 234).
+type SkillExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Service provides business logic for the Skill Evaluation Framework.
 type Service struct {
-	repo   Repository
-	runner *Runner
+	repo     Repository
+	runner   *Runner
+	skillRdr SkillExister
 }
 
 // NewService creates a new Service.
@@ -24,6 +30,12 @@ func NewService(repo Repository) *Service {
 // WithRunner wires the eval runner for executing suites.
 func (s *Service) WithRunner(r *Runner) *Service {
 	s.runner = r
+	return s
+}
+
+// WithSkillExister wires a skill existence checker (bug 234).
+func (s *Service) WithSkillExister(r SkillExister) *Service {
+	s.skillRdr = r
 	return s
 }
 
@@ -40,6 +52,13 @@ func (s *Service) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suit
 	}
 	if req.SkillID == uuid.Nil {
 		return SuiteResponse{}, fmt.Errorf("%w: skillId is required", ErrValidation)
+	}
+	// Bug 234: validar existência da skill (UUID format já checked pelo
+	// uuid.Nil; aqui a skill precisa existir no tenant).
+	if s.skillRdr != nil {
+		if err := s.skillRdr.GetByID(ctx, req.SkillID); err != nil {
+			return SuiteResponse{}, fmt.Errorf("%w: skillId not found", ErrValidation)
+		}
 	}
 	// Bug 178: cap description em 32KB (cross-cutting com bug 159).
 	if len(req.Description) > 32000 {
