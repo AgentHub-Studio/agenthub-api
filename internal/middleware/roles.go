@@ -53,6 +53,44 @@ func claimsFromContext(ctx context.Context) roleChecker {
 	return claims
 }
 
+// SubjectFromContext returns the JWT subject (user identifier) when available,
+// or "" if no claims are present. Bug 296: capabilities endpoint needs this.
+func SubjectFromContext(ctx context.Context) string {
+	claims, ok := ctx.Value(roleContextKey{}).(*roleClaims)
+	if !ok || claims == nil {
+		return ""
+	}
+	return claims.Subject
+}
+
+// RolesFromContext returns the deduplicated union of realm + resource roles
+// in the JWT, or nil if no claims are present. Bug 296.
+func RolesFromContext(ctx context.Context) []string {
+	claims, ok := ctx.Value(roleContextKey{}).(*roleClaims)
+	if !ok || claims == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var roles []string
+	for _, r := range claims.RealmAccess.Roles {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		roles = append(roles, r)
+	}
+	for _, access := range claims.ResourceAccess {
+		for _, r := range access.Roles {
+			if _, dup := seen[r]; dup {
+				continue
+			}
+			seen[r] = struct{}{}
+			roles = append(roles, r)
+		}
+	}
+	return roles
+}
+
 // RequireRole returns a middleware that allows only requests whose JWT contains
 // the specified role (checked in both realm_access and resource_access).
 func RequireRole(role string) func(http.Handler) http.Handler {

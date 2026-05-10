@@ -472,10 +472,16 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		llmpresetHandler.RegisterProtectedRoutes(r)
 		agentHandler.RegisterRoutes(r)
 		// MA-11: Capabilities endpoint — frontend queries this to adapt UI per user.
-		// Extractor returns zeros in placeholder auth mode; wired to JWT claims once
-		// agenthub-go-commons/auth lands.
+		// Bug 296: extractor pulls subject + tenant + roles from the JWT context
+		// populated by the auth middleware so the frontend's capabilities endpoint
+		// reflects the real session (was hard-coded to zeros).
 		auth.NewHandler(
-			func(*http.Request) (string, string, []string) { return "", "", nil },
+			func(req *http.Request) (string, string, []string) {
+				ctx := req.Context()
+				return middleware.SubjectFromContext(ctx),
+					tenantctx.FromContext(ctx),
+					middleware.RolesFromContext(ctx)
+			},
 			auth.FeatureFlags{RBAC: true},
 		).RegisterRoutes(r)
 		agent.NewHookHandler(pool).WithAgentService(agentSvc).RegisterRoutes(r)
