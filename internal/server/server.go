@@ -155,7 +155,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		WithDatasource(&toolDatasourceAdapter{svc: datasourceSvc}, tenantctx.FromContext)
 	toolHandler := tool.NewHandler(toolSvc).
 		WithSkillExister(&skillExisterAdapter{repo: skillRepo})
-	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool)))
+	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool))).
+		WithAgentExister(&agentExisterAdapter{svc: agentSvc})
 	promptTemplateHandler := prompttemplate.NewHandler(prompttemplate.NewService(prompttemplate.NewRepository(pool)))
 	agentTemplateSvc := agenttemplate.NewService(agenttemplate.NewRepository(pool)).WithAgentCreator(agentSvc)
 	agentTemplateHandler := agenttemplate.NewHandler(agentTemplateSvc)

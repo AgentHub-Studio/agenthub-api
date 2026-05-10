@@ -27,14 +27,26 @@ type memoryService interface {
 	BulkUpsert(ctx context.Context, agentID uuid.UUID, entries []BulkMemoryEntry) (int, error)
 }
 
+// agentExister verifies parent agent existence (bug 224 batch).
+type agentExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler exposes the HTTP interface for agent memory.
 type Handler struct {
-	svc memoryService
+	svc   memoryService
+	agent agentExister
 }
 
 // NewHandler creates a new memory Handler.
 func NewHandler(svc memoryService) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithAgentExister wires the parent-agent existence checker (bug 224).
+func (h *Handler) WithAgentExister(a agentExister) *Handler {
+	h.agent = a
+	return h
 }
 
 // RegisterRoutes mounts memory endpoints on the router.
@@ -55,6 +67,12 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid agent id")
 		return
+	}
+	if h.agent != nil {
+		if err := h.agent.GetByID(r.Context(), agentID); err != nil {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return
+		}
 	}
 	var userID *string
 	if v := r.URL.Query().Get("userId"); v != "" {
@@ -228,6 +246,12 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid agent id")
 		return
+	}
+	if h.agent != nil {
+		if err := h.agent.GetByID(r.Context(), agentID); err != nil {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return
+		}
 	}
 	s, err := h.svc.Stats(r.Context(), agentID)
 	if err != nil {
