@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -300,9 +302,29 @@ func (h *Handler) addMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bug 230: validar session existence antes de tentar INSERT.
+	// Antes: 422 com FK constraint name + SQLSTATE 23503 leaked.
+	if _, err := h.svc.GetSession(r.Context(), sessionID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to add message")
+		return
+	}
+
 	resp, err := h.svc.AddMessage(r.Context(), sessionID, req)
 	if err != nil {
-		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		// Bug 230: erros wrapped do repositório (FK/constraint/SQLSTATE)
+		// não podem vazar — o caminho de validação do service usa
+		// fmt.Errorf sem %w. Os com "%w" são wrapped errors do repo.
+		msg := err.Error()
+		if strings.Contains(msg, "SQLSTATE") || strings.Contains(msg, "ERROR:") || strings.Contains(msg, "create message:") {
+			slog.Error("chat: addMessage failed", "sessionID", sessionID, "err", err)
+			respond.Error(w, http.StatusInternalServerError, "failed to add message")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
 
