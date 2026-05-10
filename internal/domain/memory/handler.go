@@ -114,7 +114,9 @@ func (h *Handler) upsert(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err := h.svc.Upsert(r.Context(), agentID, key, req)
 	if err != nil {
-		respond.Error(w, http.StatusBadRequest, err.Error())
+		// Bug 248: erros de validação (key pattern, value JSON) viram 422,
+		// não 400. 400 é reservado para parse failures.
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	respond.JSON(w, http.StatusOK, MemoryResponseFrom(m))

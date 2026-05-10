@@ -4,10 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// keyPattern restringe memory key a chars seguros: alphanumeric, underscore,
+// hyphen, dot, colon. Bug 248: sem este gate, keys com espaços, HTML
+// (<script>), path traversal (../), ou Unicode estranho eram aceitas e:
+//   - quebravam URL routing (key="x y" precisa double-encoding)
+//   - viravam vetor de XSS quando UI renderizava entry.key sem escape
+//   - confundiam logs e debugging
+// Pattern aceita identificadores de até 255 chars (DB column varchar(255)).
+var keyPattern = regexp.MustCompile(`^[A-Za-z0-9_\-.:]{1,255}$`)
+
+// validateKey aplica o pattern e retorna erro descritivo. Usado em Upsert
+// e BulkUpsert para garantir consistência.
+func validateKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("memory: key is required")
+	}
+	if !keyPattern.MatchString(key) {
+		return fmt.Errorf("memory: key must match pattern [A-Za-z0-9_\\-.:]{1,255} (got %q)", key)
+	}
+	return nil
+}
 
 // Service handles business logic for agent memory.
 type Service struct {
@@ -26,6 +48,11 @@ func (s *Service) List(ctx context.Context, agentID uuid.UUID, userID *string) (
 
 // Upsert creates or updates a memory entry.
 func (s *Service) Upsert(ctx context.Context, agentID uuid.UUID, key string, req UpsertMemoryRequest) (AgentMemory, error) {
+	// Bug 248: gate restritivo no key (alphanumeric + ._-:). Keys com
+	// HTML/espaços/path-traversal eram aceitas silenciosamente.
+	if err := validateKey(key); err != nil {
+		return AgentMemory{}, err
+	}
 	if len(req.Value) == 0 || !json.Valid(req.Value) {
 		return AgentMemory{}, fmt.Errorf("memory: value must be valid JSON")
 	}
