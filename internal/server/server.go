@@ -252,6 +252,10 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	channelRegistry.Register(channel.ChannelTypeTelegram, &channel.TelegramAdapter{})
 	channelRegistry.Register(channel.ChannelTypeDiscord, &channel.DiscordAdapter{})
 	channelRegistry.Register(channel.ChannelTypeCustom, &channel.CustomAdapter{})
+	// Bug 240: WEBHOOK type was registered no adapter, fazendo todos
+	// os 20+ channels WEBHOOK criados retornarem 401 inbound. Reusa o
+	// CustomAdapter que valida apenas via token na URL.
+	channelRegistry.Register(channel.ChannelTypeWebhook, &channel.CustomAdapter{})
 	channelSvc := channel.NewService(channel.NewRepository(pool), channelRegistry).
 		WithDispatcher(&chatAgentDispatcher{chatSvc: chatSvc})
 	channelHandler := channel.NewHandler(channelSvc)
