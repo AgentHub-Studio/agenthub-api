@@ -4,10 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
+
+// settingsKeyPattern restringe key a alphanumeric + dot-notation. Bug 249:
+// sem este gate, keys com HTML/espaços/slash eram aceitas e renderizadas
+// na UI Settings, virando vetor de XSS.
+var settingsKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_\-.]{1,255}$`)
 
 // Service defines business logic operations for Setting.
 type Service interface {
@@ -53,6 +59,13 @@ func (s *service) Upsert(ctx context.Context, key string, req UpdateSettingReque
 	// Bug 134: key varchar(255) — gate length antes do INSERT.
 	if len(key) > 255 {
 		return SettingResponse{}, fmt.Errorf("%w: key exceeds maximum length of 255 chars (got %d)", ErrValidation, len(key))
+	}
+	// Bug 249: gate restritivo no key (alphanumeric + ._-). Settings usam
+	// dot-notation (ex: "openrouter.apiKey", "agent.defaultModel"). Sem
+	// este gate, keys com HTML/espaços/path-traversal eram silenciosamente
+	// aceitas — vetor XSS quando a UI Settings renderiza key sem escape.
+	if !settingsKeyPattern.MatchString(key) {
+		return SettingResponse{}, fmt.Errorf("%w: key must match pattern [A-Za-z0-9_\\-.]{1,255} (got %q)", ErrValidation, key)
 	}
 	if len(req.Value) == 0 {
 		return SettingResponse{}, fmt.Errorf("%w: value is required", ErrValidation)
