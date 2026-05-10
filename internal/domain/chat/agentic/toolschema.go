@@ -377,6 +377,12 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// this to persist all facts in a single tool invocation.
 	tools = append(tools, memoryStoreBulkTool())
 
+	// Builtin: memory_recall — bug 287: explicit recall fallback when auto-recall
+	// (via system prompt injection) does not surface the relevant memory. Useful
+	// when user asks to retrieve a specific stored fact and embedding-based
+	// similarity scores below threshold.
+	tools = append(tools, memoryRecallTool())
+
 	// Builtin: ask_user — available by default; agents can opt-out via config.disableAskUser.
 	if !b.disableAskUser {
 		tools = append(tools, askUserTool())
@@ -1010,6 +1016,38 @@ IMPORTANT:
 				}
 			},
 			"required": ["facts"]
+		}`),
+	}
+}
+
+// memoryRecallTool returns the builtin memory_recall tool definition.
+// Bug 287: explicit recall when auto-recall (via system prompt injection) doesn't
+// surface a needed fact. The LLM can use this to query stored memories on demand
+// — useful for direct user questions like "what did I tell you about X?".
+func memoryRecallTool() LLMTool {
+	return LLMTool{
+		Name:     "memory_recall",
+		Builtin:  true,
+		ReadOnly: true,
+		Description: `Search the agent's long-term memory for facts previously stored via memory_store.
+Use this when the user asks about something they may have told you in a previous session,
+or when you need to confirm a stored preference/fact.
+
+Returns the most relevant memories formatted as a markdown section. Empty result means
+nothing matching was found.
+
+IMPORTANT:
+- Memories are scoped to the agent — only what was explicitly stored will be returned.
+- Do NOT fabricate facts. If recall returns empty, tell the user nothing is stored.`,
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"query": {
+					"type": "string",
+					"description": "Search query (natural language) describing what to recall"
+				}
+			},
+			"required": ["query"]
 		}`),
 	}
 }

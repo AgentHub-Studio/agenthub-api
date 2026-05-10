@@ -2563,6 +2563,41 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			continue
 		}
 
+		// Builtin: memory_recall — explicit recall when auto-recall (via system
+		// prompt injection) does not surface the relevant memory. Bug 287.
+		if tc.Function.Name == "memory_recall" {
+			var args struct {
+				Query string `json:"query"`
+			}
+			_ = json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args)
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+			})
+			var recallResult string
+			if r.memory != nil {
+				if args.Query == "" {
+					recallResult = "Empty query — provide what you want to recall."
+				} else {
+					rec, err := r.memory.Recall(ctx, in.AgentID, args.Query)
+					if err != nil {
+						recallResult = "Memory recall failed: " + err.Error()
+					} else if rec == "" {
+						recallResult = "No relevant memories found for this query."
+					} else {
+						recallResult = rec
+					}
+				}
+			} else {
+				recallResult = "Memory recall is not available for this agent."
+			}
+			out, _ := json.Marshal(recallResult)
+			results[i] = ToolExecResult{Output: out, ToolName: tc.Function.Name}
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
+			})
+			continue
+		}
+
 		// Route tool_search calls locally — resolve deferred tool schemas without
 		// hitting the skill-runtime. Inspired by Claude Code's ToolSearchTool.
 		if IsToolSearchCall(tc.Function.Name) && len(deferredTools) > 0 {
