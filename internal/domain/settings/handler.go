@@ -178,7 +178,12 @@ func (h *Handler) listOllamaModels(w http.ResponseWriter, r *http.Request) {
 	models, err := ListOllamaModels(r.Context(), baseURL)
 	if err != nil {
 		if errors.Is(err, ErrUpstream) {
-			httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			// Bug 293: never echo the raw err here — http.Client errors embed
+			// resolution details (DNS, TCP target IPs, TLS cert info, upstream
+			// HTTP body) that disclose internal infrastructure. Log the full
+			// detail and surface a stable, generic message to the client.
+			slog.Warn("settings: ollama upstream failed", "baseURL", baseURL, "err", err)
+			httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": "ollama: upstream unavailable"})
 			return
 		}
 		slog.Error("settings: list ollama models failed", "baseURL", baseURL, "err", err)
