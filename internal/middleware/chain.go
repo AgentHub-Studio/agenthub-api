@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -85,7 +86,11 @@ func authMiddleware(keycloakBaseURL string) func(http.Handler) http.Handler {
 			// Fetch (or return cached) signing keys for this realm.
 			keys, err := getRealmKeys(keycloakBaseURL, realm)
 			if err != nil {
-				rejectUnauthorized(w, fmt.Sprintf("cannot retrieve signing keys: %v", err))
+				// Bug 264: erro de transport pode incluir URL Keycloak interna
+				// (`Get "http://keycloak.agenthub.svc.cluster.local:8080/...":
+				// dial tcp ...`). Loga server-side, retorna msg genérica.
+				slog.Error("auth: jwks fetch failed", "realm", realm, "err", err)
+				rejectUnauthorized(w, "authentication backend unavailable")
 				return
 			}
 
