@@ -370,6 +370,10 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
+	// Bug 266: limita body size global pra evitar DoS via JSON gigante.
+	// Endpoints que precisam mais (uploads VPN .ovpn, portable YAML)
+	// usam seu próprio MaxBytesReader específico.
+	r.Use(middleware.MaxBodyBytes(middleware.DefaultMaxBodyBytes))
 
 	// JSON 404/405 handlers para consistência. Sem isso, chi default
 	// retorna text/plain "404 page not found" que quebra clientes que
