@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -210,6 +211,15 @@ func (h *Handler) testTool(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "tool not found")
+			return
+		}
+		// Bug 242: TestTool emite erros prefixados com "tool: ..." para
+		// casos de configuração (URL faltando, tipo não suportado, KB
+		// referenciada não existe). Mapeia para 422 com a própria mensagem
+		// (todas as construídas com fmt.Errorf são seguras — sem SQL/PII).
+		// Caso contrário, vira 500 "internal error" e mascara feedback útil.
+		if strings.HasPrefix(err.Error(), "tool: ") {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, "internal error")
