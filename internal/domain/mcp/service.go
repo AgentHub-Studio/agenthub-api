@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,11 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
+
+// envNamePattern é POSIX env name. Bug 252: env vars com keys como
+// "<script>", "" ou "foo bar" eram persistidas e enviadas ao subprocesso
+// MCP — XSS via UI Settings + processos quebrados.
+var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // oauthService defines methods needed from oauth domain.
 type oauthService interface {
@@ -139,6 +145,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 	// 1000+ é storage waste e perf hit ao montar processos do client.
 	if len(req.Env) > 50 {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: env exceeds maximum of 50 entries (got %d)", len(req.Env))
+	}
+	// Bug 252: validar env names (POSIX env name pattern). Sem este gate,
+	// keys como "<script>", "" ou "foo bar" eram persistidas e enviadas
+	// para o subprocesso/HTTP — XSS via UI Settings + processos quebrados.
+	for k := range req.Env {
+		if !envNamePattern.MatchString(k) {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: env name %q invalid — must match POSIX env pattern [A-Za-z_][A-Za-z0-9_]*", k)
+		}
 	}
 	if len(req.Args) > 100 {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: args exceeds maximum of 100 entries (got %d)", len(req.Args))

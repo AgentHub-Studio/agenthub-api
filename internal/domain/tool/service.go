@@ -429,8 +429,22 @@ func validateHTTPMethodAndTimeout(raw json.RawMessage) error {
 			return fmt.Errorf("%w: timeoutSeconds must be between 1 and 600 (got %d)", ErrValidation, int(n))
 		}
 	}
+	// Bug 251: validar header names (cluster XSS via map key — bugs 248/249/250).
+	// Mesmo pattern do integration.httpHeaderNamePattern: RFC 7230 token subset.
+	if hdrs, ok := cfg["headers"].(map[string]any); ok {
+		for k := range hdrs {
+			if !toolHTTPHeaderNamePattern.MatchString(k) {
+				return fmt.Errorf("%w: header name %q invalid — must match RFC 7230 token (alphanumeric + -_)", ErrValidation, k)
+			}
+		}
+	}
 	return nil
 }
+
+// toolHTTPHeaderNamePattern subset prático do RFC 7230 token. Bug 251:
+// sem este gate, headers com keys "<script>"/""/com espaços eram persistidas
+// e enviadas como header HTTP inválido para o upstream.
+var toolHTTPHeaderNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
 // extractURLFromConfig extracts the "url" field from a JSON config blob.
 // Returns empty string when the config is nil, unparseable, or has no url field.
