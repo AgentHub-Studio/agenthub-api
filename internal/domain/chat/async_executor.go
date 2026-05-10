@@ -593,9 +593,24 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 
 // fireCompletionHooks invokes registered hooks. Each hook runs in its own
 // goroutine with a 5s timeout — a slow hook must never block the next run.
+// Bug 292: when called for a successful run with turns/tokens=0, read
+// run.metadata to populate them so trigger_run history shows real usage.
 func (e *AsyncExecutor) fireCompletionHooks(ctx context.Context, task ChatRunTask, status ChatRunStatus, turns, tokens int, errMsg string) {
 	if len(e.completionHooks) == 0 {
 		return
+	}
+	if status == ChatRunStatusCompleted && turns == 0 && tokens == 0 {
+		if run, err := e.repo.GetRunByID(ctx, task.RunID); err == nil && len(run.Metadata) > 0 {
+			var meta struct {
+				TotalTurns        int `json:"totalTurns"`
+				TotalInputTokens  int `json:"totalInputTokens"`
+				TotalOutputTokens int `json:"totalOutputTokens"`
+			}
+			if json.Unmarshal(run.Metadata, &meta) == nil {
+				turns = meta.TotalTurns
+				tokens = meta.TotalInputTokens + meta.TotalOutputTokens
+			}
+		}
 	}
 	for _, h := range e.completionHooks {
 		hook := h

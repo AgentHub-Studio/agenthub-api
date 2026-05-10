@@ -242,7 +242,14 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			if errMsg != "" {
 				errPtr = &errMsg
 			}
-			if err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, nil, nil, errPtr); err != nil {
+			var turnsPtr, tokensPtr *int
+			if turns > 0 {
+				turnsPtr = &turns
+			}
+			if tokens > 0 {
+				tokensPtr = &tokens
+			}
+			if err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, turnsPtr, tokensPtr, errPtr); err != nil {
 				// Most chat runs aren't from triggers — UPDATE simply matches 0 rows.
 				// Only log when it's an actual DB error.
 				slog.Debug("trigger.completion: skipped (not a trigger run or no rows)", "sessionId", sessionID)
