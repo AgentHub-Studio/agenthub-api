@@ -306,7 +306,6 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	mkplListingRepo := mkplListing.NewRepository(pool)
 	mkplReviewHandler := mkplReview.NewHandler(mkplReview.NewService(mkplReview.NewRepository(pool), mkplListingRepo)).
 		WithListingExister(&listingExisterAdapter{repo: mkplListingRepo})
-	mkplInstallationHandler := mkplInstallation.NewHandler(mkplInstallation.NewService(mkplInstallation.NewRepository(pool)))
 
 	// Registry handlers — storage backend selected based on MinIO config.
 	var regStorage regInstallation.StorageBackend
@@ -339,6 +338,10 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		WithPackageExister(pkgExister)
 	regInstallationHandler := regInstallation.NewHandler(regInstallation.NewService(regInstallation.NewRepository(pool), regStorage)).
 		WithPackageExister(pkgExister)
+	// Bug 238: marketplace installation valida package existence (após pkgExister wireado).
+	mkplInstallationHandler := mkplInstallation.NewHandler(
+		mkplInstallation.NewService(mkplInstallation.NewRepository(pool)).
+			WithPackageExister(pkgExister))
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)

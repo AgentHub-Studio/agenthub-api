@@ -18,14 +18,26 @@ type InstallRepository interface {
 	SetHydrated(ctx context.Context, id uuid.UUID) error
 }
 
+// PackageExister verifies a package exists in the registry (bug 238).
+type PackageExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Service implements business logic for marketplace installations.
 type Service struct {
-	repo InstallRepository
+	repo    InstallRepository
+	pkgRdr  PackageExister
 }
 
 // NewService creates a new Service.
 func NewService(repo InstallRepository) *Service {
 	return &Service{repo: repo}
+}
+
+// WithPackageExister wires a package existence checker (bug 238).
+func (s *Service) WithPackageExister(r PackageExister) *Service {
+	s.pkgRdr = r
+	return s
 }
 
 // Install installs a package for the given tenant.
@@ -35,6 +47,14 @@ func (s *Service) Install(ctx context.Context, tenantID string, req InstallReque
 	}
 	if req.PackageVersion == "" {
 		return InstallResponse{}, fmt.Errorf("installation: packageVersion is required")
+	}
+	// Bug 238: validar existência do package no registry. Antes, qualquer
+	// UUID era aceito e persistido com status=INSTALLED, criando rows
+	// órfãs apontando pra packages inexistentes.
+	if s.pkgRdr != nil {
+		if err := s.pkgRdr.GetByID(ctx, req.PackageID); err != nil {
+			return InstallResponse{}, fmt.Errorf("installation: packageId not found")
+		}
 	}
 	i := Installation{
 		ID:             uuid.New(),
