@@ -3,6 +3,7 @@ package agentic
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"runtime"
 	"strings"
 )
@@ -252,6 +253,10 @@ func HasExactMessage(err error, msg string) bool {
 // sanitizeToolError scrubs internal infrastructure details (hostnames, ports,
 // internal error codes) from a tool error message before emitting it to the
 // LLM or to the SSE stream. P-C65-2.
+//
+// Bug 285: também remove URLs internas, IPs privados de cluster e hostnames
+// de service k8s. Sem isso, tool_result error vazava topologia interna do
+// cluster (ex: "http://agenthub-embedding:8092/embed" + IPs 10.42.x).
 func sanitizeToolError(msg string) string {
 	if msg == "" {
 		return msg
@@ -260,6 +265,8 @@ func sanitizeToolError(msg string) string {
 	if idx := strings.Index(msg, "\ngoroutine "); idx > 0 {
 		msg = msg[:idx]
 	}
+	// Bug 285: scrub URLs, internal IPs, and k8s service hostnames.
+	msg = scrubInternalNetwork(msg)
 	// Trim to a reasonable length for the LLM.
 	const maxLen = 512
 	if len(msg) > maxLen {
@@ -267,6 +274,27 @@ func sanitizeToolError(msg string) string {
 	}
 	return strings.TrimSpace(msg)
 }
+
+// scrubInternalNetwork redacts URLs, IPs and hostnames that hint at internal
+// cluster topology. Bug 285.
+func scrubInternalNetwork(msg string) string {
+	// Scrub full URLs with http(s)://host:port
+	msg = urlScrubRegex.ReplaceAllString(msg, "<upstream>")
+	// Scrub bare IPv4 addresses with optional port (catches IPs in net.OpError messages)
+	msg = ipv4Regex.ReplaceAllString(msg, "<ip>")
+	// Scrub k8s service hostnames (something.svc.cluster.local or service:port patterns)
+	msg = svcHostRegex.ReplaceAllString(msg, "<service>")
+	return msg
+}
+
+var (
+	// http(s)://anything-not-quote-or-space until end of word
+	urlScrubRegex = regexp.MustCompile(`https?://[^\s"'<>]+`)
+	// IPv4 with optional port (e.g., 10.42.0.154:8092)
+	ipv4Regex = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b`)
+	// k8s service hostname pattern: lowercase-name (with optional dots) followed by :port
+	svcHostRegex = regexp.MustCompile(`\b[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*\.svc\.cluster\.local(:\d+)?\b`)
+)
 
 // sanitizeToolErrorPtr is the pointer variant of sanitizeToolError.
 func sanitizeToolErrorPtr(s *string) *string {
