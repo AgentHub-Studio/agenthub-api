@@ -73,7 +73,7 @@ func (m *mockStorage) Upload(_ context.Context, key string, r io.Reader, size in
 	return "storage://" + key, nil
 }
 
-func (m *mockStorage) PresignedURL(_ context.Context, storagePath string, _ time.Duration) (string, error) {
+func (m *mockStorage) PresignedURL(_ context.Context, storagePath string, _ string, _ time.Duration) (string, error) {
 	if _, ok := m.stored[storagePath]; !ok {
 		// Return a fake URL anyway (mimics real object stores)
 		return fmt.Sprintf("https://storage.example.com/%s?sig=abc", storagePath), nil

@@ -17,6 +17,6 @@ func (n *NoopStorage) Upload(_ context.Context, key string, _ io.Reader, _ int64
 }
 
 // PresignedURL is a no-op implementation that always returns an error.
-func (n *NoopStorage) PresignedURL(_ context.Context, storagePath string, _ time.Duration) (string, error) {
+func (n *NoopStorage) PresignedURL(_ context.Context, storagePath string, _ string, _ time.Duration) (string, error) {
 	return "", fmt.Errorf("noop storage: no storage backend configured; path=%s", storagePath)
 }

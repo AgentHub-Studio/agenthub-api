@@ -17,7 +17,8 @@ type StorageBackend interface {
 	// Upload stores an object and returns the storage path.
 	Upload(ctx context.Context, key string, r io.Reader, size int64, contentType string) (storagePath string, err error)
 	// PresignedURL returns a time-limited URL for downloading an object.
-	PresignedURL(ctx context.Context, storagePath string, expires time.Duration) (string, error)
+	// filename é usado para Content-Disposition: attachment (bug 275 — força download).
+	PresignedURL(ctx context.Context, storagePath string, filename string, expires time.Duration) (string, error)
 }
 
 // assetRepository defines data access methods required by Service.
@@ -106,7 +107,7 @@ func (s *Service) DownloadURL(ctx context.Context, assetID uuid.UUID) (AssetDown
 		return AssetDownloadResponse{}, err
 	}
 
-	url, err := s.storage.PresignedURL(ctx, asset.StoragePath, 15*time.Minute)
+	url, err := s.storage.PresignedURL(ctx, asset.StoragePath, asset.Filename, 15*time.Minute)
 	if err != nil {
 		return AssetDownloadResponse{}, fmt.Errorf("service: generate presigned URL: %w", err)
 	}
