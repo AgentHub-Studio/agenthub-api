@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -247,7 +248,10 @@ func (h *Handler) generateCode(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// LLM provider failures (no key configured, network error, rate limit)
 		// são erros upstream, não internal server errors. Retorna 502 Bad Gateway.
-		respond.JSON(w, http.StatusBadGateway, map[string]string{"error": "llm provider error: " + err.Error()})
+		// Bug 284: err.Error() pode incluir API key parcial ou stack trace —
+		// loga server-side mas retorna msg genérica.
+		slog.Error("tool: generate code failed", "lang", req.Language, "err", err)
+		respond.Error(w, http.StatusBadGateway, "llm provider error")
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -269,7 +273,9 @@ func (h *Handler) generateBlockly(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.svc.GenerateBlockly(r.Context(), req.Prompt)
 	if err != nil {
-		respond.JSON(w, http.StatusBadGateway, map[string]string{"error": "llm provider error: " + err.Error()})
+		// Bug 284: idem generateCode — sanitize provider error
+		slog.Error("tool: generate blockly failed", "err", err)
+		respond.Error(w, http.StatusBadGateway, "llm provider error")
 		return
 	}
 	respond.JSON(w, http.StatusOK, result)
