@@ -187,6 +187,17 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// the conversation even if the agent is updated between turns.
 	if req.AgentID != nil && s.agentLoader != nil {
 		if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *req.AgentID); err == nil {
+			// Bug 245: rejeitar criação de session em agent que não está PUBLISHED.
+			// ErrAgentNotPublished e ErrAgentArchived já estavam definidos no
+			// package mas nunca eram disparados em CreateSession. Resultado:
+			// usuários criavam sessions em agent DRAFT/ARCHIVED e descobriam só
+			// no primeiro run que algo não funcionava.
+			switch strings.ToUpper(agentCfg.Status) {
+			case "ARCHIVED":
+				return ChatSessionResponse{}, ErrAgentArchived
+			case "DRAFT":
+				return ChatSessionResponse{}, ErrAgentNotPublished
+			}
 			if agentCfg.SystemPrompt != "" {
 				snapshot := agentCfg.SystemPrompt
 				session.SystemPromptSnapshot = &snapshot
