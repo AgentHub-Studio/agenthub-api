@@ -3,7 +3,9 @@ package user
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -77,6 +79,20 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		// Bug 254: erros do Keycloak admin API vazavam URL interna do
+		// cluster (`http://keycloak.agenthub.svc.cluster.local:8080/...`)
+		// e mensagens técnicas (`context deadline exceeded`). Mapeia
+		// para 502 Bad Gateway sem vazar topology.
+		msg := err.Error()
+		if strings.Contains(msg, "context deadline exceeded") ||
+			strings.Contains(msg, "keycloak") ||
+			strings.Contains(msg, ".svc.cluster.local") ||
+			strings.Contains(msg, "Post \"http") ||
+			strings.Contains(msg, "Get \"http") {
+			slog.Error("user: keycloak upstream error", "err", err)
+			httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": "user provisioning service unavailable"})
+			return
+		}
 		httputil.BadRequest(w, err.Error())
 		return
 	}
