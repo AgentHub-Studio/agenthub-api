@@ -382,6 +382,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// Bug 276: security headers globais (nosniff/X-Frame-Options/Referrer-Policy).
 	// Defesa em profundidade contra MIME sniffing e clickjacking.
 	r.Use(middleware.SecurityHeaders)
+	// Bug 279: cap em URL (path+query) previne DoS via URL gigante.
+	r.Use(middleware.MaxURLBytes(middleware.DefaultMaxURLBytes))
 
 	// JSON 404/405 handlers para consistência. Sem isso, chi default
 	// retorna text/plain "404 page not found" que quebra clientes que
