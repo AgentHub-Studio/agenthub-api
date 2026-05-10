@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -70,8 +71,21 @@ func (h *Handler) importPortable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, err := h.svc.Create(r.Context(), portable.ToCreateRequest())
-	if err != nil {
+	if errors.Is(err, ErrSlugConflict) {
+		respond.Error(w, http.StatusConflict, "agent slug already exists")
+		return
+	}
+	if errors.Is(err, ErrInvalidRequest) || errors.Is(err, ErrInvalidModelConfig) ||
+		errors.Is(err, ErrInvalidSkillIDs) || errors.Is(err, ErrInvalidKnowledgeBaseIDs) ||
+		errors.Is(err, ErrInvalidMCPServerIDs) {
 		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if err != nil {
+		// Bug 262: fallback only sees repo SQL errors after sentinels are
+		// matched — never propagate raw err.Error to the client.
+		slog.Error("agent: portable import failed", "err", err)
+		respond.Error(w, http.StatusInternalServerError, "import failed")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)

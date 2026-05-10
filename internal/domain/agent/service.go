@@ -179,7 +179,10 @@ const maxSystemPromptChars = 10000
 func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResponse, error) {
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
-		return AgentResponse{}, fmt.Errorf("name is required")
+		// Bug 261: era raw fmt.Errorf — handlers caíam em fallback genérico
+		// e podiam vazar como 500. Wrap em ErrInvalidRequest pra mapeamento
+		// consistente → 422 (mesmo padrão do Update line 303).
+		return AgentResponse{}, fmt.Errorf("%w: name is required", ErrInvalidRequest)
 	}
 	if len(req.Name) > 255 {
 		return AgentResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(req.Name))
