@@ -122,6 +122,11 @@ func (s *Service) AddCase(ctx context.Context, suiteID uuid.UUID, req CreateCase
 	if req.InputText == "" {
 		return CaseResponse{}, fmt.Errorf("%w: inputText is required", ErrValidation)
 	}
+	// Bug 235: validar que suite parent existe — sem isso, INSERT FK
+	// 23503 escapava como 500 "internal error".
+	if _, err := s.repo.GetSuiteByID(ctx, suiteID); err != nil {
+		return CaseResponse{}, ErrSuiteNotFound
+	}
 	graderType := req.GraderType
 	if graderType == "" {
 		graderType = GraderContains
