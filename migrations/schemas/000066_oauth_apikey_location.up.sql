@@ -1,0 +1,2 @@
+ALTER TABLE oauth_credential
+    ADD COLUMN IF NOT EXISTS api_key_location VARCHAR(16) NOT NULL DEFAULT 'HEADER';

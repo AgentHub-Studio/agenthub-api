@@ -61,7 +61,7 @@ func (r *Repository) List(ctx context.Context) ([]WebhookConfig, error) {
 	defer release()
 
 	rows, err := conn.Query(ctx, `
-		SELECT id, name, url, events, secret, enabled, retry_count, created_at, updated_at
+		SELECT id, name, url, events, secret, token, enabled, retry_count, created_at, updated_at
 		  FROM webhook_config ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("webhook: list: %w", err)
@@ -96,11 +96,14 @@ func (r *Repository) Create(ctx context.Context, w WebhookConfig) (WebhookConfig
 	}
 	defer release()
 
+	// Bug 241: token field não estava no INSERT — service gerava
+	// uuid.New() mas o repo descartava silenciosamente, deixando o
+	// endpoint /api/webhooks/{token}/ingest inutilizável.
 	const query = `
-		INSERT INTO webhook_config (name, url, events, secret, enabled, retry_count)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, name, url, events, secret, enabled, retry_count, created_at, updated_at`
-	row := conn.QueryRow(ctx, query, w.Name, w.URL, w.Events, w.Secret, w.Enabled, w.RetryCount)
+		INSERT INTO webhook_config (name, url, events, secret, token, enabled, retry_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, name, url, events, secret, token, enabled, retry_count, created_at, updated_at`
+	row := conn.QueryRow(ctx, query, w.Name, w.URL, w.Events, w.Secret, w.Token, w.Enabled, w.RetryCount)
 	return scanConfigRow(row)
 }
 
@@ -114,7 +117,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (WebhookConfig, 
 	defer release()
 
 	row := conn.QueryRow(ctx, `
-		SELECT id, name, url, events, secret, enabled, retry_count, created_at, updated_at
+		SELECT id, name, url, events, secret, token, enabled, retry_count, created_at, updated_at
 		  FROM webhook_config WHERE id = $1`, id)
 	return scanConfigRow(row)
 }
@@ -129,7 +132,7 @@ func (r *Repository) GetBySecret(ctx context.Context, secret string) (WebhookCon
 	defer release()
 
 	row := conn.QueryRow(ctx, `
-		SELECT id, name, url, events, secret, enabled, retry_count, created_at, updated_at
+		SELECT id, name, url, events, secret, token, enabled, retry_count, created_at, updated_at
 		  FROM webhook_config WHERE secret = $1 AND enabled = TRUE`, secret)
 	return scanConfigRow(row)
 }
@@ -275,7 +278,7 @@ func (r *Repository) UpdateDelivery(ctx context.Context, d WebhookDeliveryLog) (
 
 func scanConfigRow(row pgx.Row) (WebhookConfig, error) {
 	var w WebhookConfig
-	err := row.Scan(&w.ID, &w.Name, &w.URL, &w.Events, &w.Secret, &w.Enabled, &w.RetryCount, &w.CreatedAt, &w.UpdatedAt)
+	err := row.Scan(&w.ID, &w.Name, &w.URL, &w.Events, &w.Secret, &w.Token, &w.Enabled, &w.RetryCount, &w.CreatedAt, &w.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return WebhookConfig{}, ErrNotFound
 	}
@@ -289,7 +292,7 @@ func scanConfigRows(rows pgx.Rows) ([]WebhookConfig, error) {
 	var items []WebhookConfig
 	for rows.Next() {
 		var w WebhookConfig
-		if err := rows.Scan(&w.ID, &w.Name, &w.URL, &w.Events, &w.Secret, &w.Enabled, &w.RetryCount, &w.CreatedAt, &w.UpdatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.Name, &w.URL, &w.Events, &w.Secret, &w.Token, &w.Enabled, &w.RetryCount, &w.CreatedAt, &w.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("webhook: scan row: %w", err)
 		}
 		items = append(items, w)

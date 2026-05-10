@@ -169,7 +169,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	probeHandler := probe.NewHandler(probe.NewService())
 	analyticsHandler := analytics.NewHandler(analytics.NewService(analytics.NewPostgresStore(pool)))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
-	webhookHandler := webhook.NewHandler(webhook.NewService(webhook.NewRepository(pool)))
+	webhookSvc := webhook.NewService(webhook.NewRepository(pool)).
+		WithTenantLister(&webhookTenantListerAdapter{repo: tenant.NewRepository(pool)})
+	webhookHandler := webhook.NewHandler(webhookSvc)
 	// BUG-TRIGGER-NOT-MOUNTED: trigger domain was fully implemented but never wired.
 	triggerRepo := trigger.NewRepository(pool)
 	triggerCron := trigger.NewSimpleCronParser()
@@ -606,6 +608,25 @@ type triggerTenantListerAdapter struct {
 func (a *triggerTenantListerAdapter) ListAllIDs(ctx context.Context) ([]string, error) {
 	// Page grande o suficiente p/ ambientes desenvolvimento; tenant count
 	// real em produção provavelmente exigirá paginação.
+	tenants, _, err := a.repo.FindAll(ctx, pagination.PageRequest{Page: 0, Size: 500})
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(tenants))
+	for i, t := range tenants {
+		ids[i] = t.ID
+	}
+	return ids, nil
+}
+
+// webhookTenantListerAdapter expõe ListAllIDs para o webhook.Service
+// permitir cross-tenant lookup do token no endpoint público de ingest
+// (bug 241).
+type webhookTenantListerAdapter struct {
+	repo tenant.Repository
+}
+
+func (a *webhookTenantListerAdapter) ListAllIDs(ctx context.Context) ([]string, error) {
 	tenants, _, err := a.repo.FindAll(ctx, pagination.PageRequest{Page: 0, Size: 500})
 	if err != nil {
 		return nil, err

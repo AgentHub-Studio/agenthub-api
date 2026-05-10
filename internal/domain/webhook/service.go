@@ -36,14 +36,53 @@ const (
 	ingestMaxRetries = 5
 )
 
+// TenantLister enumerates tenant IDs for cross-tenant token lookup
+// (bug 241). Public ingest endpoint não tem JWT/tenant context, então
+// precisa varrer todos os schemas ah_* até achar o webhook pelo token.
+type TenantLister interface {
+	ListAllIDs(ctx context.Context) ([]string, error)
+}
+
 // Service handles business logic for webhooks.
 type Service struct {
-	repo WebhookRepository
+	repo         WebhookRepository
+	tenantLister TenantLister
 }
 
 // NewService creates a new webhook Service.
 func NewService(repo WebhookRepository) *Service {
 	return &Service{repo: repo}
+}
+
+// WithTenantLister wires a tenant lister enabling cross-tenant token
+// lookup at the public ingest endpoint (bug 241).
+func (s *Service) WithTenantLister(t TenantLister) *Service {
+	s.tenantLister = t
+	return s
+}
+
+// lookupConfigByToken finds the webhook that owns the given token,
+// iterating tenants when ctx has no tenant (public endpoint case).
+func (s *Service) lookupConfigByToken(ctx context.Context, token string) (WebhookConfig, string, error) {
+	if tid := tenantctx.FromContext(ctx); tid != "" {
+		if w, err := s.repo.GetByToken(ctx, token); err == nil {
+			return w, tid, nil
+		}
+	}
+	if s.tenantLister == nil {
+		return WebhookConfig{}, "", ErrNotFound
+	}
+	tids, err := s.tenantLister.ListAllIDs(ctx)
+	if err != nil {
+		return WebhookConfig{}, "", fmt.Errorf("webhook: list tenants: %w", err)
+	}
+	for _, tid := range tids {
+		tctx := tenantctx.NewContext(ctx, tid)
+		if w, err := s.repo.GetByToken(tctx, token); err == nil {
+			return w, tid, nil
+		}
+	}
+	return WebhookConfig{}, "", ErrNotFound
 }
 
 // List returns all webhooks (secret omitted in responses).
@@ -249,17 +288,27 @@ func (s *Service) ListDeliveries(ctx context.Context, webhookID uuid.UUID, filte
 // sourceType must be "github" or "gitlab".
 // signature is the raw value of X-Hub-Signature-256 (GitHub) or X-Gitlab-Token (GitLab).
 func (s *Service) IngestWebhook(ctx context.Context, token, sourceType string, payload []byte, signature, eventType string) (WebhookDeliveryLog, error) {
-	w, err := s.repo.GetBySecret(ctx, token)
+	// Bug 241: lookup via column `token` (URL param é o token público,
+	// não o secret HMAC) e itera tenants quando ctx é público.
+	// Fallback para legacy GetBySecret se não houver match (compat com
+	// webhooks antigos pré-migration que usavam secret como token).
+	w, resolvedTenant, err := s.lookupConfigByToken(ctx, token)
 	if err != nil {
-		// Endpoint público (sem JWT/tenant context) → search_path é
-		// public, mas webhook_config só existe em schemas ah_*. Mapeia
-		// "relation does not exist" para ErrNotFound (404) em vez de
-		// vazar 500. Backlog #198: cross-schema lookup ou tabela global.
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
-			return WebhookDeliveryLog{}, ErrNotFound
+		w, err = s.repo.GetBySecret(ctx, token)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+				return WebhookDeliveryLog{}, ErrNotFound
+			}
+			if errors.Is(err, ErrNotFound) {
+				return WebhookDeliveryLog{}, ErrNotFound
+			}
+			return WebhookDeliveryLog{}, err
 		}
-		return WebhookDeliveryLog{}, err
+	}
+	// Propaga tenant resolvido para downstream (CreateDelivery + dispatch).
+	if resolvedTenant != "" {
+		ctx = tenantctx.NewContext(ctx, resolvedTenant)
 	}
 
 	// Validate signature.
@@ -395,9 +444,12 @@ func containsEvent(allowed []string, event string) bool {
 // log and asynchronously dispatches to the configured URL. This is a simplified
 // alternative to IngestWebhook for non-signed payloads (internal or testing use).
 func (s *Service) Ingest(ctx context.Context, token, eventType, signature string, payload []byte) (WebhookDeliveryLog, error) {
-	w, err := s.repo.GetByToken(ctx, token)
+	w, resolvedTenant, err := s.lookupConfigByToken(ctx, token)
 	if err != nil {
 		return WebhookDeliveryLog{}, err
+	}
+	if resolvedTenant != "" {
+		ctx = tenantctx.NewContext(ctx, resolvedTenant)
 	}
 
 	if len(w.Events) > 0 && !containsEvent(w.Events, eventType) {
