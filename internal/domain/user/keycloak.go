@@ -80,7 +80,12 @@ func NewKeycloakUserClient(cfg KeycloakClientConfig) KeycloakUserClient {
 		adminClientID:  cfg.AdminClientID,
 		adminRealm:     cfg.AdminRealm,
 		frontendClient: cfg.FrontendClient,
-		httpClient:     &http.Client{Timeout: 15 * time.Second},
+		// Bug 269: Keycloak admin API às vezes leva >15s para responder
+		// (observado em GET /admin/realms/X/users em cluster k3s). 60s
+		// dá margem para Keycloak pod sob carga sem aborta requests
+		// legítimos. Logs mostravam: context deadline exceeded em 15s
+		// para chamadas que de fato respondem em 25-30s.
+		httpClient:     &http.Client{Timeout: 60 * time.Second},
 		clientUUIDs:    make(map[string]string),
 	}
 }

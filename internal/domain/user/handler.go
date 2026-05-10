@@ -39,6 +39,10 @@ func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	users, err := h.svc.List(r.Context())
 	if err != nil {
+		// Bug 268: erro era engolido sem log — qualquer falha do
+		// Keycloak Admin API caía em 500 sem visibilidade. Loga
+		// server-side para diagnóstico.
+		slog.Error("user: list failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
