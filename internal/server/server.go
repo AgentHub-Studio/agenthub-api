@@ -227,6 +227,27 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		if agentRepo != nil {
 			chatExecutor = chatExecutor.WithAgentExister(&chatAgentExisterAdapter{repo: agentRepo})
 		}
+		// Bug 291: close trigger_run rows when their chat run terminates so
+		// status reflects the actual outcome (completed/failed/cancelled)
+		// instead of forever stuck at "running".
+		chatExecutor = chatExecutor.WithCompletionHook(func(ctx context.Context, sessionID, runID uuid.UUID, status chat.ChatRunStatus, turns, tokens int, errMsg string) {
+			triggerStatus := trigger.RunStatusFailed
+			switch status {
+			case chat.ChatRunStatusCompleted:
+				triggerStatus = trigger.RunStatusCompleted
+			case chat.ChatRunStatusCancelled:
+				triggerStatus = trigger.RunStatusFailed // no Cancelled enum on trigger run; surface as failed
+			}
+			var errPtr *string
+			if errMsg != "" {
+				errPtr = &errMsg
+			}
+			if err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, nil, nil, errPtr); err != nil {
+				// Most chat runs aren't from triggers — UPDATE simply matches 0 rows.
+				// Only log when it's an actual DB error.
+				slog.Debug("trigger.completion: skipped (not a trigger run or no rows)", "sessionId", sessionID)
+			}
+		})
 		go func() {
 			if err := chatExecutor.StartWorker(context.Background()); err != nil {
 				slog.Error("rabbitmq: chat worker failed", "err", err)

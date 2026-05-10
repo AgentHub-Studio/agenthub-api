@@ -91,12 +91,18 @@ type AgentExister interface {
 	GetByID(ctx context.Context, id uuid.UUID) error
 }
 
+// RunCompletionHook is called after a chat run finishes (success/fail/cancel).
+// Bug 291: triggers register one of these to close their trigger_run rows.
+// Hooks must be non-blocking and safe under concurrent runs.
+type RunCompletionHook func(ctx context.Context, sessionID, runID uuid.UUID, status ChatRunStatus, turns, tokens int, errMsg string)
+
 type AsyncExecutor struct {
 	repo            Repository
 	runner          SessionRunner
 	agentLoader     AgentLoader // optional: used to enrich RunInput with agent bindings
 	agentExister    AgentExister
 	metricsRecorder MetricsRecorder
+	completionHooks []RunCompletionHook
 	connURL         string
 	runTimeout      time.Duration
 	bufferRegistry  *RunEventBufferRegistry
@@ -114,6 +120,12 @@ type AsyncExecutor struct {
 // populated by external POST /api/metrics calls.
 func (e *AsyncExecutor) WithMetricsRecorder(rec MetricsRecorder) *AsyncExecutor {
 	e.metricsRecorder = rec
+	return e
+}
+
+// WithCompletionHook appends a hook fired when each run terminates.
+func (e *AsyncExecutor) WithCompletionHook(hook RunCompletionHook) *AsyncExecutor {
+	e.completionHooks = append(e.completionHooks, hook)
 	return e
 }
 
@@ -538,6 +550,7 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 			slog.Info("chat: background run cancelled by user", "runId", task.RunID)
 			_ = e.repo.UpdateRunStatus(cleanupCtx, task.RunID, ChatRunStatusCancelled, "")
 			appendBufferedError(buf, "run cancelled by user", "cancelled")
+			e.fireCompletionHooks(cleanupCtx, task, ChatRunStatusCancelled, 0, 0, "cancelled by user")
 			return
 		}
 		slog.Warn("chat: background run timed out", "runId", task.RunID, "timeout", e.runTimeout)
@@ -551,6 +564,7 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 				MessageType: MessageTypeText,
 			})
 		}
+		e.fireCompletionHooks(cleanupCtx, task, ChatRunStatusFailed, 0, 0, "timeout")
 		return
 	}
 
@@ -560,11 +574,13 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	if lastLLMErrorMsg != "" {
 		_ = e.repo.MarkRunFailed(cleanupCtx, task.RunID, lastLLMErrorMsg)
 		slog.Warn("chat: background run failed due to LLM error", "runId", task.RunID, "err", lastLLMErrorMsg)
+		e.fireCompletionHooks(cleanupCtx, task, ChatRunStatusFailed, 0, 0, lastLLMErrorMsg)
 		return
 	}
 
 	_ = e.repo.MarkRunCompleted(ctx, task.RunID)
 	slog.Info("chat: background run completed", "runId", task.RunID)
+	e.fireCompletionHooks(cleanupCtx, task, ChatRunStatusCompleted, 0, 0, "")
 
 	// Persist agent_metrics row from the run metadata so the metrics
 	// dashboards and cost-tracking endpoints have data without requiring
@@ -572,6 +588,27 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// this point — defaulted earlier in processTask if missing.
 	if e.metricsRecorder != nil && session.AgentID != nil {
 		e.recordMetricsFromRun(cleanupCtx, task, *session.AgentID)
+	}
+}
+
+// fireCompletionHooks invokes registered hooks. Each hook runs in its own
+// goroutine with a 5s timeout — a slow hook must never block the next run.
+func (e *AsyncExecutor) fireCompletionHooks(ctx context.Context, task ChatRunTask, status ChatRunStatus, turns, tokens int, errMsg string) {
+	if len(e.completionHooks) == 0 {
+		return
+	}
+	for _, h := range e.completionHooks {
+		hook := h
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("chat: completion hook panicked", "runId", task.RunID, "panic", r)
+				}
+			}()
+			hookCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			hook(hookCtx, task.SessionID, task.RunID, status, turns, tokens, errMsg)
+		}()
 	}
 }
 

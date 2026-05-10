@@ -32,6 +32,10 @@ type TriggerRepository interface {
 	CreateRun(ctx context.Context, run AgentTriggerRun) (AgentTriggerRun, error)
 	// CompleteRun updates a run with final status.
 	CompleteRun(ctx context.Context, runID uuid.UUID, status RunStatus, turns, tokens *int, errMsg *string) error
+	// CompleteRunBySession updates the running trigger_run linked to a chat session.
+	// Bug 291: chat run finishes asynchronously and only knows sessionID; this lets the
+	// run-end hook close the trigger_run without a separate sessionID→runID lookup.
+	CompleteRunBySession(ctx context.Context, sessionID uuid.UUID, status RunStatus, turns, tokens *int, errMsg *string) error
 	// ListRuns returns paginated runs for a trigger.
 	ListRuns(ctx context.Context, triggerID uuid.UUID, page pagination.PageRequest) (pagination.Page[AgentTriggerRun], error)
 }
@@ -251,6 +255,31 @@ func (r *Repository) CompleteRun(ctx context.Context, runID uuid.UUID, status Ru
 		 WHERE id = $1`, runID, status, turns, tokens, errMsg)
 	if err != nil {
 		return fmt.Errorf("trigger: complete run: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) CompleteRunBySession(ctx context.Context, sessionID uuid.UUID, status RunStatus, turns, tokens *int, errMsg *string) error {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	// Only update the most recent running run for this session — protects against
+	// stale rows if the session is somehow reused.
+	_, err = conn.Exec(ctx, `
+		UPDATE agent_trigger_run
+		   SET status = $2, completed_at = NOW(), total_turns = $3, total_tokens = $4, error = $5
+		 WHERE id = (
+		     SELECT id FROM agent_trigger_run
+		      WHERE session_id = $1 AND status = 'running'
+		      ORDER BY started_at DESC
+		      LIMIT 1
+		 )`, sessionID, status, turns, tokens, errMsg)
+	if err != nil {
+		return fmt.Errorf("trigger: complete run by session: %w", err)
 	}
 	return nil
 }
