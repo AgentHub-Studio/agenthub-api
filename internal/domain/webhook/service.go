@@ -22,6 +22,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
+	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // ErrSignatureInvalid is returned when a webhook signature does not match.
@@ -286,8 +287,10 @@ func (s *Service) IngestWebhook(ctx context.Context, token, sourceType string, p
 		return WebhookDeliveryLog{}, err
 	}
 
-	// Dispatch asynchronously with retry.
-	go s.dispatchWithRetry(w, log)
+	// Dispatch asynchronously with retry. Bug 236: usa Ctx variant
+	// para preservar tenant — sem isso UpdateDelivery falha por
+	// search_path errado e delivery fica eternamente PENDING.
+	go s.dispatchWithRetryCtx(ctx, w, log)
 
 	return log, nil
 }
@@ -295,12 +298,23 @@ func (s *Service) IngestWebhook(ctx context.Context, token, sourceType string, p
 // dispatchWithRetry forwards the payload to the webhook's target URL with exponential backoff.
 // Delays: 1s, 2s, 4s, 8s, 16s (2^attempt * baseDelay, capped at ingestMaxRetries attempts).
 func (s *Service) dispatchWithRetry(w WebhookConfig, d WebhookDeliveryLog) {
+	s.dispatchWithRetryCtx(context.Background(), w, d)
+}
+
+// dispatchWithRetryCtx é como dispatchWithRetry mas preserva o tenant
+// context do request original, sem isso UpdateDelivery não acha o
+// schema ah_{tenantId} e a delivery fica eternamente PENDING.
+func (s *Service) dispatchWithRetryCtx(parentCtx context.Context, w WebhookConfig, d WebhookDeliveryLog) {
 	maxAttempts := w.RetryCount
 	if maxAttempts <= 0 || maxAttempts > ingestMaxRetries {
 		maxAttempts = ingestMaxRetries
 	}
 
+	// Preserva tenantID do parent para o goroutine não perder schema.
 	ctx := context.Background()
+	if tid := tenantctx.FromContext(parentCtx); tid != "" {
+		ctx = tenantctx.NewContext(ctx, tid)
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -402,7 +416,8 @@ func (s *Service) Ingest(ctx context.Context, token, eventType, signature string
 		return WebhookDeliveryLog{}, err
 	}
 
-	go s.dispatchWithRetry(w, log)
+	// Bug 236: Ctx variant preserva tenant para o goroutine.
+	go s.dispatchWithRetryCtx(ctx, w, log)
 	return log, nil
 }
 
@@ -420,7 +435,7 @@ func (s *Service) RecordDeliveryResult(ctx context.Context, d WebhookDeliveryLog
 
 // SendTest creates a test delivery log entry with a sample payload.
 func (s *Service) SendTest(ctx context.Context, webhookID uuid.UUID) (WebhookDeliveryLog, error) {
-	_, err := s.repo.GetByID(ctx, webhookID)
+	w, err := s.repo.GetByID(ctx, webhookID)
 	if err != nil {
 		return WebhookDeliveryLog{}, err
 	}
@@ -438,5 +453,13 @@ func (s *Service) SendTest(ctx context.Context, webhookID uuid.UUID) (WebhookDel
 		Status:    "PENDING",
 		Attempts:  0,
 	}
-	return s.repo.CreateDelivery(ctx, d)
+	log, err := s.repo.CreateDelivery(ctx, d)
+	if err != nil {
+		return WebhookDeliveryLog{}, err
+	}
+	// Bug 236: SendTest criava delivery em PENDING mas nunca firava o
+	// dispatch — todas test deliveries ficavam paradas. Mesmo padrão
+	// do Ingest (linha 405) com Ctx variant para preservar tenant.
+	go s.dispatchWithRetryCtx(ctx, w, log)
+	return log, nil
 }
