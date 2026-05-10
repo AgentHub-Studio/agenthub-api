@@ -60,7 +60,8 @@ func RequireRole(role string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims := claimsFromContext(r.Context())
 			if claims == nil || !claims.HasRole(role) {
-				http.Error(w, `{"error":"forbidden: missing required role"}`, http.StatusForbidden)
+				// Bug 282: http.Error usa text/plain mesmo com body JSON
+				writeJSONError(w, http.StatusForbidden, "forbidden: missing required role")
 				return
 			}
 			next.ServeHTTP(w, r)

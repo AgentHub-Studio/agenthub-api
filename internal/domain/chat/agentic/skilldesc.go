@@ -430,7 +430,10 @@ func (h *SkillDescHandler) ValidateHandler(w http.ResponseWriter, r *http.Reques
 		Description string `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		// Bug 282: http.Error usa text/plain mesmo com body JSON
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
 		return
 	}
 

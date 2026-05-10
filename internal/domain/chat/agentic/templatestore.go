@@ -154,7 +154,10 @@ func (h *TemplateHandler) GetTemplate(w http.ResponseWriter, r *http.Request) {
 
 	tmpl, ok := h.store.GetByID(id)
 	if !ok {
-		http.Error(w, `{"error":"template not found"}`, http.StatusNotFound)
+		// Bug 282: http.Error usa text/plain mesmo com body JSON
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "template not found"})
 		return
 	}
 

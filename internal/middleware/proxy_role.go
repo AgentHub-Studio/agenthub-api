@@ -9,7 +9,9 @@ func ProxyServiceRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims := claimsFromContext(r.Context())
 		if claims == nil || !claims.HasRole("PROXY_SERVICE") {
-			http.Error(w, `{"error":"forbidden: PROXY_SERVICE role required"}`, http.StatusForbidden)
+			// Bug 282: http.Error usa text/plain — quebra clientes que parseiam JSON
+			// baseado em Content-Type. Body é JSON, então setamos CT explícito.
+			writeJSONError(w, http.StatusForbidden, "forbidden: PROXY_SERVICE role required")
 			return
 		}
 		next.ServeHTTP(w, r)

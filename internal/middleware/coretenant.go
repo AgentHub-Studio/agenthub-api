@@ -16,7 +16,8 @@ const CoreTenantID = "core"
 func RequireCoreTenant(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if tenant.FromContext(r.Context()) != CoreTenantID {
-			http.Error(w, `{"error":"forbidden: core tenant only"}`, http.StatusForbidden)
+			// Bug 282: http.Error usa text/plain mesmo com body JSON
+			writeJSONError(w, http.StatusForbidden, "forbidden: core tenant only")
 			return
 		}
 		next.ServeHTTP(w, r)
