@@ -147,12 +147,16 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	)
 	datasourceSvc := datasource.NewService(datasource.NewRepository(pool))
 	toolRepo := tool.NewRepository(pool)
+	// kbRepo é usado pelo toolSvc (KBExister, bug 231) e pelo kbHandler;
+	// declarado aqui pra ficar disponível antes do toolSvc.
+	kbRepo := knowledgebase.NewRepository(pool)
 	// BUG-F1: wire toolRepo as ToolBinder so skill.Service.Create can auto-bind
 	// a tool when {"toolId": "..."} is provided in POST /api/skills.
 	skillSvc = skillSvc.WithToolBinder(toolRepo)
 	toolSvc := tool.NewService(toolRepo).
 		WithSettings(&toolSettingsAdapter{repo: settingsRepo}).
-		WithDatasource(&toolDatasourceAdapter{svc: datasourceSvc}, tenantctx.FromContext)
+		WithDatasource(&toolDatasourceAdapter{svc: datasourceSvc}, tenantctx.FromContext).
+		WithKBExister(&kbExisterAdapter{repo: kbRepo})
 	toolHandler := tool.NewHandler(toolSvc).
 		WithSkillExister(&skillExisterAdapter{repo: skillRepo})
 	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool))).
@@ -191,7 +195,6 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	).WithHTTPManagement(skill.NewService(skillRepo), toolSvc, integration.NewRepository(pool))
 	integrationHandler := integration.NewHandler(integrationSvc)
 	suggestHandler := suggest.NewHandler(suggest.NewService(integrationSvc))
-	kbRepo := knowledgebase.NewRepository(pool)
 	pipelineHandler := pipeline.NewHandler(pipeline.NewRepository(pool))
 	coreToolLoader := core.NewCoreToolLoader(pool)
 

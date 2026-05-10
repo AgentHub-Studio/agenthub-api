@@ -40,6 +40,11 @@ type DatasourceReader interface {
 	GetDatasourceCreds(ctx context.Context, tenantID string, id uuid.UUID) (DatasourceCreds, error)
 }
 
+// KBExister verifies a knowledge-base exists in the tenant (bug 231).
+type KBExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // DatasourceCreds holds the connection parameters for a datasource.
 type DatasourceCreds struct {
 	Type     string
@@ -55,6 +60,7 @@ type Service struct {
 	repo        ToolRepository
 	settingsRdr SettingsReader
 	dsRdr       DatasourceReader
+	kbRdr       KBExister
 	tenantIDFn  func(ctx context.Context) string
 }
 
@@ -73,6 +79,12 @@ func (s *Service) WithSettings(r SettingsReader) *Service {
 func (s *Service) WithDatasource(r DatasourceReader, tenantIDFn func(ctx context.Context) string) *Service {
 	s.dsRdr = r
 	s.tenantIDFn = tenantIDFn
+	return s
+}
+
+// WithKBExister attaches a KB existence checker (bug 231).
+func (s *Service) WithKBExister(r KBExister) *Service {
+	s.kbRdr = r
 	return s
 }
 
@@ -145,9 +157,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 			return Response{}, fmt.Errorf("%w: datasourceId must be a valid UUID (got %q)", ErrValidation, dsID)
 		}
 	}
-	// Bug 147: DOCUMENT_SEARCH tool requer kbId (UUID válido). Sem isso,
-	// frontend criava tools que nunca funcionavam — silenciosamente
-	// quebrados. Espelha gate SQL.datasourceId (bug 88).
+	// Bug 147 + 231: DOCUMENT_SEARCH tool requer kbId — UUID válido E
+	// existente. Antes da bug 231, qualquer UUID passava (mesmo bogus
+	// ou zero), criando tools quebradas silenciosamente.
 	if req.Type == ToolTypeDocumentSearch || req.Type == ToolTypeDocuments {
 		var cfgMap map[string]any
 		_ = json.Unmarshal(req.Config, &cfgMap)
@@ -160,8 +172,15 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		if strings.TrimSpace(kbID) == "" {
 			return Response{}, fmt.Errorf("%w: kbId is required for DOCUMENT_SEARCH tools", ErrValidation)
 		}
-		if _, err := uuid.Parse(strings.TrimSpace(kbID)); err != nil {
+		kbUUID, err := uuid.Parse(strings.TrimSpace(kbID))
+		if err != nil {
 			return Response{}, fmt.Errorf("%w: kbId must be a valid UUID (got %q)", ErrValidation, kbID)
+		}
+		// Bug 231: verificar existência da KB no tenant atual.
+		if s.kbRdr != nil {
+			if err := s.kbRdr.GetByID(ctx, kbUUID); err != nil {
+				return Response{}, fmt.Errorf("%w: kbId not found", ErrValidation)
+			}
 		}
 	}
 	slug := strings.TrimSpace(req.Slug)
@@ -313,8 +332,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		}
 	}
 
-	// Bug 148: DOCUMENT_SEARCH UPDATE precisa do mesmo gate de Create —
-	// senão PATCH pode salvar kbId malformed e tool quebra silenciosamente.
+	// Bug 148 + 231: DOCUMENT_SEARCH UPDATE com kbId existência também.
 	if existing.Type == ToolTypeDocumentSearch || existing.Type == ToolTypeDocuments {
 		var cfgMap map[string]any
 		_ = json.Unmarshal(existing.Config, &cfgMap)
@@ -327,8 +345,15 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if strings.TrimSpace(kbID) == "" {
 			return Response{}, fmt.Errorf("%w: kbId is required for DOCUMENT_SEARCH tools", ErrValidation)
 		}
-		if _, err := uuid.Parse(strings.TrimSpace(kbID)); err != nil {
+		kbUUID, err := uuid.Parse(strings.TrimSpace(kbID))
+		if err != nil {
 			return Response{}, fmt.Errorf("%w: kbId must be a valid UUID (got %q)", ErrValidation, kbID)
+		}
+		// Bug 231: verificar existência da KB no tenant atual.
+		if s.kbRdr != nil {
+			if err := s.kbRdr.GetByID(ctx, kbUUID); err != nil {
+				return Response{}, fmt.Errorf("%w: kbId not found", ErrValidation)
+			}
 		}
 	}
 
