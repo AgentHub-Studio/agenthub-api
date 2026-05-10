@@ -374,15 +374,19 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// JSON 404/405 handlers para consistência. Sem isso, chi default
 	// retorna text/plain "404 page not found" que quebra clientes que
 	// só lidam com JSON.
+	// Bug 265: padroniza chi 404/405 com o shape `{"error": "..."}` usado
+	// por todos os outros handlers (httputil/respond), em vez do shape
+	// `{"status": N, "message": "..."}` que destoava. Frontend e clientes
+	// que dependem de `body.error` agora têm comportamento consistente.
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"status":404,"message":"not found"}`))
+		_, _ = w.Write([]byte(`{"error":"not found"}`))
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = w.Write([]byte(`{"status":405,"message":"method not allowed"}`))
+		_, _ = w.Write([]byte(`{"error":"method not allowed"}`))
 	})
 
 	// CORS must be at root level so OPTIONS preflight requests are handled
