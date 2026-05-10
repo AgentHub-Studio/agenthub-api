@@ -175,10 +175,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	triggerCron := trigger.NewSimpleCronParser()
 	triggerHandler := trigger.NewHandler(trigger.NewService(triggerRepo, triggerCron)).
 		WithAgentExister(&agentExisterAdapter{svc: agentSvc})
-	// Bug 237 (fase 1): scheduler tick para detectar triggers due. Por
-	// ora apenas loga; fase 2 fará fire real (criar chat session/run).
+	// Bug 237 (fase 2): scheduler firará chat session + run para cada
+	// trigger due. Wireado abaixo após chatSvc + chatExecutor.
 	triggerScheduler := trigger.NewScheduler(pool, &triggerTenantListerAdapter{repo: tenant.NewRepository(pool)}, triggerRepo, triggerCron)
-	triggerScheduler.Start(context.Background())
 	oauthSvc := oauth.NewServiceWithEncryption(oauth.NewRepository(pool), cfg.OAuthEncryptionKey)
 	oauthHandler := oauth.NewHandler(oauthSvc)
 	auditHandler := audit.NewHandler(auditSvc)
@@ -239,6 +238,13 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	chatHandler := chat.NewHandler(chatSvc, chatExecutor).
 		WithTaskRepository(chatTask.NewRepository(pool)).
 		WithPermissionAuditReader(&permissionAuditReaderAdapter{repo: permAuditRepo})
+
+	// Bug 237 fase 2: wire trigger Firer agora que chatSvc + chatExecutor
+	// existem, e starta o scheduler.
+	if chatExecutor != nil {
+		triggerScheduler.WithFirer(&triggerFirerAdapter{chatSvc: chatSvc, chatExecutor: chatExecutor})
+	}
+	triggerScheduler.Start(context.Background())
 
 	// Channel adapter registry — adapters registered here handle inbound platform events.
 	channelRegistry := channel.NewRegistry()
@@ -604,6 +610,32 @@ func (a *triggerTenantListerAdapter) ListAllIDs(ctx context.Context) ([]string, 
 		ids[i] = t.ID
 	}
 	return ids, nil
+}
+
+// triggerFirerAdapter implementa trigger.Firer agregando chat.Service e
+// chat.AsyncExecutor para o scheduler poder criar sessions e enfileirar
+// runs (bug 237 fase 2).
+type triggerFirerAdapter struct {
+	chatSvc      *chat.Service
+	chatExecutor *chat.AsyncExecutor
+}
+
+func (a *triggerFirerAdapter) CreateSessionForTrigger(ctx context.Context, tenantID string, agentID uuid.UUID, title string) (uuid.UUID, error) {
+	// Garantir tenant context para search_path correto.
+	ctx = tenantctx.NewContext(ctx, tenantID)
+	resp, err := a.chatSvc.CreateSession(ctx, chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   title,
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return resp.ID, nil
+}
+
+func (a *triggerFirerAdapter) EnqueueRun(ctx context.Context, sessionID uuid.UUID, tenantID, message string) (uuid.UUID, error) {
+	ctx = tenantctx.NewContext(ctx, tenantID)
+	return a.chatExecutor.EnqueueRun(ctx, sessionID, tenantID, message)
 }
 
 // packageExisterAdapter wraps regPackage.Repository so version/dependency/
