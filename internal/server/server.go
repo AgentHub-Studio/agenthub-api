@@ -171,7 +171,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	oauthHandler := oauth.NewHandler(oauthSvc)
 	auditHandler := audit.NewHandler(auditSvc)
 	metricsSvc := metrics.NewService(metrics.NewRepository(pool))
-	metricsHandler := metrics.NewHandler(metricsSvc)
+	metricsHandler := metrics.NewHandler(metricsSvc).
+		WithAgentExister(&agentExisterAdapter{svc: agentSvc})
 	vpnSvc := vpnresource.NewService(vpnresource.NewRepository(pool))
 	vpnHandler := vpnresource.NewHandler(vpnSvc)
 	datasourceHandler := datasource.NewHandler(datasourceSvc)

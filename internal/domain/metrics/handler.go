@@ -25,14 +25,26 @@ type metricsService interface {
 	CostBreakdown(ctx context.Context, tenantID string) ([]CostBreakdownEntry, error)
 }
 
+// agentExister verifies parent-agent existence (bug 222 batch).
+type agentExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 // Handler handles HTTP requests for agent metrics.
 type Handler struct {
-	svc metricsService
+	svc   metricsService
+	agent agentExister
 }
 
 // NewHandler creates a new Handler.
 func NewHandler(svc metricsService) *Handler {
 	return &Handler{svc: svc}
+}
+
+// WithAgentExister wires the parent-agent existence checker (bug 222).
+func (h *Handler) WithAgentExister(a agentExister) *Handler {
+	h.agent = a
+	return h
 }
 
 // AgentRoutes returns a router for agent-scoped metric endpoints. server.go
@@ -62,6 +74,12 @@ func (h *Handler) listByAgent(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid agentId")
 		return
 	}
+	if h.agent != nil {
+		if err := h.agent.GetByID(r.Context(), agentID); err != nil {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return
+		}
+	}
 	pr := pagination.ParsePageRequest(r)
 
 	items, total, err := h.svc.ListByAgent(r.Context(), tenantID, agentID, pr)
@@ -85,6 +103,12 @@ func (h *Handler) agentSummary(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid agentId")
 		return
+	}
+	if h.agent != nil {
+		if err := h.agent.GetByID(r.Context(), agentID); err != nil {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return
+		}
 	}
 
 	s, err := h.svc.GetAgentSummary(r.Context(), tenantID, agentID)
