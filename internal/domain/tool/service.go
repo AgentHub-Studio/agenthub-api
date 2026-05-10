@@ -153,8 +153,19 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		if strings.TrimSpace(dsID) == "" {
 			return Response{}, fmt.Errorf("%w: datasourceId is required for SQL tools", ErrValidation)
 		}
-		if _, err := uuid.Parse(strings.TrimSpace(dsID)); err != nil {
+		dsUUID, err := uuid.Parse(strings.TrimSpace(dsID))
+		if err != nil {
 			return Response{}, fmt.Errorf("%w: datasourceId must be a valid UUID (got %q)", ErrValidation, dsID)
+		}
+		// Bug 233: validar existência do datasource no tenant (mesmo padrão
+		// do bug 231 com KB). Antes, qualquer UUID passava — SQL tool ficava
+		// silenciosamente quebrada (executor falhava com FK ou not found
+		// quando o LLM tentava chamar).
+		if s.dsRdr != nil && s.tenantIDFn != nil {
+			tenantID := s.tenantIDFn(ctx)
+			if _, err := s.dsRdr.GetDatasourceCreds(ctx, tenantID, dsUUID); err != nil {
+				return Response{}, fmt.Errorf("%w: datasourceId not found", ErrValidation)
+			}
 		}
 	}
 	// Bug 147 + 231: DOCUMENT_SEARCH tool requer kbId — UUID válido E
@@ -326,8 +337,16 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 			}
 		}
 		if strings.TrimSpace(dsID) != "" {
-			if _, err := uuid.Parse(strings.TrimSpace(dsID)); err != nil {
+			dsUUID, err := uuid.Parse(strings.TrimSpace(dsID))
+			if err != nil {
 				return Response{}, fmt.Errorf("%w: datasourceId must be a valid UUID (got %q)", ErrValidation, dsID)
+			}
+			// Bug 233: gate UPDATE também valida existência.
+			if s.dsRdr != nil && s.tenantIDFn != nil {
+				tenantID := s.tenantIDFn(ctx)
+				if _, err := s.dsRdr.GetDatasourceCreds(ctx, tenantID, dsUUID); err != nil {
+					return Response{}, fmt.Errorf("%w: datasourceId not found", ErrValidation)
+				}
 			}
 		}
 	}
