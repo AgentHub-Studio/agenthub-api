@@ -370,6 +370,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
+	// Bug 274: RequestID em root garante que 404/405 catch-all também
+	// ecoa o X-Request-ID (antes só rotas em Public/Protected groups
+	// passavam pelo middleware). Frontend de tracing precisa do header
+	// em qualquer resposta para correlacionar logs server-side.
+	r.Use(middleware.RequestID)
 	// Bug 266: limita body size global pra evitar DoS via JSON gigante.
 	// Endpoints que precisam mais (uploads VPN .ovpn, portable YAML)
 	// usam seu próprio MaxBytesReader específico.
