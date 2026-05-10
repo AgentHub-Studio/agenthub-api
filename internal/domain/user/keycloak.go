@@ -250,15 +250,30 @@ func (c *keycloakClient) rolesFromCache(tenantID, userID string) ([]string, bool
 	return entry.roles, true
 }
 
-// rolesCacheStore writes roles to cache with current TTL.
+// rolesCacheMaxEntries é o threshold a partir do qual rolesCacheStore faz
+// sweep de entries expiradas. Bug 272: sem GC periódico, entries expiradas
+// (após TTL 60s) ficavam no map indefinidamente. Para 1000 users × 100
+// tenants × 50B = 5MB. Sweep amortizado mantém footprint limitado.
+const rolesCacheMaxEntries = 1000
+
+// rolesCacheStore writes roles to cache with current TTL. Faz sweep de
+// entries expiradas se o map exceder rolesCacheMaxEntries.
 func (c *keycloakClient) rolesCacheStore(tenantID, userID string, roles []string) {
 	key := c.rolesCacheKey(tenantID, userID)
 	c.rolesMu.Lock()
+	defer c.rolesMu.Unlock()
+	if len(c.rolesCache) >= rolesCacheMaxEntries {
+		now := time.Now()
+		for k, e := range c.rolesCache {
+			if now.After(e.expiresAt) {
+				delete(c.rolesCache, k)
+			}
+		}
+	}
 	c.rolesCache[key] = rolesCacheEntry{
 		roles:     append([]string(nil), roles...),
 		expiresAt: time.Now().Add(rolesCacheTTL),
 	}
-	c.rolesMu.Unlock()
 }
 
 // rolesCacheInvalidate evicts the entry for (tenantID, userID). Called
