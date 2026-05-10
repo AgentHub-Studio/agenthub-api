@@ -485,6 +485,11 @@ type runStatusResponse struct {
 // The handler consults both so programmatic polling works for every run type.
 // P-C102-2: async runs are not in bgRegistry and previously returned 404.
 func (h *Handler) runStatus(w http.ResponseWriter, r *http.Request) {
+	// Bug 226: validar session id da URL contra run.session_id.
+	// Antes: GET /sessions/{bogus}/run/{realRun}/status retornava 200
+	// com os dados do run mesmo que a session da URL não existisse ou
+	// não fosse a dona do run — cross-resource leak entre tenants/sessions.
+	urlSessionID := chi.URLParam(r, "id")
 	runID := chi.URLParam(r, "runId")
 	if runID == "" {
 		respond.Error(w, http.StatusBadRequest, "runId is required")
@@ -493,6 +498,10 @@ func (h *Handler) runStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Fast path: in-memory bgRegistry (sync SSE runs).
 	if run := h.bgRegistry.Get(runID); run != nil {
+		if urlSessionID != "" && run.SessionID.String() != urlSessionID {
+			respond.Error(w, http.StatusNotFound, "run not found")
+			return
+		}
 		respond.JSON(w, http.StatusOK, runStatusResponse{
 			RunID:     run.RunID,
 			SessionID: run.SessionID,
@@ -507,6 +516,10 @@ func (h *Handler) runStatus(w http.ResponseWriter, r *http.Request) {
 		runUUID, err := uuid.Parse(runID)
 		if err == nil {
 			if persisted, perr := h.executor.GetRunByID(r.Context(), runUUID); perr == nil {
+				if urlSessionID != "" && persisted.SessionID.String() != urlSessionID {
+					respond.Error(w, http.StatusNotFound, "run not found")
+					return
+				}
 				startedAt := ""
 				if persisted.StartedAt != nil {
 					startedAt = persisted.StartedAt.Format("2006-01-02T15:04:05Z07:00")
@@ -529,6 +542,10 @@ func (h *Handler) runStatus(w http.ResponseWriter, r *http.Request) {
 // Tries the in-process bgRegistry (legacy synchronous path) first, then
 // falls back to AsyncExecutor.Cancel for runs dispatched via RabbitMQ.
 func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
+	// Bug 227: validar session id da URL contra run.session_id antes
+	// de aplicar o cancel. Antes era possível cancelar qualquer run
+	// passando uma session id arbitrária.
+	urlSessionID := chi.URLParam(r, "id")
 	runID := chi.URLParam(r, "runId")
 	if runID == "" {
 		respond.Error(w, http.StatusBadRequest, "runId is required")
@@ -536,6 +553,10 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if run := h.bgRegistry.Get(runID); run != nil {
+		if urlSessionID != "" && run.SessionID.String() != urlSessionID {
+			respond.Error(w, http.StatusNotFound, "run not found")
+			return
+		}
 		h.bgRegistry.Cancel(runID)
 		respond.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 		return
@@ -547,16 +568,19 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusBadRequest, "invalid runId")
 			return
 		}
-		if h.executor.Cancel(runUUID) {
-			respond.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+		// Bug 207 + 227: antes de qualquer UPDATE, validar a existência E
+		// que o run pertence à session da URL.
+		persisted, getErr := h.executor.repo.GetRunByID(r.Context(), runUUID)
+		if getErr != nil {
+			respond.Error(w, http.StatusNotFound, "run not found")
 			return
 		}
-		// Bug 207: antes de aplicar UPDATE de cancellation no DB, verificar
-		// que o run de fato existe — caso contrário retornávamos 200
-		// "cancelled" mesmo para UUIDs inexistentes (UPDATE SET status WHERE
-		// id=X afeta 0 rows mas não erra).
-		if _, getErr := h.executor.repo.GetRunByID(r.Context(), runUUID); getErr != nil {
+		if urlSessionID != "" && persisted.SessionID.String() != urlSessionID {
 			respond.Error(w, http.StatusNotFound, "run not found")
+			return
+		}
+		if h.executor.Cancel(runUUID) {
+			respond.JSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 			return
 		}
 		// Run not in-flight on this pod — best-effort: persist the
@@ -581,8 +605,11 @@ type ReconnectOverflowData struct {
 // It replays buffered events since Last-Event-ID and continues streaming
 // if the run is still in progress. Used for SSE reconnection.
 func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
-	_, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
+	// Bug 228: validar que o run pertence à session da URL antes de
+	// começar o stream. Antes era possível resumir qualquer run com
+	// uma session id arbitrária e receber o SSE inteiro.
+	urlSessionID := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(urlSessionID); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
@@ -591,6 +618,15 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 	if runID == "" {
 		respond.Error(w, http.StatusBadRequest, "run id is required")
 		return
+	}
+
+	if runUUID, err := uuid.Parse(runID); err == nil && h.executor != nil {
+		if persisted, perr := h.executor.GetRunByID(r.Context(), runUUID); perr == nil {
+			if persisted.SessionID.String() != urlSessionID {
+				respond.Error(w, http.StatusNotFound, "run not found")
+				return
+			}
+		}
 	}
 
 	buf := h.bufferRegistry.Get(runID)
@@ -754,8 +790,20 @@ func (h *Handler) listTaskNotifications(w http.ResponseWriter, r *http.Request) 
 		respond.Error(w, http.StatusNotImplemented, "task persistence not configured")
 		return
 	}
-	if _, err := uuid.Parse(chi.URLParam(r, "id")); err != nil {
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	// Bug 229: validar a existência da session antes de listar
+	// notifications (mesmo padrão de listMessages bug 204 / listTasks
+	// bug 205). Antes retornávamos 200 [] mesmo para sessions bogus.
+	if _, err := h.svc.GetSession(r.Context(), sessionID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to list notifications")
 		return
 	}
 	taskID := chi.URLParam(r, "taskId")
