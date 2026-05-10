@@ -78,9 +78,16 @@ type BundleAgentDef struct {
 
 // ImportResult summarises the outcome of a bundle import.
 type ImportResult struct {
-	AgentID      uuid.UUID   `json:"agentId"`
-	AgentName    string      `json:"agentName"`
+	AgentID        uuid.UUID `json:"agentId"`
+	AgentName      string    `json:"agentName"`
 	SkillsImported int       `json:"skillsImported"`
+	ToolsImported  int       `json:"toolsImported,omitempty"`
+	// SkippedTools lists tool slugs that could not be re-created in the
+	// destination tenant. Bug 295: DOCUMENT_SEARCH tools embed a kbId from
+	// the origin tenant; without a matching KB locally the validation
+	// rejects the create. Surfacing the list lets the operator rebind
+	// post-import instead of silently shipping a half-functional agent.
+	SkippedTools []string `json:"skippedTools,omitempty"`
 }
 
 // --- Exporter ---
@@ -281,6 +288,9 @@ func (imp *Importer) Import(ctx context.Context, bundle AgentBundle) (ImportResu
 	// 4. Bug 294: recreate tools and rebind them to the new skills via slug map.
 	// Each tool may be bound to multiple skills (SkillSlugs). Failures are
 	// non-fatal — partial recovery is preferable to aborting the whole import.
+	// Bug 295: surface skipped tool slugs so the operator can rebind manually.
+	toolsImported := 0
+	var skippedTools []string
 	if imp.toolSvc != nil && len(bundle.Tools) > 0 {
 		for _, bt := range bundle.Tools {
 			toolReq := tool.CreateRequest{
@@ -295,9 +305,12 @@ func (imp *Importer) Import(ctx context.Context, bundle AgentBundle) (ImportResu
 			}
 			createdTool, err := imp.toolSvc.Create(ctx, toolReq)
 			if err != nil {
-				// Tool slug might already exist in destination tenant — non-fatal.
+				// Tool slug might already exist OR DOCUMENT_SEARCH kbId is
+				// stale from origin tenant — non-fatal but surfaced.
+				skippedTools = append(skippedTools, bt.Slug)
 				continue
 			}
+			toolsImported++
 			for _, sslug := range bt.SkillSlugs {
 				sid, ok := skillSlugToID[sslug]
 				if !ok {
@@ -312,6 +325,8 @@ func (imp *Importer) Import(ctx context.Context, bundle AgentBundle) (ImportResu
 		AgentID:        created.ID,
 		AgentName:      created.Name,
 		SkillsImported: imported,
+		ToolsImported:  toolsImported,
+		SkippedTools:   skippedTools,
 	}, nil
 }
 
