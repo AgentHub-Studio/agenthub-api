@@ -225,7 +225,7 @@ func (s *Service) UploadOvpnConfig(ctx context.Context, tenantID string, id uuid
 	// Buffer entire content for validation (max 1 MB).
 	const maxOvpnSize = 1 << 20
 	if size > maxOvpnSize {
-		return VpnResource{}, fmt.Errorf("vpn: ovpn config exceeds maximum size of 1 MB")
+		return VpnResource{}, fmt.Errorf("%w: ovpn config exceeds maximum size of 1 MB", ErrValidation)
 	}
 
 	buf, err := io.ReadAll(io.LimitReader(r, maxOvpnSize+1))
@@ -263,7 +263,7 @@ func (s *Service) UploadAuthFile(ctx context.Context, tenantID string, id uuid.U
 
 	const maxAuthSize = 4096
 	if size > maxAuthSize {
-		return VpnResource{}, fmt.Errorf("vpn: auth file exceeds maximum size of 4 KB")
+		return VpnResource{}, fmt.Errorf("%w: auth file exceeds maximum size of 4 KB", ErrValidation)
 	}
 
 	buf, err := io.ReadAll(io.LimitReader(r, maxAuthSize+1))
@@ -293,10 +293,10 @@ func (s *Service) UploadAuthFile(ctx context.Context, tenantID string, id uuid.U
 func validateOvpnContent(content string) error {
 	lower := strings.ToLower(content)
 	if !strings.Contains(lower, "remote ") {
-		return fmt.Errorf("vpn: invalid .ovpn file: missing 'remote' directive")
+		return fmt.Errorf("%w: invalid .ovpn file: missing 'remote' directive", ErrValidation)
 	}
 	if !strings.Contains(lower, "dev ") {
-		return fmt.Errorf("vpn: invalid .ovpn file: missing 'dev' directive")
+		return fmt.Errorf("%w: invalid .ovpn file: missing 'dev' directive", ErrValidation)
 	}
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -216,7 +217,15 @@ func (h *Handler) uploadConfig(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusBadRequest, err.Error())
+		// Bug 258: validation (size cap, missing remote/dev directive) usa
+		// ErrValidation; demais (read I/O ou MinIO upload errors) podem
+		// conter o endpoint interno do MinIO — sanitizar.
+		if errors.Is(err, ErrValidation) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		slog.Error("vpn: upload ovpn config failed", "tenantID", tenantID, "id", id, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "upload failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ResponseFrom(updated))
@@ -250,7 +259,14 @@ func (h *Handler) uploadAuth(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusBadRequest, err.Error())
+		// Bug 258: igual UploadOvpnConfig — distinguir validation
+		// de upload/IO errors do MinIO.
+		if errors.Is(err, ErrValidation) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		slog.Error("vpn: upload auth file failed", "tenantID", tenantID, "id", id, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "upload failed")
 		return
 	}
 	respond.JSON(w, http.StatusOK, ResponseFrom(updated))
