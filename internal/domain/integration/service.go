@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -400,12 +401,27 @@ func validateHTTPRequest(req HTTPCreateRequest) error {
 	// headers; 1000+ é payload malformado e perf hit em request loop.
 	if len(req.Headers) > 0 {
 		var hm map[string]any
-		if err := json.Unmarshal(req.Headers, &hm); err == nil && len(hm) > 50 {
-			return fmt.Errorf("integration service: headers exceeds maximum of 50 entries (got %d)", len(hm))
+		if err := json.Unmarshal(req.Headers, &hm); err == nil {
+			if len(hm) > 50 {
+				return fmt.Errorf("integration service: headers exceeds maximum of 50 entries (got %d)", len(hm))
+			}
+			// Bug 250: validar header names (RFC 7230 token). Sem este gate,
+			// keys com HTML (<script>) eram persistidas → XSS na UI Settings;
+			// keys vazias ou com espaços viravam HTTP requests inválidos.
+			for k := range hm {
+				if !httpHeaderNamePattern.MatchString(k) {
+					return fmt.Errorf("integration service: header name %q invalid — must match RFC 7230 token (alphanumeric + -_)", k)
+				}
+			}
 		}
 	}
 	return nil
 }
+
+// httpHeaderNamePattern é um subset prático do RFC 7230 token:
+// alphanumeric + hyphen + underscore. Cobre 99% dos headers reais
+// (Authorization, X-Custom-Header, etc) sem permitir XSS chars.
+var httpHeaderNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
 
 func buildHTTPConfig(req HTTPCreateRequest) json.RawMessage {
