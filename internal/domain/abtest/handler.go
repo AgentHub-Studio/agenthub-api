@@ -3,6 +3,7 @@ package abtest
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -70,7 +71,9 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		// Bug 263: fallback only sees repo SQL errors after sentinels.
+		slog.Error("abtest: create failed", "agentID", agentID, "err", err)
+		writeError(w, http.StatusInternalServerError, "create failed")
 		return
 	}
 	writeJSON(w, http.StatusCreated, resp)
@@ -115,7 +118,9 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		// Bug 263: fallback only sees repo SQL errors after sentinels.
+		slog.Error("abtest: update failed", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "update failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
