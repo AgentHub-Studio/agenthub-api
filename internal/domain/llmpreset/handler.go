@@ -54,8 +54,15 @@ func (h *Handler) listByProvider(w http.ResponseWriter, r *http.Request) {
 	provider := chi.URLParam(r, "provider")
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.ListByProvider(r.Context(), tenantID, provider, req)
+	// Bug 256: validação semântica retorna 422; demais erros (repo SQL)
+	// não vazam ao cliente.
+	if errors.Is(err, ErrValidation) {
+		httputil.UnprocessableEntity(w, err.Error())
+		return
+	}
 	if err != nil {
-		httputil.BadRequest(w, err.Error())
+		slog.Error("llmpreset: listByProvider failed", "tenantID", tenantID, "provider", provider, "err", err)
+		httputil.InternalServerError(w, "list failed")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, page)
@@ -102,7 +109,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.BadRequest(w, err.Error())
+		// Bug 256: fallback após Conflict/Validation só vê erros de
+		// repo (SQL state, pgx wrapper). Não vazar.
+		slog.Error("llmpreset: create failed", "tenantID", tenantID, "err", err)
+		httputil.InternalServerError(w, "create failed")
 		return
 	}
 	httputil.JSON(w, http.StatusCreated, p)

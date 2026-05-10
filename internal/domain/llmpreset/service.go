@@ -44,7 +44,7 @@ func (s *service) List(ctx context.Context, tenantID string, req pagination.Page
 
 func (s *service) ListByProvider(ctx context.Context, tenantID, provider string, req pagination.PageRequest) (pagination.Page[LLMPresetResponse], error) {
 	if provider == "" {
-		return pagination.Page[LLMPresetResponse]{}, fmt.Errorf("llmpreset: provider is required")
+		return pagination.Page[LLMPresetResponse]{}, fmt.Errorf("%w: provider is required", ErrValidation)
 	}
 	presets, total, err := s.repo.FindByProvider(ctx, tenantID, provider, req)
 	if err != nil {
