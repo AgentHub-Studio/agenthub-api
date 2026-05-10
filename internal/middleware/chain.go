@@ -46,10 +46,14 @@ func (c *Chain) Public() []func(http.Handler) http.Handler {
 	}
 }
 
-// Protected returns middleware for authenticated routes: Public stack + Auth + Tenant.
+// Protected returns middleware for authenticated routes: Public stack + NoStoreCache + Auth + Tenant.
+// NoStoreCache (bug 280) é aplicado antes do Auth para que mesmo respostas 401/403
+// recebam Cache-Control: no-store — caso contrário browser pode cachear o erro
+// e mostrá-lo após o token ser renovado.
 // Auth validates JWT signature via Keycloak JWKS; Tenant extracts tenantID from the issuer claim.
 func (c *Chain) Protected() []func(http.Handler) http.Handler {
 	return append(c.Public(),
+		NoStoreCache,
 		authMiddleware(c.keycloakBaseURL),
 		tenantMiddleware(),
 	)
