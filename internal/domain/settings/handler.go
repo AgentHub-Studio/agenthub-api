@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -99,7 +100,10 @@ func (h *Handler) upsert(w http.ResponseWriter, r *http.Request) {
 			httputil.UnprocessableEntity(w, err.Error())
 			return
 		}
-		httputil.BadRequest(w, err.Error())
+		// Bug 257: fallback após ErrValidation só vê repo SQL errors.
+		// Não vazar SQLSTATE/pgx detail para o cliente.
+		slog.Error("settings: upsert failed", "key", key, "err", err)
+		httputil.InternalServerError(w, "upsert failed")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, s)
