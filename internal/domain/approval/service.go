@@ -31,13 +31,13 @@ func NewService(repo Repository) Service {
 
 func (s *service) Create(ctx context.Context, req CreateApprovalRequest) (PendingApproval, error) {
 	if req.ExecutionID == uuid.Nil {
-		return PendingApproval{}, fmt.Errorf("approval: executionId is required")
+		return PendingApproval{}, fmt.Errorf("%w: executionId is required", ErrValidation)
 	}
 	if req.NodeID == "" {
-		return PendingApproval{}, fmt.Errorf("approval: nodeId is required")
+		return PendingApproval{}, fmt.Errorf("%w: nodeId is required", ErrValidation)
 	}
 	if req.Title == "" {
-		return PendingApproval{}, fmt.Errorf("approval: title is required")
+		return PendingApproval{}, fmt.Errorf("%w: title is required", ErrValidation)
 	}
 	return s.repo.Create(ctx, req)
 }

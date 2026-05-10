@@ -19,6 +19,10 @@ const (
 var (
 	ErrNotFound        = errors.New("approval: not found")
 	ErrAlreadyResolved = errors.New("approval: already resolved")
+	// ErrValidation marks semantic input validation errors safe to surface
+	// to the client. Bug 259: distinguishes user-facing validation from
+	// repository SQL errors that should never reach the response body.
+	ErrValidation = errors.New("approval: validation failed")
 )
 
 // PendingApproval represents a human-in-the-loop approval request created by an APPROVAL node.

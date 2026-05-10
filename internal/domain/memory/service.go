@@ -93,7 +93,7 @@ func (s *Service) Upsert(ctx context.Context, agentID uuid.UUID, key string, req
 // with a time-decayed relevance score attached to each result.
 func (s *Service) Recall(ctx context.Context, agentID uuid.UUID, req RecallRequest) ([]MemoryRecallResult, error) {
 	if len(req.Embedding) == 0 {
-		return nil, fmt.Errorf("memory: recall requires a non-empty embedding vector")
+		return nil, fmt.Errorf("%w: recall requires a non-empty embedding vector", ErrValidation)
 	}
 	limit := req.Limit
 	if limit <= 0 {
@@ -138,7 +138,7 @@ func (s *Service) ListByType(ctx context.Context, agentID uuid.UUID, userID *str
 // SearchByText returns memories matching a text pattern in key or value.
 func (s *Service) SearchByText(ctx context.Context, agentID uuid.UUID, query string, limit int) ([]AgentMemory, error) {
 	if query == "" {
-		return nil, fmt.Errorf("memory: search query is required")
+		return nil, fmt.Errorf("%w: search query is required", ErrValidation)
 	}
 	return s.repo.SearchByText(ctx, agentID, query, limit)
 }

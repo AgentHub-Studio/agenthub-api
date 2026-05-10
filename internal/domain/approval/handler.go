@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -65,8 +66,14 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a, err := h.svc.Create(r.Context(), req)
+	if errors.Is(err, ErrValidation) {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	if err != nil {
-		respond.Error(w, http.StatusBadRequest, err.Error())
+		// Bug 259: fallback only sees repo SQL errors after validation.
+		slog.Error("approval: create failed", "err", err)
+		respond.Error(w, http.StatusInternalServerError, "create failed")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, a)

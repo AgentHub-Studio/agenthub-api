@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -194,8 +195,14 @@ func (h *Handler) recall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	results, err := h.svc.Recall(r.Context(), agentID, req)
+	if errors.Is(err, ErrValidation) {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	if err != nil {
-		respond.Error(w, http.StatusBadRequest, err.Error())
+		// Bug 260: fallback may include repo SQL errors.
+		slog.Error("memory: recall failed", "agentID", agentID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "recall failed")
 		return
 	}
 	// Strip embedding vectors from recall results too.
@@ -230,8 +237,14 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items, err := h.svc.SearchByText(r.Context(), agentID, q, limit)
+	if errors.Is(err, ErrValidation) {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	if err != nil {
-		respond.Error(w, http.StatusBadRequest, err.Error())
+		// Bug 260: fallback may include repo SQL errors.
+		slog.Error("memory: search failed", "agentID", agentID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "search failed")
 		return
 	}
 	// Strip embedding vectors.

@@ -17,6 +17,11 @@ import (
 // ErrNotFound is returned when a memory entry is not found.
 var ErrNotFound = errors.New("memory: not found")
 
+// ErrValidation marks semantic input validation errors safe to surface to the
+// client. Bug 260: distinguishes user-facing validation from repository SQL
+// errors that should never reach the response body.
+var ErrValidation = errors.New("memory: validation failed")
+
 // MemoryRepository defines the persistence interface for AgentMemory.
 type MemoryRepository interface {
 	ListByAgent(ctx context.Context, agentID uuid.UUID, userID *string) ([]AgentMemory, error)
