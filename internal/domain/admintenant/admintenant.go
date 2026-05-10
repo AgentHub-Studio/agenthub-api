@@ -179,6 +179,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	page, err := h.svc.tenants.List(r.Context(), pagination.PageRequest{Page: 0, Size: 1000})
 	if err != nil {
+		slog.Error("admintenant: list for get failed", "id", id, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}

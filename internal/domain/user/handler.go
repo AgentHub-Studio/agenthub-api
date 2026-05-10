@@ -61,6 +61,8 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		// Bug 270: log err para diagnóstico (mesma classe do bug 268).
+		slog.Error("user: get failed", "id", id, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -120,6 +122,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		slog.Error("user: update failed", "id", id, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -138,6 +141,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		slog.Error("user: delete failed", "id", id, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -156,6 +160,7 @@ func (h *Handler) assignRole(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "user not found")
 			return
 		}
+		slog.Error("user: assign role failed", "id", id, "role", role, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -174,6 +179,7 @@ func (h *Handler) removeRole(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "user not found")
 			return
 		}
+		slog.Error("user: remove role failed", "id", id, "role", role, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -191,6 +197,7 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "user not found")
 			return
 		}
+		slog.Error("user: reset password failed", "id", id, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -200,6 +207,7 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) listRoles(w http.ResponseWriter, r *http.Request) {
 	roles, err := h.svc.ListRoles(r.Context())
 	if err != nil {
+		slog.Error("user: list roles failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}

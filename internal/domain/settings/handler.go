@@ -67,6 +67,8 @@ func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	settings, err := h.svc.List(r.Context())
 	if err != nil {
+		// Bug 270: log err para diagnóstico (mesma classe do bug 268).
+		slog.Error("settings: list failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -81,6 +83,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		slog.Error("settings: get failed", "key", key, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -117,6 +120,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		slog.Error("settings: delete failed", "key", key, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -132,6 +136,7 @@ func (h *Handler) providerImpact(w http.ResponseWriter, r *http.Request) {
 	}
 	count, err := h.assessor.CountPublishedWithoutProvider(r.Context())
 	if err != nil {
+		slog.Error("settings: provider impact assess failed", "err", err)
 		httputil.InternalServerError(w, "failed to assess provider impact")
 		return
 	}
@@ -150,6 +155,7 @@ func (h *Handler) listOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	}
 	models, err := ListOpenAIModels(r.Context(), apiKey)
 	if err != nil {
+		slog.Error("settings: list openai models failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -160,6 +166,7 @@ func (h *Handler) listAnthropicModels(w http.ResponseWriter, r *http.Request) {
 	apiKey := r.Header.Get("X-Claude-API-Key")
 	models, err := ListAnthropicModels(r.Context(), apiKey)
 	if err != nil {
+		slog.Error("settings: list anthropic models failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -174,6 +181,7 @@ func (h *Handler) listOllamaModels(w http.ResponseWriter, r *http.Request) {
 			httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
+		slog.Error("settings: list ollama models failed", "baseURL", baseURL, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -184,6 +192,7 @@ func (h *Handler) listOpenRouterModels(w http.ResponseWriter, r *http.Request) {
 	apiKey := r.Header.Get("X-OpenRouter-API-Key")
 	models, err := ListOpenRouterModels(r.Context(), apiKey)
 	if err != nil {
+		slog.Error("settings: list openrouter models failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -194,6 +203,7 @@ func (h *Handler) listOpenRouterEmbeddingModels(w http.ResponseWriter, r *http.R
 	apiKey := r.Header.Get("X-OpenRouter-API-Key")
 	models, err := ListOpenRouterEmbeddingModels(r.Context(), apiKey)
 	if err != nil {
+		slog.Error("settings: list openrouter embedding models failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
@@ -212,6 +222,7 @@ func (h *Handler) testSmtp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := TestSMTPConnection(r.Context(), req); err != nil {
+		slog.Error("settings: smtp test failed", "to", to, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
