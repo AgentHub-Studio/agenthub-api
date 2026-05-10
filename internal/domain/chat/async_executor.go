@@ -78,6 +78,7 @@ type MetricsRecord struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	EstimatedCostUSD float64 // Bug 221: era omitido — todas analytics mostravam $0
 	LatencyMs        int64
 }
 
@@ -541,11 +542,12 @@ func (e *AsyncExecutor) recordMetricsFromRun(ctx context.Context, task ChatRunTa
 		return
 	}
 	var meta struct {
-		TotalInputTokens  int    `json:"totalInputTokens"`
-		TotalOutputTokens int    `json:"totalOutputTokens"`
-		ModelUsed         string `json:"modelUsed"`
-		ProviderUsed      string `json:"providerUsed"`
-		DurationMs        int64  `json:"durationMs"`
+		TotalInputTokens  int     `json:"totalInputTokens"`
+		TotalOutputTokens int     `json:"totalOutputTokens"`
+		TotalCostUSD      float64 `json:"totalCostUsd"` // Bug 221: lê do RunMetadata
+		ModelUsed         string  `json:"modelUsed"`
+		ProviderUsed      string  `json:"providerUsed"`
+		DurationMs        int64   `json:"durationMs"`
 	}
 	if err := json.Unmarshal(run.Metadata, &meta); err != nil {
 		slog.Warn("metrics: failed to parse run metadata", "runId", task.RunID, "err", err)
@@ -565,6 +567,7 @@ func (e *AsyncExecutor) recordMetricsFromRun(ctx context.Context, task ChatRunTa
 		PromptTokens:     meta.TotalInputTokens,
 		CompletionTokens: meta.TotalOutputTokens,
 		TotalTokens:      meta.TotalInputTokens + meta.TotalOutputTokens,
+		EstimatedCostUSD: meta.TotalCostUSD, // Bug 221
 		LatencyMs:        meta.DurationMs,
 	}); err != nil {
 		slog.Warn("metrics: record failed", "runId", task.RunID, "err", err)

@@ -755,6 +755,7 @@ func (m *metricsRecorderAdapter) Record(ctx context.Context, tenantID string, re
 		PromptTokens:     req.PromptTokens,
 		CompletionTokens: req.CompletionTokens,
 		TotalTokens:      req.TotalTokens,
+		EstimatedCostUSD: req.EstimatedCostUSD, // Bug 221
 		LatencyMs:        req.LatencyMs,
 	})
 	return err
