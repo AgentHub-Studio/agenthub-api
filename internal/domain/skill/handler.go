@@ -161,6 +161,13 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "skill not found")
 			return
 		}
+		// Bug 243: skill ainda referenciada por agent → 409 Conflict, não 500.
+		// Service.Delete já gateava com ErrSkillBoundToAgents mas o handler
+		// vazava como "internal error".
+		if errors.Is(err, ErrSkillBoundToAgents) {
+			respond.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
