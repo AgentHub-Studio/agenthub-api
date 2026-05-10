@@ -159,6 +159,18 @@ func (s *Scheduler) fireOne(ctx context.Context, tenantID string, t AgentTrigger
 		slog.Warn("trigger.scheduler: MarkRun failed",
 			"tenantID", tenantID, "triggerID", t.ID, "err", err)
 	}
+
+	// Bug 290: persist run history so GET /triggers/{id}/runs surfaces
+	// what fired and when. Status starts as "queued"; the chat run handler
+	// will UpdateRunStatus when the actual execution completes.
+	if _, err := s.repo.CreateRun(ctx, AgentTriggerRun{
+		TriggerID: t.ID,
+		SessionID: sessionID,
+		Status:    RunStatusRunning,
+	}); err != nil {
+		slog.Warn("trigger.scheduler: CreateRun failed",
+			"tenantID", tenantID, "triggerID", t.ID, "err", err)
+	}
 	slog.Info("trigger.scheduler: fired",
 		"tenantID", tenantID, "triggerID", t.ID, "sessionID", sessionID, "runID", runID, "nextRunAt", nextRun)
 }
