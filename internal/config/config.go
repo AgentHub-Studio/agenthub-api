@@ -35,6 +35,7 @@ type Config struct {
 	Port                string
 	DatabaseURL         string
 	KeycloakBaseURL     string
+	KeycloakIssuerURL   string // KEYCLOAK_ISSUER_URL — bug 281: validar `iss` claim contra esta URL pública. Vazio = sem validação (legacy)
 	KeycloakAdmin       KeycloakAdminConfig
 	MinIO               MinIOConfig
 	CORSOrigins         []string
@@ -55,7 +56,8 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port:            getEnv("PORT", "8081"),
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
-		KeycloakBaseURL: os.Getenv("KEYCLOAK_BASE_URL"),
+		KeycloakBaseURL:   os.Getenv("KEYCLOAK_BASE_URL"),
+		KeycloakIssuerURL: os.Getenv("KEYCLOAK_ISSUER_URL"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
 		KeycloakAdmin: KeycloakAdminConfig{
 			AdminUsername:  getEnv("KEYCLOAK_ADMIN_USERNAME", "admin"),

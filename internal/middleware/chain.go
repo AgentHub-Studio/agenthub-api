@@ -17,8 +17,9 @@ import (
 
 // Chain holds the configured middleware stack.
 type Chain struct {
-	keycloakBaseURL string
-	corsOrigins     []string
+	keycloakBaseURL   string
+	keycloakIssuerURL string // bug 281: validar `iss` claim contra esta URL pública. Vazio = sem validação (legacy).
+	corsOrigins       []string
 }
 
 // New creates a new middleware Chain.
@@ -27,6 +28,15 @@ func New(keycloakBaseURL string, corsOrigins []string) *Chain {
 		keycloakBaseURL: keycloakBaseURL,
 		corsOrigins:     corsOrigins,
 	}
+}
+
+// WithIssuerURL configura a URL pública do Keycloak para validação do `iss` claim.
+// Bug 281: sem essa validação, o regex extractRealm aceitaria tokens com
+// `iss: https://evil.com/realms/<realm>` desde que a signature do `<realm>`
+// fosse válida no nosso Keycloak. Setando issuer URL, validamos start_with.
+func (c *Chain) WithIssuerURL(issuerURL string) *Chain {
+	c.keycloakIssuerURL = issuerURL
+	return c
 }
 
 // CORSHandler returns the CORS middleware for use at the root router level.
@@ -54,7 +64,7 @@ func (c *Chain) Public() []func(http.Handler) http.Handler {
 func (c *Chain) Protected() []func(http.Handler) http.Handler {
 	return append(c.Public(),
 		NoStoreCache,
-		authMiddleware(c.keycloakBaseURL),
+		authMiddleware(c.keycloakBaseURL, c.keycloakIssuerURL),
 		tenantMiddleware(),
 	)
 }
@@ -63,7 +73,7 @@ func (c *Chain) Protected() []func(http.Handler) http.Handler {
 // The issuer realm is extracted from the token's unverified payload to locate the correct
 // JWKS URL, then the signature is verified with the matching RSA public key. Keys are
 // cached per-realm for jwksCacheTTL to avoid repeated round-trips to Keycloak.
-func authMiddleware(keycloakBaseURL string) func(http.Handler) http.Handler {
+func authMiddleware(keycloakBaseURL, expectedIssuerPrefix string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -81,10 +91,21 @@ func authMiddleware(keycloakBaseURL string) func(http.Handler) http.Handler {
 			}
 
 			// Extract the realm from the unverified payload so we know which JWKS to fetch.
-			realm, err := extractRealm(parts[1])
+			realm, issuer, err := extractRealmAndIssuer(parts[1])
 			if err != nil {
 				rejectUnauthorized(w, "cannot extract realm from jwt issuer")
 				return
+			}
+
+			// Bug 281: se KEYCLOAK_ISSUER_URL configurado, valida que `iss` começa
+			// com a URL pública esperada. Sem isso, atacante com signature válida
+			// do realm-A poderia forjar `iss: https://evil/realms/realm-A`.
+			if expectedIssuerPrefix != "" {
+				expected := strings.TrimRight(expectedIssuerPrefix, "/") + "/realms/" + realm
+				if issuer != expected {
+					rejectUnauthorized(w, "invalid token issuer")
+					return
+				}
 			}
 
 			// Fetch (or return cached) signing keys for this realm.
@@ -160,21 +181,29 @@ func extractBearerToken(authHeader string) (string, bool) {
 // extractRealm decodes the base64url JWT payload and returns the Keycloak realm name
 // extracted from the "iss" claim (e.g. ".../realms/my-tenant" → "my-tenant").
 func extractRealm(payloadB64 string) (string, error) {
+	realm, _, err := extractRealmAndIssuer(payloadB64)
+	return realm, err
+}
+
+// extractRealmAndIssuer decodes the JWT payload and returns both the realm name
+// (extracted via regex) and the full `iss` claim. Used by authMiddleware to
+// validate the issuer against KEYCLOAK_ISSUER_URL (bug 281).
+func extractRealmAndIssuer(payloadB64 string) (string, string, error) {
 	payload, err := base64.RawURLEncoding.DecodeString(payloadB64)
 	if err != nil {
-		return "", fmt.Errorf("cannot decode jwt payload: %w", err)
+		return "", "", fmt.Errorf("cannot decode jwt payload: %w", err)
 	}
 	var claims struct {
 		Issuer string `json:"iss"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil || claims.Issuer == "" {
-		return "", fmt.Errorf("missing iss claim in jwt")
+		return "", "", fmt.Errorf("missing iss claim in jwt")
 	}
 	m := realmRegex.FindStringSubmatch(claims.Issuer)
 	if len(m) < 2 {
-		return "", fmt.Errorf("iss claim %q does not contain /realms/<name>", claims.Issuer)
+		return "", "", fmt.Errorf("iss claim %q does not contain /realms/<name>", claims.Issuer)
 	}
-	return m[1], nil
+	return m[1], claims.Issuer, nil
 }
 
 // rsaKeyForToken is a jwt.Keyfunc that looks up the RSA key by "kid" header.

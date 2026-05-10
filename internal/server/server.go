@@ -86,7 +86,7 @@ type Server struct {
 // New creates a new Server with all routes mounted.
 func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	s := &Server{pool: pool}
-	chain := middleware.New(cfg.KeycloakBaseURL, cfg.CORSOrigins)
+	chain := middleware.New(cfg.KeycloakBaseURL, cfg.CORSOrigins).WithIssuerURL(cfg.KeycloakIssuerURL)
 
 	// Build Keycloak user client for user management.
 	keycloakCfg := user.KeycloakClientConfig{
