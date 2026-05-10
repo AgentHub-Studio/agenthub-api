@@ -379,6 +379,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// Endpoints que precisam mais (uploads VPN .ovpn, portable YAML)
 	// usam seu próprio MaxBytesReader específico.
 	r.Use(middleware.MaxBodyBytes(middleware.DefaultMaxBodyBytes))
+	// Bug 276: security headers globais (nosniff/X-Frame-Options/Referrer-Policy).
+	// Defesa em profundidade contra MIME sniffing e clickjacking.
+	r.Use(middleware.SecurityHeaders)
 
 	// JSON 404/405 handlers para consistência. Sem isso, chi default
 	// retorna text/plain "404 page not found" que quebra clientes que
