@@ -63,8 +63,8 @@ func authMiddleware(keycloakBaseURL string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
-			tokenStr, ok := strings.CutPrefix(authHeader, "Bearer ")
-			if !ok || tokenStr == "" {
+			tokenStr, ok := extractBearerToken(authHeader)
+			if !ok {
 				rejectUnauthorized(w, "missing or invalid authorization header")
 				return
 			}
@@ -133,6 +133,26 @@ func rejectUnauthorized(w http.ResponseWriter, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// extractBearerToken parses an Authorization header value matching the
+// "Bearer <token>" pattern. Bug 273: scheme name é case-insensitive segundo
+// RFC 7235 §2.1, então "bearer", "BEARER", "Bearer" são todos válidos.
+// Retorna (token, true) se o header começa com "bearer " (case-insensitive)
+// e tem token non-empty; caso contrário ("", false).
+func extractBearerToken(authHeader string) (string, bool) {
+	const prefix = "bearer "
+	if len(authHeader) <= len(prefix) {
+		return "", false
+	}
+	if !strings.EqualFold(authHeader[:len(prefix)], prefix) {
+		return "", false
+	}
+	token := authHeader[len(prefix):]
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
 // extractRealm decodes the base64url JWT payload and returns the Keycloak realm name
 // extracted from the "iss" claim (e.g. ".../realms/my-tenant" → "my-tenant").
 func extractRealm(payloadB64 string) (string, error) {
@@ -179,7 +199,7 @@ func tenantMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
-			tokenStr, _ := strings.CutPrefix(authHeader, "Bearer ")
+			tokenStr, _ := extractBearerToken(authHeader)
 			parts := strings.Split(tokenStr, ".")
 			if len(parts) != 3 {
 				rejectUnauthorized(w, "malformed jwt token")
