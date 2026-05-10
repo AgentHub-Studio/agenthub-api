@@ -3,6 +3,7 @@ package datasource
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -144,7 +145,16 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 		DBPassword:    req.DBPassword,
 		VpnResourceID: req.VpnResourceID,
 	}
-	return s.repo.Create(ctx, tenantID, d)
+	created, err := s.repo.Create(ctx, tenantID, d)
+	if err != nil {
+		// Bug 232: traduzir FK violation de vpn_resource_id em ErrValidation
+		// para o handler retornar 422 (não 500 silencioso).
+		if strings.Contains(err.Error(), "data_source_vpn_resource_id_fkey") {
+			return DataSource{}, fmt.Errorf("%w: vpnResourceId not found", ErrValidation)
+		}
+		return DataSource{}, err
+	}
+	return created, nil
 }
 
 // Update updates an existing datasource. PATCH-friendly: campos vazios
@@ -198,7 +208,15 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 		DBPassword:    password,
 		VpnResourceID: req.VpnResourceID,
 	}
-	return s.repo.Update(ctx, tenantID, id, d)
+	updated, err := s.repo.Update(ctx, tenantID, id, d)
+	if err != nil {
+		// Bug 232: traduzir FK violation no PATCH/PUT também.
+		if strings.Contains(err.Error(), "data_source_vpn_resource_id_fkey") {
+			return DataSource{}, fmt.Errorf("%w: vpnResourceId not found", ErrValidation)
+		}
+		return DataSource{}, err
+	}
+	return updated, nil
 }
 
 // Delete removes a datasource.
