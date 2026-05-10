@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -202,7 +203,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "tenant not found")
 			return
 		}
-		httputil.BadRequest(w, err.Error())
+		writeAdminTenantErr(w, "admintenant.update", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -215,7 +216,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "tenant not found")
 			return
 		}
-		httputil.BadRequest(w, err.Error())
+		writeAdminTenantErr(w, "admintenant.delete", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -233,10 +234,30 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httputil.BadRequest(w, err.Error())
+		writeAdminTenantErr(w, "admintenant.create", err)
 		return
 	}
 	httputil.JSON(w, http.StatusCreated, resp)
+}
+
+// writeAdminTenantErr distinguishes validation errors (raw `errors.New(...)`
+// from the service, safe to surface as 400) from upstream/transport errors
+// containing internal cluster URLs or technical detail (Keycloak admin API,
+// SQL drivers). Bug 255 — same class of fix as 254 (`user.handler`).
+func writeAdminTenantErr(w http.ResponseWriter, op string, err error) {
+	msg := err.Error()
+	if strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "keycloak") ||
+		strings.Contains(msg, ".svc.cluster.local") ||
+		strings.Contains(msg, "Post \"http") ||
+		strings.Contains(msg, "Get \"http") ||
+		strings.Contains(msg, "Delete \"http") ||
+		strings.Contains(msg, "dial tcp") {
+		slog.Error(op+": upstream error", "err", err)
+		httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": "tenant provisioning service unavailable"})
+		return
+	}
+	httputil.BadRequest(w, msg)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
