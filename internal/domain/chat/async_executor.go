@@ -83,10 +83,19 @@ type MetricsRecord struct {
 }
 
 // AsyncExecutor handles asynchronous execution of chat runs via RabbitMQ.
+// AgentExister checks if an agent ID exists in the tenant's catalog.
+// Bug 244: chat session can outlive its agent (DELETE agent leaves the
+// session orphaned). EnqueueRun must reject runs whose agent has been
+// deleted instead of accepting and failing later in the worker.
+type AgentExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
+}
+
 type AsyncExecutor struct {
 	repo            Repository
 	runner          SessionRunner
 	agentLoader     AgentLoader // optional: used to enrich RunInput with agent bindings
+	agentExister    AgentExister
 	metricsRecorder MetricsRecorder
 	connURL         string
 	runTimeout      time.Duration
@@ -133,6 +142,15 @@ func (e *AsyncExecutor) WithAgentLoader(loader AgentLoader) *AsyncExecutor {
 	return e
 }
 
+// WithAgentExister wires an agent existence checker. Bug 244: chat sessions
+// can outlive their agent (DELETE /api/agents/{id} doesn't cascade or
+// archive sessions). EnqueueRun must reject runs on orphaned sessions
+// instead of accepting and failing in the worker.
+func (e *AsyncExecutor) WithAgentExister(ax AgentExister) *AsyncExecutor {
+	e.agentExister = ax
+	return e
+}
+
 // GetRunByID looks up a run from the persistent store (DB).
 // Used by the handler to resolve async runs that are not in the in-memory bgRegistry.
 func (e *AsyncExecutor) GetRunByID(ctx context.Context, id uuid.UUID) (ChatRun, error) {
@@ -172,6 +190,31 @@ func (e *AsyncExecutor) wasCancelled(runID uuid.UUID) bool {
 // P-C99-1: rejects the request with ErrRunAlreadyActive when a run is already
 // in progress for the session, preventing concurrent runs that corrupt history.
 func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, tenantID, message string) (uuid.UUID, error) {
+	// Bug 244: validar que session existe e o agent ainda existe ANTES de
+	// criar o run e enfileirar. Sem isso, sessions órfãs (agent deletado)
+	// aceitam runs que silenciosamente fazem fallback para um default agent
+	// no worker — usuário pensa que está conversando com seu agent original.
+	// Quando DELETE /api/agents/{id} executa, o FK ON DELETE SET NULL
+	// reseta chat_session.agent_id para NULL — então cobrimos ambos casos:
+	// (a) AgentID nil = agent já foi deletado e FK setou NULL
+	// (b) AgentID set mas GetByID retorna erro = agent foi deletado
+	//     em outro tenant ou inconsistência rara.
+	if e.agentExister != nil {
+		session, err := e.repo.GetSessionByID(ctx, sessionID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return uuid.Nil, ErrNotFound
+			}
+			return uuid.Nil, fmt.Errorf("chat: lookup session: %w", err)
+		}
+		if session.AgentID == nil {
+			return uuid.Nil, ErrAgentNotFound
+		}
+		if err := e.agentExister.GetByID(ctx, *session.AgentID); err != nil {
+			return uuid.Nil, ErrAgentNotFound
+		}
+	}
+
 	// Guard: reject if a run is already active for this session.
 	// P-C103-1: auto-expire orphaned runs that have been active longer than 2x the timeout.
 	// This handles pod restarts that leave runs stuck in 'active' indefinitely.

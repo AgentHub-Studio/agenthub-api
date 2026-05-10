@@ -385,6 +385,12 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 				respond.Error(w, http.StatusNotFound, "chat session not found")
 				return
 			}
+			// Bug 244: session existe mas agent foi deletado → 410 Gone.
+			// Sem isso retornava 202 e o run falhava silenciosamente no worker.
+			if errors.Is(err, ErrAgentNotFound) {
+				respond.Error(w, http.StatusGone, "agent has been deleted; cannot run on orphaned session")
+				return
+			}
 			respond.Error(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue run: %v", err))
 			return
 		}

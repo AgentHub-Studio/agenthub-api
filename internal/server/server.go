@@ -222,6 +222,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		}
 		// Persist agent_metrics rows after every completed async run.
 		chatExecutor = chatExecutor.WithMetricsRecorder(&metricsRecorderAdapter{svc: metricsSvc})
+		// Bug 244: validate agent existence before accepting runs (sessions
+		// outlive their agents when DELETE /api/agents/{id} runs).
+		if agentRepo != nil {
+			chatExecutor = chatExecutor.WithAgentExister(&chatAgentExisterAdapter{repo: agentRepo})
+		}
 		go func() {
 			if err := chatExecutor.StartWorker(context.Background()); err != nil {
 				slog.Error("rabbitmq: chat worker failed", "err", err)
@@ -860,6 +865,18 @@ func (m *metricsRecorderAdapter) Record(ctx context.Context, tenantID string, re
 type agentConfigAdapter struct {
 	repo        agent.Repository
 	bindingRepo agent.BindingRepository
+}
+
+// chatAgentExisterAdapter wraps agent.Repository so chat.AsyncExecutor
+// can validate that an agent still exists before accepting a run on its
+// session (bug 244).
+type chatAgentExisterAdapter struct {
+	repo agent.Repository
+}
+
+func (a *chatAgentExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
+	_, err := a.repo.FindByID(ctx, id)
+	return err
 }
 
 func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (*chat.AgentRunConfig, error) {
