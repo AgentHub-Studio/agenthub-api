@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -85,6 +86,13 @@ func (h *Handler) instantiate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "agent template not found")
+			return
+		}
+		// Bug 239: 2º instantiate sem name custom dispara slug duplicado
+		// no agent (default vem do template). Antes virava 500 silencioso;
+		// agora 409 com mensagem acionável.
+		if errors.Is(err, agent.ErrSlugConflict) {
+			respond.Error(w, http.StatusConflict, "agent slug already exists; provide a custom name or slug to instantiate")
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, "internal error")
