@@ -50,6 +50,16 @@ type keycloakClient struct {
 	tokenMu        sync.Mutex
 	cachedToken    string
 	tokenExpiresAt time.Time
+	// Bug 271: cache de roles in-memory para mitigar bug 267
+	// (Keycloak admin API lento em cluster k3s). TTL 60s mantém
+	// staleness baixa; roles mudam raramente. Key: tenantID:userID.
+	rolesMu    sync.RWMutex
+	rolesCache map[string]rolesCacheEntry
+}
+
+type rolesCacheEntry struct {
+	roles     []string
+	expiresAt time.Time
 }
 
 // KeycloakClientConfig holds configuration for the Keycloak Admin API client.
@@ -87,6 +97,7 @@ func NewKeycloakUserClient(cfg KeycloakClientConfig) KeycloakUserClient {
 		// para chamadas que de fato respondem em 25-30s.
 		httpClient:     &http.Client{Timeout: 60 * time.Second},
 		clientUUIDs:    make(map[string]string),
+		rolesCache:     make(map[string]rolesCacheEntry),
 	}
 }
 
@@ -219,7 +230,50 @@ func (c *keycloakClient) getClientUUID(ctx context.Context, tenantID string) (st
 	return uuid, nil
 }
 
+// rolesCacheTTL is how long a roles entry stays cached. Bug 271: roles
+// mudam raramente; 60s reduz drasticamente o N+1 em GET /api/users.
+const rolesCacheTTL = 60 * time.Second
+
+func (c *keycloakClient) rolesCacheKey(tenantID, userID string) string {
+	return tenantID + ":" + userID
+}
+
+// rolesFromCache retrieves cached roles if not expired; otherwise returns nil, false.
+func (c *keycloakClient) rolesFromCache(tenantID, userID string) ([]string, bool) {
+	key := c.rolesCacheKey(tenantID, userID)
+	c.rolesMu.RLock()
+	defer c.rolesMu.RUnlock()
+	entry, ok := c.rolesCache[key]
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil, false
+	}
+	return entry.roles, true
+}
+
+// rolesCacheStore writes roles to cache with current TTL.
+func (c *keycloakClient) rolesCacheStore(tenantID, userID string, roles []string) {
+	key := c.rolesCacheKey(tenantID, userID)
+	c.rolesMu.Lock()
+	c.rolesCache[key] = rolesCacheEntry{
+		roles:     append([]string(nil), roles...),
+		expiresAt: time.Now().Add(rolesCacheTTL),
+	}
+	c.rolesMu.Unlock()
+}
+
+// rolesCacheInvalidate evicts the entry for (tenantID, userID). Called
+// after AssignRole/RemoveRole/DeleteUser to prevent stale data.
+func (c *keycloakClient) rolesCacheInvalidate(tenantID, userID string) {
+	key := c.rolesCacheKey(tenantID, userID)
+	c.rolesMu.Lock()
+	delete(c.rolesCache, key)
+	c.rolesMu.Unlock()
+}
+
 func (c *keycloakClient) getUserRoles(ctx context.Context, tenantID, userID string) ([]string, error) {
+	if cached, ok := c.rolesFromCache(tenantID, userID); ok {
+		return cached, nil
+	}
 	clientUUID, err := c.getClientUUID(ctx, tenantID)
 	if err != nil {
 		return nil, err
@@ -232,6 +286,7 @@ func (c *keycloakClient) getUserRoles(ctx context.Context, tenantID, userID stri
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
+		c.rolesCacheStore(tenantID, userID, []string{})
 		return []string{}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -247,6 +302,7 @@ func (c *keycloakClient) getUserRoles(ctx context.Context, tenantID, userID stri
 	for i, role := range roles {
 		names[i] = role.Name
 	}
+	c.rolesCacheStore(tenantID, userID, names)
 	return names, nil
 }
 
@@ -424,15 +480,24 @@ func (c *keycloakClient) DeleteUser(ctx context.Context, tenantID string, userID
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("keycloak: delete user %d: %s", resp.StatusCode, string(b))
 	}
+	c.rolesCacheInvalidate(tenantID, userID)
 	return nil
 }
 
 func (c *keycloakClient) AssignRole(ctx context.Context, tenantID string, userID string, role string) error {
-	return c.manageRole(ctx, tenantID, userID, role, http.MethodPost)
+	err := c.manageRole(ctx, tenantID, userID, role, http.MethodPost)
+	if err == nil {
+		c.rolesCacheInvalidate(tenantID, userID)
+	}
+	return err
 }
 
 func (c *keycloakClient) RemoveRole(ctx context.Context, tenantID string, userID string, role string) error {
-	return c.manageRole(ctx, tenantID, userID, role, http.MethodDelete)
+	err := c.manageRole(ctx, tenantID, userID, role, http.MethodDelete)
+	if err == nil {
+		c.rolesCacheInvalidate(tenantID, userID)
+	}
+	return err
 }
 
 func (c *keycloakClient) manageRole(ctx context.Context, tenantID, userID, role, method string) error {
