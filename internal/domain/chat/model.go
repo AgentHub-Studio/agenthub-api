@@ -19,6 +19,11 @@ var ErrRunAlreadyActive = errors.New("chat: a run is already in progress for thi
 // 422 com SQL state na mensagem.
 var ErrAgentNotFound = errors.New("chat: agent not found")
 
+// ErrSessionArchived é retornado quando há tentativa de POST run/message
+// numa session com status=ARCHIVED. Bug 246/247: sessions arquivadas
+// estavam aceitando novos runs e mensagens silenciosamente.
+var ErrSessionArchived = errors.New("chat: session is archived; create a new session to continue")
+
 // ChatStatus represents the lifecycle status of a ChatSession.
 type ChatStatus string
 

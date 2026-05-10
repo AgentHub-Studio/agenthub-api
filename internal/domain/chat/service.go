@@ -284,6 +284,17 @@ func (s *Service) GetLatestAssistantMessage(ctx context.Context, sessionID uuid.
 // Returns the persisted user message DTO. For agent-bound sessions the agentic
 // loop is NOT started here — use RunSession instead.
 func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error) {
+	// Bug 247: rejeitar addMessage em session ARCHIVED. Sem isso, mensagens
+	// novas eram silenciosamente persistidas e poluíam o histórico de uma
+	// session que o usuário marcou como concluída.
+	if session, err := s.repo.GetSessionByID(ctx, sessionID); err == nil {
+		if session.Status == StatusArchived {
+			return ChatMessageResponse{}, ErrSessionArchived
+		}
+	}
+	// Sem else: se a session não existe, deixa o INSERT abaixo falhar com FK
+	// (bug 230 já mapeia para ErrNotFound).
+
 	if req.Role == "" {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: role is required")
 	}

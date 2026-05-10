@@ -210,6 +210,11 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 		if session.AgentID == nil {
 			return uuid.Nil, ErrAgentNotFound
 		}
+		// Bug 246: rejeitar runs em session ARCHIVED — usuário arquivou
+		// como sinal de "não usar mais"; aceitar runs subverte isso.
+		if session.Status == StatusArchived {
+			return uuid.Nil, ErrSessionArchived
+		}
 		if err := e.agentExister.GetByID(ctx, *session.AgentID); err != nil {
 			return uuid.Nil, ErrAgentNotFound
 		}

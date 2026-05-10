@@ -315,6 +315,11 @@ func (h *Handler) addMessage(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.svc.AddMessage(r.Context(), sessionID, req)
 	if err != nil {
+		// Bug 247: session arquivada não aceita novas mensagens.
+		if errors.Is(err, ErrSessionArchived) {
+			respond.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		// Bug 230: erros wrapped do repositório (FK/constraint/SQLSTATE)
 		// não podem vazar — o caminho de validação do service usa
 		// fmt.Errorf sem %w. Os com "%w" são wrapped errors do repo.
@@ -389,6 +394,11 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 			// Sem isso retornava 202 e o run falhava silenciosamente no worker.
 			if errors.Is(err, ErrAgentNotFound) {
 				respond.Error(w, http.StatusGone, "agent has been deleted; cannot run on orphaned session")
+				return
+			}
+			// Bug 246: session arquivada não aceita novos runs.
+			if errors.Is(err, ErrSessionArchived) {
+				respond.Error(w, http.StatusConflict, err.Error())
 				return
 			}
 			respond.Error(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue run: %v", err))
