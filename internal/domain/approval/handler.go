@@ -163,7 +163,10 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	// Bug 283: combine no-cache + no-store. no-cache evita revalidação
+	// stale; no-store mantém a proteção do bug 280 (Protected stack)
+	// que seria sobrescrita pelo Set anterior.
+	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)

@@ -438,7 +438,8 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 
 	// Set SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	// Bug 283: no-cache + no-store (preserva proteção do bug 280)
+	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("X-Run-ID", runID)
@@ -694,7 +695,8 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 
 	// Set SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	// Bug 283: no-cache + no-store (preserva proteção do bug 280)
+	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("X-Run-ID", runID)
