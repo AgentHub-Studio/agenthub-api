@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS ah_core.idx_platform_catalog_manifest_dt_active;
+DROP INDEX IF EXISTS ah_core.idx_platform_catalog_manifest_dt_kind;
+DROP TABLE IF EXISTS ah_core.platform_catalog_manifest_default_template;

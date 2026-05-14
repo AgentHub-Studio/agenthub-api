@@ -29,10 +29,10 @@ type Repository interface {
 	// UpdateSessionConfigHash stores the SHA-256 hash of the current modelConfig.
 	// P-C173-1: used to detect config changes between turns.
 	UpdateSessionConfigHash(ctx context.Context, sessionID uuid.UUID, hash string) error
-	// FindDefaultAgentID returns the ID of the default agent for the tenant
-	// (slug='agenthub-assistant', PUBLISHED). Falls back to any PUBLISHED agent.
-	// Returns nil, nil when no published agent exists.
-	FindDefaultAgentID(ctx context.Context) (*uuid.UUID, error)
+	// UpdateSessionSnapshots persists the agent persona/model/skill snapshot onto
+	// a session. Used when an agent is routed and bound to a previously agentless
+	// session so the P-C115-1 consistency guarantee also covers routed sessions.
+	UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage) error
 	// FindAgentsForRouting returns all PUBLISHED agents with lightweight routing
 	// metadata (id, name, slug, description). Used by the smart agent router to
 	// pick the best agent for a given user message without loading full configs.
@@ -284,27 +284,26 @@ func (r *postgresRepository) UpdateSessionAgent(ctx context.Context, sessionID u
 	return nil
 }
 
-func (r *postgresRepository) FindDefaultAgentID(ctx context.Context) (*uuid.UUID, error) {
+func (r *postgresRepository) UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage) error {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer release()
 
-	var id uuid.UUID
-	// Prefer the well-known AgentHub Assistant; fall back to any published agent.
-	err = conn.QueryRow(ctx,
-		`SELECT id FROM agent WHERE status = 'PUBLISHED'
-		 ORDER BY (slug = 'agenthub-assistant') DESC, created_at ASC
-		 LIMIT 1`,
-	).Scan(&id)
+	tag, err := conn.Exec(ctx,
+		`UPDATE chat_session
+		 SET system_prompt_snapshot = $1, model_config_snapshot = $2, skill_bindings_snapshot = $3, updated_at = $4
+		 WHERE id = $5`,
+		systemPrompt, modelConfig, skillBindings, time.Now().UTC(), sessionID,
+	)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("chat: find default agent: %w", err)
+		return fmt.Errorf("chat: update session snapshots: %w", err)
 	}
-	return &id, nil
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (r *postgresRepository) FindAgentsForRouting(ctx context.Context) ([]AgentRoutingInfo, error) {

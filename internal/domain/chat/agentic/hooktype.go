@@ -64,6 +64,22 @@ const (
 	HookCommandHTTP   HookCommandType = "http"
 )
 
+// AllHookCommandTypes returns a defensive copy of all valid hook command types.
+func AllHookCommandTypes() []HookCommandType {
+	return []HookCommandType{
+		HookCommandBash, HookCommandPrompt, HookCommandAgent, HookCommandHTTP,
+	}
+}
+
+// IsValidHookCommandType returns true when typ is in the closed set.
+func IsValidHookCommandType(typ HookCommandType) bool {
+	switch typ {
+	case HookCommandBash, HookCommandPrompt, HookCommandAgent, HookCommandHTTP:
+		return true
+	}
+	return false
+}
+
 // DefaultTimeout returns the default timeout (seconds) for a hook command type.
 func DefaultTimeout(typ HookCommandType) int {
 	switch typ {
@@ -133,7 +149,8 @@ type HookMatcher struct {
 // --- HooksSettings ---
 
 // ExtendedHookEvent extends the base HookEvent with additional events
-// from Claude Code's comprehensive hook event system.
+// from Claude Code's comprehensive hook event system, including four
+// web-adapted events for AgentHub's HTTP/SSE runtime (EXT-002a).
 type ExtendedHookEvent string
 
 const (
@@ -160,9 +177,26 @@ const (
 	HookConfigChangeExt        ExtendedHookEvent = "ConfigChange"
 	HookInstructionsLoadedExt  ExtendedHookEvent = "InstructionsLoaded"
 	HookFileChangedExt         ExtendedHookEvent = "FileChanged"
+
+	// EXT-002a — four web-adapted events absent from the original 23-event set.
+	// These map to AgentHub's HTTP/SSE run lifecycle instead of the CLI lifecycle.
+
+	// HookRunStartedExt fires when POST /api/chat/sessions/{id}/run is accepted
+	// and the agentic loop begins. Analogous to SessionStart but scoped to one run.
+	HookRunStartedExt ExtendedHookEvent = "RunStarted"
+	// HookRunCompleteExt fires when the SSE run_complete event is emitted — the
+	// run finished (success or stop). Use this to trigger post-run notifications.
+	HookRunCompleteExt ExtendedHookEvent = "RunComplete"
+	// HookContextWindowAlertExt fires when the token budget reaches the configured
+	// alert threshold (default 80 % used). Gives hooks a chance to summarize or
+	// compact before the window is exhausted.
+	HookContextWindowAlertExt ExtendedHookEvent = "ContextWindowAlert"
+	// HookKnowledgeBaseQueriedExt fires after every successful RAG vector-search
+	// against a tenant knowledge base. Useful for audit, analytics, and cache warming.
+	HookKnowledgeBaseQueriedExt ExtendedHookEvent = "KnowledgeBaseQueried"
 )
 
-// AllExtendedHookEvents lists every supported hook event name.
+// AllExtendedHookEvents lists every supported hook event name (27 total).
 var AllExtendedHookEvents = []ExtendedHookEvent{
 	HookPreToolUseExt, HookPostToolUseExt, HookPostToolUseFailureExt,
 	HookNotificationExt, HookUserPromptSubmitExt,
@@ -174,6 +208,29 @@ var AllExtendedHookEvents = []ExtendedHookEvent{
 	HookSetupExt, HookTaskCreatedExt, HookTaskCompletedExt,
 	HookElicitationExt, HookElicitationResultExt,
 	HookConfigChangeExt, HookInstructionsLoadedExt, HookFileChangedExt,
+	// EXT-002a — web-adapted run lifecycle events
+	HookRunStartedExt, HookRunCompleteExt,
+	HookContextWindowAlertExt, HookKnowledgeBaseQueriedExt,
+}
+
+// WebAdaptedHookEvents returns the 4 events added in EXT-002a that are
+// specific to AgentHub's HTTP/SSE runtime (no CLI equivalent).
+func WebAdaptedHookEvents() []ExtendedHookEvent {
+	return []ExtendedHookEvent{
+		HookRunStartedExt, HookRunCompleteExt,
+		HookContextWindowAlertExt, HookKnowledgeBaseQueriedExt,
+	}
+}
+
+// IsWebAdaptedHookEvent returns true when event is one of the four
+// web-specific events introduced in EXT-002a.
+func IsWebAdaptedHookEvent(event ExtendedHookEvent) bool {
+	switch event {
+	case HookRunStartedExt, HookRunCompleteExt,
+		HookContextWindowAlertExt, HookKnowledgeBaseQueriedExt:
+		return true
+	}
+	return false
 }
 
 // IsValidHookEvent checks if a string is a known hook event.

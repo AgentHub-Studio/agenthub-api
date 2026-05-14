@@ -293,6 +293,40 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	return runner
 }
 
+// resolveRunConfig builds the effective RunConfig for a run: it overlays the
+// agent's model_config on the compiled defaults, then fills in an empty
+// provider/model from the tenant's settings via the factory. Extracted from
+// RunSession so the resolution chain — critical for fresh tenants whose
+// auto-seeded default agent ships with an empty provider/model — is unit-testable.
+func resolveRunConfig(ctx context.Context, factory ChatModelFactory, modelConfig json.RawMessage, llmCallTimeout time.Duration) RunConfig {
+	config := RunConfigFromModelConfig(modelConfig)
+	defaultCfg := DefaultRunConfig()
+
+	// P-C102-1: apply the server-level LLM call timeout when the agent's
+	// model_config did not explicitly override it (still equals the default).
+	if llmCallTimeout > 0 && config.LLMCallTimeout == defaultCfg.LLMCallTimeout {
+		config.LLMCallTimeout = llmCallTimeout
+	}
+
+	// When the agent has no explicit provider, use the tenant's configured
+	// default. This avoids hard-coding the fallback to "anthropic" when the
+	// tenant is on a different provider (P-C75-1).
+	if config.Provider == "" || config.Provider == defaultCfg.Provider {
+		if defaultProvider := factory.ResolveDefaultProvider(ctx); defaultProvider != "" {
+			config.Provider = defaultProvider
+		}
+	}
+
+	// When the agent has no explicit model, resolve it from the tenant's settings.
+	if config.Model == "" || config.Model == defaultCfg.Model {
+		if settingsModel := factory.ResolveModel(ctx, config.Provider); settingsModel != "" {
+			config.Model = settingsModel
+		}
+	}
+
+	return config
+}
+
 // RunSession implements chat.SessionRunner. It resolves the ChatModel for the
 // agent's configured provider from the settings table, then runs the agentic loop.
 // If an ElicitationHandler is enqueued during the run, the adapter emits
@@ -321,30 +355,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		// OK — proceed
 	}
 
-	config := RunConfigFromModelConfig(agentCfg.ModelConfig)
-	defaultCfg := DefaultRunConfig()
-
-	// P-C102-1: apply server-level LLM call timeout when the agent's model_config
-	// did not explicitly override it (i.e. still equals the compiled default).
-	if a.llmCallTimeout > 0 && config.LLMCallTimeout == defaultCfg.LLMCallTimeout {
-		config.LLMCallTimeout = a.llmCallTimeout
-	}
-
-	// When the agent has no explicit provider, use the tenant's configured default.
-	// This avoids hard-coding the fallback to "anthropic" when the tenant is on
-	// a different provider (P-C75-1).
-	if config.Provider == "" || config.Provider == defaultCfg.Provider {
-		if defaultProvider := a.modelFactory.ResolveDefaultProvider(ctx); defaultProvider != "" {
-			config.Provider = defaultProvider
-		}
-	}
-
-	// If the agent doesn't specify a model, resolve it from the tenant's settings.
-	if config.Model == "" || config.Model == defaultCfg.Model {
-		if settingsModel := a.modelFactory.ResolveModel(ctx, config.Provider); settingsModel != "" {
-			config.Model = settingsModel
-		}
-	}
+	config := resolveRunConfig(ctx, a.modelFactory, agentCfg.ModelConfig, a.llmCallTimeout)
 
 	// Resolve the ChatModel for this agent's provider from the factory.
 	// The model name is passed so the factory can select the correct API

@@ -3,6 +3,7 @@ package chat_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -15,8 +16,10 @@ import (
 )
 
 type mockChatRepo struct {
-	sessions map[uuid.UUID]chat.ChatSession
-	messages []chat.ChatMessage
+	sessions      map[uuid.UUID]chat.ChatSession
+	messages      []chat.ChatMessage
+	routingAgents []chat.AgentRoutingInfo
+	routingErr    error
 }
 
 func uuidPtr() *uuid.UUID { id := uuid.New(); return &id }
@@ -139,12 +142,20 @@ func (m *mockChatRepo) UpdateSessionAgent(_ context.Context, sessionID uuid.UUID
 	return nil
 }
 
-func (m *mockChatRepo) FindDefaultAgentID(_ context.Context) (*uuid.UUID, error) {
-	return nil, nil
+func (m *mockChatRepo) UpdateSessionSnapshots(_ context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage) error {
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		return chat.ErrNotFound
+	}
+	s.SystemPromptSnapshot = systemPrompt
+	s.ModelConfigSnapshot = modelConfig
+	s.SkillBindingsSnapshot = skillBindings
+	m.sessions[sessionID] = s
+	return nil
 }
 
 func (m *mockChatRepo) FindAgentsForRouting(_ context.Context) ([]chat.AgentRoutingInfo, error) {
-	return nil, nil
+	return m.routingAgents, m.routingErr
 }
 
 func (m *mockChatRepo) CreateRun(_ context.Context, r chat.ChatRun) (chat.ChatRun, error) {
@@ -279,15 +290,108 @@ func TestChatService_RunSession_NoAgent(t *testing.T) {
 	runner := &mockSessionRunner{}
 	svc := chat.NewService(repo, runner)
 
-	// Create session WITHOUT an agent.
+	// Create session WITHOUT an agent; the mock repo has no routable agents.
 	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
 		Title: "no-agent",
 	})
 	require.NoError(t, err)
 
 	_, err = svc.RunSession(context.Background(), session.ID, "Hello", "tenant")
+	require.ErrorIs(t, err, chat.ErrNoAgentAvailable)
+}
+
+// TestRunSession_RoutesSingleAgent verifies that an agentless session is bound
+// to the only published agent when exactly one exists (the OOB default-assistant
+// case for a fresh tenant).
+func TestRunSession_RoutesSingleAgent(t *testing.T) {
+	repo := newMockRepo()
+	agentID := uuid.New()
+	repo.routingAgents = []chat.AgentRoutingInfo{{ID: agentID, Name: "Meu Assistente"}}
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(repo, runner)
+
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
+	require.NoError(t, err)
+
+	_, err = svc.RunSession(context.Background(), session.ID, "olá, tudo bem?", "tenant")
+	require.NoError(t, err)
+	assert.Equal(t, agentID, runner.lastInput.AgentID, "runner should receive the routed agent")
+
+	bound, err := svc.GetSession(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, bound.AgentID)
+	assert.Equal(t, agentID, *bound.AgentID, "session should be bound to the routed agent")
+}
+
+// TestRunSession_RoutesBestOfMultiple verifies keyword-based routing picks the
+// most relevant published agent when several exist.
+func TestRunSession_RoutesBestOfMultiple(t *testing.T) {
+	repo := newMockRepo()
+	general := uuid.New()
+	billing := uuid.New()
+	repo.routingAgents = []chat.AgentRoutingInfo{
+		{ID: general, Name: "General", Description: "helpful companion"},
+		{ID: billing, Name: "Billing Specialist", Description: "handles invoices"},
+	}
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(repo, runner)
+
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
+	require.NoError(t, err)
+
+	_, err = svc.RunSession(context.Background(), session.ID, "I have a billing question", "tenant")
+	require.NoError(t, err)
+	assert.Equal(t, billing, runner.lastInput.AgentID)
+}
+
+// TestRunSession_RoutingRepoError verifies a repository failure during routing
+// is surfaced as an error rather than silently picking no agent.
+func TestRunSession_RoutingRepoError(t *testing.T) {
+	repo := newMockRepo()
+	repo.routingErr = errors.New("db unavailable")
+	svc := chat.NewService(repo, &mockSessionRunner{})
+
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
+	require.NoError(t, err)
+
+	_, err = svc.RunSession(context.Background(), session.ID, "Hello", "tenant")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "session has no agent")
+	assert.Contains(t, err.Error(), "route agent")
+}
+
+// TestRunSession_SnapshotOnFirstRoute verifies that when an agent is routed and
+// bound to a previously agentless session, its persona/model/skills are captured
+// onto the session AND forwarded to the runner (P-C115-1 consistency guarantee).
+func TestRunSession_SnapshotOnFirstRoute(t *testing.T) {
+	repo := newMockRepo()
+	agentID := uuid.New()
+	repo.routingAgents = []chat.AgentRoutingInfo{{ID: agentID, Name: "Routed Agent"}}
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		ID:           agentID,
+		SystemPrompt: "You are the routed agent.",
+		ModelConfig:  json.RawMessage(`{"provider":"openrouter","model":"x"}`),
+		SkillIDs:     []uuid.UUID{uuid.New()},
+		Status:       "PUBLISHED",
+	}}
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(repo, runner).WithAgentLoader(loader)
+
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
+	require.NoError(t, err)
+
+	_, err = svc.RunSession(context.Background(), session.ID, "do something useful", "tenant")
+	require.NoError(t, err)
+
+	// Forwarded to the runner for this run.
+	require.NotNil(t, runner.lastInput.SystemPromptSnapshot)
+	assert.Equal(t, "You are the routed agent.", *runner.lastInput.SystemPromptSnapshot)
+	assert.NotEmpty(t, runner.lastInput.SkillIDsSnapshot)
+
+	// Persisted to the session so subsequent runs stay consistent.
+	stored, err := repo.GetSessionByID(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored.SystemPromptSnapshot)
+	assert.Equal(t, "You are the routed agent.", *stored.SystemPromptSnapshot)
 }
 
 func TestChatService_RunSession_SessionNotFound(t *testing.T) {
