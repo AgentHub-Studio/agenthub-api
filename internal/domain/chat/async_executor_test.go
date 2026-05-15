@@ -14,12 +14,14 @@ import (
 )
 
 type asyncExecutorRepoStub struct {
-	session      ChatSession
-	active       bool
-	createdRun   ChatRun
-	completedID  uuid.UUID
-	failedID     uuid.UUID
-	failedReason string
+	session       ChatSession
+	active        bool
+	createdRun    ChatRun
+	completedID   uuid.UUID
+	failedID      uuid.UUID
+	failedReason  string
+	routingAgents []AgentRoutingInfo
+	routingErr    error
 }
 
 func (r *asyncExecutorRepoStub) FindSessions(context.Context, pagination.PageRequest) ([]ChatSession, int64, error) {
@@ -57,12 +59,12 @@ func (r *asyncExecutorRepoStub) UpdateSessionConfigHash(context.Context, uuid.UU
 	return nil
 }
 
-func (r *asyncExecutorRepoStub) FindDefaultAgentID(context.Context) (*uuid.UUID, error) {
-	return nil, nil
+func (r *asyncExecutorRepoStub) UpdateSessionSnapshots(context.Context, uuid.UUID, *string, json.RawMessage, json.RawMessage) error {
+	return nil
 }
 
 func (r *asyncExecutorRepoStub) FindAgentsForRouting(context.Context) ([]AgentRoutingInfo, error) {
-	return nil, nil
+	return r.routingAgents, r.routingErr
 }
 
 func (r *asyncExecutorRepoStub) DeleteSession(context.Context, uuid.UUID) error {

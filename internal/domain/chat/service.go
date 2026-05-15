@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode"
@@ -52,6 +53,11 @@ var ErrAgentNotPublished = errors.New("agent is not published")
 
 // ErrAgentArchived is returned when an agent has been archived.
 var ErrAgentArchived = errors.New("agent is archived and no longer accepts new sessions")
+
+// ErrNoAgentAvailable is returned when a session has no agent bound and the
+// tenant has no published agent to route the message to. The handler maps this
+// to a friendly, actionable error (create and publish an agent).
+var ErrNoAgentAvailable = errors.New("no published agent available for routing")
 
 // RunEvent is the envelope emitted by the agentic loop.
 // Defined here (in the chat package) to avoid an import cycle:
@@ -198,20 +204,7 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			case "DRAFT":
 				return ChatSessionResponse{}, ErrAgentNotPublished
 			}
-			if agentCfg.SystemPrompt != "" {
-				snapshot := agentCfg.SystemPrompt
-				session.SystemPromptSnapshot = &snapshot
-			}
-			if len(agentCfg.ModelConfig) > 2 {
-				session.ModelConfigSnapshot = agentCfg.ModelConfig
-			}
-			// P-C115-1: snapshot skill bindings so the tool set is fixed for the session.
-			if len(agentCfg.SkillIDs) > 0 {
-				snapshotData := SkillBindingsSnapshotData{SkillIDs: agentCfg.SkillIDs}
-				if snapshotJSON, err := json.Marshal(snapshotData); err == nil {
-					session.SkillBindingsSnapshot = snapshotJSON
-				}
-			}
+			snapshotAgent(agentCfg, &session)
 		}
 		// Snapshot failure is non-fatal: session creation proceeds without snapshot.
 	}
@@ -222,6 +215,30 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 
 	return SessionResponseFrom(created), nil
+}
+
+// snapshotAgent captures the agent's persona, model config and skill bindings
+// onto the session so they stay consistent across every run of the session even
+// if the agent is edited later (P-C115-1 / P-C330-1). It mutates sess in place
+// and is a no-op when agentCfg is nil. Shared by CreateSession (agent picked up
+// front) and RunSession (agent picked by the router for an agentless session).
+func snapshotAgent(agentCfg *AgentRunConfig, sess *ChatSession) {
+	if agentCfg == nil {
+		return
+	}
+	if agentCfg.SystemPrompt != "" {
+		snapshot := agentCfg.SystemPrompt
+		sess.SystemPromptSnapshot = &snapshot
+	}
+	if len(agentCfg.ModelConfig) > 2 {
+		sess.ModelConfigSnapshot = agentCfg.ModelConfig
+	}
+	if len(agentCfg.SkillIDs) > 0 {
+		snapshotData := SkillBindingsSnapshotData{SkillIDs: agentCfg.SkillIDs}
+		if snapshotJSON, err := json.Marshal(snapshotData); err == nil {
+			sess.SkillBindingsSnapshot = snapshotJSON
+		}
+	}
 }
 
 // ArchiveSession sets a session's status to ARCHIVED.
@@ -369,17 +386,31 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		return nil, fmt.Errorf("chat service: get session: %w", err)
 	}
 	if session.AgentID == nil {
-		routed, err := s.routeAgent(ctx, userMessage)
+		routed, err := routeAgentID(ctx, s.repo, userMessage)
 		if err != nil {
 			return nil, fmt.Errorf("chat service: route agent: %w", err)
 		}
 		if routed == nil {
-			return nil, fmt.Errorf("chat service: session has no agent and no published agent exists")
+			return nil, fmt.Errorf("chat service: %w", ErrNoAgentAvailable)
 		}
 		if err := s.repo.UpdateSessionAgent(ctx, sessionID, *routed); err != nil {
 			return nil, fmt.Errorf("chat service: bind routed agent: %w", err)
 		}
 		session.AgentID = routed
+		// P-C115-1: snapshot the just-routed agent onto the session so the
+		// persona/model/skills stay consistent across the rest of the
+		// conversation. Non-fatal on failure — the run still proceeds using the
+		// agent's current config via the adapter's snapshot fallback.
+		if s.agentLoader != nil {
+			if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *routed); err == nil {
+				snapshotAgent(agentCfg, &session)
+				if err := s.repo.UpdateSessionSnapshots(ctx, sessionID,
+					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot); err != nil {
+					slog.Warn("chat service: failed to persist routed-agent snapshot",
+						"sessionID", sessionID, "agentID", *routed, "error", err)
+				}
+			}
+		}
 	}
 
 	// P-C178-2: persist user message BEFORE starting the run so it is never lost
@@ -430,14 +461,22 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 	})
 }
 
-// routeAgent selects the best published agent for the given user message.
+// agentRouter is the subset of Repository needed to route a user message to a
+// published agent. Both chat.Service (SSE path) and the async executor depend
+// on routeAgentID, so it takes this narrow interface rather than *Service.
+type agentRouter interface {
+	FindAgentsForRouting(ctx context.Context) ([]AgentRoutingInfo, error)
+}
+
+// routeAgentID selects the best published agent for the given user message.
 // When only one agent exists it is returned immediately. When multiple agents
 // are available, each is scored by keyword overlap between the user message
 // and the agent's name + description. The highest-scoring agent wins; ties
 // are broken by the natural ordering returned by FindAgentsForRouting
-// (agenthub-assistant slug first, then oldest created_at).
-func (s *Service) routeAgent(ctx context.Context, userMessage string) (*uuid.UUID, error) {
-	agents, err := s.repo.FindAgentsForRouting(ctx)
+// (agenthub-assistant slug first, then oldest created_at). Returns nil when the
+// tenant has no published agent — callers map this to ErrNoAgentAvailable.
+func routeAgentID(ctx context.Context, repo agentRouter, userMessage string) (*uuid.UUID, error) {
+	agents, err := repo.FindAgentsForRouting(ctx)
 	if err != nil {
 		return nil, err
 	}

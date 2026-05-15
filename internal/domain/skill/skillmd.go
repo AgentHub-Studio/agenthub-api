@@ -13,18 +13,38 @@ const SkillMDVersion = "1"
 
 // skillMDFrontmatter is the YAML structure inside the --- delimiters.
 // Fields map 1-to-1 to the Skill model; snake_case keys match the DB columns.
+//
+// PDF Section 6.1 gap closure (EXT-006a): model_overrides, effort_level,
+// associated_agents, dynamic_hooks added below.
+// shell_config is NOT_APPLICABLE_WEB — AgentHub is a web platform.
 type skillMDFrontmatter struct {
-	Version                string   `yaml:"version"`
-	Name                   string   `yaml:"name"`
-	Slug                   string   `yaml:"slug,omitempty"`
-	Description            string   `yaml:"description,omitempty"`
-	Category               string   `yaml:"category,omitempty"`
-	WhenToUse              string   `yaml:"when_to_use,omitempty"`
-	ContextMode            string   `yaml:"context_mode,omitempty"`
-	AllowedTools           []string `yaml:"allowed_tools,omitempty"`
-	DisableModelInvocation bool     `yaml:"disable_model_invocation,omitempty"`
-	ArgumentHint           string   `yaml:"argument_hint,omitempty"`
-	ShouldDefer            bool     `yaml:"should_defer,omitempty"`
+	Version                string            `yaml:"version"`
+	Name                   string            `yaml:"name"`
+	Slug                   string            `yaml:"slug,omitempty"`
+	Description            string            `yaml:"description,omitempty"`
+	Category               string            `yaml:"category,omitempty"`
+	WhenToUse              string            `yaml:"when_to_use,omitempty"`
+	ContextMode            string            `yaml:"context_mode,omitempty"`
+	AllowedTools           []string          `yaml:"allowed_tools,omitempty"`
+	DisableModelInvocation bool              `yaml:"disable_model_invocation,omitempty"`
+	ArgumentHint           string            `yaml:"argument_hint,omitempty"`
+	ShouldDefer            bool              `yaml:"should_defer,omitempty"`
+	// ModelOverrides lets a skill request a different model than the agent default.
+	// Keys are usage contexts ("default", "vision"); values are model IDs.
+	// Inspired by Claude Code BundledSkillDefinition.modelOverrides.
+	ModelOverrides map[string]string `yaml:"model_overrides,omitempty"`
+	// EffortLevel sets the Anthropic thinking-budget tier for this skill's turns.
+	// Valid values: lowest, low, medium, high, highest.
+	// Inspired by Claude Code BundledSkillDefinition.effortLevel.
+	EffortLevel string `yaml:"effort_level,omitempty"`
+	// AssociatedAgents lists agent slugs whose persona this skill is bound to.
+	// On invocation the runner activates the named agent's system prompt.
+	// Inspired by Claude Code BundledSkillDefinition.associatedAgentDefinitions.
+	AssociatedAgents []string `yaml:"associated_agents,omitempty"`
+	// DynamicHooks lists hook-event slugs registered for the duration of the skill.
+	// The runner wires these hooks before executing and removes them after.
+	// Inspired by Claude Code skill-level dynamic hooks (Section 6.1).
+	DynamicHooks []string `yaml:"dynamic_hooks,omitempty"`
 }
 
 // ParseSkillMD parses a SKILL.md file into a CreateRequest.
@@ -77,6 +97,10 @@ func ParseSkillMD(content string) (CreateRequest, error) {
 		DisableModelInvocation: fm.DisableModelInvocation,
 		ArgumentHint:           argumentHint,
 		ShouldDefer:            fm.ShouldDefer,
+		ModelOverrides:         fm.ModelOverrides,
+		EffortLevel:            fm.EffortLevel,
+		AssociatedAgents:       fm.AssociatedAgents,
+		DynamicHooks:           fm.DynamicHooks,
 	}, nil
 }
 

@@ -2,6 +2,7 @@ package agentic_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
 // mockAgentConfigLoader is a test double for agentic.AgentConfigLoader.
@@ -82,4 +84,54 @@ func TestRunSession_ArchivedAgent_ReturnsErrAgentArchived(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, chat.ErrAgentArchived), "expected ErrAgentArchived, got: %v", err)
+}
+
+// --- OOB: model build failure surfaces a provider-tagged error ---
+
+// buildErrorFactory is a ChatModelFactory whose Build always fails — simulating
+// a tenant that has not configured the provider's API key yet.
+type buildErrorFactory struct{}
+
+func (buildErrorFactory) Build(context.Context, string, string) (ai.ChatModel, error) {
+	return nil, errors.New("chat model: openrouter.apiKey not configured in settings")
+}
+func (buildErrorFactory) ResolveModel(context.Context, string) string     { return "" }
+func (buildErrorFactory) ResolveDefaultProvider(context.Context) string   { return "" }
+
+// TestRunSession_BuildError_WrapsProvider verifies that when the model factory
+// cannot build a ChatModel (e.g. missing API key), RunSession returns an error
+// that names the provider — friendlyStartupError relies on that tag to point
+// the user at the right settings row.
+func TestRunSession_BuildError_WrapsProvider(t *testing.T) {
+	loader := &mockAgentConfigLoader{cfg: &chat.AgentRunConfig{
+		Status:      "PUBLISHED",
+		ID:          uuid.New(),
+		ModelConfig: json.RawMessage(`{"provider":"openrouter","model":"mistralai/mistral-nemo"}`),
+	}}
+	adapter := agentic.NewSessionRunnerAdapterWithFactory(
+		buildErrorFactory{}, // factory — reached because the agent is PUBLISHED
+		nil,                 // skillClient
+		nil,                 // prompt
+		nil,                 // tools
+		nil,                 // ctxManager
+		nil,                 // memory
+		nil,                 // hookExecutor
+		nil,                 // repo
+		loader,
+		nil, // agentRepo
+		nil, // skillRepo
+		nil, // toolRepo
+		nil, // integRepo
+		nil, // mcpRepo
+	)
+
+	_, err := adapter.RunSession(context.Background(), chat.RunInput{
+		AgentID:   uuid.New(),
+		SessionID: uuid.New(),
+		TenantID:  "test",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "build model for provider")
+	assert.Contains(t, err.Error(), "openrouter")
 }

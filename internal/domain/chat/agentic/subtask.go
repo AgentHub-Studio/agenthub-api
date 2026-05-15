@@ -25,6 +25,33 @@ const (
 	SubtaskKilled    SubtaskStatus = "killed"
 )
 
+// allSubtaskStatuses is the closed canonical set (mirrors the same
+// pattern used by every other bounded enum in this package).
+var allSubtaskStatuses = []SubtaskStatus{
+	SubtaskCompleted, SubtaskFailed, SubtaskKilled,
+}
+
+// IsValidSubtaskStatus returns true for the bounded set. Useful when
+// deserialising OBS-006 SubtaskCompleteData from external sources
+// (e.g., persisted audit rows, cross-agent replay) and you need to
+// reject unknown labels before they flow into the trace pipeline.
+func IsValidSubtaskStatus(s SubtaskStatus) bool {
+	for _, v := range allSubtaskStatuses {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+// AllSubtaskStatuses returns a defensive copy of the closed set —
+// useful for catalog UIs, validation tables, and audit emission.
+func AllSubtaskStatuses() []SubtaskStatus {
+	out := make([]SubtaskStatus, len(allSubtaskStatuses))
+	copy(out, allSubtaskStatuses)
+	return out
+}
+
 // SubtaskResult is the structured envelope for sub-agent results.
 // It is serialised as the tool_result output so the LLM can parse it.
 type SubtaskResult struct {

@@ -429,6 +429,13 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusNotFound, "session not found")
 			return
 		}
+		// OOB: a session with no agent and no published agent to route to. 503
+		// (not 422) — it is a tenant-level configuration gap, retryable once an
+		// admin creates/publishes an agent.
+		if errors.Is(err, ErrNoAgentAvailable) {
+			respond.Error(w, http.StatusServiceUnavailable, friendlyStartupError(err.Error()))
+			return
+		}
 		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}

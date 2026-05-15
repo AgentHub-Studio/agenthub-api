@@ -354,7 +354,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	mcpHandler := mcp.NewHandler(mcpSvc)
 	approvalHandler := approval.NewHandler(approval.NewService(approval.NewRepository(pool)))
 	coreAgentLoader := core.NewCoreAgentLoader(pool)
-	coreHandler := core.NewHandler(coreAgentLoader)
+	coreOnboardingService := core.NewOnboardingService(
+		core.NewCoreCapabilityOnboardingChecklistLoader(pool),
+		core.NewOnboardingStatusRepository(pool),
+	)
+	coreHandler := core.NewHandler(coreAgentLoader, coreOnboardingService)
 
 	// Marketplace handlers.
 	mkplListingHandler := mkplListing.NewHandler(mkplListing.NewService(mkplListing.NewRepository(pool)))

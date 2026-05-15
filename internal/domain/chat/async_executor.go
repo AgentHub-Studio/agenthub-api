@@ -219,16 +219,21 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 			}
 			return uuid.Nil, fmt.Errorf("chat: lookup session: %w", err)
 		}
-		if session.AgentID == nil {
-			return uuid.Nil, ErrAgentNotFound
-		}
 		// Bug 246: rejeitar runs em session ARCHIVED — usuário arquivou
 		// como sinal de "não usar mais"; aceitar runs subverte isso.
 		if session.Status == StatusArchived {
 			return uuid.Nil, ErrSessionArchived
 		}
-		if err := e.agentExister.GetByID(ctx, *session.AgentID); err != nil {
-			return uuid.Nil, ErrAgentNotFound
+		// OOB / Bug 244: um AgentID nil é permitido aqui — significa ou uma
+		// sessão intencionalmente sem agente (criada para o roteador escolher)
+		// ou uma sessão cujo agente foi deletado (FK ON DELETE SET NULL). Ambos
+		// os casos são tratados em runTask, que roteia a mensagem para o melhor
+		// agente publicado. Só rejeitamos quando um agente AINDA é referenciado
+		// mas não existe mais.
+		if session.AgentID != nil {
+			if err := e.agentExister.GetByID(ctx, *session.AgentID); err != nil {
+				return uuid.Nil, ErrAgentNotFound
+			}
 		}
 	}
 
@@ -444,30 +449,48 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	}
 
 	if session.AgentID == nil {
-		// P-C292-1: mirror the SSE path — attempt to bind the default published agent
-		// before giving up, so async runs on agent-less sessions behave identically.
-		defaultID, err := e.repo.FindDefaultAgentID(ctx)
-		if err != nil || defaultID == nil {
-			slog.Error("chat: background run session has no agent and no default agent found", "runId", task.RunID, "err", err)
-			_ = e.repo.MarkRunFailed(ctx, task.RunID, "no agent configured for this session and no default published agent found")
-			appendBufferedError(buf, "no agent configured for this session and no default published agent found", "startup")
+		// P-C292-1 / OOB: mirror the SSE path — route the message to the best
+		// published agent before giving up, so async runs on agentless sessions
+		// behave identically. Covers both intentionally agentless sessions and
+		// sessions whose agent was deleted (FK ON DELETE SET NULL).
+		routed, err := routeAgentID(ctx, e.repo, task.Message)
+		if err != nil || routed == nil {
+			reason := ErrNoAgentAvailable.Error()
+			if err != nil {
+				reason = err.Error()
+			}
+			slog.Error("chat: background run has no agent and routing found none", "runId", task.RunID, "err", err)
+			_ = e.repo.MarkRunFailed(ctx, task.RunID, reason)
+			appendBufferedError(buf, reason, "startup")
 			// P-C292-2: persist a user-facing error so chat history is not left empty.
 			_, _ = e.repo.CreateMessage(ctx, ChatMessage{
 				SessionID:   task.SessionID,
 				Role:        "assistant",
-				Content:     "Não foi possível iniciar o agente: nenhum agente está configurado para esta sessão e não há agente padrão publicado.",
+				Content:     friendlyStartupError(ErrNoAgentAvailable.Error()),
 				MessageType: MessageTypeText,
 			})
 			return
 		}
-		if err := e.repo.UpdateSessionAgent(ctx, task.SessionID, *defaultID); err != nil {
-			slog.Error("chat: background run failed to bind default agent", "runId", task.RunID, "err", err)
-			_ = e.repo.MarkRunFailed(ctx, task.RunID, "failed to bind default agent: "+err.Error())
-			appendBufferedError(buf, "failed to bind default agent: "+err.Error(), "startup")
+		if err := e.repo.UpdateSessionAgent(ctx, task.SessionID, *routed); err != nil {
+			slog.Error("chat: background run failed to bind routed agent", "runId", task.RunID, "err", err)
+			_ = e.repo.MarkRunFailed(ctx, task.RunID, "failed to bind routed agent: "+err.Error())
+			appendBufferedError(buf, "failed to bind routed agent: "+err.Error(), "startup")
 			return
 		}
-		session.AgentID = defaultID
-		slog.Info("chat: background run bound default agent to session", "runId", task.RunID, "agentId", *defaultID)
+		session.AgentID = routed
+		slog.Info("chat: background run bound routed agent to session", "runId", task.RunID, "agentId", *routed)
+		// P-C115-1: snapshot the routed agent onto the session so the
+		// persona/model/skills stay consistent across the rest of the
+		// conversation. Non-fatal on failure.
+		if e.agentLoader != nil {
+			if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *routed); err == nil {
+				snapshotAgent(agentCfg, &session)
+				if err := e.repo.UpdateSessionSnapshots(ctx, task.SessionID,
+					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot); err != nil {
+					slog.Warn("chat: failed to persist routed-agent snapshot", "runId", task.RunID, "err", err)
+				}
+			}
+		}
 	}
 
 	// P-C253-1: load MCP server names so the runner filters tools to only those
@@ -480,6 +503,17 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		}
 	}
 
+	// P-C115-1: extract skill IDs from the session snapshot so the runner uses
+	// the same tool set captured at session creation (or when the agent was
+	// routed). Mirrors chat.Service.RunSession.
+	var skillIDsSnapshot []uuid.UUID
+	if len(session.SkillBindingsSnapshot) > 2 {
+		var snap SkillBindingsSnapshotData
+		if err := json.Unmarshal(session.SkillBindingsSnapshot, &snap); err == nil {
+			skillIDsSnapshot = snap.SkillIDs
+		}
+	}
+
 	// 2. Execute the run
 	runEvents, err := e.runner.RunSession(ctx, RunInput{
 		RunID:                  task.RunID,
@@ -487,6 +521,9 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		AgentID:                *session.AgentID,
 		TenantID:               task.TenantID,
 		UserMessage:            task.Message,
+		SystemPromptSnapshot:   session.SystemPromptSnapshot,
+		ModelConfigSnapshot:    session.ModelConfigSnapshot,
+		SkillIDsSnapshot:       skillIDsSnapshot,
 		MCPServerNamesSnapshot: mcpServerNames,
 	})
 
@@ -692,6 +729,9 @@ var settingKeyRE = regexp.MustCompile(`([a-z][a-zA-Z0-9_]*\.[a-zA-Z][a-zA-Z0-9_]
 // cause and (c) where to fix it. If we fall through to the default, the message
 // still names the setting key extracted from the raw error.
 func friendlyStartupError(rawMsg string) string {
+	if strings.Contains(rawMsg, "no published agent") || strings.Contains(rawMsg, "no agent configured") {
+		return "Não foi possível iniciar o chat: este tenant ainda não tem nenhum agente publicado. Crie um agente em Administração → Agentes e publique-o (ou aguarde o provisionamento do assistente padrão) e tente novamente."
+	}
 	if strings.Contains(rawMsg, "is not published") || strings.Contains(rawMsg, "DRAFT status") || strings.Contains(rawMsg, "agent is not published") {
 		return "Não foi possível iniciar o agente: este agente ainda não foi publicado. Abra o agente na seção Administração → Agentes e clique em Publicar antes de usá-lo no chat."
 	}
