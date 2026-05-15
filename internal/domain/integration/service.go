@@ -786,6 +786,16 @@ func (s *Service) CreateMCP(ctx context.Context, req mcp.CreateRequest) (mcp.Mcp
 	return s.mcps.Create(ctx, req)
 }
 
+// UpdateMCP delegates to the underlying MCP catalog.
+func (s *Service) UpdateMCP(ctx context.Context, id uuid.UUID, req mcp.UpdateRequest) (mcp.McpServerConfigResponse, error) {
+	return s.mcps.Update(ctx, id, req)
+}
+
+// DeleteMCP delegates to the underlying MCP catalog.
+func (s *Service) DeleteMCP(ctx context.Context, id uuid.UUID) error {
+	return s.mcps.Delete(ctx, id)
+}
+
 // CreateDatabase creates a datasource and generates a companion skill + SQL tool.
 func (s *Service) CreateDatabase(ctx context.Context, req DatabaseCreateRequest) (DatabaseResponse, error) {
 	if err := validateDatabaseRequest(req); err != nil {

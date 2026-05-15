@@ -520,6 +520,39 @@ func TestService_CreateMCP_DelegatesToUnderlyingService(t *testing.T) {
 	assert.Equal(t, "filesystem", mcpCatalog.created.Name)
 }
 
+func TestService_UpdateMCP_DelegatesToUnderlyingService(t *testing.T) {
+	existingID := uuid.New()
+	mcpCatalog := &stubMCPCatalog{items: []mcp.McpServerConfigResponse{{
+		ID: existingID, Name: "filesystem", TransportType: "stdio", Enabled: true,
+	}}}
+	svc := integration.NewService(&stubToolCatalog{}, &stubDatasourceCatalog{}, mcpCatalog, &stubVPNCatalog{})
+
+	newName := "filesystem-renamed"
+	resp, err := svc.UpdateMCP(context.Background(), existingID, mcp.UpdateRequest{Name: &newName})
+	require.NoError(t, err)
+	assert.Equal(t, "filesystem-renamed", resp.Name)
+	require.NotNil(t, mcpCatalog.updated.Name)
+	assert.Equal(t, "filesystem-renamed", *mcpCatalog.updated.Name)
+}
+
+func TestService_UpdateMCP_NotFoundFromUnderlyingService(t *testing.T) {
+	mcpCatalog := &stubMCPCatalog{}
+	svc := integration.NewService(&stubToolCatalog{}, &stubDatasourceCatalog{}, mcpCatalog, &stubVPNCatalog{})
+
+	_, err := svc.UpdateMCP(context.Background(), uuid.New(), mcp.UpdateRequest{})
+	require.ErrorIs(t, err, mcp.ErrNotFound)
+}
+
+func TestService_DeleteMCP_DelegatesToUnderlyingService(t *testing.T) {
+	id := uuid.New()
+	mcpCatalog := &stubMCPCatalog{}
+	svc := integration.NewService(&stubToolCatalog{}, &stubDatasourceCatalog{}, mcpCatalog, &stubVPNCatalog{})
+
+	err := svc.DeleteMCP(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, id, mcpCatalog.deleted)
+}
+
 func TestService_CreateDatabase_GeneratesDatasourceSkillAndTool(t *testing.T) {
 	datasources := &stubDatasourceCatalog{}
 	skillCreator := &stubSkillCreator{resp: skill.Response{ID: uuid.New()}}
