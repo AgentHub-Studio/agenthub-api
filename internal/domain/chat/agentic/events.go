@@ -38,6 +38,12 @@ const (
 	// (markdown, HTML table, JSON) intended for display in the canvas panel.
 	// The frontend renders this in a sandboxed panel alongside the chat.
 	EventCanvasUpdate RunEventType = "canvas_update"
+	// EventFrontendActionCall is emitted when the LLM calls a tool that was
+	// declared by the Flutter client via `POST /api/chat/sessions/{id}/client-state`.
+	// The runner blocks for the result via [FrontendActionHandler.Submit]; the
+	// client posts it back through the same `client-state` endpoint with
+	// `actionResults: [{id, status, result?, error?}]`.
+	EventFrontendActionCall RunEventType = "frontend_action_call"
 )
 
 // ToolUseSummaryData carries a human-readable summary of a completed tool batch.
@@ -289,6 +295,15 @@ const (
 	// The content field must be valid JSON: {"columns":[...],"rows":[[...]]}.
 	CanvasFormatTable CanvasFormat = "table"
 )
+
+// FrontendActionCallData is the payload for EventFrontendActionCall.
+// Carries everything the client needs to dispatch the call to its local
+// CopilotAction registry.
+type FrontendActionCallData struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
 
 // CanvasUpdateData is the payload for EventCanvasUpdate.
 // Emitted when the agent renders rich visual content to the canvas panel.

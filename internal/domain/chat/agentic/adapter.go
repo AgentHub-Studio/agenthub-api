@@ -76,8 +76,31 @@ type SessionRunnerAdapter struct {
 	// session ID so that HTTP respond calls can be routed to the correct run.
 	elicitation elicitationRegistry
 
+	// clientState holds CopilotKit client declarations (frontend actions and
+	// readables) and routes action results back to the active run. Lazily
+	// created — nil until [WithClientStateStore] is called or [ClientStateStore]
+	// is accessed.
+	clientState *ClientStateStore
+
 	// permAudit, when set, records permission decisions for every tool call.
 	permAudit PermissionAuditLogger
+}
+
+// WithClientStateStore wires a [ClientStateStore] for CopilotKit Phase 1
+// frontend actions. When unset, the adapter falls back to a default in-memory
+// store (TTL 6h) created lazily via [SessionRunnerAdapter.ClientStateStore].
+func (a *SessionRunnerAdapter) WithClientStateStore(store *ClientStateStore) *SessionRunnerAdapter {
+	a.clientState = store
+	return a
+}
+
+// ClientStateStore returns the active store, creating a default one on first
+// access. Safe for concurrent use after the adapter is constructed.
+func (a *SessionRunnerAdapter) ClientStateStore() *ClientStateStore {
+	if a.clientState == nil {
+		a.clientState = NewClientStateStore(6 * time.Hour)
+	}
+	return a.clientState
 }
 
 // elicitationRegistry maps active session runs to their ElicitationHandlers.
@@ -418,6 +441,14 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	runKey := in.SessionID.String()
 	a.elicitation.register(runKey, elicHandler)
 
+	// CopilotKit Phase 1: attach a FrontendActionHandler for this run. The store
+	// already holds the client-declared actions/readables (posted before the run
+	// started) and now routes any incoming action results to the handler that
+	// will block in Submit() while the LLM waits.
+	store := a.ClientStateStore()
+	frontendHandler := NewFrontendActionHandler()
+	store.AttachHandler(in.SessionID, frontendHandler)
+
 	// The bridgeCh receives elicitation events from OnEnqueue before agenticCh
 	// is created. We use a buffered channel so the callback never blocks.
 	elicEventCh := make(chan RunEvent, 8)
@@ -467,6 +498,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		TenantID:               in.TenantID,
 		PermissionRules:        ParsePermissionRules(agentCfg.PermissionRules),
 		Elicitation:            elicHandler,
+		FrontendActions:        store, // CopilotKit Phase 1 (ClientStateStore satisfies FrontendActionsProvider)
 		IsAdmin:                callerHasAdminRole(ctx),    // P-C298-1
 		EnableManagement:       agentCfg.EnableManagement, // P-C184-2
 		DisableAskUser:         agentCfg.DisableAskUser,
@@ -480,6 +512,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	go func() {
 		defer func() {
 			a.elicitation.unregister(runKey)
+			store.DetachHandler(in.SessionID)
 			// P-C173-1: persist the current config hash so the next run can detect changes.
 			if currentHash != "" {
 				if hashErr := a.repo.UpdateSessionConfigHash(ctx, in.SessionID, currentHash); hashErr != nil {
@@ -534,6 +567,47 @@ func (a *SessionRunnerAdapter) RespondElicitation(sessionID, requestID string, r
 		Content: result.Content,
 	}
 	return a.elicitation.Respond(sessionID, requestID, agResult)
+}
+
+// ApplyClientState merges a CopilotKit client-state patch into the per-session
+// store. Action results are dispatched to the active run (if any); declared
+// actions and readables persist in memory until the next run picks them up.
+// Implements [chat.ClientStateApplier] without exposing the agentic types.
+func (a *SessionRunnerAdapter) ApplyClientState(sessionID uuid.UUID, patch chat.ClientStatePatch) {
+	agPatch := ClientStatePatch{}
+	if patch.FrontendActions != nil {
+		agPatch.FrontendActions = make([]FrontendAction, 0, len(patch.FrontendActions))
+		for _, fa := range patch.FrontendActions {
+			agPatch.FrontendActions = append(agPatch.FrontendActions, FrontendAction{
+				Name:        fa.Name,
+				Description: fa.Description,
+				Parameters:  fa.Parameters,
+			})
+		}
+	}
+	if patch.Readables != nil {
+		agPatch.Readables = make([]Readable, 0, len(patch.Readables))
+		for _, r := range patch.Readables {
+			agPatch.Readables = append(agPatch.Readables, Readable{
+				ID:          r.ID,
+				Description: r.Description,
+				Value:       r.Value,
+				ParentID:    r.ParentID,
+			})
+		}
+	}
+	if patch.ActionResults != nil {
+		agPatch.ActionResults = make([]FrontendActionResult, 0, len(patch.ActionResults))
+		for _, ar := range patch.ActionResults {
+			agPatch.ActionResults = append(agPatch.ActionResults, FrontendActionResult{
+				ID:     ar.ID,
+				Status: ar.Status,
+				Result: ar.Result,
+				Error:  ar.Error,
+			})
+		}
+	}
+	a.ClientStateStore().Apply(sessionID, agPatch)
 }
 
 // GetPendingElicitations returns unresolved ask_user requests for the given session.

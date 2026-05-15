@@ -68,6 +68,13 @@ type RunInput struct {
 	// user submits a response via POST /elicitation/{requestId}/respond.
 	Elicitation ElicitationSubmitter
 
+	// FrontendActions, when set, exposes CopilotKit-style frontend actions —
+	// tools whose names match are intercepted at the routing point: the runner
+	// emits an EventFrontendActionCall and blocks via Submit() until the
+	// client posts the result back through POST /client-state. CopilotKit
+	// Phase 1.
+	FrontendActions FrontendActionsProvider
+
 	// IsAdmin, when true, grants access to the agenthub_manage builtin tool.
 	// P-C298-1: set from the caller's JWT "admin" realm role.
 	IsAdmin bool
@@ -281,14 +288,19 @@ type runState struct {
 	// of blocking for user input again. This prevents infinite ask_user loops observed
 	// with models like gpt-oss-120b that do not follow the "_instruction" hint.
 	collectedUserValues map[string]any
+	// frontendActionsByName is the set of CopilotKit frontend action names declared by
+	// the client for this session. Tool calls whose name matches are routed through
+	// FrontendActionsProvider.Submit instead of local execution.
+	frontendActionsByName map[string]bool
 }
 
 // newRunState initialises a fresh runState for a new run.
 func newRunState() *runState {
 	return &runState{
-		toolRetries:         make(map[string]int),
-		storedMemoryKeys:    make(map[string]struct{}),
-		collectedUserValues: make(map[string]any),
+		toolRetries:           make(map[string]int),
+		storedMemoryKeys:      make(map[string]struct{}),
+		collectedUserValues:   make(map[string]any),
+		frontendActionsByName: make(map[string]bool),
 	}
 }
 
@@ -574,6 +586,33 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	for i, t := range toolResult.Loaded {
 		toolNames[i] = t.Name
 	}
+
+	// CopilotKit Phase 1: append client-declared frontend actions as LLM tools.
+	// They are routed by name at the execution point — see the interception block
+	// in executeWithPermissions for the Submit() handoff.
+	if in.FrontendActions != nil {
+		frontendActions := in.FrontendActions.GetActions(in.SessionID)
+		for _, fa := range frontendActions {
+			var params map[string]any
+			if len(fa.Parameters) > 0 {
+				_ = json.Unmarshal(fa.Parameters, &params)
+			}
+			if params == nil {
+				params = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
+			aiTools = append(aiTools, ai.Tool{
+				Type: "function",
+				Function: ai.ToolSchema{
+					Name:        fa.Name,
+					Description: fa.Description,
+					Parameters:  params,
+				},
+			})
+			toolNames = append(toolNames, fa.Name)
+			rs.frontendActionsByName[fa.Name] = true
+		}
+	}
+
 	slog.Info("agentic: tools loaded for LLM", "count", len(aiTools), "tools", toolNames, "agentID", in.AgentID)
 	readOnlyIndex := BuildReadOnlyIndex(toolResult.All)
 	destructiveIndex := BuildDestructiveIndex(toolResult.All)
@@ -588,6 +627,11 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	allowedToolsIndex := make(map[string]bool, len(toolResult.All))
 	for _, t := range toolResult.All {
 		allowedToolsIndex[t.Name] = true
+	}
+	// Frontend actions are allowed for this run too — they bypass the skill-binding
+	// check because the client declared them, not the agent config.
+	for name := range rs.frontendActionsByName {
+		allowedToolsIndex[name] = true
 	}
 	_ = contextModeIndex       // TODO: use for fork-mode skill execution via SubtaskExecutor
 	_ = interruptBehaviorIndex // TODO: pass to SSE handler for graceful stop
@@ -2215,6 +2259,49 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 				ID:    tc.ID,
 				Name:  tc.Function.Name,
 				Error: &errMsg,
+			})
+			continue
+		}
+
+		// CopilotKit Phase 1: client-declared frontend actions. Emit the call event,
+		// block until the client posts the result back via POST /client-state, then
+		// surface the result as a normal tool_result. No permission evaluation —
+		// the action is owned and authorised by the client app itself.
+		if rs.frontendActionsByName[tc.Function.Name] && in.FrontendActions != nil {
+			ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+				ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(tc.Function.Arguments),
+			})
+			ch <- NewRunEvent(EventFrontendActionCall, FrontendActionCallData{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: json.RawMessage(tc.Function.Arguments),
+			})
+			// Mirror ask_user: use a long-lived context (24h) so the run-level
+			// processing timeout does not expire while the user is interacting.
+			actionCtx, actionCancel := context.WithTimeout(context.Background(), 24*time.Hour)
+			actionResult := in.FrontendActions.Submit(actionCtx, in.SessionID, tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			actionCancel()
+			if actionResult.Status == "error" {
+				errMsg := actionResult.Error
+				if errMsg == "" {
+					errMsg = "frontend action failed"
+				}
+				results[i] = ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
+				ch <- NewRunEvent(EventToolResult, ToolResultData{
+					ID: tc.ID, Name: tc.Function.Name, Error: &errMsg,
+				})
+				continue
+			}
+			output := actionResult.Result
+			if len(output) == 0 {
+				output = json.RawMessage(`null`)
+			}
+			results[i] = ToolExecResult{Output: output, ToolName: tc.Function.Name}
+			ch <- NewRunEvent(EventToolResult, ToolResultData{
+				ID: tc.ID, Name: tc.Function.Name, Output: output,
+			})
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
 			})
 			continue
 		}
