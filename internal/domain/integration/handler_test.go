@@ -316,3 +316,101 @@ func TestIntegrationHandler_GetMCPSuccess(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "filesystem")
 }
+
+func TestIntegrationHandler_UpdateDatabaseSuccess(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	body, _ := json.Marshal(integration.DatabaseCreateRequest{
+		Name: "Orders DB v2", Type: datasource.DataSourceTypePostgreSQL,
+		Host: "pg.new", Port: 5432, Database: "orders", DBUser: "u", DBPassword: "p",
+		Query: "SELECT 2", AllowWrite: true,
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/integrations/database/"+svc.database.ID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "Orders DB v2", svc.dbReq.Name)
+	assert.True(t, svc.dbReq.AllowWrite)
+}
+
+func TestIntegrationHandler_UpdateDatabase_NotFound(t *testing.T) {
+	r, _ := setupIntegrationHandler()
+	body, _ := json.Marshal(integration.DatabaseCreateRequest{Name: "x", Type: datasource.DataSourceTypePostgreSQL})
+	req := httptest.NewRequest(http.MethodPut, "/api/integrations/database/"+uuid.NewString(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestIntegrationHandler_DeleteDatabaseSuccess(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	req := httptest.NewRequest(http.MethodDelete, "/api/integrations/database/"+svc.database.ID.String(), nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, svc.database.ID, svc.deleted)
+}
+
+func TestIntegrationHandler_DeleteDatabase_NotFound(t *testing.T) {
+	r, _ := setupIntegrationHandler()
+	req := httptest.NewRequest(http.MethodDelete, "/api/integrations/database/"+uuid.NewString(), nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestIntegrationHandler_UpdateMCPSuccess(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	newName := "filesystem-renamed"
+	body, _ := json.Marshal(mcp.UpdateRequest{Name: &newName})
+	req := httptest.NewRequest(http.MethodPut, "/api/integrations/mcp/"+svc.mcp.ID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "filesystem-renamed", svc.mcp.Name)
+}
+
+func TestIntegrationHandler_UpdateMCP_NotFound(t *testing.T) {
+	r, _ := setupIntegrationHandler()
+	body, _ := json.Marshal(mcp.UpdateRequest{})
+	req := httptest.NewRequest(http.MethodPut, "/api/integrations/mcp/"+uuid.NewString(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestIntegrationHandler_DeleteMCPSuccess(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	req := httptest.NewRequest(http.MethodDelete, "/api/integrations/mcp/"+svc.mcp.ID.String(), nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, svc.mcp.ID, svc.deleted)
+}
+
+func TestIntegrationHandler_DeleteMCP_NotFound(t *testing.T) {
+	r, _ := setupIntegrationHandler()
+	req := httptest.NewRequest(http.MethodDelete, "/api/integrations/mcp/"+uuid.NewString(), nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
