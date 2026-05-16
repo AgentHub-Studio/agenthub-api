@@ -33,6 +33,9 @@ type chatService interface {
 	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error)
 	// RespondElicitation routes a user response to an active elicitation request.
 	RespondElicitation(sessionID, requestID string, result ElicitationResult) bool
+	// ApplyClientState merges a CopilotKit client-state patch (frontend actions,
+	// readables, action results) into the per-session runner state.
+	ApplyClientState(sessionID uuid.UUID, patch ClientStatePatch)
 }
 
 // RunLookup is a narrow interface for looking up a persisted run by ID.
@@ -119,6 +122,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/chat/sessions/{id}/run/{runId}/cancel", h.cancelRun)
 	r.Get("/api/chat/sessions/{id}/run/{runId}/resume", h.resumeSession)
 	r.Post("/api/chat/sessions/{id}/elicitation/{requestId}/respond", h.respondElicitation)
+	r.Post("/api/chat/sessions/{id}/client-state", h.clientState)
 	r.Get("/api/chat/runs/{id}", h.getRun)
 	r.Get("/api/chat/sessions/{id}/tasks", h.listTasks)
 	r.Get("/api/chat/sessions/{id}/tasks/{taskId}/notifications", h.listTaskNotifications)
@@ -797,6 +801,35 @@ func (h *Handler) respondElicitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	respond.NoContent(w)
+}
+
+// clientState handles POST /api/chat/sessions/{id}/client-state.
+//
+// CopilotKit Phase 1+: the body may carry any combination of:
+//   - frontendActions: actions the Flutter client is exposing for this session
+//   - readables:       app state exposed to the agent as <app_state>
+//   - actionResults:   results for a previously-emitted frontend_action_call
+//
+// Returns 204 on success. Sessions are not validated against the DB — the
+// store is a best-effort in-memory cache that survives a missing or stale
+// session UUID by silently dropping pending callbacks.
+func (h *Handler) clientState(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+
+	var patch ClientStatePatch
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			respond.Error(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+
+	h.svc.ApplyClientState(sessionID, patch)
 	respond.NoContent(w)
 }
 

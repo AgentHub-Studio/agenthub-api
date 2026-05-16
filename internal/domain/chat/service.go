@@ -107,6 +107,45 @@ type ElicitationResult struct {
 	Content map[string]interface{} `json:"content,omitempty"`
 }
 
+// ClientStateApplier merges a CopilotKit-style patch into the per-session store
+// owned by the runner. Mirrors agentic.ClientStatePatch to avoid circular
+// imports. Implemented by agentic.SessionRunnerAdapter; no-op on others.
+type ClientStateApplier interface {
+	ApplyClientState(sessionID uuid.UUID, patch ClientStatePatch)
+}
+
+// ClientStateFrontendAction mirrors agentic.FrontendAction. JSON-encoded
+// parameters follow the JSON Schema shape (`type=object`, `properties`, ...).
+type ClientStateFrontendAction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// ClientStateReadable mirrors agentic.Readable.
+type ClientStateReadable struct {
+	ID          string          `json:"id"`
+	Description string          `json:"description"`
+	Value       json.RawMessage `json:"value"`
+	ParentID    string          `json:"parentId,omitempty"`
+}
+
+// ClientStateActionResult mirrors agentic.FrontendActionResult.
+type ClientStateActionResult struct {
+	ID     string          `json:"id"`
+	Status string          `json:"status"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+// ClientStatePatch is the body of `POST /api/chat/sessions/{id}/client-state`.
+// Each top-level field is optional; nil slices mean "no change for this kind".
+type ClientStatePatch struct {
+	FrontendActions []ClientStateFrontendAction `json:"frontendActions,omitempty"`
+	Readables       []ClientStateReadable       `json:"readables,omitempty"`
+	ActionResults   []ClientStateActionResult   `json:"actionResults,omitempty"`
+}
+
 // SessionRunner starts an agentic loop and returns a channel of RunEvents.
 // The chat.Service calls this; the concrete implementation lives in
 // chat/agentic and is injected via the server wiring.
@@ -371,6 +410,16 @@ func (s *Service) RespondElicitation(sessionID, requestID string, result Elicita
 		return r.RespondElicitation(sessionID, requestID, result)
 	}
 	return false
+}
+
+// ApplyClientState forwards a CopilotKit client-state patch (frontend actions,
+// readables, action results) to the runner's store. Silently ignored when the
+// runner does not implement [ClientStateApplier] — keeps the chat service
+// usable in tests without a full agentic adapter wired in.
+func (s *Service) ApplyClientState(sessionID uuid.UUID, patch ClientStatePatch) {
+	if r, ok := s.runner.(ClientStateApplier); ok {
+		r.ApplyClientState(sessionID, patch)
+	}
 }
 
 // RunSession starts an agentic run for the given session.

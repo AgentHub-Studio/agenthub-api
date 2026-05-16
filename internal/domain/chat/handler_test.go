@@ -21,9 +21,11 @@ import (
 
 // mockChatSvc satisfies the private chatService interface in chat.Handler.
 type mockChatSvc struct {
-	sessions  map[uuid.UUID]chat.ChatSession
-	messages  map[uuid.UUID][]chat.ChatMessage
-	runEvents []chat.RunEvent
+	sessions               map[uuid.UUID]chat.ChatSession
+	messages               map[uuid.UUID][]chat.ChatMessage
+	runEvents              []chat.RunEvent
+	lastClientState        chat.ClientStatePatch
+	lastClientStateSession uuid.UUID
 }
 
 func newMockChatSvc() *mockChatSvc {
@@ -134,6 +136,11 @@ func (m *mockChatSvc) GetActiveRun(_ context.Context, _ uuid.UUID) (chat.ChatRun
 
 func (m *mockChatSvc) RespondElicitation(sessionID, requestID string, result chat.ElicitationResult) bool {
 	return false // no active runs in tests
+}
+
+func (m *mockChatSvc) ApplyClientState(sessionID uuid.UUID, patch chat.ClientStatePatch) {
+	m.lastClientState = patch
+	m.lastClientStateSession = sessionID
 }
 
 func setupChat() (*chi.Mux, *mockChatSvc) {
@@ -638,4 +645,71 @@ func TestHandler_GetTaskNotifications_200(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// --- CopilotKit Phase 1: POST /client-state ----------------------------------
+
+func TestHandler_ClientState_204_ForwardsFullPatch(t *testing.T) {
+	r, svc := setupChat()
+
+	sessionID := uuid.New()
+	body := bytes.NewBufferString(`{
+		"frontendActions":[{"name":"navigate_to","description":"d"}],
+		"readables":[{"id":"route","description":"d","value":"/x"}],
+		"actionResults":[{"id":"c-1","status":"ok","result":{"navigated":true}}]
+	}`)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/chat/sessions/"+sessionID.String()+"/client-state", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, sessionID, svc.lastClientStateSession)
+	require.Len(t, svc.lastClientState.FrontendActions, 1)
+	assert.Equal(t, "navigate_to", svc.lastClientState.FrontendActions[0].Name)
+	require.Len(t, svc.lastClientState.Readables, 1)
+	assert.Equal(t, "route", svc.lastClientState.Readables[0].ID)
+	require.Len(t, svc.lastClientState.ActionResults, 1)
+	assert.Equal(t, "c-1", svc.lastClientState.ActionResults[0].ID)
+	assert.Equal(t, "ok", svc.lastClientState.ActionResults[0].Status)
+}
+
+func TestHandler_ClientState_400_InvalidSessionID(t *testing.T) {
+	r, _ := setupChat()
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/chat/sessions/not-a-uuid/client-state",
+		bytes.NewBufferString(`{}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandler_ClientState_400_InvalidJSON(t *testing.T) {
+	r, _ := setupChat()
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/chat/sessions/"+uuid.New().String()+"/client-state",
+		bytes.NewBufferString(`{bad`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandler_ClientState_204_EmptyBodyIsOK(t *testing.T) {
+	r, svc := setupChat()
+
+	sessionID := uuid.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/chat/sessions/"+sessionID.String()+"/client-state", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, sessionID, svc.lastClientStateSession)
 }
