@@ -3,6 +3,7 @@ package agentic
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -345,5 +346,97 @@ func TestClientStateStore_UnknownSession_ReturnsNil(t *testing.T) {
 	}
 	if got := s.GetReadables(uuid.New()); got != nil {
 		t.Errorf("GetReadables on unknown session = %+v, want nil", got)
+	}
+}
+
+// --- FormatAppStateBlock -----------------------------------------------------
+
+func TestFormatAppStateBlock_Empty_ReturnsEmptyString(t *testing.T) {
+	if got := FormatAppStateBlock(nil); got != "" {
+		t.Errorf("nil readables → %q, want \"\"", got)
+	}
+	if got := FormatAppStateBlock([]Readable{}); got != "" {
+		t.Errorf("empty readables → %q, want \"\"", got)
+	}
+}
+
+func TestFormatAppStateBlock_RendersSingleReadable(t *testing.T) {
+	readables := []Readable{
+		{
+			ID:          "route",
+			Description: "current route",
+			Value:       json.RawMessage(`"/standalone/abc"`),
+		},
+	}
+	got := FormatAppStateBlock(readables)
+	wantContains := []string{
+		"<app_state>",
+		`<readable id="route" description="current route">`,
+		`"/standalone/abc"`,
+		"</readable>",
+		"</app_state>",
+	}
+	for _, w := range wantContains {
+		if !strings.Contains(got, w) {
+			t.Errorf("output missing %q\n----- got -----\n%s", w, got)
+		}
+	}
+}
+
+func TestFormatAppStateBlock_RendersMultipleWithParent(t *testing.T) {
+	readables := []Readable{
+		{ID: "auth", Description: "auth bundle", Value: json.RawMessage(`{}`)},
+		{
+			ID:          "user",
+			Description: "logged-in user",
+			ParentID:    "auth",
+			Value:       json.RawMessage(`{"name":"Cezar"}`),
+		},
+	}
+	got := FormatAppStateBlock(readables)
+	if !strings.Contains(got, `id="auth"`) {
+		t.Errorf("missing first readable")
+	}
+	if !strings.Contains(got, `parent="auth"`) {
+		t.Errorf("missing parent attribute on child")
+	}
+	if !strings.Contains(got, `{"name":"Cezar"}`) {
+		t.Errorf("missing JSON-encoded value")
+	}
+}
+
+func TestFormatAppStateBlock_EscapesXMLMetaCharsInAttributes(t *testing.T) {
+	readables := []Readable{
+		{
+			ID:          `it's "weird" & <bad>`,
+			Description: `also "weird"`,
+			Value:       json.RawMessage(`true`),
+		},
+	}
+	got := FormatAppStateBlock(readables)
+	bad := []string{`id="it's`, `id="it"s`, `description="also "weird""`}
+	for _, b := range bad {
+		if strings.Contains(got, b) {
+			t.Errorf("unescaped chars leaked into attribute: %q", b)
+		}
+	}
+	wantContains := []string{
+		`id="it&apos;s &quot;weird&quot; &amp; &lt;bad&gt;"`,
+		`description="also &quot;weird&quot;"`,
+	}
+	for _, w := range wantContains {
+		if !strings.Contains(got, w) {
+			t.Errorf("expected escaped: %q\n----- got -----\n%s", w, got)
+		}
+	}
+}
+
+func TestFormatAppStateBlock_EmptyValue_RendersNull(t *testing.T) {
+	readables := []Readable{
+		{ID: "x", Description: "y"},
+	}
+	got := FormatAppStateBlock(readables)
+	if !strings.Contains(got, "null") {
+		t.Errorf("expected null fallback for empty value\n----- got -----\n%s", got)
 	}
 }

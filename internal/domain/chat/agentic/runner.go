@@ -676,6 +676,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		localEmitError("prompt_build", err)
 		return
 	}
+	// CopilotKit Phase 2: append client-declared readables as <app_state>.
+	// The block stays fresh because we refetch the snapshot every time the
+	// prompt is (re)built — and the prompt is rebuilt after compaction.
+	if in.FrontendActions != nil {
+		systemPrompt += FormatAppStateBlock(in.FrontendActions.GetReadables(in.SessionID))
+	}
 
 	// 4. Load conversation history.
 	messages, lastResponseID, err := r.loadHistory(ctx, in.SessionID)
@@ -1566,6 +1572,11 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 							ActiveSkillSlugs:  activeSkillSlugs,
 						}); err == nil {
 							systemPrompt = rebuilt
+							// CopilotKit Phase 2: re-append <app_state> after compaction
+							// so the agent keeps seeing the latest client readables.
+							if in.FrontendActions != nil {
+								systemPrompt += FormatAppStateBlock(in.FrontendActions.GetReadables(in.SessionID))
+							}
 						}
 					}
 				}

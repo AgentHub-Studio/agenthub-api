@@ -19,13 +19,18 @@ import (
 // for runner-level tests: the catalog is pre-populated and Submit resolves
 // synchronously with [Result].
 type stubFrontendActionsProvider struct {
-	actions []agentic.FrontendAction
-	Result  agentic.FrontendActionResult
-	called  atomic.Int32
+	actions   []agentic.FrontendAction
+	readables []agentic.Readable
+	Result    agentic.FrontendActionResult
+	called    atomic.Int32
 }
 
 func (s *stubFrontendActionsProvider) GetActions(_ uuid.UUID) []agentic.FrontendAction {
 	return s.actions
+}
+
+func (s *stubFrontendActionsProvider) GetReadables(_ uuid.UUID) []agentic.Readable {
+	return s.readables
 }
 
 func (s *stubFrontendActionsProvider) Submit(_ context.Context, _ uuid.UUID, callID, _ string, _ json.RawMessage) agentic.FrontendActionResult {
@@ -165,6 +170,80 @@ func TestRunner_FrontendAction_ErrorResult(t *testing.T) {
 
 	// Run still terminates cleanly.
 	assert.True(t, hasEventType(events, agentic.EventRunComplete))
+}
+
+// TestRunner_Readables_InjectedIntoSystemPrompt verifies CopilotKit Phase 2:
+// readables declared by the client appear inside an <app_state> block in the
+// system message passed to the LLM. The runner threads systemPrompt through
+// [ai.ChatOptions.SystemMsg], not as messages[0], so the assertion targets opts.
+func TestRunner_Readables_InjectedIntoSystemPrompt(t *testing.T) {
+	var observedSystem string
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []commonsai.Message, opts commonsai.ChatOptions) (<-chan commonsai.StreamChunk, error) {
+			if idx == 0 {
+				observedSystem = opts.SystemMsg
+			}
+			return makeTextStream("ok"), nil
+		},
+	}
+
+	persister := &mockPersister{}
+	history := &mockHistoryLoader{}
+	config := agentic.DefaultRunConfig()
+	runner := newTestRunner(model, persister, history, config)
+
+	provider := &stubFrontendActionsProvider{
+		readables: []agentic.Readable{
+			{
+				ID:          "currentRoute",
+				Description: "rota visível no momento",
+				Value:       json.RawMessage(`"/standalone/abc"`),
+			},
+		},
+	}
+
+	collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		SessionID:       uuid.New(),
+		AgentID:         uuid.New(),
+		UserMessage:     "qual rota?",
+		SystemPrompt:    "you are helpful",
+		TenantID:        "test-tenant",
+		FrontendActions: provider,
+	}))
+
+	assert.Contains(t, observedSystem, "<app_state>")
+	assert.Contains(t, observedSystem, `id="currentRoute"`)
+	assert.Contains(t, observedSystem, `"/standalone/abc"`)
+	assert.Contains(t, observedSystem, "</app_state>")
+}
+
+// TestRunner_NoReadables_NoAppStateBlock ensures absent readables produce no
+// <app_state> block — the rest of the system prompt stays unchanged.
+func TestRunner_NoReadables_NoAppStateBlock(t *testing.T) {
+	var observedSystem string
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []commonsai.Message, opts commonsai.ChatOptions) (<-chan commonsai.StreamChunk, error) {
+			if idx == 0 {
+				observedSystem = opts.SystemMsg
+			}
+			return makeTextStream("ok"), nil
+		},
+	}
+
+	runner := newTestRunner(model, &mockPersister{}, &mockHistoryLoader{}, agentic.DefaultRunConfig())
+
+	provider := &stubFrontendActionsProvider{}
+
+	collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		SessionID:       uuid.New(),
+		AgentID:         uuid.New(),
+		UserMessage:     "oi",
+		SystemPrompt:    "p",
+		TenantID:        "test-tenant",
+		FrontendActions: provider,
+	}))
+
+	assert.NotContains(t, observedSystem, "<app_state>")
 }
 
 // TestRunner_NoFrontendActions_NoSubmit ensures the provider's Submit is never
