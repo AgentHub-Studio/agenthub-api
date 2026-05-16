@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,14 +62,19 @@ type FrontendActionSubmitter interface {
 }
 
 // FrontendActionsProvider is the full surface the runner sees: catalog +
-// submission. Implementations are session-scoped via the registry (see
-// [SessionRunnerAdapter.frontendActions]).
+// submission + readables. Implementations are session-scoped via the registry
+// (see [SessionRunnerAdapter.frontendActions]).
 type FrontendActionsProvider interface {
 	FrontendActionSubmitter
 
 	// GetActions returns the actions currently declared by the client for
 	// this session. Returns an empty slice when nothing has been declared.
 	GetActions(sessionID uuid.UUID) []FrontendAction
+
+	// GetReadables returns the readables currently declared by the client
+	// for this session. Returns an empty slice when nothing has been declared.
+	// Used by the runner to inject an <app_state> block into the system prompt.
+	GetReadables(sessionID uuid.UUID) []Readable
 }
 
 // --- request queue -----------------------------------------------------------
@@ -332,6 +338,66 @@ func (s *ClientStateStore) Submit(ctx context.Context, sessionID uuid.UUID, call
 		return FrontendActionResult{ID: callID, Status: "error", Error: "no client connected"}
 	}
 	return handler.Submit(ctx, sessionID, callID, name, args)
+}
+
+// FormatAppStateBlock renders the readable snapshot as an XML-tagged block
+// suitable for appending to a system prompt. Returns an empty string when no
+// readables are present so callers can `prompt += FormatAppStateBlock(...)`
+// without conditionals.
+//
+// Format:
+//
+//	<app_state>
+//	  <readable id="route" description="current route">
+//	    "/standalone/abc"
+//	  </readable>
+//	  <readable id="user" description="logged-in user" parent="auth">
+//	    {"name":"Cezar"}
+//	  </readable>
+//	</app_state>
+//
+// JSON-encoded values are inlined verbatim (Readable.Value is json.RawMessage).
+// Long values are NOT truncated here — the caller controls budget.
+func FormatAppStateBlock(readables []Readable) string {
+	if len(readables) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n<app_state>\n")
+	for _, r := range readables {
+		b.WriteString(`  <readable id="`)
+		b.WriteString(xmlEscape(r.ID))
+		b.WriteString(`" description="`)
+		b.WriteString(xmlEscape(r.Description))
+		b.WriteString(`"`)
+		if r.ParentID != "" {
+			b.WriteString(` parent="`)
+			b.WriteString(xmlEscape(r.ParentID))
+			b.WriteString(`"`)
+		}
+		b.WriteString(">\n    ")
+		if len(r.Value) > 0 {
+			b.Write(r.Value)
+		} else {
+			b.WriteString("null")
+		}
+		b.WriteString("\n  </readable>\n")
+	}
+	b.WriteString("</app_state>")
+	return b.String()
+}
+
+// xmlEscape escapes the five XML metacharacters in attribute values so a
+// description like `it's "high"` doesn't break the rendered block.
+func xmlEscape(s string) string {
+	r := strings.NewReplacer(
+		`&`, `&amp;`,
+		`<`, `&lt;`,
+		`>`, `&gt;`,
+		`"`, `&quot;`,
+		`'`, `&apos;`,
+	)
+	return r.Replace(s)
 }
 
 // Cleanup evicts sessions whose state hasn't been touched within the TTL.
