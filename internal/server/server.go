@@ -292,6 +292,15 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	}
 	triggerScheduler.Start(context.Background())
 
+	// Memory pruner — clears expired (ExpiresAt < NOW) and stale "general" memories
+	// every 6h across all tenants. Issue #138.
+	memoryPruner := memory.NewPruner(
+		&triggerTenantListerAdapter{repo: tenant.NewRepository(pool)},
+		memory.NewRepository(pool),
+		memory.DefaultPrunerConfig(),
+	)
+	memoryPruner.Start(context.Background())
+
 	// Channel adapter registry — adapters registered here handle inbound platform events.
 	channelRegistry := channel.NewRegistry()
 	channelRegistry.Register(channel.ChannelTypeSlack, &channel.SlackAdapter{})

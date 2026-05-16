@@ -238,6 +238,49 @@ func (r *Repository) ClearByAgent(ctx context.Context, agentID uuid.UUID) error 
 	return nil
 }
 
+// DeleteExpired removes memory entries whose ExpiresAt is in the past for the
+// current tenant. Returns the number of rows deleted.
+//
+// Called by the background Pruner; safe to call manually as well. Rows without
+// an ExpiresAt (NULL) are never touched.
+func (r *Repository) DeleteExpired(ctx context.Context) (int64, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
+	tag, err := conn.Exec(ctx, `DELETE FROM agent_memory WHERE expires_at IS NOT NULL AND expires_at < NOW()`)
+	if err != nil {
+		return 0, fmt.Errorf("memory: delete expired: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// PruneStaleGeneral removes "general" memories whose LastAccessedAt is older
+// than the cutoff. Structured types (user, feedback, project, reference) are
+// preserved indefinitely — they hold curated, high-value context.
+//
+// Returns the number of rows deleted.
+func (r *Repository) PruneStaleGeneral(ctx context.Context, cutoff time.Time) (int64, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
+	tag, err := conn.Exec(ctx,
+		`DELETE FROM agent_memory WHERE memory_type = 'general' AND last_accessed_at < $1`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("memory: prune stale general: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // ListByAgentAndType returns memories filtered by type.
 func (r *Repository) ListByAgentAndType(ctx context.Context, agentID uuid.UUID, userID *string, memoryType MemoryType) ([]AgentMemory, error) {
 	tenantID := tenant.FromContext(ctx)
