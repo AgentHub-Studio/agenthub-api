@@ -388,6 +388,7 @@ func (h *VersionHandler) RegisterVersionRoutes(r chi.Router) {
 	r.Get("/api/agents/{agentId}/versions/latest-published", h.getLatestPublished)
 	r.Get("/api/agents/{agentId}/versions/by-id/{versionId}", h.getVersionByID)
 	r.Put("/api/agents/{agentId}/versions/by-id/{versionId}", h.updateDraft)
+	r.Patch("/api/agents/{agentId}/versions/by-id/{versionId}", h.updateDraft)
 	r.Post("/api/agents/{agentId}/versions/{versionId}/publish", h.publishVersion)
 	r.Post("/api/agents/{agentId}/versions/{versionId}/rollback", h.rollbackVersion)
 }

@@ -528,9 +528,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		r.Mount("/api/oauth-credentials", oauthHandler.Routes())
 		r.Mount("/api/audit-logs", auditHandler.Routes())
 		r.Mount("/api/metrics", metricsHandler.Routes())
-		r.Route("/api/agents/{agentId}/metrics", func(r chi.Router) {
-			r.Mount("/", metricsHandler.AgentRoutes())
-		})
+		r.Mount("/api/agents/{id}/metrics", metricsHandler.AgentRoutes())
 		r.Mount("/api/vpn-resources", vpnHandler.Routes())
 		r.Mount("/api/datasources", datasourceHandler.Routes())
 		// Proxy credentials endpoint — requires PROXY_SERVICE role.

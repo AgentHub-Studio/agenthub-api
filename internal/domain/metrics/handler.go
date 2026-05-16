@@ -48,7 +48,7 @@ func (h *Handler) WithAgentExister(a agentExister) *Handler {
 }
 
 // AgentRoutes returns a router for agent-scoped metric endpoints. server.go
-// already mounts this under /api/agents/{agentId}/metrics, so paths here
+// already mounts this under /api/agents/{id}/metrics, so paths here
 // must be relative to that prefix (was emitting /metrics/metrics before).
 func (h *Handler) AgentRoutes() http.Handler {
 	r := chi.NewRouter()
@@ -69,7 +69,7 @@ func (h *Handler) Routes() http.Handler {
 
 func (h *Handler) listByAgent(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.FromContext(r.Context())
-	agentID, err := uuid.Parse(chi.URLParam(r, "agentId"))
+	agentID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid agentId")
 		return
@@ -99,7 +99,7 @@ func (h *Handler) listByAgent(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) agentSummary(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.FromContext(r.Context())
-	agentID, err := uuid.Parse(chi.URLParam(r, "agentId"))
+	agentID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid agentId")
 		return

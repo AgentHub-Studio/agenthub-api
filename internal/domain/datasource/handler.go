@@ -139,6 +139,43 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PATCH: merge with existing entity so partial updates don't fail validation.
+	if r.Method == http.MethodPatch {
+		existing, err := h.svc.GetByID(r.Context(), tenantID, id)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				respond.Error(w, http.StatusNotFound, err.Error())
+				return
+			}
+			respond.Error(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if req.Name == "" {
+			req.Name = existing.Name
+		}
+		if req.Type == "" {
+			req.Type = existing.Type
+		}
+		if req.Host == "" {
+			req.Host = existing.Host
+		}
+		if req.Port == 0 {
+			req.Port = existing.Port
+		}
+		if req.Database == "" {
+			req.Database = existing.Database
+		}
+		if req.DBUser == "" {
+			req.DBUser = existing.DBUser
+		}
+		if req.DBPassword == "" {
+			req.DBPassword = existing.DBPassword
+		}
+		if req.VpnResourceID == nil {
+			req.VpnResourceID = existing.VpnResourceID
+		}
+	}
+
 	updated, err := h.svc.Update(r.Context(), tenantID, id, req)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
