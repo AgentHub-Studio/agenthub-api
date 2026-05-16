@@ -28,6 +28,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/suggest"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/copilot"
 	chatTask "github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chatsession"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
@@ -206,6 +207,14 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	integrationHandler := integration.NewHandler(integrationSvc)
 	suggestHandler := suggest.NewHandler(suggest.NewService(integrationSvc))
 	pipelineHandler := pipeline.NewHandler(pipeline.NewRepository(pool))
+
+	// CopilotKit Phase 5 — completions endpoint (autocompletion ghost-text).
+	// Reuses the same per-tenant settings-driven model factory as the agentic
+	// runner, but without any session/SSE state.
+	copilotHandler := copilot.NewHandler(copilot.NewService(&settingsChatModelFactory{
+		settingsRepo: settingsRepo,
+		fallback:     buildDefaultChatModel(),
+	}))
 	coreToolLoader := core.NewCoreToolLoader(pool)
 
 	// Build agentic runner and wire it into the chat service.
@@ -525,6 +534,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		knowledgebaseHandler.RegisterRoutes(r)
 		integrationHandler.RegisterRoutes(r)
 		suggestHandler.RegisterRoutes(r)
+		copilotHandler.RegisterRoutes(r)
 		mcpHandler.RegisterRoutes(r)
 		approvalHandler.RegisterRoutes(r)
 		coreHandler.RegisterRoutes(r)
