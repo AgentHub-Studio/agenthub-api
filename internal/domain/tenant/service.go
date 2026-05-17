@@ -5,9 +5,17 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"time"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+// provisionTimeout caps the per-tenant Keycloak realm provisioning. Realm
+// creation is dominated by Keycloak cold-path cost (observed 97–360s in dev
+// cluster) — well over any edge proxy timeout. We detach from the request
+// context to survive client disconnect / proxy cap, but still bound the
+// background work so a stuck Keycloak can't leak goroutines.
+const provisionTimeout = 6 * time.Minute
 
 var slugRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$`)
 
@@ -80,23 +88,34 @@ func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantRe
 		return TenantResponse{}, err
 	}
 
+	// Detach provisioning + migration from request context so client disconnect
+	// or edge-proxy cancellation (Cloudflare/nginx default ~30-60s) doesn't
+	// leave the tenant in a half-provisioned state. Caller still observes the
+	// final outcome via the synchronous return below; the new context has its
+	// own bound to prevent goroutine leaks on stuck Keycloak.
+	provisionCtx, provisionCancel := context.WithTimeout(context.Background(), provisionTimeout)
+	defer provisionCancel()
+
 	// Attempt Keycloak provisioning; on failure mark status but do not rollback.
 	if s.provisioningClient != nil {
-		if pErr := s.provisioningClient.ProvisionRealm(ctx, created.ID, created.Name); pErr != nil {
+		if pErr := s.provisioningClient.ProvisionRealm(provisionCtx, created.ID, created.Name); pErr != nil {
 			slog.Warn("tenant: keycloak provisioning failed",
 				"tenantID", created.ID,
 				"error", pErr.Error(),
 			)
-			_ = s.repo.UpdateStatus(ctx, created.ID, StatusProvisioningFailed)
+			if updErr := s.repo.UpdateStatus(provisionCtx, created.ID, StatusProvisioningFailed); updErr != nil {
+				slog.Error("tenant: failed to mark status provisioning_failed", "tenantID", created.ID, "err", updErr)
+			}
 			created.Status = StatusProvisioningFailed
 		}
 	}
 
-	// Create the tenant PostgreSQL schema and run schema migrations.
-	// Only attempt if Keycloak provisioning did not fail — a failed realm means
-	// the tenant cannot authenticate, so schema provisioning would be premature.
-	if s.schemaMigrator != nil && created.Status == StatusActive {
-		if mErr := s.schemaMigrator.MigrateTenant(ctx, created.ID); mErr != nil {
+	// Always run schema migration — even when Keycloak provisioning fails. The
+	// schema is independent of the realm; a missing realm just blocks auth, but
+	// leaving the tenant without tables breaks ALL subsequent api startups when
+	// MigrateAllTenants iterates this tenant. See [project_postgres_dirty_schemas].
+	if s.schemaMigrator != nil {
+		if mErr := s.schemaMigrator.MigrateTenant(provisionCtx, created.ID); mErr != nil {
 			slog.Warn("tenant: schema migration failed",
 				"tenantID", created.ID,
 				"error", mErr.Error(),
