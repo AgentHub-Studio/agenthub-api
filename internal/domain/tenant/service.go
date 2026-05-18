@@ -96,6 +96,22 @@ func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantRe
 	provisionCtx, provisionCancel := context.WithTimeout(context.Background(), provisionTimeout)
 	defer provisionCancel()
 
+	// Run schema migration BEFORE Keycloak provisioning. The schema is independent
+	// of the realm and is fast (<30s). By migrating first, any caller that waits for
+	// the KC realm to appear (e.g. BDD harness WaitForRealmRoles) is guaranteed to
+	// see a fully-migrated schema when it makes the first tenant-scoped API call.
+	// Doing it after ProvisionRealm (which can take 3-6 min) would create a race
+	// where the realm is ready but the tables are not. See [project_postgres_dirty_schemas].
+	if s.schemaMigrator != nil {
+		if mErr := s.schemaMigrator.MigrateTenant(provisionCtx, created.ID); mErr != nil {
+			slog.Warn("tenant: schema migration failed",
+				"tenantID", created.ID,
+				"error", mErr.Error(),
+			)
+			// Non-fatal: schema can be created on next server restart via MigrateAllTenants.
+		}
+	}
+
 	// Attempt Keycloak provisioning; on failure mark status but do not rollback.
 	if s.provisioningClient != nil {
 		if pErr := s.provisioningClient.ProvisionRealm(provisionCtx, created.ID, created.Name); pErr != nil {
@@ -107,20 +123,6 @@ func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantRe
 				slog.Error("tenant: failed to mark status provisioning_failed", "tenantID", created.ID, "err", updErr)
 			}
 			created.Status = StatusProvisioningFailed
-		}
-	}
-
-	// Always run schema migration — even when Keycloak provisioning fails. The
-	// schema is independent of the realm; a missing realm just blocks auth, but
-	// leaving the tenant without tables breaks ALL subsequent api startups when
-	// MigrateAllTenants iterates this tenant. See [project_postgres_dirty_schemas].
-	if s.schemaMigrator != nil {
-		if mErr := s.schemaMigrator.MigrateTenant(provisionCtx, created.ID); mErr != nil {
-			slog.Warn("tenant: schema migration failed",
-				"tenantID", created.ID,
-				"error", mErr.Error(),
-			)
-			// Non-fatal: schema can be created on next server restart via MigrateAllTenants.
 		}
 	}
 
