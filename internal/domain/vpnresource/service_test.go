@@ -63,6 +63,15 @@ func (m *mockVpnRepo) Delete(_ context.Context, _ string, id uuid.UUID) error {
 	return nil
 }
 
+func (m *mockVpnRepo) ExistsByName(_ context.Context, _ string, name string) (bool, error) {
+	for _, v := range m.data {
+		if v.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 const tenantID = "test-tenant"
 
 const validOvpn = `client
