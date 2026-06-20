@@ -65,12 +65,12 @@ func (t *TrackedTool) abort() {
 
 // StreamingToolExecutor runs tool calls with state tracking and progress events.
 type StreamingToolExecutor struct {
-	skillClient    *SkillRuntimeClient
-	mcpBridge      *MCPToolBridge
-	hookExecutor   *HookExecutor
-	cache          *ToolResultCache
-	stallDetector  *StallDetector
-	config         RunConfig
+	skillClient   *SkillRuntimeClient
+	mcpBridge     *MCPToolBridge
+	hookExecutor  *HookExecutor
+	cache         *ToolResultCache
+	stallDetector *StallDetector
+	config        RunConfig
 	// P-C179-1: document_search is executed locally (not delegated to skill-runtime).
 	docSearch   knowledge.DocumentSearchClient
 	activeKBIDs []uuid.UUID
@@ -101,11 +101,10 @@ func (e *StreamingToolExecutor) emitToolResult(ch chan<- RunEvent, tt *TrackedTo
 		duration = tt.DoneAt.Sub(tt.StartedAt).Milliseconds()
 	}
 
-	// SECRET-SCANNER: redact known credential patterns from tool output before
-	// emitting the SSE tool_result event visible to the frontend.
+	// Redact credential-bearing fields before emitting the SSE tool_result event.
 	output := result.Output
 	if len(output) > 0 {
-		output = json.RawMessage(RedactSecrets(string(output), "[REDACTED]"))
+		output = RedactSensitiveFields(output)
 	}
 
 	ch <- NewRunEvent(EventToolResult, ToolResultData{
@@ -389,7 +388,7 @@ func (e *StreamingToolExecutor) executeParallel(
 				return
 			}
 
-		// Validate tool input before execution.
+			// Validate tool input before execution.
 			toolInput := json.RawMessage(tc.Function.Arguments)
 			if vErr := ValidateToolInput(tc.Function.Name, toolInput); vErr != "" {
 				errMsg := vErr
@@ -746,7 +745,7 @@ func executeDocumentSearchInternal(ctx context.Context, client knowledge.Documen
 	var args struct {
 		Query           string `json:"query"`
 		TopK            int    `json:"top_k"`
-		Limit           int    `json:"limit"` // BUG-DOCSEARCH-PARAMS: alias accepted from LLM schema
+		Limit           int    `json:"limit"`             // BUG-DOCSEARCH-PARAMS: alias accepted from LLM schema
 		KnowledgeBaseID string `json:"knowledge_base_id"` // BUG-DOCSEARCH-PARAMS: optional KB filter
 	}
 	if err := json.Unmarshal(rawArgs, &args); err != nil {

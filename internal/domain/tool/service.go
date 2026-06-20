@@ -14,6 +14,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/redact"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
@@ -438,6 +439,9 @@ func validateHTTPMethodAndTimeout(raw json.RawMessage) error {
 			}
 		}
 	}
+	if err := validateHTTPBodyTemplate(raw); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -445,6 +449,34 @@ func validateHTTPMethodAndTimeout(raw json.RawMessage) error {
 // sem este gate, headers com keys "<script>"/""/com espaços eram persistidas
 // e enviadas como header HTTP inválido para o upstream.
 var toolHTTPHeaderNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
+
+var bodyTemplateVarPattern = regexp.MustCompile(`\{\{\s*(?:input\.)?([A-Za-z0-9_.-]+)\s*\}\}|\{([A-Za-z0-9_.-]+)\}`)
+
+func validateHTTPBodyTemplate(raw json.RawMessage) error {
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	for _, field := range []string{"body_template", "bodyTemplate"} {
+		template, ok := cfg[field].(string)
+		if !ok || strings.TrimSpace(template) == "" {
+			continue
+		}
+		if strings.Contains(template, "${") {
+			return fmt.Errorf("%w: %s must not contain environment variable placeholders", ErrValidation, field)
+		}
+		for _, match := range bodyTemplateVarPattern.FindAllStringSubmatch(template, -1) {
+			name := match[1]
+			if name == "" {
+				name = match[2]
+			}
+			if redact.IsSensitiveKey(name) {
+				return fmt.Errorf("%w: %s placeholder %q is not allowed for credential-like fields", ErrValidation, field, name)
+			}
+		}
+	}
+	return nil
+}
 
 // extractURLFromConfig extracts the "url" field from a JSON config blob.
 // Returns empty string when the config is nil, unparseable, or has no url field.

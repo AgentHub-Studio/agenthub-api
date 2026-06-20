@@ -129,31 +129,31 @@ type RunMetadata struct {
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
 type Runner struct {
-	chatModel       ai.ChatModel
-	skillClient     *SkillRuntimeClient
-	prompt          *PromptBuilder
-	promptCache     map[string]string // session-scoped prompt section cache (owned per Runner)
-	tools           *ToolSchemaBuilder
-	mcpClient       MCPClientService
-	ctxManager      *ContextManager
-	memory          *MemoryBridge
-	persister          MessagePersister
-	metadataPersister  RunMetadataPersister // optional — nil for sub-runners
-	history            HistoryLoader
-	toolExec           *StreamingToolExecutor
-	subtaskExec        *SubtaskExecutor
-	agentMailbox       *AgentMailbox
-	managementExec     *ManagementExecutor
-	denialTracker      *DenialTracker
-	turnEndHandlers    []TurnEndHandler
-	runEndHandlers     []RunEndHandler
-	toolSummary        *ToolUseSummaryGenerator
-	memoryExtractor    *SessionMemoryExtractor
-	cacheSafeSnap      *CacheSafeParamsSnapshot
-	progress           *RunProgressTracker
-	commands           *CommandRegistry
-	config             RunConfig
-	runID              uuid.UUID
+	chatModel         ai.ChatModel
+	skillClient       *SkillRuntimeClient
+	prompt            *PromptBuilder
+	promptCache       map[string]string // session-scoped prompt section cache (owned per Runner)
+	tools             *ToolSchemaBuilder
+	mcpClient         MCPClientService
+	ctxManager        *ContextManager
+	memory            *MemoryBridge
+	persister         MessagePersister
+	metadataPersister RunMetadataPersister // optional — nil for sub-runners
+	history           HistoryLoader
+	toolExec          *StreamingToolExecutor
+	subtaskExec       *SubtaskExecutor
+	agentMailbox      *AgentMailbox
+	managementExec    *ManagementExecutor
+	denialTracker     *DenialTracker
+	turnEndHandlers   []TurnEndHandler
+	runEndHandlers    []RunEndHandler
+	toolSummary       *ToolUseSummaryGenerator
+	memoryExtractor   *SessionMemoryExtractor
+	cacheSafeSnap     *CacheSafeParamsSnapshot
+	progress          *RunProgressTracker
+	commands          *CommandRegistry
+	config            RunConfig
+	runID             uuid.UUID
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -563,7 +563,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	toolBuilder.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
-	toolBuilder.WithAdminScope(in.IsAdmin)               // P-C298-1: gate agenthub_manage on admin role
+	toolBuilder.WithAdminScope(in.IsAdmin)                // P-C298-1: gate agenthub_manage on admin role
 	toolBuilder.WithEnableManagement(in.EnableManagement) // P-C184-2: gate on agent opt-in flag
 	toolBuilder.WithDisableAskUser(in.DisableAskUser)
 	toolBuilder.WithDisableAgentDelegation(in.DisableAgentDelegation)
@@ -1267,12 +1267,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				for _, tc := range toolCalls {
 					tcID := tc.ID // capture loop variable
 					nudgeResult := chat.ChatMessage{
-						SessionID:    in.SessionID,
-						Role:         "tool",
-						Content:      nudgeContent,
-						MessageType:  chat.MessageTypeToolResult,
-						ToolCallID:   &tcID,
-						RunID:        &r.runID,
+						SessionID:   in.SessionID,
+						Role:        "tool",
+						Content:     nudgeContent,
+						MessageType: chat.MessageTypeToolResult,
+						ToolCallID:  &tcID,
+						RunID:       &r.runID,
 					}
 					if _, err := r.persister.CreateMessage(ctx, nudgeResult); err != nil {
 						emitError(ch, "persist_loop_nudge", err)
@@ -1338,11 +1338,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				// P-C84-1: sanitize error before sending to LLM, same as for SSE (P-C65-2).
 				sanitizedResult := result
 				sanitizedResult.Error = sanitizeToolErrorPtr(result.Error)
-				// SECRET-SCANNER: redact known credential patterns from tool output before
-				// sending to the LLM. Prevents static authToken values from leaking into
-				// the conversation when remote endpoints echo back Authorization headers.
+				// Redact credential-bearing fields before persistence, SSE fallback,
+				// and the next LLM turn.
 				if len(sanitizedResult.Output) > 0 {
-					sanitizedResult.Output = json.RawMessage(RedactSecrets(string(sanitizedResult.Output), "[REDACTED]"))
+					sanitizedResult.Output = RedactSensitiveFields(sanitizedResult.Output)
 				}
 				resultContent := FormatToolResult(sanitizedResult)
 				toolMsg := chat.ChatMessage{
@@ -1373,7 +1372,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					ch <- NewRunEvent(EventToolResult, ToolResultData{
 						ID:         tcID,
 						Name:       toolName,
-						Output:     result.Output,
+						Output:     sanitizedResult.Output,
 						DurationMs: result.LatencyMs,
 						Error:      sanitizeToolErrorPtr(result.Error), // P-C65-2: scrub internal infra details
 					})
@@ -2082,6 +2081,10 @@ func (r *Runner) executeAgentHubManage(ctx context.Context, ch chan<- RunEvent, 
 		if err := json.Unmarshal(input, &args); err == nil {
 			execResult := r.managementExec.Execute(ctx, args.Operation, args.Resource, args.ID, args.Query, args.Payload)
 			execResult.LatencyMs = time.Since(start).Milliseconds()
+			if len(execResult.Output) > 0 {
+				execResult.Output = RedactSensitiveFields(execResult.Output)
+			}
+			execResult.Error = sanitizeToolErrorPtr(execResult.Error)
 
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
 			ch <- NewRunEvent(EventToolResult, ToolResultData{
@@ -2110,9 +2113,13 @@ func (r *Runner) executeAgentHubManage(ctx context.Context, ch chan<- RunEvent, 
 	}
 
 	execResult.LatencyMs = latency
+	if len(execResult.Output) > 0 {
+		execResult.Output = RedactSensitiveFields(execResult.Output)
+	}
+	execResult.Error = sanitizeToolErrorPtr(execResult.Error)
 	execResult.EmittedToStream = true
 	ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
-	ch <- NewRunEvent(EventToolResult, ToolResultData{ID: tc.ID, Name: tc.Function.Name, Output: execResult.Output, DurationMs: latency})
+	ch <- NewRunEvent(EventToolResult, ToolResultData{ID: tc.ID, Name: tc.Function.Name, Output: execResult.Output, Error: execResult.Error, DurationMs: latency})
 	return *execResult
 }
 
@@ -2157,7 +2164,7 @@ func FormatToolResult(r ToolExecResult) string {
 		// P-C176-1: strip status_code / statusCode from HTTP tool output before
 		// sending to LLM. HTTP status codes are transport metadata; the LLM should
 		// reason about the response body, not the protocol-level code.
-		sanitised := stripStatusCodeFromToolOutput(r.Output)
+		sanitised := stripStatusCodeFromToolOutput(RedactSensitiveFields(r.Output))
 		s := string(sanitised)
 		if strings.TrimSpace(s) != "" && s != "{}" && s != "null" {
 			return s
@@ -2306,6 +2313,8 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			output := actionResult.Result
 			if len(output) == 0 {
 				output = json.RawMessage(`null`)
+			} else {
+				output = RedactSensitiveFields(output)
 			}
 			results[i] = ToolExecResult{Output: output, ToolName: tc.Function.Name}
 			ch <- NewRunEvent(EventToolResult, ToolResultData{
