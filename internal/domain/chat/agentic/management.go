@@ -222,8 +222,9 @@ func (e *ManagementExecutor) create(ctx context.Context, resource string, payloa
 			Status          agent.AgentStatus `json:"status"`
 			SystemPrompt    *string         `json:"system_prompt"`
 			ModelConfig     json.RawMessage `json:"model_config"`
-			PermissionRules json.RawMessage `json:"permission_rules"`
-			Config          json.RawMessage `json:"config"`
+			PermissionRules    json.RawMessage `json:"permission_rules"`
+			Config             json.RawMessage `json:"config"`
+			EnableManagement   bool            `json:"enable_management"`
 		}
 		if err = json.Unmarshal(payload, &req); err == nil {
 			a := agent.Agent{
@@ -236,6 +237,7 @@ func (e *ManagementExecutor) create(ctx context.Context, resource string, payloa
 				ModelConfig:     req.ModelConfig,
 				PermissionRules: req.PermissionRules,
 				Config:          req.Config,
+				EnableManagement: req.EnableManagement,
 			}
 			// Ensure the LLM cannot produce a nil or zero-value primary key.
 			// The repository does not generate IDs — the service layer does —
@@ -340,8 +342,9 @@ func (e *ManagementExecutor) update(ctx context.Context, resource string, idStr 
 			Status          agent.AgentStatus `json:"status"`
 			SystemPrompt    *string         `json:"system_prompt"`
 			ModelConfig     json.RawMessage `json:"model_config"`
-			PermissionRules json.RawMessage `json:"permission_rules"`
-			Config          json.RawMessage `json:"config"`
+			PermissionRules    json.RawMessage `json:"permission_rules"`
+			Config             json.RawMessage `json:"config"`
+			EnableManagement   *bool           `json:"enable_management"`
 		}
 		if err = json.Unmarshal(payload, &req); err == nil {
 			// Merge: only overwrite fields that were explicitly provided.
@@ -368,6 +371,9 @@ func (e *ManagementExecutor) update(ctx context.Context, resource string, idStr 
 			}
 			if len(req.Config) > 0 {
 				existing.Config = req.Config
+			}
+			if req.EnableManagement != nil {
+				existing.EnableManagement = *req.EnableManagement
 			}
 			var updatedAgent agent.Agent
 			updatedAgent, err = e.agents.Update(ctx, existing)
