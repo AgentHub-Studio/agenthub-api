@@ -87,7 +87,7 @@ func (r *postgresRepository) FindSessions(ctx context.Context, req pagination.Pa
 	}
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, agent_id, title, status, created_at, updated_at
+		`SELECT id, agent_id, mode, persona_id, sticky_skill_set, title, status, created_at, updated_at
 		 FROM chat_session
 		 ORDER BY created_at DESC
 		 LIMIT $1 OFFSET $2`,
@@ -101,7 +101,7 @@ func (r *postgresRepository) FindSessions(ctx context.Context, req pagination.Pa
 	var items []ChatSession
 	for rows.Next() {
 		var s ChatSession
-		if err := rows.Scan(&s.ID, &s.AgentID, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.AgentID, &s.Mode, &s.PersonaID, &s.StickySkillSet, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, 0, fmt.Errorf("chat: scan session: %w", err)
 		}
 		items = append(items, s)
@@ -141,12 +141,12 @@ func (r *postgresRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (
 
 	var s ChatSession
 	err = conn.QueryRow(ctx,
-		`SELECT id, agent_id, title, status,
+		`SELECT id, agent_id, mode, persona_id, sticky_skill_set, title, status,
 		        system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot,
 		        created_at, updated_at
 		 FROM chat_session WHERE id = $1`,
 		id,
-	).Scan(&s.ID, &s.AgentID, &s.Title, &s.Status,
+	).Scan(&s.ID, &s.AgentID, &s.Mode, &s.PersonaID, &s.StickySkillSet, &s.Title, &s.Status,
 		&s.SystemPromptSnapshot, &s.ModelConfigSnapshot, &s.SkillBindingsSnapshot,
 		&s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
@@ -170,14 +170,24 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s ChatSession) (
 	s.ID = uuid.New()
 	s.CreatedAt = now
 	s.UpdatedAt = now
+	if s.Mode == "" {
+		if s.AgentID == nil {
+			s.Mode = ModeDynamicSkill
+		} else {
+			s.Mode = ModeAgentFixed
+		}
+	}
+	if len(s.StickySkillSet) == 0 {
+		s.StickySkillSet = json.RawMessage(`[]`)
+	}
 
 	_, err = conn.Exec(ctx,
 		`INSERT INTO chat_session
-		 (id, agent_id, title, status,
+		 (id, agent_id, mode, persona_id, sticky_skill_set, title, status,
 		  system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot,
 		  created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		s.ID, s.AgentID, s.Title, s.Status,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		s.ID, s.AgentID, s.Mode, s.PersonaID, s.StickySkillSet, s.Title, s.Status,
 		s.SystemPromptSnapshot, s.ModelConfigSnapshot, s.SkillBindingsSnapshot,
 		s.CreatedAt, s.UpdatedAt,
 	)
@@ -207,9 +217,9 @@ func (r *postgresRepository) UpdateSessionStatus(ctx context.Context, id uuid.UU
 		`UPDATE chat_session
 		 SET status = $1, updated_at = $2
 		 WHERE id = $3
-		 RETURNING id, agent_id, title, status, created_at, updated_at`,
+		 RETURNING id, agent_id, mode, persona_id, sticky_skill_set, title, status, created_at, updated_at`,
 		status, now, id,
-	).Scan(&s.ID, &s.AgentID, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.ID, &s.AgentID, &s.Mode, &s.PersonaID, &s.StickySkillSet, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatSession{}, ErrNotFound
@@ -233,9 +243,9 @@ func (r *postgresRepository) UpdateSessionTitle(ctx context.Context, id uuid.UUI
 		`UPDATE chat_session
 		 SET title = $1, updated_at = $2
 		 WHERE id = $3
-		 RETURNING id, agent_id, title, status, created_at, updated_at`,
+		 RETURNING id, agent_id, mode, persona_id, sticky_skill_set, title, status, created_at, updated_at`,
 		title, now, id,
-	).Scan(&s.ID, &s.AgentID, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.ID, &s.AgentID, &s.Mode, &s.PersonaID, &s.StickySkillSet, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatSession{}, ErrNotFound
@@ -272,8 +282,10 @@ func (r *postgresRepository) UpdateSessionAgent(ctx context.Context, sessionID u
 	defer release()
 
 	tag, err := conn.Exec(ctx,
-		`UPDATE chat_session SET agent_id = $1, updated_at = $2 WHERE id = $3`,
-		agentID, time.Now().UTC(), sessionID,
+		`UPDATE chat_session
+		 SET agent_id = $1, mode = $2, persona_id = NULL, updated_at = $3
+		 WHERE id = $4`,
+		agentID, ModeAgentFixed, time.Now().UTC(), sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("chat: update session agent: %w", err)

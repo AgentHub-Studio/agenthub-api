@@ -138,6 +138,8 @@ func (m *mockChatRepo) UpdateSessionAgent(_ context.Context, sessionID uuid.UUID
 		return chat.ErrNotFound
 	}
 	s.AgentID = &agentID
+	s.Mode = chat.ModeAgentFixed
+	s.PersonaID = nil
 	m.sessions[sessionID] = s
 	return nil
 }
@@ -200,6 +202,56 @@ func TestChatService_CreateSession_Success(t *testing.T) {
 	assert.Equal(t, chat.StatusActive, s.Status)
 }
 
+func TestChatService_CreateSession_DefaultsAgentFixedWhenAgentProvided(t *testing.T) {
+	svc := chat.NewService(newMockRepo(), nil)
+	agentID := uuid.New()
+	s, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "Support Chat",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "AGENT_FIXED", s.Mode)
+	require.NotNil(t, s.AgentID)
+	assert.Equal(t, agentID, *s.AgentID)
+}
+
+func TestChatService_CreateSession_DynamicSkillWithPersona(t *testing.T) {
+	svc := chat.NewService(newMockRepo(), nil)
+	personaID := uuid.New()
+	s, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		Mode:      chat.ModeDynamicSkill,
+		PersonaID: &personaID,
+		Title:     "Dynamic Chat",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "DYNAMIC_SKILL", s.Mode)
+	assert.Nil(t, s.AgentID)
+	require.NotNil(t, s.PersonaID)
+	assert.Equal(t, personaID, *s.PersonaID)
+}
+
+func TestChatService_CreateSession_AgentFixedRequiresAgent(t *testing.T) {
+	svc := chat.NewService(newMockRepo(), nil)
+	_, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		Mode:  chat.ModeAgentFixed,
+		Title: "Invalid Fixed Chat",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AGENT_FIXED sessions require agentId")
+}
+
+func TestChatService_CreateSession_DynamicSkillRejectsAgentID(t *testing.T) {
+	svc := chat.NewService(newMockRepo(), nil)
+	agentID := uuid.New()
+	_, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Mode:    chat.ModeDynamicSkill,
+		Title:   "Invalid Dynamic Chat",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DYNAMIC_SKILL sessions cannot include agentId")
+}
+
 func TestChatService_GetSession_NotFound(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
 	_, err := svc.GetSession(context.Background(), uuid.New())
@@ -208,7 +260,7 @@ func TestChatService_GetSession_NotFound(t *testing.T) {
 
 func TestChatService_ArchiveSession(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	created, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"test"})
+	created, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title: "test"})
 	require.NoError(t, err)
 	archived, err := svc.ArchiveSession(context.Background(), created.ID)
 	require.NoError(t, err)
@@ -217,7 +269,7 @@ func TestChatService_ArchiveSession(t *testing.T) {
 
 func TestChatService_AddMessage(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title: "q&a"})
 	require.NoError(t, err)
 	msg, err := svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{
 		Role:    "user",
@@ -404,7 +456,7 @@ func TestChatService_RunSession_SessionNotFound(t *testing.T) {
 
 func TestChatService_ListMessages(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title: "q&a"})
 	require.NoError(t, err)
 	for i := 0; i < 3; i++ {
 		_, err = svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{Role: "user", Content: "msg"})

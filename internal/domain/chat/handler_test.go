@@ -46,10 +46,12 @@ func (m *mockChatSvc) ListSessions(_ context.Context, req pagination.PageRequest
 func (m *mockChatSvc) CreateSession(_ context.Context, req chat.CreateSessionRequest) (chat.ChatSessionResponse, error) {
 	id := uuid.New()
 	s := chat.ChatSession{
-		ID:      id,
-		AgentID: req.AgentID,
-		Title:   req.Title,
-		Status:  chat.StatusActive,
+		ID:        id,
+		AgentID:   req.AgentID,
+		Mode:      req.Mode,
+		PersonaID: req.PersonaID,
+		Title:     req.Title,
+		Status:    chat.StatusActive,
 	}
 	m.sessions[id] = s
 	return chat.SessionResponseFrom(s), nil
@@ -180,6 +182,51 @@ func TestChatHandler_CreateSession_Success(t *testing.T) {
 	var resp chat.ChatSessionResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "My Chat", resp.Title)
+}
+
+func TestChatHandler_CreateSession_AgentFixedUnchanged(t *testing.T) {
+	r, _ := setupChat()
+	agentID := uuid.New()
+	body, _ := json.Marshal(chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Mode:    chat.ModeAgentFixed,
+		Title:   "Fixed Agent Chat",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	var resp chat.ChatSessionResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Fixed Agent Chat", resp.Title)
+	assert.Equal(t, "AGENT_FIXED", resp.Mode)
+	require.NotNil(t, resp.AgentID)
+	assert.Equal(t, agentID, *resp.AgentID)
+}
+
+func TestChatHandler_CreateSession_DynamicSkillWithPersona(t *testing.T) {
+	r, _ := setupChat()
+	personaID := uuid.New()
+	body, _ := json.Marshal(chat.CreateSessionRequest{
+		Mode:      chat.ModeDynamicSkill,
+		PersonaID: &personaID,
+		Title:     "Dynamic Chat",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	var resp chat.ChatSessionResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Dynamic Chat", resp.Title)
+	assert.Equal(t, "DYNAMIC_SKILL", resp.Mode)
+	assert.Nil(t, resp.AgentID)
+	require.NotNil(t, resp.PersonaID)
+	assert.Equal(t, personaID, *resp.PersonaID)
 }
 
 func TestChatHandler_CreateSession_InvalidBody(t *testing.T) {
@@ -601,7 +648,8 @@ func TestHandler_GetTasks_200(t *testing.T) {
 			{ID: "task-2", SessionID: sessionID, Status: "completed", Phase: "implementation"},
 		},
 	}
-	r, _ := setupChatWithTasks(repo)
+	r, svc := setupChatWithTasks(repo)
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Task Session", Status: chat.StatusActive}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/tasks", nil)
 	w := httptest.NewRecorder()
@@ -637,7 +685,8 @@ func TestHandler_GetTasks_NoRepo_Returns501(t *testing.T) {
 func TestHandler_GetTaskNotifications_200(t *testing.T) {
 	sessionID := uuid.New()
 	repo := &mockHandlerTaskRepo{}
-	r, _ := setupChatWithTasks(repo)
+	r, svc := setupChatWithTasks(repo)
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Task Session", Status: chat.StatusActive}
 
 	url := "/api/chat/sessions/" + sessionID.String() + "/tasks/task-1/notifications"
 	req := httptest.NewRequest(http.MethodGet, url, nil)
