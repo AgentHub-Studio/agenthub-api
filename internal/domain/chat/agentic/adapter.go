@@ -2,9 +2,7 @@ package agentic
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -259,7 +257,7 @@ func (f staticModelFactory) Build(_ context.Context, _, _ string) (ai.ChatModel,
 	return f.model, nil
 }
 
-func (f staticModelFactory) ResolveModel(_ context.Context, _ string) string          { return "" }
+func (f staticModelFactory) ResolveModel(_ context.Context, _ string) string { return "" }
 func (f staticModelFactory) ResolveDefaultProvider(_ context.Context) string { return "" }
 
 // nopPersister is a MessagePersister that accepts writes without hitting the
@@ -378,7 +376,11 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		// OK — proceed
 	}
 
-	config := resolveRunConfig(ctx, a.modelFactory, agentCfg.ModelConfig, a.llmCallTimeout)
+	// P-C115-1: use session snapshot when available to preserve persona consistency.
+	effectiveSystemPrompt := resolveSystemPrompt(in, agentCfg)
+	effectiveModelConfig := resolveModelConfig(in, agentCfg)
+
+	config := resolveRunConfig(ctx, a.modelFactory, effectiveModelConfig, a.llmCallTimeout)
 
 	// Resolve the ChatModel for this agent's provider from the factory.
 	// The model name is passed so the factory can select the correct API
@@ -467,25 +469,24 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		elicEventCh <- NewRunEvent(EventInputRequest, json.RawMessage(data))
 	})
 
-	// P-C115-1: use session snapshot when available to preserve persona consistency.
-	effectiveSystemPrompt := resolveSystemPrompt(in, agentCfg)
-	effectiveModelConfig := resolveModelConfig(in, agentCfg)
-	_ = effectiveModelConfig // model config snapshot used for future provider resolution
-
 	// P-C173-1: detect modelConfig changes between turns and persist a system
 	// notification so the LLM is aware the configuration has changed.
 	currentHash := hashConfig(agentCfg.ModelConfig)
+	shouldPersistConfigHash := false
+	configChangedEvent := chat.RunEvent{}
 	if session, err := a.repo.GetSessionByID(ctx, in.SessionID); err == nil {
+		shouldPersistConfigHash = session.ConfigHash == nil || *session.ConfigHash == ""
 		if detectConfigChange(session, agentCfg.ModelConfig) {
 			notif := chat.ChatMessage{
 				SessionID:   in.SessionID,
 				Role:        "system",
-				Content:     "[system] Agent configuration was updated since the last turn. The new settings are now in effect.",
+				Content:     "[system] Agent configuration changed, but this session remains pinned to its original snapshot.",
 				MessageType: chat.MessageTypeSystem,
 			}
 			if _, msgErr := a.repo.CreateMessage(ctx, notif); msgErr != nil {
 				slog.Warn("agentic: failed to persist config-change notification", "error", msgErr)
 			}
+			configChangedEvent = newConfigChangedEvent(in.SessionID, in.AgentID)
 		}
 	}
 
@@ -498,8 +499,8 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		TenantID:               in.TenantID,
 		PermissionRules:        ParsePermissionRules(agentCfg.PermissionRules),
 		Elicitation:            elicHandler,
-		FrontendActions:        store, // CopilotKit Phase 1 (ClientStateStore satisfies FrontendActionsProvider)
-		IsAdmin:                callerHasAdminRole(ctx),    // P-C298-1
+		FrontendActions:        store,                     // CopilotKit Phase 1 (ClientStateStore satisfies FrontendActionsProvider)
+		IsAdmin:                callerHasAdminRole(ctx),   // P-C298-1
 		EnableManagement:       agentCfg.EnableManagement, // P-C184-2
 		DisableAskUser:         agentCfg.DisableAskUser,
 		DisableAgentDelegation: agentCfg.DisableAgentDelegation,
@@ -513,8 +514,9 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		defer func() {
 			a.elicitation.unregister(runKey)
 			store.DetachHandler(in.SessionID)
-			// P-C173-1: persist the current config hash so the next run can detect changes.
-			if currentHash != "" {
+			// P-C173-1: persist a hash only for legacy sessions that do not yet
+			// have one. Snapshotted sessions keep the original hash pinned.
+			if shouldPersistConfigHash && currentHash != "" {
 				if hashErr := a.repo.UpdateSessionConfigHash(ctx, in.SessionID, currentHash); hashErr != nil {
 					slog.Warn("agentic: failed to update session config hash", "error", hashErr)
 				}
@@ -527,6 +529,10 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		// proxies (Traefik, nginx) or browsers may close the idle connection.
 		heartbeat := time.NewTicker(15 * time.Second)
 		defer heartbeat.Stop()
+
+		if configChangedEvent.Type != "" {
+			chatCh <- configChangedEvent
+		}
 
 		for {
 			select {
@@ -715,7 +721,7 @@ func (l *repoHistoryLoader) FindAllMessages(ctx context.Context, sessionID uuid.
 // P-C115-1: uses the session snapshot when available to preserve persona consistency
 // even when the agent is updated between turns.
 func resolveSystemPrompt(in chat.RunInput, agentCfg *chat.AgentRunConfig) string {
-	if in.SystemPromptSnapshot != nil && *in.SystemPromptSnapshot != "" {
+	if in.SystemPromptSnapshot != nil {
 		return *in.SystemPromptSnapshot
 	}
 	return agentCfg.SystemPrompt
@@ -724,7 +730,7 @@ func resolveSystemPrompt(in chat.RunInput, agentCfg *chat.AgentRunConfig) string
 // resolveModelConfig returns the effective model config for a run.
 // P-C330-1: uses the session snapshot when available.
 func resolveModelConfig(in chat.RunInput, agentCfg *chat.AgentRunConfig) json.RawMessage {
-	if len(in.ModelConfigSnapshot) > 2 {
+	if len(in.ModelConfigSnapshot) > 0 {
 		return in.ModelConfigSnapshot
 	}
 	return agentCfg.ModelConfig
@@ -735,23 +741,7 @@ func resolveModelConfig(in chat.RunInput, agentCfg *chat.AgentRunConfig) json.Ra
 // Normalises the input by sorting JSON keys via re-marshal so that semantically
 // equivalent configs with different key ordering produce the same hash.
 func hashConfig(config json.RawMessage) string {
-	if len(config) == 0 {
-		return ""
-	}
-	// Normalise: unmarshal into a generic map and re-marshal so key order is stable.
-	var v interface{}
-	if err := json.Unmarshal(config, &v); err != nil {
-		// If the payload is not valid JSON, hash the raw bytes so we still track changes.
-		sum := sha256.Sum256(config)
-		return hex.EncodeToString(sum[:])
-	}
-	normalised, err := json.Marshal(v)
-	if err != nil {
-		sum := sha256.Sum256(config)
-		return hex.EncodeToString(sum[:])
-	}
-	sum := sha256.Sum256(normalised)
-	return hex.EncodeToString(sum[:])
+	return chat.HashModelConfig(config)
 }
 
 // detectConfigChange returns true when the agent's current modelConfig differs
@@ -762,4 +752,15 @@ func detectConfigChange(session chat.ChatSession, currentConfig json.RawMessage)
 		return false
 	}
 	return *session.ConfigHash != hashConfig(currentConfig)
+}
+
+func newConfigChangedEvent(sessionID, agentID uuid.UUID) chat.RunEvent {
+	return chat.RunEvent{
+		Type: string(EventConfigChanged),
+		Data: NewRunEvent(EventConfigChanged, ConfigChangedData{
+			SessionID: sessionID.String(),
+			AgentID:   agentID.String(),
+			Message:   "Agent configuration changed; this session is still using its pinned snapshot.",
+		}).Data,
+	}
 }

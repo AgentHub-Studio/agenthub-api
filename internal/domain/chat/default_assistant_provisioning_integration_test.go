@@ -186,9 +186,11 @@ func TestIntegration_UpdateSessionSnapshots_Persists(t *testing.T) {
 	require.NoError(t, err)
 
 	prompt := "You are the routed agent."
+	configHash := chat.HashModelConfig(json.RawMessage(`{"provider":"openrouter","model":"mistralai/mistral-nemo"}`))
 	err = repo.UpdateSessionSnapshots(ctx, created.ID, &prompt,
 		json.RawMessage(`{"provider":"openrouter","model":"mistralai/mistral-nemo"}`),
-		json.RawMessage(`{"skillIds":[]}`))
+		json.RawMessage(`{"skillIds":[]}`),
+		configHash)
 	require.NoError(t, err)
 
 	got, err := repo.GetSessionByID(ctx, created.ID)
@@ -196,6 +198,8 @@ func TestIntegration_UpdateSessionSnapshots_Persists(t *testing.T) {
 	require.NotNil(t, got.SystemPromptSnapshot)
 	assert.Equal(t, prompt, *got.SystemPromptSnapshot)
 	assert.JSONEq(t, `{"provider":"openrouter","model":"mistralai/mistral-nemo"}`, string(got.ModelConfigSnapshot))
+	require.NotNil(t, got.ConfigHash)
+	assert.Equal(t, configHash, *got.ConfigHash)
 }
 
 // integrationRecordingRunner is a chat.SessionRunner that records the RunInput
