@@ -271,7 +271,7 @@ func TestChatService_RunSession_Success(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ch, err := svc.RunSession(context.Background(), session.ID, "Hello", "test-tenant")
+	ch, err := svc.RunSession(context.Background(), session.ID, "Hello", "test-tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 
 	var events []chat.RunEvent
@@ -285,7 +285,7 @@ func TestChatService_RunSession_Success(t *testing.T) {
 
 func TestChatService_RunSession_NoRunner(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	_, err := svc.RunSession(context.Background(), uuid.New(), "Hello", "tenant")
+	_, err := svc.RunSession(context.Background(), uuid.New(), "Hello", "tenant", chat.RunOverrides{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agentic features not configured")
 }
@@ -301,7 +301,7 @@ func TestChatService_RunSession_NoAgent(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "Hello", "tenant")
+	_, err = svc.RunSession(context.Background(), session.ID, "Hello", "tenant", chat.RunOverrides{})
 	require.ErrorIs(t, err, chat.ErrNoAgentAvailable)
 }
 
@@ -318,7 +318,7 @@ func TestRunSession_RoutesSingleAgent(t *testing.T) {
 	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
 	require.NoError(t, err)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "olá, tudo bem?", "tenant")
+	_, err = svc.RunSession(context.Background(), session.ID, "olá, tudo bem?", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 	assert.Equal(t, agentID, runner.lastInput.AgentID, "runner should receive the routed agent")
 
@@ -344,7 +344,7 @@ func TestRunSession_RoutesBestOfMultiple(t *testing.T) {
 	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
 	require.NoError(t, err)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "I have a billing question", "tenant")
+	_, err = svc.RunSession(context.Background(), session.ID, "I have a billing question", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 	assert.Equal(t, billing, runner.lastInput.AgentID)
 }
@@ -359,7 +359,7 @@ func TestRunSession_RoutingRepoError(t *testing.T) {
 	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
 	require.NoError(t, err)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "Hello", "tenant")
+	_, err = svc.RunSession(context.Background(), session.ID, "Hello", "tenant", chat.RunOverrides{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "route agent")
 }
@@ -384,7 +384,7 @@ func TestRunSession_SnapshotOnFirstRoute(t *testing.T) {
 	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
 	require.NoError(t, err)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "do something useful", "tenant")
+	_, err = svc.RunSession(context.Background(), session.ID, "do something useful", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 
 	// Forwarded to the runner for this run.
@@ -403,7 +403,7 @@ func TestChatService_RunSession_SessionNotFound(t *testing.T) {
 	runner := &mockSessionRunner{}
 	svc := chat.NewService(newMockRepo(), runner)
 
-	_, err := svc.RunSession(context.Background(), uuid.New(), "Hello", "tenant")
+	_, err := svc.RunSession(context.Background(), uuid.New(), "Hello", "tenant", chat.RunOverrides{})
 	require.Error(t, err)
 }
 
@@ -438,7 +438,7 @@ func TestRunSession_UserMessagePersistedBeforeRun(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "Hello from user", "test-tenant")
+	_, err = svc.RunSession(context.Background(), session.ID, "Hello from user", "test-tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 
 	// The runner must have received a non-nil UserMessageID.
@@ -470,7 +470,7 @@ func TestRunSession_RunnerError_UserMessageStillPersisted(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "message before failure", "tenant")
+	_, err = svc.RunSession(context.Background(), session.ID, "message before failure", "tenant", chat.RunOverrides{})
 	require.Error(t, err)
 
 	// Despite the runner error, the user message must be persisted.
@@ -572,12 +572,50 @@ func TestRunSession_PassesSnapshotToRunner(t *testing.T) {
 	}
 
 	svc := chat.NewService(repo, runner)
-	_, err := svc.RunSession(context.Background(), sessionID, "Hello", "tenant")
+	_, err := svc.RunSession(context.Background(), sessionID, "Hello", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 
 	// The runner must have received the snapshot.
 	require.NotNil(t, runner.lastInput.SystemPromptSnapshot)
 	assert.Equal(t, snapshot, *runner.lastInput.SystemPromptSnapshot)
+}
+
+func TestRunSession_AppliesTransientOverridesWithoutPersisting(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+
+	snapshot := "Original snapshot."
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	repo.sessions[sessionID] = chat.ChatSession{
+		ID:                   sessionID,
+		AgentID:              &agentID,
+		Status:               chat.StatusActive,
+		SystemPromptSnapshot: &snapshot,
+		ModelConfigSnapshot:  json.RawMessage(`{"provider":"openai","model":"gpt-4o"}`),
+	}
+
+	overridePrompt := "Respond only in French."
+	_, err := chat.NewService(repo, runner).RunSession(
+		context.Background(),
+		sessionID,
+		"Hello",
+		"tenant",
+		chat.RunOverrides{
+			SystemPrompt: &overridePrompt,
+			ModelConfig:  json.RawMessage(`{"provider":"openai","model":"gpt-4o-mini","temperature":0.2}`),
+		},
+	)
+	require.NoError(t, err)
+
+	require.NotNil(t, runner.lastInput.SystemPromptSnapshot)
+	assert.Equal(t, overridePrompt, *runner.lastInput.SystemPromptSnapshot)
+	assert.JSONEq(t, `{"provider":"openai","model":"gpt-4o-mini","temperature":0.2}`, string(runner.lastInput.ModelConfigSnapshot))
+
+	stored := repo.sessions[sessionID]
+	require.NotNil(t, stored.SystemPromptSnapshot)
+	assert.Equal(t, snapshot, *stored.SystemPromptSnapshot)
+	assert.JSONEq(t, `{"provider":"openai","model":"gpt-4o"}`, string(stored.ModelConfigSnapshot))
 }
 
 func TestRunSession_CapturesMissingSnapshotOnFirstRun(t *testing.T) {
@@ -599,7 +637,7 @@ func TestRunSession_CapturesMissingSnapshotOnFirstRun(t *testing.T) {
 	}}
 	svc := chat.NewService(repo, runner).WithAgentLoader(loader)
 
-	_, err := svc.RunSession(context.Background(), sessionID, "Hello", "tenant")
+	_, err := svc.RunSession(context.Background(), sessionID, "Hello", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 
 	stored := repo.sessions[sessionID]
@@ -680,7 +718,7 @@ func TestRunSession_PassesSkillSnapshotToRunner(t *testing.T) {
 	}
 
 	svc := chat.NewService(repo, runner)
-	_, err = svc.RunSession(context.Background(), sessionID, "Hello", "tenant")
+	_, err = svc.RunSession(context.Background(), sessionID, "Hello", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 
 	assert.Equal(t, []uuid.UUID{skillID}, runner.lastInput.SkillIDsSnapshot,
@@ -701,7 +739,7 @@ func TestRunSession_EmptyMessage_NoMessagePersisted(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "", "tenant")
+	_, err = svc.RunSession(context.Background(), session.ID, "", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 
 	// No message should have been written for an empty user message.

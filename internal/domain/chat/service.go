@@ -95,6 +95,66 @@ type RunInput struct {
 	MCPServerNamesSnapshot []string
 }
 
+// RunOverrides contains transient Agent Studio values for a single run.
+// They override the session snapshot only in memory and are never persisted
+// back to chat_session.
+type RunOverrides struct {
+	SystemPrompt *string         `json:"systemPrompt,omitempty"`
+	ModelConfig  json.RawMessage `json:"modelConfig,omitempty"`
+}
+
+// Empty reports whether the override payload has any effective values.
+func (o RunOverrides) Empty() bool {
+	n := o.normalized()
+	return n.SystemPrompt == nil && len(n.ModelConfig) == 0
+}
+
+// Validate rejects malformed override payloads before a run is started.
+func (o RunOverrides) Validate() error {
+	n := o.normalized()
+	if len(n.ModelConfig) == 0 {
+		return nil
+	}
+	if !json.Valid(n.ModelConfig) {
+		return fmt.Errorf("modelConfig override must be valid JSON")
+	}
+	trimmed := strings.TrimSpace(string(n.ModelConfig))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	if trimmed[0] != '{' {
+		return fmt.Errorf("modelConfig override must be a JSON object")
+	}
+	return nil
+}
+
+func (o RunOverrides) normalized() RunOverrides {
+	var out RunOverrides
+	if o.SystemPrompt != nil {
+		if prompt := strings.TrimSpace(*o.SystemPrompt); prompt != "" {
+			out.SystemPrompt = &prompt
+		}
+	}
+	if raw := strings.TrimSpace(string(o.ModelConfig)); raw != "" && raw != "null" {
+		out.ModelConfig = json.RawMessage(raw)
+	}
+	return out
+}
+
+func applyRunOverrides(systemPrompt *string, modelConfig json.RawMessage, overrides RunOverrides) (*string, json.RawMessage) {
+	n := overrides.normalized()
+	effectiveSystemPrompt := systemPrompt
+	effectiveModelConfig := modelConfig
+	if n.SystemPrompt != nil {
+		prompt := *n.SystemPrompt
+		effectiveSystemPrompt = &prompt
+	}
+	if len(n.ModelConfig) > 0 {
+		effectiveModelConfig = append(json.RawMessage(nil), n.ModelConfig...)
+	}
+	return effectiveSystemPrompt, effectiveModelConfig
+}
+
 // ElicitationResponder routes a user's elicitation response to the active run.
 // Implemented by agentic.SessionRunnerAdapter; no-op on other implementations.
 type ElicitationResponder interface {
@@ -432,9 +492,12 @@ func (s *Service) ApplyClientState(sessionID uuid.UUID, patch ClientStatePatch) 
 // RunSession starts an agentic run for the given session.
 // It loads the session, validates it has an agent, then delegates to the SessionRunner.
 // The caller (SSE handler) consumes the returned channel for streaming.
-func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error) {
+func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, overrides RunOverrides) (<-chan RunEvent, error) {
 	if s.runner == nil {
 		return nil, fmt.Errorf("chat service: agentic features not configured")
+	}
+	if err := overrides.Validate(); err != nil {
+		return nil, fmt.Errorf("chat service: invalid run overrides: %w", err)
 	}
 
 	session, err := s.repo.GetSessionByID(ctx, sessionID)
@@ -513,6 +576,11 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 			mcpServerNames = agentCfg.MCPServerNames
 		}
 	}
+	systemPromptSnapshot, modelConfigSnapshot := applyRunOverrides(
+		session.SystemPromptSnapshot,
+		session.ModelConfigSnapshot,
+		overrides,
+	)
 
 	return s.runner.RunSession(ctx, RunInput{
 		SessionID:              sessionID,
@@ -520,8 +588,8 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		UserMessage:            userMessage,
 		TenantID:               tenantID,
 		UserMessageID:          userMsgID,
-		SystemPromptSnapshot:   session.SystemPromptSnapshot,
-		ModelConfigSnapshot:    session.ModelConfigSnapshot,
+		SystemPromptSnapshot:   systemPromptSnapshot,
+		ModelConfigSnapshot:    modelConfigSnapshot,
 		SkillIDsSnapshot:       skillIDsSnapshot,
 		MCPServerNamesSnapshot: mcpServerNames,
 	})
