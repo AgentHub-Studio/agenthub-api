@@ -1,6 +1,7 @@
 package trigger
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -30,6 +31,7 @@ func NewService(repo TriggerRepository, cron CronParser) *Service {
 
 // Create creates a new trigger and computes the initial next_run_at.
 func (s *Service) Create(ctx context.Context, agentID uuid.UUID, req CreateTriggerRequest) (AgentTrigger, error) {
+	req.InputTemplate = normalizeInputTemplate(req.InputTemplate)
 	// Bug 182: strip HTML do name (XSS prevention).
 	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" {
@@ -73,12 +75,13 @@ func (s *Service) Create(ctx context.Context, agentID uuid.UUID, req CreateTrigg
 	}
 
 	trigger := AgentTrigger{
-		AgentID:        agentID,
-		Name:           req.Name,
-		CronExpression: req.CronExpression,
-		Enabled:        enabled,
-		InputTemplate:  req.InputTemplate,
-		NextRunAt:      nextRun,
+		AgentID:               agentID,
+		Name:                  req.Name,
+		CronExpression:        req.CronExpression,
+		Enabled:               enabled,
+		InputTemplate:         req.InputTemplate,
+		NotificationWebhookID: req.NotificationWebhookID,
+		NextRunAt:             nextRun,
 	}
 
 	return s.repo.Create(ctx, trigger)
@@ -120,11 +123,15 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateTriggerReq
 		existing.Enabled = *req.Enabled
 	}
 	if req.InputTemplate != nil {
+		normalized := normalizeInputTemplate(*req.InputTemplate)
 		// Bug 177: cap em Update (cross-cutting com Create — bug 161).
-		if len(*req.InputTemplate) > 32000 {
-			return AgentTrigger{}, fmt.Errorf("trigger: inputTemplate exceeds maximum length of 32000 chars (got %d)", len(*req.InputTemplate))
+		if len(normalized) > 32000 {
+			return AgentTrigger{}, fmt.Errorf("trigger: inputTemplate exceeds maximum length of 32000 chars (got %d)", len(normalized))
 		}
-		existing.InputTemplate = *req.InputTemplate
+		existing.InputTemplate = normalized
+	}
+	if req.NotificationWebhookID.Set {
+		existing.NotificationWebhookID = req.NotificationWebhookID.Value
 	}
 
 	// Recompute next run.
@@ -168,4 +175,11 @@ func (s *Service) CompleteRun(ctx context.Context, runID uuid.UUID, turns, token
 // FailRun marks a run as failed.
 func (s *Service) FailRun(ctx context.Context, runID uuid.UUID, errMsg string) error {
 	return s.repo.CompleteRun(ctx, runID, RunStatusFailed, nil, nil, &errMsg)
+}
+
+func normalizeInputTemplate(raw []byte) []byte {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	return raw
 }

@@ -2,10 +2,12 @@ package webhook_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -14,6 +16,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
+	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 func init() {
@@ -165,6 +168,56 @@ func TestWebhookService_List(t *testing.T) {
 	assert.Len(t, items, 2)
 }
 
+func TestWebhookService_DispatchEvent_Success(t *testing.T) {
+	received := make(chan []byte, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		received <- b
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	repo := newMockRepo()
+	svc := webhook.NewService(repo)
+	cfg, err := svc.Create(context.Background(), webhook.CreateWebhookRequest{
+		Name:   "trigger notifications",
+		URL:    ts.URL,
+		Events: []string{"trigger.run.completed"},
+	})
+	require.NoError(t, err)
+
+	log, err := svc.DispatchEvent(context.Background(), cfg.ID, "trigger.run.completed", map[string]any{
+		"triggerId": "trg_1",
+		"status":    "completed",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "trigger.run.completed", log.EventType)
+	require.Len(t, repo.deliveries, 1)
+	select {
+	case body := <-received:
+		var payload map[string]string
+		require.NoError(t, json.Unmarshal(body, &payload))
+		assert.Equal(t, "trg_1", payload["triggerId"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected webhook dispatch")
+	}
+}
+
+func TestWebhookService_DispatchEvent_Filtered(t *testing.T) {
+	svc := webhook.NewService(newMockRepo())
+	cfg, err := svc.Create(context.Background(), webhook.CreateWebhookRequest{
+		Name:   "push only",
+		URL:    "https://hooks.example.com/push",
+		Events: []string{"push"},
+	})
+	require.NoError(t, err)
+
+	_, err = svc.DispatchEvent(context.Background(), cfg.ID, "trigger.run.completed", map[string]any{})
+
+	require.ErrorIs(t, err, webhook.ErrEventFiltered)
+}
+
 // --- IngestWebhook tests ---
 
 // newIngestWebhook creates a webhook with a secret and returns its token.
@@ -261,29 +314,30 @@ func TestWebhookService_ListDeliveries_FilterByStatus(t *testing.T) {
 	repo := newMockRepo()
 	svc := webhook.NewService(repo)
 	w := createWebhook(t, svc, nil)
+	ctx := tenantctx.NewContext(context.Background(), "test")
 
 	// Ingest two events with different results.
-	d1, err := svc.Ingest(context.Background(), w.Token, "push", "", []byte("{}"))
+	d1, err := svc.Ingest(ctx, w.Token, "push", "", []byte("{}"))
 	require.NoError(t, err)
-	_, err = svc.RecordDeliveryResult(context.Background(), d1, 200, "OK", true)
+	_, err = svc.RecordDeliveryResult(ctx, d1, 200, "OK", true)
 	require.NoError(t, err)
 
-	_, err = svc.Ingest(context.Background(), w.Token, "push", "", []byte("{}"))
+	_, err = svc.Ingest(ctx, w.Token, "push", "", []byte("{}"))
 	require.NoError(t, err)
 	// Second delivery remains PENDING.
 
 	pr := pagination.PageRequest{Page: 0, Size: 20}
 
-	pageAll, err := svc.ListDeliveries(context.Background(), w.ID, webhook.DeliveryFilter{}, pr)
+	pageAll, err := svc.ListDeliveries(ctx, w.ID, webhook.DeliveryFilter{}, pr)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), pageAll.TotalElements)
 
-	pageSuccess, err := svc.ListDeliveries(context.Background(), w.ID, webhook.DeliveryFilter{Status: webhook.DeliverySuccess}, pr)
+	pageSuccess, err := svc.ListDeliveries(ctx, w.ID, webhook.DeliveryFilter{Status: webhook.DeliverySuccess}, pr)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), pageSuccess.TotalElements)
 	assert.Equal(t, webhook.DeliverySuccess, pageSuccess.Content[0].Status)
 
-	pagePending, err := svc.ListDeliveries(context.Background(), w.ID, webhook.DeliveryFilter{Status: webhook.DeliveryPending}, pr)
+	pagePending, err := svc.ListDeliveries(ctx, w.ID, webhook.DeliveryFilter{Status: webhook.DeliveryPending}, pr)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), pagePending.TotalElements)
 }
@@ -292,15 +346,16 @@ func TestWebhookService_ListDeliveries_FilterByEventType(t *testing.T) {
 	repo := newMockRepo()
 	svc := webhook.NewService(repo)
 	w := createWebhook(t, svc, nil)
+	ctx := tenantctx.NewContext(context.Background(), "test")
 
-	_, err := svc.Ingest(context.Background(), w.Token, "push", "", []byte("{}"))
+	_, err := svc.Ingest(ctx, w.Token, "push", "", []byte("{}"))
 	require.NoError(t, err)
-	_, err = svc.Ingest(context.Background(), w.Token, "pull_request", "", []byte("{}"))
+	_, err = svc.Ingest(ctx, w.Token, "pull_request", "", []byte("{}"))
 	require.NoError(t, err)
 
 	pr := pagination.PageRequest{Page: 0, Size: 20}
 
-	pagePush, err := svc.ListDeliveries(context.Background(), w.ID, webhook.DeliveryFilter{EventType: "push"}, pr)
+	pagePush, err := svc.ListDeliveries(ctx, w.ID, webhook.DeliveryFilter{EventType: "push"}, pr)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), pagePush.TotalElements)
 	assert.Equal(t, "push", pagePush.Content[0].EventType)

@@ -32,7 +32,7 @@ var ErrSignatureInvalid = fmt.Errorf("webhook: invalid signature")
 var ErrEventFiltered = fmt.Errorf("webhook: event filtered")
 
 const (
-	ingestBaseDelay = time.Second
+	ingestBaseDelay  = time.Second
 	ingestMaxRetries = 5
 )
 
@@ -512,6 +512,39 @@ func (s *Service) SendTest(ctx context.Context, webhookID uuid.UUID) (WebhookDel
 	// Bug 236: SendTest criava delivery em PENDING mas nunca firava o
 	// dispatch — todas test deliveries ficavam paradas. Mesmo padrão
 	// do Ingest (linha 405) com Ctx variant para preservar tenant.
+	go s.dispatchWithRetryCtx(ctx, w, log)
+	return log, nil
+}
+
+// DispatchEvent sends an internal AgentHub event to an existing outgoing
+// webhook configuration, recording the attempt in webhook_delivery_log.
+func (s *Service) DispatchEvent(ctx context.Context, webhookID uuid.UUID, eventType string, payload any) (WebhookDeliveryLog, error) {
+	w, err := s.repo.GetByID(ctx, webhookID)
+	if err != nil {
+		return WebhookDeliveryLog{}, err
+	}
+	if !w.Enabled {
+		return WebhookDeliveryLog{}, ErrEventFiltered
+	}
+	if len(w.Events) > 0 && !containsEvent(w.Events, eventType) {
+		return WebhookDeliveryLog{}, ErrEventFiltered
+	}
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return WebhookDeliveryLog{}, fmt.Errorf("webhook: marshal dispatch payload: %w", err)
+	}
+	d := WebhookDeliveryLog{
+		WebhookID: webhookID,
+		EventType: eventType,
+		Payload:   raw,
+		Status:    DeliveryPending,
+		Attempts:  0,
+	}
+	log, err := s.repo.CreateDelivery(ctx, d)
+	if err != nil {
+		return WebhookDeliveryLog{}, err
+	}
 	go s.dispatchWithRetryCtx(ctx, w, log)
 	return log, nil
 }

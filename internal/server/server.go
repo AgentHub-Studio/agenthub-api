@@ -16,29 +16,29 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/abtest"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/admintenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/auth"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agenttemplate"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/analytics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/approval"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/channel"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/core"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/auth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/channel"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/suggest"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/copilot"
 	chatTask "github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chatsession"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/copilot"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/core"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration/probe"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
 	mkplInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
 	mkplListing "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
@@ -47,6 +47,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/prompttemplate"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/provider"
 	regDependency "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/dependency"
@@ -58,7 +59,6 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skilleval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/admintenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenantsignup"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/trigger"
@@ -260,10 +260,34 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			if tokens > 0 {
 				tokensPtr = &tokens
 			}
-			if err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, turnsPtr, tokensPtr, errPtr); err != nil {
-				// Most chat runs aren't from triggers — UPDATE simply matches 0 rows.
-				// Only log when it's an actual DB error.
-				slog.Debug("trigger.completion: skipped (not a trigger run or no rows)", "sessionId", sessionID)
+			triggerRun, parentTrigger, updated, err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, turnsPtr, tokensPtr, errPtr)
+			if err != nil {
+				slog.Debug("trigger.completion: failed to complete trigger run", "sessionId", sessionID, "err", err)
+				return
+			}
+			if !updated || parentTrigger.NotificationWebhookID == nil {
+				return
+			}
+			payload := map[string]any{
+				"event":       "trigger.run.completed",
+				"triggerId":   parentTrigger.ID,
+				"triggerName": parentTrigger.Name,
+				"agentId":     parentTrigger.AgentID,
+				"runId":       triggerRun.ID,
+				"sessionId":   triggerRun.SessionID,
+				"chatRunId":   runID,
+				"status":      triggerRun.Status,
+				"startedAt":   triggerRun.StartedAt,
+				"completedAt": triggerRun.CompletedAt,
+				"totalTurns":  triggerRun.TotalTurns,
+				"totalTokens": triggerRun.TotalTokens,
+				"error":       triggerRun.Error,
+			}
+			if _, err := webhookSvc.DispatchEvent(ctx, *parentTrigger.NotificationWebhookID, "trigger.run.completed", payload); err != nil {
+				slog.Warn("trigger.notification: dispatch failed",
+					"triggerID", parentTrigger.ID,
+					"webhookID", *parentTrigger.NotificationWebhookID,
+					"err", err)
 			}
 		})
 		go func() {
@@ -545,8 +569,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		mcpHandler.RegisterRoutes(r)
 		approvalHandler.RegisterRoutes(r)
 		coreHandler.RegisterRoutes(r)
-			// BUG-DEPR1: read-only deprecated pipeline endpoints (Sunset: 2026-07-01).
-			pipelineHandler.RegisterRoutes(r)
+		// BUG-DEPR1: read-only deprecated pipeline endpoints (Sunset: 2026-07-01).
+		pipelineHandler.RegisterRoutes(r)
 		// Marketplace
 		mkplListingHandler.RegisterRoutes(r)
 		mkplReviewHandler.RegisterRoutes(r)
