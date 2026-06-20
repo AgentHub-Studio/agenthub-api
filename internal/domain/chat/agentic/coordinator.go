@@ -12,7 +12,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+const coordinatorHydratePageSize = 200
 
 // WorkerIdentity identifies a worker agent in a coordinator swarm.
 // Inspired by Claude Code's teammate identity in utils/teammate.ts.
@@ -131,9 +134,65 @@ func (s *CoordinatorState) WithRepository(repo task.Repository, sessionID uuid.U
 }
 
 // WithContext sets the context used for repository calls (carries tenant/auth info).
+// When repository persistence is configured, it also reloads existing tasks for
+// the session so a restarted API process resumes the coordinator state from PG.
 func (s *CoordinatorState) WithContext(ctx context.Context) *CoordinatorState {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.ctx = ctx
+	if err := s.HydrateFromRepository(ctx); err != nil {
+		slog.Warn("coordinator: failed to hydrate persisted tasks", "sessionID", s.sessionID, "err", err)
+	}
 	return s
+}
+
+// HydrateFromRepository loads persisted tasks for this coordinator session into
+// memory. Existing in-memory tasks win on ID conflict so runtime state is not
+// rolled back by a stale read.
+func (s *CoordinatorState) HydrateFromRepository(ctx context.Context) error {
+	if s.repo == nil || s.sessionID == uuid.Nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = s.ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	for page := 0; ; page++ {
+		req := pagination.PageRequest{Page: page, Size: coordinatorHydratePageSize}
+		records, total, err := s.repo.ListBySession(ctx, s.sessionID, req)
+		if err != nil {
+			return fmt.Errorf("coordinator: list persisted tasks: %w", err)
+		}
+		s.mu.Lock()
+		for _, rec := range records {
+			if _, exists := s.tasks[rec.ID]; exists {
+				continue
+			}
+			s.tasks[rec.ID] = coordinatorTaskFromRecord(rec)
+		}
+		s.mu.Unlock()
+
+		if len(records) == 0 || int64((page+1)*coordinatorHydratePageSize) >= total {
+			return nil
+		}
+	}
+}
+
+func coordinatorTaskFromRecord(rec task.Task) *CoordinatorTask {
+	return &CoordinatorTask{
+		ID:          rec.ID,
+		Description: rec.Description,
+		AssignedTo:  rec.AssignedTo,
+		Status:      TaskStatus(rec.Status),
+		Phase:       TaskPhase(rec.Phase),
+		DependsOn:   append([]string(nil), rec.DependsOn...),
+		CreatedAt:   rec.CreatedAt,
+		CompletedAt: rec.CompletedAt,
+	}
 }
 
 // RegisterWorker adds a worker to the swarm.
