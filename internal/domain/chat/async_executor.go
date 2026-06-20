@@ -24,10 +24,11 @@ const ChatRunQueue = "chat.run.queue"
 
 // ChatRunTask is the message payload for RabbitMQ.
 type ChatRunTask struct {
-	RunID     uuid.UUID `json:"runId"`
-	SessionID uuid.UUID `json:"sessionId"`
-	TenantID  string    `json:"tenantId"`
-	Message   string    `json:"message"`
+	RunID       uuid.UUID       `json:"runId"`
+	SessionID   uuid.UUID       `json:"sessionId"`
+	TenantID    string          `json:"tenantId"`
+	Message     string          `json:"message"`
+	Attachments json.RawMessage `json:"attachments,omitempty"`
 	// RawToken is the caller's Bearer JWT forwarded so that background workers
 	// can authenticate outbound calls to the skill-runtime. Without this, all
 	// tool executions fail with 401 because the async context has no token.
@@ -202,6 +203,14 @@ func (e *AsyncExecutor) wasCancelled(runID uuid.UUID) bool {
 // P-C99-1: rejects the request with ErrRunAlreadyActive when a run is already
 // in progress for the session, preventing concurrent runs that corrupt history.
 func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, tenantID, message string) (uuid.UUID, error) {
+	return e.EnqueueRunWithAttachments(ctx, sessionID, tenantID, message, nil)
+}
+
+func (e *AsyncExecutor) EnqueueRunWithAttachments(ctx context.Context, sessionID uuid.UUID, tenantID, message string, rawAttachments json.RawMessage) (uuid.UUID, error) {
+	attachments, err := NormalizeChatAttachments(rawAttachments)
+	if err != nil {
+		return uuid.Nil, err
+	}
 	// Bug 244: validar que session existe e o agent ainda existe ANTES de
 	// criar o run e enfileirar. Sem isso, sessions órfãs (agent deletado)
 	// aceitam runs que silenciosamente fazem fallback para um default agent
@@ -306,11 +315,12 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 	}
 
 	body, _ := json.Marshal(ChatRunTask{
-		RunID:     run.ID,
-		SessionID: sessionID,
-		TenantID:  tenantID,
-		Message:   message,
-		RawToken:  tenant.TokenFromContext(ctx),
+		RunID:       run.ID,
+		SessionID:   sessionID,
+		TenantID:    tenantID,
+		Message:     message,
+		Attachments: attachments,
+		RawToken:    tenant.TokenFromContext(ctx),
 	})
 
 	err = ch.PublishWithContext(ctx, "", q.Name, false, false, amqp.Publishing{
@@ -521,6 +531,7 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		AgentID:                *session.AgentID,
 		TenantID:               task.TenantID,
 		UserMessage:            task.Message,
+		Attachments:            task.Attachments,
 		SystemPromptSnapshot:   session.SystemPromptSnapshot,
 		ModelConfigSnapshot:    session.ModelConfigSnapshot,
 		SkillIDsSnapshot:       skillIDsSnapshot,
@@ -712,13 +723,17 @@ func (e *AsyncExecutor) recordMetricsFromRun(ctx context.Context, task ChatRunTa
 }
 
 // providerNameRE captures the provider slug out of error strings like
-//   build model for provider "anthropic": chat model: claude.apiKey not configured
+//
+//	build model for provider "anthropic": chat model: claude.apiKey not configured
+//
 // so the friendly message can point the user at the specific provider row
 // in the tenant settings.
 var providerNameRE = regexp.MustCompile(`provider\s+"([^"]+)"`)
 
 // settingKeyRE captures the settings key that the backend expected, e.g.
-//   chat model: claude.apiKey not configured
+//
+//	chat model: claude.apiKey not configured
+//
 // Used to tell the user which setting to fill in.
 var settingKeyRE = regexp.MustCompile(`([a-z][a-zA-Z0-9_]*\.[a-zA-Z][a-zA-Z0-9_]*)\s+not configured`)
 

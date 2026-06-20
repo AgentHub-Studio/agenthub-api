@@ -348,7 +348,7 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 	}
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, session_id, role, content,
+		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
 		        message_type, tool_calls, tool_call_id,
 		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
@@ -367,7 +367,7 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 	for rows.Next() {
 		var m ChatMessage
 		if err := rows.Scan(
-			&m.ID, &m.SessionID, &m.Role, &m.Content,
+			&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
 			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 			&m.CreatedAt,
@@ -395,15 +395,18 @@ func (r *postgresRepository) CreateMessage(ctx context.Context, m ChatMessage) (
 	if m.MessageType == "" {
 		m.MessageType = MessageTypeText
 	}
+	if len(m.Attachments) == 0 {
+		m.Attachments = json.RawMessage("[]")
+	}
 
 	_, err = conn.Exec(ctx,
 		`INSERT INTO chat_message
-		 (id, session_id, role, content,
+		 (id, session_id, role, content, attachments,
 		  message_type, tool_calls, tool_call_id,
 		  metadata, token_usage, finish_reason, turn_index, run_id,
 		  created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-		m.ID, m.SessionID, m.Role, m.Content,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		m.ID, m.SessionID, m.Role, m.Content, m.Attachments,
 		m.MessageType, m.ToolCalls, m.ToolCallID,
 		m.Metadata, m.TokenUsage, m.FinishReason, m.TurnIndex, m.RunID,
 		m.CreatedAt,
@@ -424,9 +427,9 @@ func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sess
 
 	var m ChatMessage
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, role, content,
+		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
 		        message_type, tool_calls, tool_call_id,
-		        metadata, token_usage, finish_reason, turn_index,
+		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1 AND role = 'assistant' AND created_at > $2
@@ -434,7 +437,7 @@ func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sess
 		 LIMIT 1`,
 		sessionID, after,
 	).Scan(
-		&m.ID, &m.SessionID, &m.Role, &m.Content,
+		&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
 		&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 		&m.CreatedAt,
@@ -457,7 +460,7 @@ func (r *postgresRepository) FindAllMessages(ctx context.Context, sessionID uuid
 	defer release()
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, session_id, role, content,
+		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
 		        message_type, tool_calls, tool_call_id,
 		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
@@ -475,7 +478,7 @@ func (r *postgresRepository) FindAllMessages(ctx context.Context, sessionID uuid
 	for rows.Next() {
 		var m ChatMessage
 		if err := rows.Scan(
-			&m.ID, &m.SessionID, &m.Role, &m.Content,
+			&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
 			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 			&m.CreatedAt,
@@ -500,9 +503,9 @@ func (r *postgresRepository) GetLatestCompactSummary(ctx context.Context, sessio
 
 	var m ChatMessage
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, role, content,
+		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
 		        message_type, tool_calls, tool_call_id,
-		        metadata, token_usage, finish_reason, turn_index,
+		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1 AND message_type = 'compact_summary'
@@ -510,7 +513,7 @@ func (r *postgresRepository) GetLatestCompactSummary(ctx context.Context, sessio
 		 LIMIT 1`,
 		sessionID,
 	).Scan(
-		&m.ID, &m.SessionID, &m.Role, &m.Content,
+		&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
 		&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 		&m.CreatedAt,

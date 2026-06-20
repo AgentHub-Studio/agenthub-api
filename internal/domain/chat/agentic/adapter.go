@@ -259,7 +259,7 @@ func (f staticModelFactory) Build(_ context.Context, _, _ string) (ai.ChatModel,
 	return f.model, nil
 }
 
-func (f staticModelFactory) ResolveModel(_ context.Context, _ string) string          { return "" }
+func (f staticModelFactory) ResolveModel(_ context.Context, _ string) string { return "" }
 func (f staticModelFactory) ResolveDefaultProvider(_ context.Context) string { return "" }
 
 // nopPersister is a MessagePersister that accepts writes without hitting the
@@ -494,12 +494,13 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		SessionID:              in.SessionID,
 		AgentID:                in.AgentID,
 		UserMessage:            in.UserMessage,
+		Attachments:            in.Attachments,
 		SystemPrompt:           effectiveSystemPrompt,
 		TenantID:               in.TenantID,
 		PermissionRules:        ParsePermissionRules(agentCfg.PermissionRules),
 		Elicitation:            elicHandler,
-		FrontendActions:        store, // CopilotKit Phase 1 (ClientStateStore satisfies FrontendActionsProvider)
-		IsAdmin:                callerHasAdminRole(ctx),    // P-C298-1
+		FrontendActions:        store,                     // CopilotKit Phase 1 (ClientStateStore satisfies FrontendActionsProvider)
+		IsAdmin:                callerHasAdminRole(ctx),   // P-C298-1
 		EnableManagement:       agentCfg.EnableManagement, // P-C184-2
 		DisableAskUser:         agentCfg.DisableAskUser,
 		DisableAgentDelegation: agentCfg.DisableAgentDelegation,

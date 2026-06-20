@@ -84,6 +84,7 @@ type ChatMessage struct {
 	SessionID    uuid.UUID       `db:"session_id"`
 	Role         string          `db:"role"`
 	Content      string          `db:"content"`
+	Attachments  json.RawMessage `db:"attachments"`
 	MessageType  MessageType     `db:"message_type"`
 	ToolCalls    json.RawMessage `db:"tool_calls"`
 	ToolCallID   *string         `db:"tool_call_id"`
@@ -125,6 +126,7 @@ type ChatMessageResponse struct {
 	SessionID    uuid.UUID       `json:"sessionId"`
 	Role         string          `json:"role"`
 	Content      string          `json:"content"`
+	Attachments  json.RawMessage `json:"attachments,omitempty"`
 	MessageType  MessageType     `json:"messageType"`
 	ToolCalls    json.RawMessage `json:"toolCalls,omitempty"`
 	ToolCallID   *string         `json:"toolCallId,omitempty"`
@@ -196,9 +198,9 @@ type CreateSessionRequest struct {
 // P-C101-1: returned by GetPendingElicitations so async (RabbitMQ) callers can
 // discover pending user-input requests when the original SSE stream is gone.
 type PendingElicitationInfo struct {
-	RequestID string          `json:"requestId"`
-	Payload   interface{}     `json:"payload,omitempty"`
-	CreatedAt time.Time       `json:"createdAt"`
+	RequestID string      `json:"requestId"`
+	Payload   interface{} `json:"payload,omitempty"`
+	CreatedAt time.Time   `json:"createdAt"`
 }
 
 // AgentRoutingInfo carries lightweight agent metadata used by the smart router
@@ -214,6 +216,7 @@ type AgentRoutingInfo struct {
 type CreateMessageRequest struct {
 	Role         string          `json:"role"`
 	Content      string          `json:"content"`
+	Attachments  json.RawMessage `json:"attachments,omitempty"`
 	MessageType  MessageType     `json:"messageType,omitempty"`
 	ToolCalls    json.RawMessage `json:"toolCalls,omitempty"`
 	ToolCallID   *string         `json:"toolCallId,omitempty"`

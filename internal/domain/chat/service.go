@@ -21,13 +21,12 @@ type AgentLoader interface {
 	GetAgentForRun(ctx context.Context, id uuid.UUID) (*AgentRunConfig, error)
 }
 
-
 // AgentRunConfig carries agent fields consumed by the agentic Runner.
 type AgentRunConfig struct {
-	ID               uuid.UUID
-	SystemPrompt     string
-	ModelConfig      json.RawMessage // raw JSON — passed to RunConfigFromModelConfig
-	PermissionRules  json.RawMessage // raw JSON — {"allow":[],"deny":[],"confirm":[]}
+	ID              uuid.UUID
+	SystemPrompt    string
+	ModelConfig     json.RawMessage // raw JSON — passed to RunConfigFromModelConfig
+	PermissionRules json.RawMessage // raw JSON — {"allow":[],"deny":[],"confirm":[]}
 	// EnableManagement controls whether the agenthub_manage builtin tool is included.
 	// P-C184-2: both this flag AND the caller's admin role must be true.
 	EnableManagement bool
@@ -73,6 +72,7 @@ type RunInput struct {
 	SessionID    uuid.UUID
 	AgentID      uuid.UUID
 	UserMessage  string
+	Attachments  json.RawMessage
 	SystemPrompt string
 	TenantID     string
 	// UserMessageID is non-nil when the user message was already persisted by the
@@ -365,7 +365,11 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 	default:
 		return ChatMessageResponse{}, fmt.Errorf("chat service: role must be \"user\" (got %q)", req.Role)
 	}
-	if req.Content == "" {
+	attachments, err := NormalizeChatAttachments(req.Attachments)
+	if err != nil {
+		return ChatMessageResponse{}, err
+	}
+	if req.Content == "" && !HasChatAttachments(attachments) {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: content is required")
 	}
 	// Bug 163: cap content em 64KB. Chat messages podem ser longas (code
@@ -392,6 +396,7 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 		SessionID:   sessionID,
 		Role:        req.Role,
 		Content:     req.Content,
+		Attachments: attachments,
 		MessageType: req.MessageType,
 	}
 
@@ -426,8 +431,17 @@ func (s *Service) ApplyClientState(sessionID uuid.UUID, patch ClientStatePatch) 
 // It loads the session, validates it has an agent, then delegates to the SessionRunner.
 // The caller (SSE handler) consumes the returned channel for streaming.
 func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error) {
+	return s.RunSessionWithAttachments(ctx, sessionID, userMessage, tenantID, nil)
+}
+
+func (s *Service) RunSessionWithAttachments(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, rawAttachments json.RawMessage) (<-chan RunEvent, error) {
 	if s.runner == nil {
 		return nil, fmt.Errorf("chat service: agentic features not configured")
+	}
+
+	attachments, err := NormalizeChatAttachments(rawAttachments)
+	if err != nil {
+		return nil, err
 	}
 
 	session, err := s.repo.GetSessionByID(ctx, sessionID)
@@ -467,9 +481,10 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 	var userMsgID *uuid.UUID
 	if userMessage != "" {
 		msg := ChatMessage{
-			SessionID: sessionID,
-			Role:      "user",
-			Content:   userMessage,
+			SessionID:   sessionID,
+			Role:        "user",
+			Content:     userMessage,
+			Attachments: attachments,
 		}
 		persisted, err := s.repo.CreateMessage(ctx, msg)
 		if err != nil {
@@ -501,6 +516,7 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		SessionID:              sessionID,
 		AgentID:                *session.AgentID,
 		UserMessage:            userMessage,
+		Attachments:            attachments,
 		TenantID:               tenantID,
 		UserMessageID:          userMsgID,
 		SystemPromptSnapshot:   session.SystemPromptSnapshot,

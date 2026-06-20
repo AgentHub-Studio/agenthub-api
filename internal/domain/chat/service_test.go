@@ -208,7 +208,7 @@ func TestChatService_GetSession_NotFound(t *testing.T) {
 
 func TestChatService_ArchiveSession(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	created, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"test"})
+	created, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title: "test"})
 	require.NoError(t, err)
 	archived, err := svc.ArchiveSession(context.Background(), created.ID)
 	require.NoError(t, err)
@@ -217,7 +217,7 @@ func TestChatService_ArchiveSession(t *testing.T) {
 
 func TestChatService_AddMessage(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title: "q&a"})
 	require.NoError(t, err)
 	msg, err := svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{
 		Role:    "user",
@@ -404,7 +404,7 @@ func TestChatService_RunSession_SessionNotFound(t *testing.T) {
 
 func TestChatService_ListMessages(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title: "q&a"})
 	require.NoError(t, err)
 	for i := 0; i < 3; i++ {
 		_, err = svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{Role: "user", Content: "msg"})
@@ -448,6 +448,36 @@ func TestRunSession_UserMessagePersistedBeforeRun(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "user message must be persisted in the repo before the runner is called")
+}
+
+func TestRunSession_WithAttachmentsPersistsAndPassesToRunner(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(repo, runner)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	attachments, err := json.Marshal([]chat.ChatAttachment{{
+		ID:   uuid.New(),
+		Name: "notes.txt",
+		Type: "text/plain",
+		Size: 5,
+		Kind: chat.AttachmentKindText,
+		Text: "hello",
+	}})
+	require.NoError(t, err)
+
+	_, err = svc.RunSessionWithAttachments(context.Background(), session.ID, "Use this file", "tenant", attachments)
+	require.NoError(t, err)
+
+	require.JSONEq(t, string(attachments), string(runner.lastInput.Attachments))
+	require.Len(t, repo.messages, 1)
+	require.JSONEq(t, string(attachments), string(repo.messages[0].Attachments))
 }
 
 // TestRunSession_RunnerError_UserMessageStillPersisted verifies that even when the

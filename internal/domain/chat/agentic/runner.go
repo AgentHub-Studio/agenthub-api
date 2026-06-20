@@ -45,6 +45,7 @@ type RunInput struct {
 	SessionID       uuid.UUID
 	AgentID         uuid.UUID
 	UserMessage     string
+	Attachments     json.RawMessage
 	SystemPrompt    string
 	TenantID        string
 	PermissionRules *PermissionRules
@@ -129,31 +130,31 @@ type RunMetadata struct {
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
 type Runner struct {
-	chatModel       ai.ChatModel
-	skillClient     *SkillRuntimeClient
-	prompt          *PromptBuilder
-	promptCache     map[string]string // session-scoped prompt section cache (owned per Runner)
-	tools           *ToolSchemaBuilder
-	mcpClient       MCPClientService
-	ctxManager      *ContextManager
-	memory          *MemoryBridge
-	persister          MessagePersister
-	metadataPersister  RunMetadataPersister // optional — nil for sub-runners
-	history            HistoryLoader
-	toolExec           *StreamingToolExecutor
-	subtaskExec        *SubtaskExecutor
-	agentMailbox       *AgentMailbox
-	managementExec     *ManagementExecutor
-	denialTracker      *DenialTracker
-	turnEndHandlers    []TurnEndHandler
-	runEndHandlers     []RunEndHandler
-	toolSummary        *ToolUseSummaryGenerator
-	memoryExtractor    *SessionMemoryExtractor
-	cacheSafeSnap      *CacheSafeParamsSnapshot
-	progress           *RunProgressTracker
-	commands           *CommandRegistry
-	config             RunConfig
-	runID              uuid.UUID
+	chatModel         ai.ChatModel
+	skillClient       *SkillRuntimeClient
+	prompt            *PromptBuilder
+	promptCache       map[string]string // session-scoped prompt section cache (owned per Runner)
+	tools             *ToolSchemaBuilder
+	mcpClient         MCPClientService
+	ctxManager        *ContextManager
+	memory            *MemoryBridge
+	persister         MessagePersister
+	metadataPersister RunMetadataPersister // optional — nil for sub-runners
+	history           HistoryLoader
+	toolExec          *StreamingToolExecutor
+	subtaskExec       *SubtaskExecutor
+	agentMailbox      *AgentMailbox
+	managementExec    *ManagementExecutor
+	denialTracker     *DenialTracker
+	turnEndHandlers   []TurnEndHandler
+	runEndHandlers    []RunEndHandler
+	toolSummary       *ToolUseSummaryGenerator
+	memoryExtractor   *SessionMemoryExtractor
+	cacheSafeSnap     *CacheSafeParamsSnapshot
+	progress          *RunProgressTracker
+	commands          *CommandRegistry
+	config            RunConfig
+	runID             uuid.UUID
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -563,7 +564,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	toolBuilder.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
-	toolBuilder.WithAdminScope(in.IsAdmin)               // P-C298-1: gate agenthub_manage on admin role
+	toolBuilder.WithAdminScope(in.IsAdmin)                // P-C298-1: gate agenthub_manage on admin role
 	toolBuilder.WithEnableManagement(in.EnableManagement) // P-C184-2: gate on agent opt-in flag
 	toolBuilder.WithDisableAskUser(in.DisableAskUser)
 	toolBuilder.WithDisableAgentDelegation(in.DisableAgentDelegation)
@@ -743,9 +744,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	// 5. Append user message.
+	userMessageForModel := chat.UserMessageWithAttachmentContext(in.UserMessage, in.Attachments)
 	messages = append(messages, ai.Message{
 		Role:    ai.RoleUser,
-		Content: in.UserMessage,
+		Content: userMessageForModel,
 	})
 
 	// Persist user message — only when not already persisted by the caller.
@@ -757,6 +759,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			SessionID:   in.SessionID,
 			Role:        "user",
 			Content:     in.UserMessage,
+			Attachments: in.Attachments,
 			MessageType: chat.MessageTypeText,
 			RunID:       &r.runID,
 		}
@@ -1267,12 +1270,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				for _, tc := range toolCalls {
 					tcID := tc.ID // capture loop variable
 					nudgeResult := chat.ChatMessage{
-						SessionID:    in.SessionID,
-						Role:         "tool",
-						Content:      nudgeContent,
-						MessageType:  chat.MessageTypeToolResult,
-						ToolCallID:   &tcID,
-						RunID:        &r.runID,
+						SessionID:   in.SessionID,
+						Role:        "tool",
+						Content:     nudgeContent,
+						MessageType: chat.MessageTypeToolResult,
+						ToolCallID:  &tcID,
+						RunID:       &r.runID,
 					}
 					if _, err := r.persister.CreateMessage(ctx, nudgeResult); err != nil {
 						emitError(ch, "persist_loop_nudge", err)
@@ -1891,6 +1894,9 @@ func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID) ([]ai.Mes
 			Role:       m.Role,
 			Content:    m.Content,
 			ToolCallID: derefString(m.ToolCallID),
+		}
+		if m.Role == ai.RoleUser {
+			aiMsg.Content = chat.UserMessageWithAttachmentContext(m.Content, m.Attachments)
 		}
 
 		// Parse tool_calls from assistant messages.
