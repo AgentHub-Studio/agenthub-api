@@ -84,6 +84,9 @@ type SessionRunnerAdapter struct {
 
 	// permAudit, when set, records permission decisions for every tool call.
 	permAudit PermissionAuditLogger
+
+	// agentDeleter routes agent deletions through the service layer (SEC-01).
+	agentDeleter agent.Deleter
 }
 
 // WithClientStateStore wires a [ClientStateStore] for CopilotKit Phase 1
@@ -232,6 +235,26 @@ func (a *SessionRunnerAdapter) WithPermissionAuditLogger(logger PermissionAuditL
 	return a
 }
 
+// WithAgentDeleter wires agent deletion through the service layer for agenthub_manage.
+func (a *SessionRunnerAdapter) WithAgentDeleter(d agent.Deleter) *SessionRunnerAdapter {
+	a.agentDeleter = d
+	return a
+}
+
+func (a *SessionRunnerAdapter) newManagementExecutor() *ManagementExecutor {
+	if a.agentRepo == nil {
+		return nil
+	}
+	return NewManagementExecutor(
+		a.agentRepo,
+		a.agentDeleter,
+		a.skillRepo,
+		skill.NewService(a.skillRepo),
+		a.toolRepo,
+		a.mcpRepo,
+	)
+}
+
 // WithDocumentSearchClient wires the document search client so the document_search
 // builtin tool executes locally via pgvector instead of failing with "not available".
 // P-E1-2: call this when the embedding service URL is configured.
@@ -294,8 +317,10 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	)
 	if f.adapter.agentRepo != nil {
 		// Pass skill.NewService as skillDeleter so delete operations enforce binding checks. P-C185-1.
-		managementExec := NewManagementExecutor(f.adapter.agentRepo, f.adapter.skillRepo, skill.NewService(f.adapter.skillRepo), f.adapter.toolRepo, f.adapter.mcpRepo)
-		runner.WithManagementExecutor(managementExec)
+		managementExec := f.adapter.newManagementExecutor()
+		if managementExec != nil {
+			runner.WithManagementExecutor(managementExec)
+		}
 	}
 	if f.adapter.mcpClient != nil {
 		runner.WithMCPClient(f.adapter.mcpClient)
@@ -411,8 +436,10 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	runner.WithMetadataPersister(a.repo)
 	if a.agentRepo != nil {
 		// Pass skill.NewService as skillDeleter so delete operations enforce binding checks. P-C185-1.
-		managementExec := NewManagementExecutor(a.agentRepo, a.skillRepo, skill.NewService(a.skillRepo), a.toolRepo, a.mcpRepo)
-		runner.WithManagementExecutor(managementExec)
+		managementExec := a.newManagementExecutor()
+		if managementExec != nil {
+			runner.WithManagementExecutor(managementExec)
+		}
 	}
 	if a.mcpClient != nil {
 		runner.WithMCPClient(a.mcpClient)
