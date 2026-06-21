@@ -46,10 +46,12 @@ func (m *mockPersistRepo) UpdateTask(_ context.Context, t task.Task) error {
 func (m *mockPersistRepo) GetTask(_ context.Context, id string) (task.Task, error) {
 	return m.tasks[id], nil
 }
-func (m *mockPersistRepo) ListBySession(_ context.Context, _ uuid.UUID, _ pagination.PageRequest) ([]task.Task, int64, error) {
+func (m *mockPersistRepo) ListBySession(_ context.Context, sessionID uuid.UUID, _ pagination.PageRequest) ([]task.Task, int64, error) {
 	var out []task.Task
 	for _, t := range m.tasks {
-		out = append(out, t)
+		if t.SessionID == sessionID {
+			out = append(out, t)
+		}
 	}
 	return out, int64(len(out)), nil
 }
@@ -95,6 +97,45 @@ func TestCoordinatorState_UpdatesStatusOnComplete(t *testing.T) {
 	persisted := repo.tasks[taskID]
 	assert.Equal(t, "completed", persisted.Status)
 	require.NotNil(t, persisted.CompletedAt)
+}
+
+func TestCoordinatorState_HydratesPersistedTasksOnRestart(t *testing.T) {
+	repo := newMockPersistRepo()
+	sessionID := uuid.New()
+	otherSessionID := uuid.New()
+	dependency := task.Task{
+		ID:          "task-research",
+		SessionID:   sessionID,
+		Description: "Research",
+		Status:      "completed",
+		Phase:       "research",
+	}
+	repo.tasks[dependency.ID] = dependency
+	repo.tasks["task-implementation"] = task.Task{
+		ID:          "task-implementation",
+		SessionID:   sessionID,
+		Description: "Implement",
+		Status:      "pending",
+		Phase:       "implementation",
+		DependsOn:   []string{dependency.ID},
+	}
+	repo.tasks["task-other-session"] = task.Task{
+		ID:        "task-other-session",
+		SessionID: otherSessionID,
+		Status:    "pending",
+		Phase:     "research",
+	}
+
+	restarted := agentic.NewCoordinatorState().
+		WithRepository(repo, sessionID).
+		WithContext(context.Background())
+
+	ready := restarted.ReadyTasks()
+	require.Len(t, ready, 1)
+	assert.Equal(t, "task-implementation", ready[0].ID)
+	assert.Equal(t, agentic.TaskStatusPending, ready[0].Status)
+	assert.Equal(t, agentic.PhaseImplementation, ready[0].Phase)
+	assert.Equal(t, "Tasks: 2 total, 1 pending, 1 completed. Workers: 0", restarted.Summary())
 }
 
 func TestCoordinatorState_WorksIfRepoBroken(t *testing.T) {
