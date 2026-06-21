@@ -28,6 +28,10 @@ const (
 	HookPreToolUse      HookEvent = "pre_tool_use"
 	HookPostToolUse     HookEvent = "post_tool_use"
 	HookPostToolFailure HookEvent = "post_tool_failure"
+	HookPreLLMCall      HookEvent = "pre_llm_call"
+	HookPostLLMCall     HookEvent = "post_llm_call"
+	HookOnError         HookEvent = "on_error"
+	HookOnComplete      HookEvent = "on_complete"
 	HookSessionStart    HookEvent = "session_start"
 	HookSessionEnd      HookEvent = "session_end"
 	HookNotification    HookEvent = "notification"
@@ -39,33 +43,36 @@ const (
 type HookType string
 
 const (
-	HookTypeHTTP   HookType = "http"
-	HookTypePrompt HookType = "prompt"
+	HookTypeHTTP      HookType = "http"
+	HookTypeWebhook   HookType = "webhook"
+	HookTypePrompt    HookType = "prompt"
+	HookTypeTransform HookType = "transform"
+	HookTypeScript    HookType = "script"
 )
 
 // AgentHook is the domain entity for a hook attached to an agent.
 type AgentHook struct {
-	ID             uuid.UUID       `json:"id"`
-	AgentID        uuid.UUID       `json:"agentId"`
-	Event          HookEvent       `json:"event"`
-	Matcher        string          `json:"matcher,omitempty"`
-	HookType       HookType        `json:"hookType"`
-	Config         json.RawMessage `json:"config"`
-	Enabled        bool            `json:"enabled"`
-	Priority       int             `json:"priority"`
+	ID       uuid.UUID       `json:"id"`
+	AgentID  uuid.UUID       `json:"agentId"`
+	Event    HookEvent       `json:"event"`
+	Matcher  string          `json:"matcher,omitempty"`
+	HookType HookType        `json:"hookType"`
+	Config   json.RawMessage `json:"config"`
+	Enabled  bool            `json:"enabled"`
+	Priority int             `json:"priority"`
 	// TimeoutSeconds overrides the global hook timeout for this specific hook.
 	// Inspired by Claude Code's per-hook timeout field.
-	TimeoutSeconds *int            `json:"timeoutSeconds,omitempty"`
+	TimeoutSeconds *int `json:"timeoutSeconds,omitempty"`
 	// IsAsync runs the hook in background without blocking the agentic loop.
 	// Inspired by Claude Code's async hook flag.
-	IsAsync        bool            `json:"isAsync"`
+	IsAsync bool `json:"isAsync"`
 	// RunOnce causes the hook to fire once then auto-disable.
 	// Inspired by Claude Code's once flag for one-shot hooks.
-	RunOnce        bool            `json:"runOnce"`
+	RunOnce bool `json:"runOnce"`
 	// StatusMessage is a custom spinner message shown while the hook runs.
-	StatusMessage  string          `json:"statusMessage,omitempty"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	StatusMessage string    `json:"statusMessage,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 // HTTPHookConfig is the config shape for hook_type = "http".
@@ -82,6 +89,25 @@ type HTTPHookConfig struct {
 type PromptHookConfig struct {
 	Template string `json:"template"` // Go text/template with {{.ToolName}}, {{.Input}}, {{.Output}}
 	Inject   string `json:"inject"`   // alias for static inject text (no templating)
+}
+
+// TransformHookConfig rewrites the hook payload for downstream execution.
+// For pre_tool_use, Modified replaces ToolInput. For post_tool_use, Modified
+// replaces ToolOutput. ToolInput/ToolOutput are accepted as explicit aliases.
+type TransformHookConfig struct {
+	Modified   json.RawMessage `json:"modified,omitempty"`
+	ToolInput  json.RawMessage `json:"toolInput,omitempty"`
+	ToolOutput json.RawMessage `json:"toolOutput,omitempty"`
+	Inject     string          `json:"inject,omitempty"`
+}
+
+// ScriptHookConfig is a safe declarative script gate. It intentionally avoids
+// arbitrary code execution while exposing the HookResult contract from the spec.
+type ScriptHookConfig struct {
+	Continue *bool           `json:"continue,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
+	Inject   string          `json:"inject,omitempty"`
+	Modified json.RawMessage `json:"modified,omitempty"`
 }
 
 // HookPayload is the data sent to hook executors and used as the template
@@ -107,8 +133,10 @@ type HookPayload struct {
 
 // HookResult holds the result of a hook execution.
 type HookResult struct {
-	Inject string  // text to inject into context (prompt hooks)
-	Error  *string // non-nil if hook failed (non-fatal)
+	Continue bool            `json:"continue"`
+	Modified json.RawMessage `json:"modified,omitempty"`
+	Inject   string          `json:"inject,omitempty"` // text to inject into context (prompt hooks)
+	Error    *string         `json:"error,omitempty"`  // non-nil if hook failed (non-fatal)
 }
 
 // --- Hook Repository ---
@@ -297,13 +325,17 @@ func (e *HookExecutor) disableHook(ctx context.Context, hookID uuid.UUID) {
 
 func (e *HookExecutor) executeHook(ctx context.Context, hook AgentHook, payload HookPayload) HookResult {
 	switch hook.HookType {
-	case HookTypeHTTP:
+	case HookTypeHTTP, HookTypeWebhook:
 		return e.executeHTTPHook(ctx, hook, payload)
 	case HookTypePrompt:
 		return e.executePromptHook(hook, payload)
+	case HookTypeTransform:
+		return e.executeTransformHook(hook, payload)
+	case HookTypeScript:
+		return e.executeScriptHook(hook)
 	default:
 		errMsg := fmt.Sprintf("unknown hook type: %s", hook.HookType)
-		return HookResult{Error: &errMsg}
+		return HookResult{Continue: true, Error: &errMsg}
 	}
 }
 
@@ -311,7 +343,7 @@ func (e *HookExecutor) executeHTTPHook(ctx context.Context, hook AgentHook, payl
 	var cfg HTTPHookConfig
 	if err := json.Unmarshal(hook.Config, &cfg); err != nil {
 		errMsg := fmt.Sprintf("invalid http hook config: %v", err)
-		return HookResult{Error: &errMsg}
+		return HookResult{Continue: true, Error: &errMsg}
 	}
 
 	method := cfg.Method
@@ -331,7 +363,7 @@ func (e *HookExecutor) executeHTTPHook(ctx context.Context, hook AgentHook, payl
 	req, err := http.NewRequestWithContext(hookCtx, method, cfg.URL, bytes.NewReader(body))
 	if err != nil {
 		errMsg := fmt.Sprintf("hook request error: %v", err)
-		return HookResult{Error: &errMsg}
+		return HookResult{Continue: true, Error: &errMsg}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range cfg.Headers {
@@ -341,7 +373,7 @@ func (e *HookExecutor) executeHTTPHook(ctx context.Context, hook AgentHook, payl
 	resp, err := e.client.Do(req)
 	if err != nil {
 		errMsg := fmt.Sprintf("hook http error: %v", err)
-		return HookResult{Error: &errMsg}
+		return HookResult{Continue: true, Error: &errMsg}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -349,18 +381,17 @@ func (e *HookExecutor) executeHTTPHook(ctx context.Context, hook AgentHook, payl
 
 	if resp.StatusCode >= 400 {
 		errMsg := fmt.Sprintf("hook returned %d: %s", resp.StatusCode, string(respBody))
-		return HookResult{Error: &errMsg}
+		return HookResult{Continue: true, Error: &errMsg}
 	}
 
-	// If hook returns text, use it as inject content.
-	return HookResult{Inject: string(respBody)}
+	return parseHookResponse(respBody)
 }
 
 func (e *HookExecutor) executePromptHook(hook AgentHook, payload HookPayload) HookResult {
 	var cfg PromptHookConfig
 	if err := json.Unmarshal(hook.Config, &cfg); err != nil {
 		errMsg := fmt.Sprintf("invalid prompt hook config: %v", err)
-		return HookResult{Error: &errMsg}
+		return HookResult{Continue: true, Error: &errMsg}
 	}
 
 	// Prefer template; fall back to inject alias for static text.
@@ -378,17 +409,112 @@ func (e *HookExecutor) executePromptHook(hook AgentHook, payload HookPayload) Ho
 		if err != nil {
 			// Malformed template — fall back to raw string rather than erroring.
 			slog.Warn("prompt hook: malformed template, using raw text", "hookID", hook.ID, "error", err)
-			return HookResult{Inject: raw}
+			return HookResult{Continue: true, Inject: raw}
 		}
 		var buf bytes.Buffer
 		if err := tmpl.Execute(&buf, payload); err != nil {
 			slog.Warn("prompt hook: template execute failed, using raw text", "hookID", hook.ID, "error", err)
-			return HookResult{Inject: raw}
+			return HookResult{Continue: true, Inject: raw}
 		}
-		return HookResult{Inject: buf.String()}
+		return HookResult{Continue: true, Inject: buf.String()}
 	}
 
-	return HookResult{Inject: raw}
+	return HookResult{Continue: true, Inject: raw}
+}
+
+func (e *HookExecutor) executeTransformHook(hook AgentHook, payload HookPayload) HookResult {
+	var cfg TransformHookConfig
+	if err := json.Unmarshal(hook.Config, &cfg); err != nil {
+		errMsg := fmt.Sprintf("invalid transform hook config: %v", err)
+		return HookResult{Continue: true, Error: &errMsg}
+	}
+	modified := cfg.Modified
+	if len(modified) == 0 && payload.Event == HookPreToolUse {
+		modified = cfg.ToolInput
+	}
+	if len(modified) == 0 && payload.Event == HookPostToolUse {
+		modified = cfg.ToolOutput
+	}
+	return HookResult{Continue: true, Modified: modified, Inject: cfg.Inject}
+}
+
+func (e *HookExecutor) executeScriptHook(hook AgentHook) HookResult {
+	var cfg ScriptHookConfig
+	if err := json.Unmarshal(hook.Config, &cfg); err != nil {
+		errMsg := fmt.Sprintf("invalid script hook config: %v", err)
+		return HookResult{Continue: true, Error: &errMsg}
+	}
+	cont := true
+	if cfg.Continue != nil {
+		cont = *cfg.Continue
+	}
+	var errPtr *string
+	if !cont {
+		reason := cfg.Reason
+		if reason == "" {
+			reason = "hook blocked execution"
+		}
+		errPtr = &reason
+	}
+	return HookResult{Continue: cont, Modified: cfg.Modified, Inject: cfg.Inject, Error: errPtr}
+}
+
+func parseHookResponse(body []byte) HookResult {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return HookResult{Continue: true}
+	}
+	var parsed struct {
+		Continue *bool           `json:"continue,omitempty"`
+		Modified json.RawMessage `json:"modified,omitempty"`
+		Inject   string          `json:"inject,omitempty"`
+		Error    string          `json:"error,omitempty"`
+	}
+	if json.Unmarshal(body, &parsed) == nil && (parsed.Continue != nil || len(parsed.Modified) > 0 || parsed.Inject != "" || parsed.Error != "") {
+		cont := true
+		if parsed.Continue != nil {
+			cont = *parsed.Continue
+		}
+		var errPtr *string
+		if parsed.Error != "" {
+			errPtr = &parsed.Error
+		}
+		return HookResult{Continue: cont, Modified: parsed.Modified, Inject: parsed.Inject, Error: errPtr}
+	}
+	return HookResult{Continue: true, Inject: string(body)}
+}
+
+func applyPreToolHookResults(results []HookResult, current json.RawMessage) (json.RawMessage, *string) {
+	next := current
+	for _, result := range results {
+		if len(result.Modified) > 0 {
+			next = result.Modified
+		}
+		if !result.Continue {
+			reason := "hook blocked execution"
+			if result.Error != nil && *result.Error != "" {
+				reason = *result.Error
+			}
+			return next, &reason
+		}
+	}
+	return next, nil
+}
+
+func applyPostToolHookResults(results []HookResult, result *ToolExecResult) {
+	for _, hr := range results {
+		if len(hr.Modified) > 0 {
+			result.Output = hr.Modified
+		}
+		if hr.Inject == "" {
+			continue
+		}
+		if result.InjectText == "" {
+			result.InjectText = hr.Inject
+		} else {
+			result.InjectText += "\n" + hr.Inject
+		}
+	}
 }
 
 // --- Turn-End / Run-End Payloads ---
@@ -488,28 +614,32 @@ func (e *HookExecutor) ExecuteRunEnd(ctx context.Context, payload RunEndPayload,
 	var injects []string
 	agentID, err := uuid.Parse(payload.AgentID)
 	if err == nil && e.repo != nil {
-		hooks, err := e.repo.FindByAgentAndEvent(ctx, agentID, HookRunEnd)
-		if err != nil {
-			slog.Warn("hook executor: failed to load run-end hooks", "error", err)
-		} else {
-			for _, hook := range hooks {
-				// Populate run-end fields so prompt templates can use
-				// {{.TotalTurns}}, {{.TotalTokens}}, {{.TotalCostUSD}}, etc.
-				hookPayload := HookPayload{
-					Event:        HookRunEnd,
-					AgentID:      payload.AgentID,
-					SessionID:    payload.SessionID,
-					TotalTurns:   payload.TotalTurns,
-					TotalTokens:  payload.TotalTokens,
-					TotalCostUSD: payload.TotalCost,
-				}
-				result := e.executeHook(ctx, hook, hookPayload)
-				if result.Error != nil {
-					slog.Warn("run-end hook failed", "hookId", hook.ID, "error", *result.Error)
-				}
-				if result.Inject != "" {
-					injects = append(injects, result.Inject)
-				}
+		var hooks []AgentHook
+		for _, event := range []HookEvent{HookRunEnd, HookOnComplete} {
+			eventHooks, err := e.repo.FindByAgentAndEvent(ctx, agentID, event)
+			if err != nil {
+				slog.Warn("hook executor: failed to load run-end hooks", "event", event, "error", err)
+				continue
+			}
+			hooks = append(hooks, eventHooks...)
+		}
+		for _, hook := range hooks {
+			// Populate run-end fields so prompt templates can use
+			// {{.TotalTurns}}, {{.TotalTokens}}, {{.TotalCostUSD}}, etc.
+			hookPayload := HookPayload{
+				Event:        hook.Event,
+				AgentID:      payload.AgentID,
+				SessionID:    payload.SessionID,
+				TotalTurns:   payload.TotalTurns,
+				TotalTokens:  payload.TotalTokens,
+				TotalCostUSD: payload.TotalCost,
+			}
+			result := e.executeHook(ctx, hook, hookPayload)
+			if result.Error != nil {
+				slog.Warn("run-end hook failed", "hookId", hook.ID, "error", *result.Error)
+			}
+			if result.Inject != "" {
+				injects = append(injects, result.Inject)
 			}
 		}
 	}

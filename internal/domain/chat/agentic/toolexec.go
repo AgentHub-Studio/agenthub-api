@@ -65,12 +65,12 @@ func (t *TrackedTool) abort() {
 
 // StreamingToolExecutor runs tool calls with state tracking and progress events.
 type StreamingToolExecutor struct {
-	skillClient    *SkillRuntimeClient
-	mcpBridge      *MCPToolBridge
-	hookExecutor   *HookExecutor
-	cache          *ToolResultCache
-	stallDetector  *StallDetector
-	config         RunConfig
+	skillClient   *SkillRuntimeClient
+	mcpBridge     *MCPToolBridge
+	hookExecutor  *HookExecutor
+	cache         *ToolResultCache
+	stallDetector *StallDetector
+	config        RunConfig
 	// P-C179-1: document_search is executed locally (not delegated to skill-runtime).
 	docSearch   knowledge.DocumentSearchClient
 	activeKBIDs []uuid.UUID
@@ -389,7 +389,7 @@ func (e *StreamingToolExecutor) executeParallel(
 				return
 			}
 
-		// Validate tool input before execution.
+			// Validate tool input before execution.
 			toolInput := json.RawMessage(tc.Function.Arguments)
 			if vErr := ValidateToolInput(tc.Function.Name, toolInput); vErr != "" {
 				errMsg := vErr
@@ -401,6 +401,40 @@ func (e *StreamingToolExecutor) executeParallel(
 				})
 				e.emitToolResult(ch, tt, validationResult)
 				return
+			}
+
+			// Pre-tool hooks may block execution or rewrite the tool input.
+			if e.hookExecutor != nil {
+				hookResults := e.hookExecutor.Execute(ctx, HookPayload{
+					Event:     HookPreToolUse,
+					AgentID:   in.AgentID.String(),
+					SessionID: in.SessionID.String(),
+					ToolName:  tc.Function.Name,
+					ToolInput: toolInput,
+				})
+				var blocked *string
+				toolInput, blocked = applyPreToolHookResults(hookResults, toolInput)
+				if blocked != nil {
+					blockedResult := ToolExecResult{Error: blocked, ToolName: tc.Function.Name, EmittedToStream: true}
+					tt.complete(blockedResult)
+					results[i] = blockedResult
+					ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+						ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
+					})
+					e.emitToolResult(ch, tt, blockedResult)
+					return
+				}
+				if vErr := ValidateToolInput(tc.Function.Name, toolInput); vErr != "" {
+					errMsg := vErr
+					validationResult := ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name, EmittedToStream: true}
+					tt.complete(validationResult)
+					results[i] = validationResult
+					ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+						ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
+					})
+					e.emitToolResult(ch, tt, validationResult)
+					return
+				}
 			}
 
 			// Check cache for cacheable tools.
@@ -439,17 +473,6 @@ func (e *StreamingToolExecutor) executeParallel(
 						})
 					},
 				)
-			}
-
-			// Pre-tool hooks.
-			if e.hookExecutor != nil {
-				e.hookExecutor.Execute(ctx, HookPayload{
-					Event:     HookPreToolUse,
-					AgentID:   in.AgentID.String(),
-					SessionID: in.SessionID.String(),
-					ToolName:  tc.Function.Name,
-					ToolInput: toolInput,
-				})
 			}
 
 			// Execute the tool.
@@ -529,21 +552,9 @@ func (e *StreamingToolExecutor) executeParallel(
 					ToolOutput: results[i].Output,
 					ToolError:  results[i].Error,
 				})
-				// Collect inject text from prompt hooks.
-				// BUG-HOOK-PROMPT-INJECT fix: store in InjectText, NOT appended to
-				// tool Output. The runner emits it as a [SYSTEM NOTE] user message
-				// before the next LLM call — preventing the LLM from treating the
-				// annotation as part of the tool result and entering a retry loop.
-				for _, hr := range hookResults {
-					if hr.Inject == "" {
-						continue
-					}
-					if results[i].InjectText == "" {
-						results[i].InjectText = hr.Inject
-					} else {
-						results[i].InjectText += "\n" + hr.Inject
-					}
-				}
+				// BUG-HOOK-PROMPT-INJECT fix: store InjectText separately. Transform
+				// hooks may also rewrite the output seen by the next LLM turn.
+				applyPostToolHookResults(hookResults, &results[i])
 			}
 		}(idx)
 	}
@@ -573,11 +584,13 @@ func (e *StreamingToolExecutor) executeToolCall(
 	result *ToolExecResult,
 	in RunInput,
 ) bool {
+	toolInput := json.RawMessage(tc.Function.Arguments)
+
 	// Phase 1: Validate input before permission checks or execution.
 	// Structural validation catches missing params and invalid types early,
 	// returning LLM-readable errors without showing permission dialogs.
 	// Inspired by Claude Code's Tool.ts two-phase validateInput/checkPermissions.
-	if vErr := ValidateToolInput(tc.Function.Name, json.RawMessage(tc.Function.Arguments)); vErr != "" {
+	if vErr := ValidateToolInput(tc.Function.Name, toolInput); vErr != "" {
 		errMsg := vErr
 		validationResult := ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name, EmittedToStream: true}
 		tt.complete(validationResult)
@@ -589,21 +602,44 @@ func (e *StreamingToolExecutor) executeToolCall(
 		return true
 	}
 
-	tt.transition(ToolStateExecuting)
-	ch <- NewRunEvent(EventToolProgress, ToolProgressData{
-		ID: tt.ID, Name: tt.Name, State: ToolStateExecuting,
-	})
-
-	// Pre-tool hooks.
+	// Pre-tool hooks may block execution or rewrite the tool input.
 	if e.hookExecutor != nil {
-		e.hookExecutor.Execute(ctx, HookPayload{
+		hookResults := e.hookExecutor.Execute(ctx, HookPayload{
 			Event:     HookPreToolUse,
 			AgentID:   in.AgentID.String(),
 			SessionID: in.SessionID.String(),
 			ToolName:  tc.Function.Name,
-			ToolInput: json.RawMessage(tc.Function.Arguments),
+			ToolInput: toolInput,
 		})
+		var blocked *string
+		toolInput, blocked = applyPreToolHookResults(hookResults, toolInput)
+		if blocked != nil {
+			blockedResult := ToolExecResult{Error: blocked, ToolName: tc.Function.Name, EmittedToStream: true}
+			tt.complete(blockedResult)
+			*result = blockedResult
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
+			})
+			e.emitToolResult(ch, tt, blockedResult)
+			return true
+		}
+		if vErr := ValidateToolInput(tc.Function.Name, toolInput); vErr != "" {
+			errMsg := vErr
+			validationResult := ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name, EmittedToStream: true}
+			tt.complete(validationResult)
+			*result = validationResult
+			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+				ID: tt.ID, Name: tt.Name, State: ToolStateCompleted,
+			})
+			e.emitToolResult(ch, tt, validationResult)
+			return true
+		}
 	}
+
+	tt.transition(ToolStateExecuting)
+	ch <- NewRunEvent(EventToolProgress, ToolProgressData{
+		ID: tt.ID, Name: tt.Name, State: ToolStateExecuting,
+	})
 
 	// Execute the tool.
 	toolCtx := ctx
@@ -617,19 +653,19 @@ func (e *StreamingToolExecutor) executeToolCall(
 	var execResult *ToolExecResult
 	var err error
 	if tc.Function.Name == "document_search" && e.docSearch != nil {
-		execResult, err = executeDocumentSearchInternal(toolCtx, e.docSearch, e.activeKBIDs, json.RawMessage(tc.Function.Arguments))
+		execResult, err = executeDocumentSearchInternal(toolCtx, e.docSearch, e.activeKBIDs, toolInput)
 	} else if tc.Function.Name == "document_search" && e.docSearch == nil {
 		// P-E1-1: docSearch client not wired — surface clear error instead of delegating to
 		// skill-runtime (which returns the confusing "skill not found" message).
 		msg := "Document search is not available for this agent. The knowledge base search client is not connected. Please check that the agent has an active knowledge base linked."
 		execResult = &ToolExecResult{Error: &msg}
 	} else if IsMCPToolCall(tc.Function.Name) && e.mcpBridge != nil {
-		execResult, err = e.mcpBridge.Execute(toolCtx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+		execResult, err = e.mcpBridge.Execute(toolCtx, tc.Function.Name, toolInput)
 	} else {
 		execResult, err = e.skillClient.Execute(
 			toolCtx,
 			tc.Function.Name,
-			json.RawMessage(tc.Function.Arguments),
+			toolInput,
 			in.TenantID, in.AgentID.String(), in.SessionID.String(),
 		)
 	}
@@ -663,35 +699,27 @@ func (e *StreamingToolExecutor) executeToolCall(
 			AgentID:    in.AgentID.String(),
 			SessionID:  in.SessionID.String(),
 			ToolName:   tc.Function.Name,
-			ToolInput:  json.RawMessage(tc.Function.Arguments),
+			ToolInput:  toolInput,
 			ToolOutput: result.Output,
 			ToolError:  result.Error,
 		})
-		// BUG-HOOK-PROMPT-INJECT fix (serial path): collect InjectText from prompt
-		// hooks so the runner can emit a [SYSTEM NOTE] user message before the next
-		// LLM call. Previously this path discarded the hook results entirely.
-		for _, hr := range hookResults {
-			if hr.Inject == "" {
-				continue
-			}
-			if result.InjectText == "" {
-				result.InjectText = hr.Inject
-			} else {
-				result.InjectText += "\n" + hr.Inject
-			}
-		}
+		// BUG-HOOK-PROMPT-INJECT fix (serial path): collect InjectText separately.
+		// Transform hooks may also rewrite output before the next LLM turn.
+		applyPostToolHookResults(hookResults, result)
 
 		// Post-tool-failure hooks — fired only when tool execution failed.
 		// Inspired by Claude Code's PostToolFailure hook event.
 		if hasErr {
-			e.hookExecutor.Execute(ctx, HookPayload{
-				Event:     HookPostToolFailure,
-				AgentID:   in.AgentID.String(),
-				SessionID: in.SessionID.String(),
-				ToolName:  tc.Function.Name,
-				ToolInput: json.RawMessage(tc.Function.Arguments),
-				ToolError: result.Error,
-			})
+			for _, event := range []HookEvent{HookPostToolFailure, HookOnError} {
+				e.hookExecutor.Execute(ctx, HookPayload{
+					Event:     event,
+					AgentID:   in.AgentID.String(),
+					SessionID: in.SessionID.String(),
+					ToolName:  tc.Function.Name,
+					ToolInput: toolInput,
+					ToolError: result.Error,
+				})
+			}
 		}
 	}
 
@@ -746,7 +774,7 @@ func executeDocumentSearchInternal(ctx context.Context, client knowledge.Documen
 	var args struct {
 		Query           string `json:"query"`
 		TopK            int    `json:"top_k"`
-		Limit           int    `json:"limit"` // BUG-DOCSEARCH-PARAMS: alias accepted from LLM schema
+		Limit           int    `json:"limit"`             // BUG-DOCSEARCH-PARAMS: alias accepted from LLM schema
 		KnowledgeBaseID string `json:"knowledge_base_id"` // BUG-DOCSEARCH-PARAMS: optional KB filter
 	}
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
