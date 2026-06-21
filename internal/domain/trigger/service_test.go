@@ -113,6 +113,22 @@ func (m *mockRepo) CompleteRun(_ context.Context, runID uuid.UUID, status trigge
 	return nil
 }
 
+func (m *mockRepo) CompleteRunBySession(_ context.Context, sessionID uuid.UUID, status trigger.RunStatus, turns, tokens *int, errMsg *string) error {
+	for id, r := range m.runs {
+		if r.SessionID == sessionID {
+			r.Status = status
+			r.TotalTurns = turns
+			r.TotalTokens = tokens
+			r.Error = errMsg
+			now := time.Now()
+			r.CompletedAt = &now
+			m.runs[id] = r
+			return nil
+		}
+	}
+	return nil
+}
+
 func (m *mockRepo) ListRuns(_ context.Context, triggerID uuid.UUID, page pagination.PageRequest) (pagination.Page[trigger.AgentTriggerRun], error) {
 	var items []trigger.AgentTriggerRun
 	for _, r := range m.runs {

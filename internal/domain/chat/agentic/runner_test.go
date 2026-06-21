@@ -1168,6 +1168,15 @@ func TestFormatToolResult_NormalOutput(t *testing.T) {
 	assert.Equal(t, `{"key": "value"}`, agentic.FormatToolResult(r))
 }
 
+func TestFormatToolResult_RedactsSensitiveFields(t *testing.T) {
+	r := agentic.ToolExecResult{Output: json.RawMessage(`{"apiKey":"short-secret","nested":{"clientSecret":"nested-secret"},"status_code":200}`)}
+	result := agentic.FormatToolResult(r)
+	assert.JSONEq(t, `{"apiKey":"[REDACTED]","nested":{"clientSecret":"[REDACTED]"}}`, result)
+	assert.NotContains(t, result, "short-secret")
+	assert.NotContains(t, result, "nested-secret")
+	assert.NotContains(t, result, "status_code")
+}
+
 func TestFormatToolResult_Error(t *testing.T) {
 	errMsg := "connection refused"
 	r := agentic.ToolExecResult{Error: &errMsg}

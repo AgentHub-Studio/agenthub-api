@@ -17,7 +17,7 @@ func TestDefaultRunConfig(t *testing.T) {
 	assert.Equal(t, 4096, cfg.MaxTokensPerCall)
 	assert.Equal(t, 200000, cfg.ContextWindowSize)
 	assert.Equal(t, 0.75, cfg.CompactThreshold)
-	assert.Equal(t, 30*time.Second, cfg.ToolTimeout)
+	assert.Equal(t, 2*time.Minute, cfg.ToolTimeout)
 	// TotalTimeout aligned with async_executor runTimeout (15 min) so slow
 	// providers (Ollama on CPU) don't abort mid-stream — see issue #181.
 	assert.Equal(t, 15*time.Minute, cfg.TotalTimeout)
@@ -49,7 +49,7 @@ func TestRunConfigFromModelConfig_OverridesDefaults(t *testing.T) {
 	assert.Equal(t, 10, cfg.MaxIterations)
 	assert.Equal(t, 0.5, cfg.CompactThreshold)
 	// Non-overridden values should remain default.
-	assert.Equal(t, 30*time.Second, cfg.ToolTimeout)
+	assert.Equal(t, 2*time.Minute, cfg.ToolTimeout)
 	assert.Equal(t, 64, cfg.StreamBufferSize)
 }
 

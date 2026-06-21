@@ -203,6 +203,7 @@ func (c *HTTPMCPClient) ListTools(ctx context.Context, tenantID string) ([]MCPTo
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: new request: %w", err)
 	}
+	req.Header.Set("X-Tenant-ID", tenantID)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -269,6 +270,7 @@ func (c *HTTPMCPClient) CallTool(ctx context.Context, tenantID, serverName, tool
 		return nil, fmt.Errorf("mcpclient: new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Tenant-ID", tenantID)
 
 	resp, err := c.client.Do(req)
 	if err != nil {

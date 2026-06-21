@@ -59,7 +59,7 @@ func (r *asyncExecutorRepoStub) UpdateSessionConfigHash(context.Context, uuid.UU
 	return nil
 }
 
-func (r *asyncExecutorRepoStub) UpdateSessionSnapshots(context.Context, uuid.UUID, *string, json.RawMessage, json.RawMessage) error {
+func (r *asyncExecutorRepoStub) UpdateSessionSnapshots(context.Context, uuid.UUID, *string, json.RawMessage, json.RawMessage, string) error {
 	return nil
 }
 
@@ -133,9 +133,11 @@ func (r *asyncExecutorRepoStub) UpdateRunMetadata(context.Context, uuid.UUID, js
 type asyncExecutorRunnerStub struct {
 	events []RunEvent
 	err    error
+	input  RunInput
 }
 
-func (r *asyncExecutorRunnerStub) RunSession(_ context.Context, _ RunInput) (<-chan RunEvent, error) {
+func (r *asyncExecutorRunnerStub) RunSession(_ context.Context, input RunInput) (<-chan RunEvent, error) {
+	r.input = input
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -205,4 +207,80 @@ func TestAsyncExecutor_ProcessTask_BuffersEventsForResume(t *testing.T) {
 	assert.Equal(t, "run_complete", events[1].Event.Type)
 	assert.Equal(t, runID, repo.completedID)
 	assert.Equal(t, uuid.Nil, repo.failedID)
+}
+
+type asyncMetricsCollectorStub struct {
+	events  []RunEvent
+	flushed bool
+}
+
+func (c *asyncMetricsCollectorStub) Collect(event RunEvent) {
+	c.events = append(c.events, event)
+}
+
+func (c *asyncMetricsCollectorStub) Flush() error {
+	c.flushed = true
+	return nil
+}
+
+type asyncMetricsFactoryStub struct {
+	collector *asyncMetricsCollectorStub
+	tenantID  string
+	agentID   uuid.UUID
+	sessionID uuid.UUID
+	runID     string
+	provider  string
+	model     string
+}
+
+func (f *asyncMetricsFactoryStub) NewCollector(tenantID string, agentID, sessionID uuid.UUID, runID, provider, model string) RunMetricsCollector {
+	f.tenantID = tenantID
+	f.agentID = agentID
+	f.sessionID = sessionID
+	f.runID = runID
+	f.provider = provider
+	f.model = model
+	return f.collector
+}
+
+func TestAsyncExecutor_ProcessTask_RecordsRunMetrics(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	runID := uuid.New()
+	repo := &asyncExecutorRepoStub{
+		session: ChatSession{
+			ID:                  sessionID,
+			AgentID:             &agentID,
+			ModelConfigSnapshot: json.RawMessage(`{"provider":"anthropic","model":"claude-sonnet"}`),
+		},
+	}
+	runner := &asyncExecutorRunnerStub{
+		events: []RunEvent{
+			{Type: "turn_complete", Data: json.RawMessage(`{"turnIndex":0}`)},
+			{Type: "run_complete", Data: json.RawMessage(`{"totalTurns":1,"totalTokens":42}`)},
+		},
+	}
+	collector := &asyncMetricsCollectorStub{}
+	factory := &asyncMetricsFactoryStub{collector: collector}
+	exec := NewAsyncExecutor(repo, runner, "").
+		WithRunMetricsCollectorFactory(factory)
+
+	exec.processTask(ChatRunTask{
+		RunID:     runID,
+		SessionID: sessionID,
+		TenantID:  "ah_test",
+		Message:   "hello",
+	})
+
+	assert.Equal(t, "test", factory.tenantID)
+	assert.Equal(t, agentID, factory.agentID)
+	assert.Equal(t, sessionID, factory.sessionID)
+	assert.Equal(t, runID.String(), factory.runID)
+	assert.Equal(t, "anthropic", factory.provider)
+	assert.Equal(t, "claude-sonnet", factory.model)
+	require.Len(t, collector.events, 2)
+	assert.Equal(t, "turn_complete", collector.events[0].Type)
+	assert.Equal(t, "run_complete", collector.events[1].Type)
+	assert.True(t, collector.flushed)
+	assert.Equal(t, runID, repo.completedID)
 }

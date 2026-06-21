@@ -1,10 +1,12 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -60,6 +62,17 @@ type PermissionAuditEntryResponse struct {
 	CreatedAt    string  `json:"createdAt"`
 }
 
+// AttachmentStorage abstracts object storage for chat attachments.
+type AttachmentStorage interface {
+	Upload(ctx context.Context, key string, r io.Reader, size int64, contentType string) (string, error)
+}
+
+type noopAttachmentStorage struct{}
+
+func (n *noopAttachmentStorage) Upload(_ context.Context, key string, _ io.Reader, _ int64, _ string) (string, error) {
+	return key, nil
+}
+
 // Handler handles HTTP requests for chat sessions and messages.
 type Handler struct {
 	svc             chatService
@@ -69,15 +82,17 @@ type Handler struct {
 	bufferRegistry  *RunEventBufferRegistry
 	taskRepo        task.Repository       // nil means task endpoints return 501
 	permAuditReader PermissionAuditReader // nil means endpoint returns 501
+	attachmentStore AttachmentStorage
 }
 
 // NewHandler creates a new Handler.
 func NewHandler(svc chatService, executor *AsyncExecutor) *Handler {
 	h := &Handler{
-		svc:            svc,
-		executor:       executor,
-		bgRegistry:     NewBackgroundRunRegistry(0),
-		bufferRegistry: NewRunEventBufferRegistry(),
+		svc:             svc,
+		executor:        executor,
+		bgRegistry:      NewBackgroundRunRegistry(0),
+		bufferRegistry:  NewRunEventBufferRegistry(),
+		attachmentStore: &noopAttachmentStorage{},
 	}
 	if executor != nil {
 		executor.WithEventBufferRegistry(h.bufferRegistry)
@@ -100,6 +115,14 @@ func (h *Handler) WithPermissionAuditReader(reader PermissionAuditReader) *Handl
 	return h
 }
 
+// WithAttachmentStorage injects object storage for chat attachment uploads.
+func (h *Handler) WithAttachmentStorage(storage AttachmentStorage) *Handler {
+	if storage != nil {
+		h.attachmentStore = storage
+	}
+	return h
+}
+
 // WithRunLookup overrides the run lookup used by GET /api/chat/runs/{id}.
 // Intended for use in unit tests where a real AsyncExecutor is not available.
 func (h *Handler) WithRunLookup(rl RunLookup) *Handler {
@@ -117,6 +140,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/chat/sessions/{id}/archive", h.archiveSession)
 	r.Get("/api/chat/sessions/{id}/messages", h.listMessages)
 	r.Post("/api/chat/sessions/{id}/messages", h.addMessage)
+	r.Post("/api/chat/sessions/{id}/attachments", h.uploadAttachment)
 	r.Post("/api/chat/sessions/{id}/run", h.runSession)
 	r.Get("/api/chat/sessions/{id}/run/{runId}/status", h.runStatus)
 	r.Post("/api/chat/sessions/{id}/run/{runId}/cancel", h.cancelRun)
@@ -340,6 +364,77 @@ func (h *Handler) addMessage(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, http.StatusCreated, resp)
 }
 
+func (h *Handler) uploadAttachment(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+
+	session, err := h.svc.GetSession(r.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to upload attachment")
+		return
+	}
+	if session.Status == StatusArchived {
+		respond.Error(w, http.StatusConflict, ErrSessionArchived.Error())
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, MaxAttachmentSizeBytes+(1<<20))
+	if err := r.ParseMultipartForm(MaxAttachmentSizeBytes); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid multipart form")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "file is required")
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, MaxAttachmentSizeBytes+1))
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "failed to read attachment")
+		return
+	}
+	if int64(len(data)) > MaxAttachmentSizeBytes {
+		respond.Error(w, http.StatusRequestEntityTooLarge, "attachment exceeds maximum size of 10MB")
+		return
+	}
+
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+	attachment, err := BuildUploadedChatAttachment(header.Filename, contentType, "", "", data)
+	if err != nil {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	tenantID := tenant.FromContext(r.Context())
+	if tenantID == "" {
+		tenantID = "unknown"
+	}
+	storageKey := fmt.Sprintf("chat-attachments/%s/%s/%s/%s", tenantID, sessionID, attachment.ID, attachment.Name)
+	url, err := h.attachmentStore.Upload(r.Context(), storageKey, bytes.NewReader(data), attachment.Size, attachment.Type)
+	if err != nil {
+		slog.Error("chat: upload attachment failed", "sessionID", sessionID, "err", err)
+		respond.Error(w, http.StatusInternalServerError, "failed to store attachment")
+		return
+	}
+	attachment.StorageKey = storageKey
+	attachment.URL = url
+
+	respond.JSON(w, http.StatusCreated, attachment)
+}
+
 // elicitationRespondRequest is the body for POST /api/chat/sessions/{id}/elicitation/{requestId}/respond.
 type elicitationRespondRequest struct {
 	Action  string                 `json:"action"`  // "accept" | "decline" | "cancel"
@@ -349,7 +444,8 @@ type elicitationRespondRequest struct {
 
 // runSessionRequest is the body for POST /api/chat/sessions/{id}/run.
 type runSessionRequest struct {
-	Message string `json:"message"`
+	Message     string          `json:"message"`
+	Attachments json.RawMessage `json:"attachments,omitempty"`
 }
 
 // runSession handles POST /api/chat/sessions/{id}/run.
@@ -369,7 +465,13 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Message == "" {
+	attachments, err := NormalizeChatAttachments(req.Attachments)
+	if err != nil {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	req.Attachments = attachments
+	if req.Message == "" && !HasChatAttachments(req.Attachments) {
 		respond.Error(w, http.StatusBadRequest, "message is required")
 		return
 	}
@@ -384,7 +486,7 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 
 	// If AsyncExecutor is available, use it to start the run in background.
 	if h.executor != nil {
-		runID, err := h.executor.EnqueueRun(r.Context(), sessionID, tenantID, req.Message)
+		runID, err := h.executor.EnqueueRunWithAttachments(r.Context(), sessionID, tenantID, req.Message, req.Attachments)
 		if err != nil {
 			if errors.Is(err, ErrRunAlreadyActive) {
 				respond.Error(w, http.StatusConflict, "a run is already in progress for this session")
@@ -426,7 +528,7 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	rawToken := tenant.TokenFromContext(r.Context())
 	runCtx = tenant.NewContextWithToken(runCtx, tenantID, rawToken)
 
-	ch, err := h.svc.RunSession(runCtx, sessionID, req.Message, tenantID)
+	ch, err := h.runSessionWithAttachments(runCtx, sessionID, req.Message, tenantID, req.Attachments)
 	if err != nil {
 		h.bgRegistry.Cancel(runID)
 		if errors.Is(err, ErrNotFound) {
@@ -518,6 +620,15 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *Handler) runSessionWithAttachments(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, attachments json.RawMessage) (<-chan RunEvent, error) {
+	if svc, ok := h.svc.(interface {
+		RunSessionWithAttachments(context.Context, uuid.UUID, string, string, json.RawMessage) (<-chan RunEvent, error)
+	}); ok {
+		return svc.RunSessionWithAttachments(ctx, sessionID, userMessage, tenantID, attachments)
+	}
+	return h.svc.RunSession(ctx, sessionID, userMessage, tenantID)
+}
+
 // runStatusResponse is returned by the run status endpoint.
 type runStatusResponse struct {
 	RunID     string    `json:"runId"`
@@ -529,8 +640,8 @@ type runStatusResponse struct {
 // runStatus handles GET /api/chat/sessions/{id}/run/{runId}/status.
 //
 // Runs are tracked in two places depending on the execution path:
-//   1. bgRegistry (in-memory) — synchronous SSE runs held for the HTTP handler's lifetime
-//   2. chat_run persistent store — async runs dispatched via AsyncExecutor/RabbitMQ
+//  1. bgRegistry (in-memory) — synchronous SSE runs held for the HTTP handler's lifetime
+//  2. chat_run persistent store — async runs dispatched via AsyncExecutor/RabbitMQ
 //
 // The handler consults both so programmatic polling works for every run type.
 // P-C102-2: async runs are not in bgRegistry and previously returned 404.

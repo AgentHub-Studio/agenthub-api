@@ -16,29 +16,29 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/abtest"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/admintenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/auth"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agenttemplate"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/analytics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/approval"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/channel"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/core"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/auth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/channel"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/suggest"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/copilot"
 	chatTask "github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chatsession"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/copilot"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/core"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration/probe"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
 	mkplInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
 	mkplListing "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
@@ -47,6 +47,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/prompttemplate"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/provider"
 	regDependency "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/dependency"
@@ -58,7 +59,6 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skilleval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/admintenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenantsignup"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/trigger"
@@ -170,7 +170,21 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentTemplateHandler := agenttemplate.NewHandler(agentTemplateSvc)
 	providerHandler := provider.NewHandler(provider.NewService(provider.NewRepository(pool)))
 	probeHandler := probe.NewHandler(probe.NewService())
-	analyticsHandler := analytics.NewHandler(analytics.NewService(analytics.NewPostgresStore(pool)))
+	analyticsStore := analytics.AnalyticsStore(analytics.NewPostgresStore(pool))
+	var runMetricsFactory chat.RunMetricsCollectorFactory
+	if cfg.ClickHouse.IsConfigured() {
+		clickHouseClient := analytics.NewClickHouseClient(cfg.ClickHouse)
+		if err := clickHouseClient.EnsureSchema(context.Background()); err != nil {
+			slog.Warn("analytics: clickhouse disabled after schema bootstrap failure", "err", err)
+		} else {
+			analyticsStore = analytics.NewClickHouseStore(clickHouseClient)
+			runMetricsFactory = &runMetricsCollectorFactory{
+				sink: analytics.NewAsyncSink(analytics.NewClickHouseSink(clickHouseClient), 100),
+			}
+			slog.Info("analytics: clickhouse pipeline enabled")
+		}
+	}
+	analyticsHandler := analytics.NewHandler(analytics.NewService(analyticsStore))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookSvc := webhook.NewService(webhook.NewRepository(pool)).
 		WithTenantLister(&webhookTenantListerAdapter{repo: tenant.NewRepository(pool)})
@@ -219,7 +233,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
-	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo)
+	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo, agentSvc)
 
 	var chatExecutor *chat.AsyncExecutor
 	if cfg.RabbitMQURL != "" {
@@ -233,6 +247,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		}
 		// Persist agent_metrics rows after every completed async run.
 		chatExecutor = chatExecutor.WithMetricsRecorder(&metricsRecorderAdapter{svc: metricsSvc})
+		if runMetricsFactory != nil {
+			chatExecutor = chatExecutor.WithRunMetricsCollectorFactory(runMetricsFactory)
+		}
 		// Bug 244: validate agent existence before accepting runs (sessions
 		// outlive their agents when DELETE /api/agents/{id} runs).
 		if agentRepo != nil {
@@ -351,6 +368,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		slog.Warn("minio: MINIO_ENDPOINT not set, document uploads will not be stored")
 		docStorage = &document.NoopStorageClient{}
 	}
+	chatHandler.WithAttachmentStorage(docStorage)
 	// Build document event publisher — optional; requires RABBITMQ_URL.
 	var docPublisher document.EventPublisher = &document.NoopEventPublisher{}
 	if cfg.RabbitMQURL != "" {
@@ -545,8 +563,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		mcpHandler.RegisterRoutes(r)
 		approvalHandler.RegisterRoutes(r)
 		coreHandler.RegisterRoutes(r)
-			// BUG-DEPR1: read-only deprecated pipeline endpoints (Sunset: 2026-07-01).
-			pipelineHandler.RegisterRoutes(r)
+		// BUG-DEPR1: read-only deprecated pipeline endpoints (Sunset: 2026-07-01).
+		pipelineHandler.RegisterRoutes(r)
 		// Marketplace
 		mkplListingHandler.RegisterRoutes(r)
 		mkplReviewHandler.RegisterRoutes(r)
@@ -799,6 +817,7 @@ func buildAgenticRunner(
 	integSvc *integration.Service,
 	coreToolLoader *core.CoreToolLoader,
 	bindingRepo agent.BindingRepository,
+	agentDeleter agent.Deleter,
 ) chat.SessionRunner {
 	// Build an env-based fallback for agents that have no provider configured.
 	// This keeps backward-compatibility with existing deployments that set env vars.
@@ -855,6 +874,7 @@ func buildAgenticRunner(
 
 	// Wire permission audit logger so every permission decision is persisted.
 	adapter.WithPermissionAuditLogger(agentic.NewPermissionAuditRepository(pool))
+	adapter.WithAgentDeleter(agentDeleter)
 
 	// P-C253-1: wire the MCP client so agents with bound MCP servers get their tools.
 	// HTTPMCPClient calls the agenthub-mcp-client-runtime service which proxies
@@ -934,6 +954,33 @@ func (m *metricsRecorderAdapter) Record(ctx context.Context, tenantID string, re
 		LatencyMs:        req.LatencyMs,
 	})
 	return err
+}
+
+// runMetricsCollectorFactory bridges chat async events to the agentic analytics
+// collector without importing ClickHouse details into the chat package.
+type runMetricsCollectorFactory struct {
+	sink agentic.AnalyticsSink
+}
+
+func (f *runMetricsCollectorFactory) NewCollector(tenantID string, agentID, sessionID uuid.UUID, runID, provider, model string) chat.RunMetricsCollector {
+	return &runMetricsCollectorAdapter{
+		collector: agentic.NewMetricsCollector(f.sink, tenantID, agentID, sessionID, runID, provider, model),
+	}
+}
+
+type runMetricsCollectorAdapter struct {
+	collector *agentic.MetricsCollector
+}
+
+func (a *runMetricsCollectorAdapter) Collect(event chat.RunEvent) {
+	a.collector.Collect(agentic.RunEvent{
+		Type: agentic.RunEventType(event.Type),
+		Data: event.Data,
+	})
+}
+
+func (a *runMetricsCollectorAdapter) Flush() error {
+	return a.collector.Flush()
 }
 
 // agentConfigAdapter adapts agent.Repository to chat.AgentLoader.

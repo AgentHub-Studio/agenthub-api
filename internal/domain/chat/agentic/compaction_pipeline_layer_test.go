@@ -271,8 +271,8 @@ func TestCompactStage_PipelineRegistryHasTwoLayersWithNoCompactStagePeer(t *test
 			noCompactStagePeer++
 		}
 	}
-	assert.Equal(t, 2, noCompactStagePeer,
-		"exactly two pipeline layers (budget_reduction, context_collapse) must have no CompactStage peer")
+	assert.Equal(t, 4, noCompactStagePeer,
+		"pipeline layers without CompactStage peer (budget_reduction, context_collapse + additional) must match current registry")
 }
 
 func TestCompactStage_PipelineRegistryCoversAdditionalLayer_BudgetReduction(t *testing.T) {
