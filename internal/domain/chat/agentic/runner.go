@@ -2080,7 +2080,13 @@ func (r *Runner) executeAgentHubManage(ctx context.Context, ch chan<- RunEvent, 
 			Payload   json.RawMessage `json:"payload"`
 		}
 		if err := json.Unmarshal(input, &args); err == nil {
-			execResult := r.managementExec.Execute(ctx, args.Operation, args.Resource, args.ID, args.Query, args.Payload)
+			mc := ManagementContext{
+				SessionID:      in.SessionID,
+				SessionAgentID: in.AgentID,
+				RunAgentID:     in.AgentID,
+				Audit:          in.PermissionAudit,
+			}
+			execResult := r.managementExec.Execute(ctx, mc, args.Operation, args.Resource, args.ID, args.Query, args.Payload)
 			execResult.LatencyMs = time.Since(start).Milliseconds()
 
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})

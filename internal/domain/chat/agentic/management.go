@@ -41,6 +41,7 @@ func slugify(name string) string {
 // It abstracts the underlying domain repositories to provide a unified CRUD interface.
 type ManagementExecutor struct {
 	agents       agent.Repository
+	agentDeleter agent.Deleter
 	skills       skill.SkillRepository
 	// skillDeleter routes skill deletions through the service layer so that
 	// binding-protection checks are enforced. P-C185-1.
@@ -52,8 +53,10 @@ type ManagementExecutor struct {
 // NewManagementExecutor creates a new ManagementExecutor.
 // skillDeleter should be a *skill.Service (implements skill.Deleter) so that
 // delete operations pass through the binding-protection check.
+// agentDeleter should be agent.Service (implements agent.Deleter) for audit + bindings.
 func NewManagementExecutor(
 	agents agent.Repository,
+	agentDeleter agent.Deleter,
 	skills skill.SkillRepository,
 	skillDeleter skill.Deleter,
 	tools tool.ToolRepository,
@@ -61,6 +64,7 @@ func NewManagementExecutor(
 ) *ManagementExecutor {
 	return &ManagementExecutor{
 		agents:       agents,
+		agentDeleter: agentDeleter,
 		skills:       skills,
 		skillDeleter: skillDeleter,
 		tools:        tools,
@@ -69,7 +73,7 @@ func NewManagementExecutor(
 }
 
 // Execute performs an administrative operation on the platform resources.
-func (e *ManagementExecutor) Execute(ctx context.Context, operation, resource string, id string, query string, payload json.RawMessage) ToolExecResult {
+func (e *ManagementExecutor) Execute(ctx context.Context, mc ManagementContext, operation, resource string, id string, query string, payload json.RawMessage) ToolExecResult {
 	slog.Info("ManagementExecutor: executing operation", "operation", operation, "resource", resource, "id", id)
 
 	switch operation {
@@ -80,9 +84,21 @@ func (e *ManagementExecutor) Execute(ctx context.Context, operation, resource st
 	case "create":
 		return e.create(ctx, resource, payload)
 	case "update":
+		if err := mc.ValidateDestructive(); err != nil {
+			errMsg := err.Error()
+			return ToolExecResult{Error: &errMsg}
+		}
 		return e.update(ctx, resource, id, payload)
 	case "delete":
-		return e.delete(ctx, resource, id)
+		if err := mc.ValidateDestructive(); err != nil {
+			errMsg := err.Error()
+			return ToolExecResult{Error: &errMsg}
+		}
+		result := e.delete(ctx, resource, id)
+		if result.Error == nil {
+			mc.logAudit(operation, resource, id)
+		}
+		return result
 	default:
 		errMsg := fmt.Sprintf("Unsupported operation: %s", operation)
 		return ToolExecResult{Error: &errMsg}
@@ -206,8 +222,9 @@ func (e *ManagementExecutor) create(ctx context.Context, resource string, payloa
 			Status          agent.AgentStatus `json:"status"`
 			SystemPrompt    *string         `json:"system_prompt"`
 			ModelConfig     json.RawMessage `json:"model_config"`
-			PermissionRules json.RawMessage `json:"permission_rules"`
-			Config          json.RawMessage `json:"config"`
+			PermissionRules    json.RawMessage `json:"permission_rules"`
+			Config             json.RawMessage `json:"config"`
+			EnableManagement   bool            `json:"enable_management"`
 		}
 		if err = json.Unmarshal(payload, &req); err == nil {
 			a := agent.Agent{
@@ -220,6 +237,7 @@ func (e *ManagementExecutor) create(ctx context.Context, resource string, payloa
 				ModelConfig:     req.ModelConfig,
 				PermissionRules: req.PermissionRules,
 				Config:          req.Config,
+				EnableManagement: req.EnableManagement,
 			}
 			// Ensure the LLM cannot produce a nil or zero-value primary key.
 			// The repository does not generate IDs — the service layer does —
@@ -324,8 +342,9 @@ func (e *ManagementExecutor) update(ctx context.Context, resource string, idStr 
 			Status          agent.AgentStatus `json:"status"`
 			SystemPrompt    *string         `json:"system_prompt"`
 			ModelConfig     json.RawMessage `json:"model_config"`
-			PermissionRules json.RawMessage `json:"permission_rules"`
-			Config          json.RawMessage `json:"config"`
+			PermissionRules    json.RawMessage `json:"permission_rules"`
+			Config             json.RawMessage `json:"config"`
+			EnableManagement   *bool           `json:"enable_management"`
 		}
 		if err = json.Unmarshal(payload, &req); err == nil {
 			// Merge: only overwrite fields that were explicitly provided.
@@ -352,6 +371,9 @@ func (e *ManagementExecutor) update(ctx context.Context, resource string, idStr 
 			}
 			if len(req.Config) > 0 {
 				existing.Config = req.Config
+			}
+			if req.EnableManagement != nil {
+				existing.EnableManagement = *req.EnableManagement
 			}
 			var updatedAgent agent.Agent
 			updatedAgent, err = e.agents.Update(ctx, existing)
@@ -431,7 +453,11 @@ func (e *ManagementExecutor) delete(ctx context.Context, resource string, idStr 
 
 	switch resource {
 	case "agent":
-		err = e.agents.Delete(ctx, id)
+		if e.agentDeleter == nil {
+			errMsg := "agent deletion unavailable"
+			return ToolExecResult{Error: &errMsg}
+		}
+		err = e.agentDeleter.Delete(ctx, id)
 	case "skill":
 		// Route through service so CountAgentBindings check is enforced. P-C185-1.
 		err = e.skillDeleter.Delete(ctx, id)

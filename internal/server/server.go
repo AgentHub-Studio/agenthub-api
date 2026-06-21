@@ -219,7 +219,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
-	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo)
+	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo, agentSvc)
 
 	var chatExecutor *chat.AsyncExecutor
 	if cfg.RabbitMQURL != "" {
@@ -799,6 +799,7 @@ func buildAgenticRunner(
 	integSvc *integration.Service,
 	coreToolLoader *core.CoreToolLoader,
 	bindingRepo agent.BindingRepository,
+	agentDeleter agent.Deleter,
 ) chat.SessionRunner {
 	// Build an env-based fallback for agents that have no provider configured.
 	// This keeps backward-compatibility with existing deployments that set env vars.
@@ -855,6 +856,7 @@ func buildAgenticRunner(
 
 	// Wire permission audit logger so every permission decision is persisted.
 	adapter.WithPermissionAuditLogger(agentic.NewPermissionAuditRepository(pool))
+	adapter.WithAgentDeleter(agentDeleter)
 
 	// P-C253-1: wire the MCP client so agents with bound MCP servers get their tools.
 	// HTTPMCPClient calls the agenthub-mcp-client-runtime service which proxies
