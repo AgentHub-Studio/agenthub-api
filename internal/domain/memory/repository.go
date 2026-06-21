@@ -264,6 +264,17 @@ func (r *Repository) DeleteExpired(ctx context.Context) (int64, error) {
 //
 // Returns the number of rows deleted.
 func (r *Repository) PruneStaleGeneral(ctx context.Context, cutoff time.Time) (int64, error) {
+	return r.PruneStaleGeneralBelowRelevance(ctx, cutoff, 1)
+}
+
+// PruneStaleGeneralBelowRelevance removes stale "general" memories only when
+// their time-decayed relevance falls below minRelevance. This keeps recently
+// accessed general memories even when they are old enough to cross the stale
+// window, while still preserving curated memory types indefinitely.
+func (r *Repository) PruneStaleGeneralBelowRelevance(ctx context.Context, cutoff time.Time, minRelevance float64) (int64, error) {
+	if minRelevance <= 0 {
+		minRelevance = 0.05
+	}
 	tenantID := tenant.FromContext(ctx)
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
@@ -272,8 +283,13 @@ func (r *Repository) PruneStaleGeneral(ctx context.Context, cutoff time.Time) (i
 	defer release()
 
 	tag, err := conn.Exec(ctx,
-		`DELETE FROM agent_memory WHERE memory_type = 'general' AND last_accessed_at < $1`,
+		`DELETE FROM agent_memory
+		  WHERE memory_type = 'general'
+		    AND last_accessed_at < $1
+		    AND exp(-1 * $3 * (EXTRACT(EPOCH FROM (NOW() - last_accessed_at)) / 3600.0)) < $2`,
 		cutoff,
+		minRelevance,
+		relevanceDecayLambda,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("memory: prune stale general: %w", err)
