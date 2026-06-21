@@ -24,10 +24,11 @@ const ChatRunQueue = "chat.run.queue"
 
 // ChatRunTask is the message payload for RabbitMQ.
 type ChatRunTask struct {
-	RunID     uuid.UUID `json:"runId"`
-	SessionID uuid.UUID `json:"sessionId"`
-	TenantID  string    `json:"tenantId"`
-	Message   string    `json:"message"`
+	RunID     uuid.UUID    `json:"runId"`
+	SessionID uuid.UUID    `json:"sessionId"`
+	TenantID  string       `json:"tenantId"`
+	Message   string       `json:"message"`
+	Overrides RunOverrides `json:"overrides,omitempty"`
 	// RawToken is the caller's Bearer JWT forwarded so that background workers
 	// can authenticate outbound calls to the skill-runtime. Without this, all
 	// tool executions fail with 401 because the async context has no token.
@@ -201,7 +202,10 @@ func (e *AsyncExecutor) wasCancelled(runID uuid.UUID) bool {
 // EnqueueRun persists a new run and sends a task to RabbitMQ.
 // P-C99-1: rejects the request with ErrRunAlreadyActive when a run is already
 // in progress for the session, preventing concurrent runs that corrupt history.
-func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, tenantID, message string) (uuid.UUID, error) {
+func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, tenantID, message string, overrides RunOverrides) (uuid.UUID, error) {
+	if err := overrides.Validate(); err != nil {
+		return uuid.Nil, err
+	}
 	// Bug 244: validar que session existe e o agent ainda existe ANTES de
 	// criar o run e enfileirar. Sem isso, sessions órfãs (agent deletado)
 	// aceitam runs que silenciosamente fazem fallback para um default agent
@@ -310,6 +314,7 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 		SessionID: sessionID,
 		TenantID:  tenantID,
 		Message:   message,
+		Overrides: overrides.normalized(),
 		RawToken:  tenant.TokenFromContext(ctx),
 	})
 
@@ -522,6 +527,11 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 			skillIDsSnapshot = snap.SkillIDs
 		}
 	}
+	systemPromptSnapshot, modelConfigSnapshot := applyRunOverrides(
+		session.SystemPromptSnapshot,
+		session.ModelConfigSnapshot,
+		task.Overrides,
+	)
 
 	// 2. Execute the run
 	runEvents, err := e.runner.RunSession(ctx, RunInput{
@@ -530,8 +540,8 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		AgentID:                *session.AgentID,
 		TenantID:               task.TenantID,
 		UserMessage:            task.Message,
-		SystemPromptSnapshot:   session.SystemPromptSnapshot,
-		ModelConfigSnapshot:    session.ModelConfigSnapshot,
+		SystemPromptSnapshot:   systemPromptSnapshot,
+		ModelConfigSnapshot:    modelConfigSnapshot,
 		SkillIDsSnapshot:       skillIDsSnapshot,
 		MCPServerNamesSnapshot: mcpServerNames,
 	})

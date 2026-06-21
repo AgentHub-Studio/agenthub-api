@@ -231,7 +231,7 @@ func TestIntegration_AgentlessSession_RouteBindFlow(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, created.AgentID, "session created without agentId")
 
-	_, err = svc.RunSession(ctx, created.ID, "olá, tudo bem?", provisioningTestTenant)
+	_, err = svc.RunSession(ctx, created.ID, "olá, tudo bem?", provisioningTestTenant, chat.RunOverrides{})
 	require.NoError(t, err)
 
 	// The router bound the seeded default agent to the previously agentless session.

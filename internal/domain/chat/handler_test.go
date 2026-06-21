@@ -24,6 +24,7 @@ type mockChatSvc struct {
 	sessions               map[uuid.UUID]chat.ChatSession
 	messages               map[uuid.UUID][]chat.ChatMessage
 	runEvents              []chat.RunEvent
+	lastRunOverrides       chat.RunOverrides
 	lastClientState        chat.ClientStatePatch
 	lastClientStateSession uuid.UUID
 }
@@ -111,10 +112,11 @@ func (m *mockChatSvc) AddMessage(_ context.Context, sessionID uuid.UUID, req cha
 	return chat.MessageResponseFrom(msg), nil
 }
 
-func (m *mockChatSvc) RunSession(_ context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan chat.RunEvent, error) {
+func (m *mockChatSvc) RunSession(_ context.Context, sessionID uuid.UUID, userMessage, tenantID string, overrides chat.RunOverrides) (<-chan chat.RunEvent, error) {
 	if _, ok := m.sessions[sessionID]; !ok {
 		return nil, chat.ErrNotFound
 	}
+	m.lastRunOverrides = overrides
 	ch := make(chan chat.RunEvent, 10)
 	go func() {
 		defer close(ch)
@@ -314,6 +316,51 @@ func TestChatHandler_RunSession_Success(t *testing.T) {
 	// SSE events must include id fields.
 	assert.Contains(t, responseBody, "id: "+runID+":1\n")
 	assert.Contains(t, responseBody, "id: "+runID+":2\n")
+}
+
+func TestChatHandler_RunSession_ForwardsOverrides(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	body, _ := json.Marshal(map[string]any{
+		"message": "Hello",
+		"overrides": map[string]any{
+			"systemPrompt": "Respond only in French.",
+			"modelConfig": map[string]any{
+				"provider":    "openai",
+				"model":       "gpt-4o-mini",
+				"temperature": 0.2,
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, svc.lastRunOverrides.SystemPrompt)
+	assert.Equal(t, "Respond only in French.", *svc.lastRunOverrides.SystemPrompt)
+	assert.JSONEq(t, `{"provider":"openai","model":"gpt-4o-mini","temperature":0.2}`, string(svc.lastRunOverrides.ModelConfig))
+}
+
+func TestChatHandler_RunSession_RejectsInvalidModelConfigOverride(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	body := []byte(`{"message":"Hello","overrides":{"modelConfig":"not-an-object"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }
 
 func TestChatHandler_RunSession_SessionNotFound(t *testing.T) {

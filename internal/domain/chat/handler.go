@@ -30,7 +30,7 @@ type chatService interface {
 	AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
 	GetActiveRun(ctx context.Context, sessionID uuid.UUID) (ChatRunResponse, bool, error)
 	// RunSession starts an agentic run and returns a channel of events for SSE streaming.
-	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error)
+	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, overrides RunOverrides) (<-chan RunEvent, error)
 	// RespondElicitation routes a user response to an active elicitation request.
 	RespondElicitation(sessionID, requestID string, result ElicitationResult) bool
 	// ApplyClientState merges a CopilotKit client-state patch (frontend actions,
@@ -349,7 +349,8 @@ type elicitationRespondRequest struct {
 
 // runSessionRequest is the body for POST /api/chat/sessions/{id}/run.
 type runSessionRequest struct {
-	Message string `json:"message"`
+	Message   string       `json:"message"`
+	Overrides RunOverrides `json:"overrides,omitempty"`
 }
 
 // runSession handles POST /api/chat/sessions/{id}/run.
@@ -373,6 +374,10 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "message is required")
 		return
 	}
+	if err := req.Overrides.Validate(); err != nil {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -384,7 +389,7 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 
 	// If AsyncExecutor is available, use it to start the run in background.
 	if h.executor != nil {
-		runID, err := h.executor.EnqueueRun(r.Context(), sessionID, tenantID, req.Message)
+		runID, err := h.executor.EnqueueRun(r.Context(), sessionID, tenantID, req.Message, req.Overrides)
 		if err != nil {
 			if errors.Is(err, ErrRunAlreadyActive) {
 				respond.Error(w, http.StatusConflict, "a run is already in progress for this session")
@@ -426,7 +431,7 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	rawToken := tenant.TokenFromContext(r.Context())
 	runCtx = tenant.NewContextWithToken(runCtx, tenantID, rawToken)
 
-	ch, err := h.svc.RunSession(runCtx, sessionID, req.Message, tenantID)
+	ch, err := h.svc.RunSession(runCtx, sessionID, req.Message, tenantID, req.Overrides)
 	if err != nil {
 		h.bgRegistry.Cancel(runID)
 		if errors.Is(err, ErrNotFound) {
@@ -529,8 +534,8 @@ type runStatusResponse struct {
 // runStatus handles GET /api/chat/sessions/{id}/run/{runId}/status.
 //
 // Runs are tracked in two places depending on the execution path:
-//   1. bgRegistry (in-memory) — synchronous SSE runs held for the HTTP handler's lifetime
-//   2. chat_run persistent store — async runs dispatched via AsyncExecutor/RabbitMQ
+//  1. bgRegistry (in-memory) — synchronous SSE runs held for the HTTP handler's lifetime
+//  2. chat_run persistent store — async runs dispatched via AsyncExecutor/RabbitMQ
 //
 // The handler consults both so programmatic polling works for every run type.
 // P-C102-2: async runs are not in bgRegistry and previously returned 404.

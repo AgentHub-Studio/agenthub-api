@@ -131,11 +131,13 @@ func (r *asyncExecutorRepoStub) UpdateRunMetadata(context.Context, uuid.UUID, js
 }
 
 type asyncExecutorRunnerStub struct {
-	events []RunEvent
-	err    error
+	events    []RunEvent
+	err       error
+	lastInput RunInput
 }
 
-func (r *asyncExecutorRunnerStub) RunSession(_ context.Context, _ RunInput) (<-chan RunEvent, error) {
+func (r *asyncExecutorRunnerStub) RunSession(_ context.Context, in RunInput) (<-chan RunEvent, error) {
+	r.lastInput = in
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -160,7 +162,7 @@ func TestAsyncExecutor_EnqueueRun_CreatesBuffer(t *testing.T) {
 	reg := NewRunEventBufferRegistry()
 	exec := NewAsyncExecutor(repo, nil, "").WithEventBufferRegistry(reg)
 
-	runID, err := exec.EnqueueRun(context.Background(), uuid.New(), "test", "hello")
+	runID, err := exec.EnqueueRun(context.Background(), uuid.New(), "test", "hello", RunOverrides{})
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, reg.Len())
@@ -205,4 +207,38 @@ func TestAsyncExecutor_ProcessTask_BuffersEventsForResume(t *testing.T) {
 	assert.Equal(t, "run_complete", events[1].Event.Type)
 	assert.Equal(t, runID, repo.completedID)
 	assert.Equal(t, uuid.Nil, repo.failedID)
+}
+
+func TestAsyncExecutor_ProcessTask_AppliesRunOverrides(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	runID := uuid.New()
+	basePrompt := "Original prompt."
+	repo := &asyncExecutorRepoStub{
+		session: ChatSession{
+			ID:                   sessionID,
+			AgentID:              &agentID,
+			SystemPromptSnapshot: &basePrompt,
+			ModelConfigSnapshot:  json.RawMessage(`{"provider":"openai","model":"gpt-4o"}`),
+		},
+	}
+	runner := &asyncExecutorRunnerStub{}
+	exec := NewAsyncExecutor(repo, runner, "")
+	overridePrompt := "Respond only in French."
+
+	exec.processTask(ChatRunTask{
+		RunID:     runID,
+		SessionID: sessionID,
+		TenantID:  "test",
+		Message:   "hello",
+		Overrides: RunOverrides{
+			SystemPrompt: &overridePrompt,
+			ModelConfig:  json.RawMessage(`{"provider":"openai","model":"gpt-4o-mini"}`),
+		},
+	})
+
+	require.NotNil(t, runner.lastInput.SystemPromptSnapshot)
+	assert.Equal(t, overridePrompt, *runner.lastInput.SystemPromptSnapshot)
+	assert.JSONEq(t, `{"provider":"openai","model":"gpt-4o-mini"}`, string(runner.lastInput.ModelConfigSnapshot))
+	assert.Equal(t, basePrompt, *repo.session.SystemPromptSnapshot)
 }

@@ -741,7 +741,7 @@ func (a *triggerFirerAdapter) CreateSessionForTrigger(ctx context.Context, tenan
 
 func (a *triggerFirerAdapter) EnqueueRun(ctx context.Context, sessionID uuid.UUID, tenantID, message string) (uuid.UUID, error) {
 	ctx = tenantctx.NewContext(ctx, tenantID)
-	return a.chatExecutor.EnqueueRun(ctx, sessionID, tenantID, message)
+	return a.chatExecutor.EnqueueRun(ctx, sessionID, tenantID, message, chat.RunOverrides{})
 }
 
 // packageExisterAdapter wraps regPackage.Repository so version/dependency/
@@ -1087,7 +1087,7 @@ func (d *chatAgentDispatcher) Dispatch(ctx context.Context, agentID uuid.UUID, u
 		return "", fmt.Errorf("channel dispatch: create session: %w", err)
 	}
 
-	events, err := d.chatSvc.RunSession(ctx, session.ID, userText, tenantID)
+	events, err := d.chatSvc.RunSession(ctx, session.ID, userText, tenantID, chat.RunOverrides{})
 	if err != nil {
 		return "", fmt.Errorf("channel dispatch: run session: %w", err)
 	}
