@@ -149,6 +149,21 @@ func (r *asyncExecutorRunnerStub) RunSession(_ context.Context, input RunInput) 
 	return ch, nil
 }
 
+type asyncExecutorVoiceStub struct {
+	synthesis VoiceSynthesisInput
+	calls     int
+}
+
+func (v *asyncExecutorVoiceStub) Transcribe(context.Context, VoiceTranscriptionInput) (VoiceTranscription, error) {
+	return VoiceTranscription{}, nil
+}
+
+func (v *asyncExecutorVoiceStub) Synthesize(_ context.Context, in VoiceSynthesisInput) (VoiceAudio, error) {
+	v.calls++
+	v.synthesis = in
+	return VoiceAudio{Format: "mp3", Base64: "YXVkaW8="}, nil
+}
+
 func TestNewHandler_WiresExecutorBufferRegistry(t *testing.T) {
 	exec := NewAsyncExecutor(nil, nil, "")
 	handler := NewHandler(nil, exec)
@@ -241,6 +256,55 @@ func (f *asyncMetricsFactoryStub) NewCollector(tenantID string, agentID, session
 	f.provider = provider
 	f.model = model
 	return f.collector
+}
+
+func TestAsyncExecutor_ProcessTask_EmitsVoiceAudioBeforeRunComplete(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	runID := uuid.New()
+	repo := &asyncExecutorRepoStub{
+		session: ChatSession{
+			ID:      sessionID,
+			AgentID: &agentID,
+		},
+	}
+	runner := &asyncExecutorRunnerStub{
+		events: []RunEvent{
+			{Type: "text_delta", Data: json.RawMessage(`{"content":"hello "}`)},
+			{Type: "text_delta", Data: json.RawMessage(`{"content":"world"}`)},
+			{Type: "run_complete", Data: json.RawMessage(`{"totalTurns":1}`)},
+		},
+	}
+	voice := &asyncExecutorVoiceStub{}
+	reg := NewRunEventBufferRegistry()
+	exec := NewAsyncExecutor(repo, runner, "").
+		WithEventBufferRegistry(reg).
+		WithVoiceService(voice)
+
+	exec.processTask(ChatRunTask{
+		RunID:       runID,
+		SessionID:   sessionID,
+		TenantID:    "test",
+		Message:     "hello",
+		VoiceOutput: true,
+	})
+
+	buf := reg.Get(runID.String())
+	require.NotNil(t, buf)
+	events, ok := buf.EventsSince(0)
+	require.True(t, ok)
+	require.Len(t, events, 4)
+	assert.Equal(t, "text_delta", events[0].Event.Type)
+	assert.Equal(t, "text_delta", events[1].Event.Type)
+	assert.Equal(t, EventAudioDelta, events[2].Event.Type)
+	assert.Equal(t, "run_complete", events[3].Event.Type)
+	assert.Equal(t, 1, voice.calls)
+	assert.Equal(t, "hello world", voice.synthesis.Text)
+
+	var audio VoiceAudioDelta
+	require.NoError(t, json.Unmarshal(events[2].Event.Data, &audio))
+	assert.Equal(t, "mp3", audio.Format)
+	assert.Equal(t, "YXVkaW8=", audio.Chunk)
 }
 
 func TestAsyncExecutor_ProcessTask_RecordsRunMetrics(t *testing.T) {

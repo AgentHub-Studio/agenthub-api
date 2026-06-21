@@ -29,6 +29,9 @@ type ChatRunTask struct {
 	TenantID    string          `json:"tenantId"`
 	Message     string          `json:"message"`
 	Attachments json.RawMessage `json:"attachments,omitempty"`
+	// VoiceOutput tells the worker to synthesize the assistant answer and emit
+	// an audio_delta event before run_complete.
+	VoiceOutput bool `json:"voiceOutput,omitempty"`
 	// RawToken is the caller's Bearer JWT forwarded so that background workers
 	// can authenticate outbound calls to the skill-runtime. Without this, all
 	// tool executions fail with 401 because the async context has no token.
@@ -83,6 +86,11 @@ type MetricsRecord struct {
 	LatencyMs        int64
 }
 
+type EnqueueRunOptions struct {
+	Attachments json.RawMessage
+	VoiceOutput bool
+}
+
 // RunMetricsCollector consumes run events and flushes an analytics batch.
 type RunMetricsCollector interface {
 	Collect(event RunEvent)
@@ -114,6 +122,7 @@ type AsyncExecutor struct {
 	agentLoader       AgentLoader // optional: used to enrich RunInput with agent bindings
 	agentExister      AgentExister
 	metricsRecorder   MetricsRecorder
+	voiceSvc          VoiceService
 	runMetricsFactory RunMetricsCollectorFactory
 	completionHooks   []RunCompletionHook
 	connURL           string
@@ -133,6 +142,12 @@ type AsyncExecutor struct {
 // populated by external POST /api/metrics calls.
 func (e *AsyncExecutor) WithMetricsRecorder(rec MetricsRecorder) *AsyncExecutor {
 	e.metricsRecorder = rec
+	return e
+}
+
+// WithVoiceService wires optional text-to-speech output for voice-originated runs.
+func (e *AsyncExecutor) WithVoiceService(svc VoiceService) *AsyncExecutor {
+	e.voiceSvc = svc
 	return e
 }
 
@@ -221,11 +236,16 @@ func (e *AsyncExecutor) wasCancelled(runID uuid.UUID) bool {
 // P-C99-1: rejects the request with ErrRunAlreadyActive when a run is already
 // in progress for the session, preventing concurrent runs that corrupt history.
 func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, tenantID, message string) (uuid.UUID, error) {
-	return e.EnqueueRunWithAttachments(ctx, sessionID, tenantID, message, nil)
+	return e.EnqueueRunWithOptions(ctx, sessionID, tenantID, message, EnqueueRunOptions{})
 }
 
 func (e *AsyncExecutor) EnqueueRunWithAttachments(ctx context.Context, sessionID uuid.UUID, tenantID, message string, rawAttachments json.RawMessage) (uuid.UUID, error) {
-	attachments, err := NormalizeChatAttachments(rawAttachments)
+	return e.EnqueueRunWithOptions(ctx, sessionID, tenantID, message, EnqueueRunOptions{Attachments: rawAttachments})
+}
+
+// EnqueueRunWithOptions persists a run and forwards execution options to the worker.
+func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uuid.UUID, tenantID, message string, opts EnqueueRunOptions) (uuid.UUID, error) {
+	attachments, err := NormalizeChatAttachments(opts.Attachments)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -338,6 +358,7 @@ func (e *AsyncExecutor) EnqueueRunWithAttachments(ctx context.Context, sessionID
 		TenantID:    tenantID,
 		Message:     message,
 		Attachments: attachments,
+		VoiceOutput: opts.VoiceOutput,
 		RawToken:    tenant.TokenFromContext(ctx),
 	})
 
@@ -421,6 +442,33 @@ func appendBufferedError(buf *EventBuffer, message, code string) {
 		"code":    code,
 	})
 	buf.Append(RunEvent{Type: "error", Data: data})
+}
+
+func extractTextDelta(data json.RawMessage) string {
+	var payload struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return ""
+	}
+	return payload.Content
+}
+
+func (e *AsyncExecutor) appendVoiceAudioDelta(ctx context.Context, buf *EventBuffer, runID uuid.UUID, text string) bool {
+	if buf == nil || e.voiceSvc == nil || strings.TrimSpace(text) == "" {
+		return false
+	}
+	audio, err := e.voiceSvc.Synthesize(ctx, VoiceSynthesisInput{Text: text})
+	if err != nil {
+		slog.Warn("voice: failed to synthesize assistant answer", "runId", runID, "err", err)
+		return false
+	}
+	data, err := json.Marshal(VoiceAudioDelta{Chunk: audio.Base64, Format: audio.Format})
+	if err != nil {
+		return false
+	}
+	buf.Append(RunEvent{Type: EventAudioDelta, Data: data})
+	return true
 }
 
 func (e *AsyncExecutor) processTask(task ChatRunTask) {
@@ -613,7 +661,15 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// do NOT write user messages — those must NOT suppress the timeout message.
 	runnerWroteUserMessage := false
 	var lastLLMErrorMsg string // non-empty when a fatal LLM error (llm_call/stream_consume) occurred
+	var assistantText strings.Builder
+	voiceAudioEmitted := false
 	for event := range runEvents {
+		if event.Type == "text_delta" {
+			assistantText.WriteString(extractTextDelta(event.Data))
+		}
+		if task.VoiceOutput && event.Type == "run_complete" {
+			voiceAudioEmitted = e.appendVoiceAudioDelta(ctx, buf, task.RunID, assistantText.String())
+		}
 		if buf != nil {
 			buf.Append(event)
 		}
@@ -635,6 +691,9 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 				}
 			}
 		}
+	}
+	if task.VoiceOutput && !voiceAudioEmitted {
+		e.appendVoiceAudioDelta(ctx, buf, task.RunID, assistantText.String())
 	}
 
 	// P-C102-1: if the context expired (timeout), mark run failed and surface error to user.

@@ -234,6 +234,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
 	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo, agentSvc)
+	voiceSvc := chat.NewOpenAIVoiceServiceFromEnv()
 
 	var chatExecutor *chat.AsyncExecutor
 	if cfg.RabbitMQURL != "" {
@@ -247,6 +248,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		}
 		// Persist agent_metrics rows after every completed async run.
 		chatExecutor = chatExecutor.WithMetricsRecorder(&metricsRecorderAdapter{svc: metricsSvc})
+		chatExecutor = chatExecutor.WithVoiceService(voiceSvc)
 		if runMetricsFactory != nil {
 			chatExecutor = chatExecutor.WithRunMetricsCollectorFactory(runMetricsFactory)
 		}
@@ -324,7 +326,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	permAuditRepo := agentic.NewPermissionAuditRepository(pool)
 	chatHandler := chat.NewHandler(chatSvc, chatExecutor).
 		WithTaskRepository(chatTask.NewRepository(pool)).
-		WithPermissionAuditReader(&permissionAuditReaderAdapter{repo: permAuditRepo})
+		WithPermissionAuditReader(&permissionAuditReaderAdapter{repo: permAuditRepo}).
+		WithVoiceService(voiceSvc)
 
 	// Bug 237 fase 2: wire trigger Firer agora que chatSvc + chatExecutor
 	// existem, e starta o scheduler.

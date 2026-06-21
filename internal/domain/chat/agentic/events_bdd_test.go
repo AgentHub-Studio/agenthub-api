@@ -76,6 +76,8 @@ func TestBDD_StructuredEventLogs(t *testing.T) {
 			EventSubtaskProgress:  "subagent progress (Section 8)",
 			EventModelFallback:    "fallback model swap (Section 4.4)",
 			EventStopHookSummary:  "stop hook summary (Section 4.5)",
+			EventTranscription:    "speech-to-text result",
+			EventAudioDelta:       "text-to-speech audio chunk",
 			EventInputRequest:     "elicitation / structured user input",
 			EventHeartbeat:        "keep-alive while waiting for input",
 			EventCanvasUpdate:     "rich UI canvas update",

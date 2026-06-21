@@ -161,6 +161,19 @@ func (m *mockChatSvc) ApplyClientState(sessionID uuid.UUID, patch chat.ClientSta
 	m.lastClientStateSession = sessionID
 }
 
+type mockVoiceSvc struct {
+	input chat.VoiceTranscriptionInput
+}
+
+func (m *mockVoiceSvc) Transcribe(_ context.Context, in chat.VoiceTranscriptionInput) (chat.VoiceTranscription, error) {
+	m.input = in
+	return chat.VoiceTranscription{Text: "abrir dashboard", Language: "pt-BR", Confidence: 0.95}, nil
+}
+
+func (m *mockVoiceSvc) Synthesize(_ context.Context, _ chat.VoiceSynthesisInput) (chat.VoiceAudio, error) {
+	return chat.VoiceAudio{Format: "mp3", Base64: "YXVkaW8="}, nil
+}
+
 func setupChat() (*chi.Mux, *mockChatSvc) {
 	svc := newMockChatSvc()
 	h := chat.NewHandler(svc, nil)
@@ -178,6 +191,15 @@ func setupChatWithHandler(configure func(*chat.Handler)) (*chi.Mux, *mockChatSvc
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
 	return r, svc
+}
+
+func setupChatWithVoice() (*chi.Mux, *mockChatSvc, *mockVoiceSvc) {
+	svc := newMockChatSvc()
+	voice := &mockVoiceSvc{}
+	h := chat.NewHandler(svc, nil).WithVoiceService(voice)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r, svc, voice
 }
 
 func TestChatHandler_ListSessions_Success(t *testing.T) {
@@ -209,6 +231,49 @@ func TestChatHandler_CreateSession_Success(t *testing.T) {
 	var resp chat.ChatSessionResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "My Chat", resp.Title)
+}
+
+func TestChatHandler_VoiceInputProviderNotConfigured(t *testing.T) {
+	r, svc := setupChat()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Voice", Status: chat.StatusActive}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/voice/input", bytes.NewReader([]byte("audio")))
+	req.Header.Set("Content-Type", "audio/wav")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+func TestChatHandler_VoiceInputTranscribesMultipartAudio(t *testing.T) {
+	r, svc, voice := setupChatWithVoice()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Voice", Status: chat.StatusActive}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("audio", "hello.wav")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("fake wav"))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("language", "pt-BR"))
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/voice/input?run=false", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "hello.wav", voice.input.Filename)
+	assert.Equal(t, "pt-BR", voice.input.Language)
+	assert.Equal(t, []byte("fake wav"), voice.input.Audio)
+	var resp chat.VoiceInputResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "transcribed", resp.Status)
+	assert.Equal(t, "abrir dashboard", resp.Transcription.Text)
+	assert.Nil(t, resp.RunID)
 }
 
 func TestChatHandler_CreateSession_AgentFixedUnchanged(t *testing.T) {

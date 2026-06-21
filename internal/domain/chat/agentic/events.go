@@ -24,6 +24,8 @@ const (
 	EventSubtaskProgress  RunEventType = "subtask_progress"
 	EventToolUseSummary   RunEventType = "tool_use_summary"
 	EventStopHookSummary  RunEventType = "stop_hook_summary"
+	EventTranscription    RunEventType = "transcription"
+	EventAudioDelta       RunEventType = "audio_delta"
 	// EventConfigChanged is emitted when the live agent configuration differs
 	// from the session snapshot currently pinned for the conversation.
 	EventConfigChanged RunEventType = "config_changed"
@@ -86,6 +88,17 @@ type TextDeltaData struct {
 // ThinkingDeltaData carries a chunk of streamed thinking/reasoning content.
 type ThinkingDeltaData struct {
 	Content string `json:"content"`
+}
+
+type TranscriptionData struct {
+	Text       string  `json:"text"`
+	Language   string  `json:"language,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+}
+
+type AudioDeltaData struct {
+	Chunk  string `json:"chunk"`
+	Format string `json:"format"`
 }
 
 // ToolCallStartData is emitted when the LLM requests a tool execution.
