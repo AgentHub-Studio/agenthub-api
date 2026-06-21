@@ -142,6 +142,13 @@ func setupTool() (*chi.Mux, *mockToolSvc) {
 	return r, svc
 }
 
+func setupRealTool() *chi.Mux {
+	h := tool.NewHandler(tool.NewService(newMockRepo()))
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r
+}
+
 func TestToolHandler_List_Success(t *testing.T) {
 	r, svc := setupTool()
 	id := uuid.New()
@@ -169,6 +176,49 @@ func TestToolHandler_Create_Success(t *testing.T) {
 	var resp tool.Response
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "My Tool", resp.Name)
+}
+
+func TestToolHandler_Create_HTTPSSRFURL_Returns422(t *testing.T) {
+	r := setupRealTool()
+	body, _ := json.Marshal(tool.CreateRequest{
+		Name:   "SSRF Tool",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"url":"http://169.254.169.254/latest/meta-data/"}`),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid URL")
+}
+
+func TestToolHandler_Update_HTTPSSRFURL_Returns422(t *testing.T) {
+	r := setupRealTool()
+	createBody, _ := json.Marshal(tool.CreateRequest{
+		Name:   "HTTP Tool",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"url":"https://api.example.com/data"}`),
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createW := httptest.NewRecorder()
+	r.ServeHTTP(createW, createReq)
+	require.Equal(t, http.StatusCreated, createW.Code)
+
+	var created tool.Response
+	require.NoError(t, json.Unmarshal(createW.Body.Bytes(), &created))
+	updateBody, _ := json.Marshal(tool.UpdateRequest{
+		Config: json.RawMessage(`{"url":"http://127.0.0.1/admin"}`),
+	})
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/tools/"+created.ID.String(), bytes.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateW := httptest.NewRecorder()
+	r.ServeHTTP(updateW, updateReq)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, updateW.Code)
+	assert.Contains(t, updateW.Body.String(), "invalid URL")
 }
 
 func TestToolHandler_Create_InvalidBody(t *testing.T) {

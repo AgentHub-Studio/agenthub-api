@@ -54,7 +54,14 @@ func (m *mockSkillRepo) Update(_ context.Context, id uuid.UUID, req skill.Update
 	}
 	s.Name = req.Name
 	s.Description = req.Description
+	s.Instructions = req.Instructions
 	s.Category = req.Category
+	s.AllowedTools = req.AllowedTools
+	s.DisableModelInvocation = req.DisableModelInvocation
+	s.ContextMode = req.ContextMode
+	s.WhenToUse = req.WhenToUse
+	s.ArgumentHint = req.ArgumentHint
+	s.ShouldDefer = req.ShouldDefer
 	m.data[id] = s
 	return s, nil
 }
@@ -143,6 +150,46 @@ func TestSkillService_Create_CustomSlug(t *testing.T) {
 	assert.Equal(t, "doc-search", s.Slug)
 }
 
+func TestSkillService_Create_RejectsHTMLName(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         `<img src=x onerror="alert(1)">Skill`,
+		Instructions: "Do something.",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, skill.ErrValidation)
+	assert.Contains(t, err.Error(), "HTML")
+}
+
+func TestSkillService_Create_RejectsInvalidCanonicalSlug(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         "Document Search",
+		Slug:         "doc_search",
+		Instructions: "Search documents.",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, skill.ErrValidation)
+	assert.Contains(t, err.Error(), "slug must match")
+}
+
+func TestSkillService_Create_DuplicateSlugUsesCanonicalSuffix(t *testing.T) {
+	repo := newMockRepo()
+	svc := skill.NewService(repo)
+	first, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         "Document Search",
+		Instructions: "Search documents.",
+	})
+	require.NoError(t, err)
+	second, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         "Document Search",
+		Instructions: "Search documents.",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "document-search", first.Slug)
+	assert.Equal(t, "document-search-1", second.Slug)
+}
+
 func TestSkillService_GetByID_NotFound(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	_, err := svc.GetByID(context.Background(), uuid.New())
@@ -176,6 +223,24 @@ func TestSkillService_Update_InstructionsEmpty_Preserved(t *testing.T) {
 	got, err := svc.GetByID(context.Background(), created.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "Do something.", got.Instructions)
+}
+
+func TestSkillService_Update_InstructionsTrimmed(t *testing.T) {
+	repo := newMockRepo()
+	svc := skill.NewService(repo)
+	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Skill", Category: "misc", Instructions: "Old guidance."})
+	require.NoError(t, err)
+
+	updated, err := svc.Update(context.Background(), created.ID, skill.UpdateRequest{
+		Name:         "Skill",
+		Instructions: "  New guidance.  \n",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "New guidance.", updated.Instructions)
+
+	got, err := svc.GetByID(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "New guidance.", got.Instructions)
 }
 
 func TestSkillService_Update_AllowedToolsNoInstructions_Accepted(t *testing.T) {

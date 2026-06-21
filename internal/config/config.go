@@ -30,21 +30,33 @@ type MinIOConfig struct {
 // IsConfigured returns true when the MinIO endpoint is set.
 func (m MinIOConfig) IsConfigured() bool { return m.Endpoint != "" }
 
+// ClickHouseConfig holds analytics ClickHouse connection settings.
+type ClickHouseConfig struct {
+	URL      string
+	Database string
+	Username string
+	Password string
+}
+
+// IsConfigured returns true when ClickHouse analytics should be enabled.
+func (c ClickHouseConfig) IsConfigured() bool { return c.URL != "" }
+
 // Config holds all configuration for agenthub-api.
 type Config struct {
-	Port                string
-	DatabaseURL         string
-	KeycloakBaseURL     string
-	KeycloakIssuerURL   string // KEYCLOAK_ISSUER_URL — bug 281: validar `iss` claim contra esta URL pública. Vazio = sem validação (legacy)
-	KeycloakAdmin       KeycloakAdminConfig
-	MinIO               MinIOConfig
-	CORSOrigins         []string
-	LogLevel            string
-	OAuthEncryptionKey  string // 32-byte AES-256 key; empty disables encryption (dev mode)
-	RabbitMQURL         string // RABBITMQ_URL — optional; enables document pipeline events when set
-	SkillRuntimeURL     string // SKILL_RUNTIME_URL — optional; base URL for skill-runtime service
-	MCPRuntimeURL       string // MCP_RUNTIME_URL — optional; base URL for mcp-client-runtime service
-	EmbeddingURL        string // EMBEDDING_URL — optional; base URL for embedding service (enables document_search)
+	Port               string
+	DatabaseURL        string
+	KeycloakBaseURL    string
+	KeycloakIssuerURL  string // KEYCLOAK_ISSUER_URL — bug 281: validar `iss` claim contra esta URL pública. Vazio = sem validação (legacy)
+	KeycloakAdmin      KeycloakAdminConfig
+	MinIO              MinIOConfig
+	CORSOrigins        []string
+	LogLevel           string
+	OAuthEncryptionKey string // 32-byte AES-256 key; empty disables encryption (dev mode)
+	RabbitMQURL        string // RABBITMQ_URL — optional; enables document pipeline events when set
+	SkillRuntimeURL    string // SKILL_RUNTIME_URL — optional; base URL for skill-runtime service
+	MCPRuntimeURL      string // MCP_RUNTIME_URL — optional; base URL for mcp-client-runtime service
+	EmbeddingURL       string // EMBEDDING_URL — optional; base URL for embedding service (enables document_search)
+	ClickHouse         ClickHouseConfig
 	// LLMCallTimeoutSecs is the per-LLM-call timeout in seconds.
 	// P-C102-1: prevents stalled providers from blocking goroutines indefinitely.
 	// Default: 300 (5 minutes). Set to 0 to disable.
@@ -54,11 +66,11 @@ type Config struct {
 // Load reads configuration from environment variables.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Port:            getEnv("PORT", "8081"),
-		DatabaseURL:     os.Getenv("DATABASE_URL"),
+		Port:              getEnv("PORT", "8081"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		KeycloakBaseURL:   os.Getenv("KEYCLOAK_BASE_URL"),
 		KeycloakIssuerURL: os.Getenv("KEYCLOAK_ISSUER_URL"),
-		LogLevel:        getEnv("LOG_LEVEL", "info"),
+		LogLevel:          getEnv("LOG_LEVEL", "info"),
 		KeycloakAdmin: KeycloakAdminConfig{
 			AdminUsername:  getEnv("KEYCLOAK_ADMIN_USERNAME", "admin"),
 			AdminPassword:  os.Getenv("KEYCLOAK_ADMIN_PASSWORD"),
@@ -84,6 +96,12 @@ func Load() (*Config, error) {
 	cfg.SkillRuntimeURL = getEnv("SKILL_RUNTIME_URL", "http://agenthub-skill-runtime:8083")
 	cfg.MCPRuntimeURL = getEnv("MCP_RUNTIME_URL", "http://agenthub-mcp-client-runtime:8080")
 	cfg.EmbeddingURL = getEnv("EMBEDDING_URL", "http://agenthub-embedding:8092")
+	cfg.ClickHouse = ClickHouseConfig{
+		URL:      os.Getenv("CLICKHOUSE_URL"),
+		Database: getEnv("CLICKHOUSE_DATABASE", "agenthub"),
+		Username: os.Getenv("CLICKHOUSE_USERNAME"),
+		Password: os.Getenv("CLICKHOUSE_PASSWORD"),
+	}
 
 	// P-C102-1: per-LLM-call timeout. Default 300s (5 minutes).
 	cfg.LLMCallTimeoutSecs = 300

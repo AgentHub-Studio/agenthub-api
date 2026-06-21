@@ -91,7 +91,7 @@ func (m *mockPublisher) PublishUploaded(_ context.Context, e document.DocumentUp
 func newSvc() (*document.Service, *mockStorage, *mockPublisher) {
 	storage := &mockStorage{}
 	publisher := &mockPublisher{}
-	svc := document.NewService(newMockRepo(), storage, publisher)
+	svc := document.NewService(newMockRepo(), storage, publisher, "documents")
 	return svc, storage, publisher
 }
 

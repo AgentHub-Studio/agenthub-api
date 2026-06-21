@@ -95,6 +95,7 @@ type ChatMessage struct {
 	SessionID    uuid.UUID       `db:"session_id"`
 	Role         string          `db:"role"`
 	Content      string          `db:"content"`
+	Attachments  json.RawMessage `db:"attachments"`
 	MessageType  MessageType     `db:"message_type"`
 	ToolCalls    json.RawMessage `db:"tool_calls"`
 	ToolCallID   *string         `db:"tool_call_id"`
@@ -138,6 +139,7 @@ type ChatMessageResponse struct {
 	SessionID    uuid.UUID       `json:"sessionId"`
 	Role         string          `json:"role"`
 	Content      string          `json:"content"`
+	Attachments  json.RawMessage `json:"attachments,omitempty"`
 	MessageType  MessageType     `json:"messageType"`
 	ToolCalls    json.RawMessage `json:"toolCalls,omitempty"`
 	ToolCallID   *string         `json:"toolCallId,omitempty"`
@@ -235,6 +237,7 @@ type AgentRoutingInfo struct {
 type CreateMessageRequest struct {
 	Role         string          `json:"role"`
 	Content      string          `json:"content"`
+	Attachments  json.RawMessage `json:"attachments,omitempty"`
 	MessageType  MessageType     `json:"messageType,omitempty"`
 	ToolCalls    json.RawMessage `json:"toolCalls,omitempty"`
 	ToolCallID   *string         `json:"toolCallId,omitempty"`

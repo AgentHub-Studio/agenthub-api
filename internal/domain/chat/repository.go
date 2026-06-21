@@ -32,7 +32,7 @@ type Repository interface {
 	// UpdateSessionSnapshots persists the agent persona/model/skill snapshot onto
 	// a session. Used when an agent is routed and bound to a previously agentless
 	// session so the P-C115-1 consistency guarantee also covers routed sessions.
-	UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage) error
+	UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage, configHash string) error
 	// FindAgentsForRouting returns all PUBLISHED agents with lightweight routing
 	// metadata (id, name, slug, description). Used by the smart agent router to
 	// pick the best agent for a given user message without loading full configs.
@@ -143,12 +143,12 @@ func (r *postgresRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (
 	err = conn.QueryRow(ctx,
 		`SELECT id, agent_id, mode, persona_id, sticky_skill_set, title, status,
 		        system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot,
-		        created_at, updated_at
+		        config_hash, created_at, updated_at
 		 FROM chat_session WHERE id = $1`,
 		id,
 	).Scan(&s.ID, &s.AgentID, &s.Mode, &s.PersonaID, &s.StickySkillSet, &s.Title, &s.Status,
 		&s.SystemPromptSnapshot, &s.ModelConfigSnapshot, &s.SkillBindingsSnapshot,
-		&s.CreatedAt, &s.UpdatedAt)
+		&s.ConfigHash, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatSession{}, ErrNotFound
@@ -184,11 +184,11 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s ChatSession) (
 	_, err = conn.Exec(ctx,
 		`INSERT INTO chat_session
 		 (id, agent_id, mode, persona_id, sticky_skill_set, title, status,
-		  system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot,
+		  system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot, config_hash,
 		  created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		s.ID, s.AgentID, s.Mode, s.PersonaID, s.StickySkillSet, s.Title, s.Status,
-		s.SystemPromptSnapshot, s.ModelConfigSnapshot, s.SkillBindingsSnapshot,
+		s.SystemPromptSnapshot, s.ModelConfigSnapshot, s.SkillBindingsSnapshot, s.ConfigHash,
 		s.CreatedAt, s.UpdatedAt,
 	)
 	if err != nil {
@@ -296,7 +296,7 @@ func (r *postgresRepository) UpdateSessionAgent(ctx context.Context, sessionID u
 	return nil
 }
 
-func (r *postgresRepository) UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage) error {
+func (r *postgresRepository) UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage, configHash string) error {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
 	if err != nil {
 		return err
@@ -305,9 +305,9 @@ func (r *postgresRepository) UpdateSessionSnapshots(ctx context.Context, session
 
 	tag, err := conn.Exec(ctx,
 		`UPDATE chat_session
-		 SET system_prompt_snapshot = $1, model_config_snapshot = $2, skill_bindings_snapshot = $3, updated_at = $4
-		 WHERE id = $5`,
-		systemPrompt, modelConfig, skillBindings, time.Now().UTC(), sessionID,
+		 SET system_prompt_snapshot = $1, model_config_snapshot = $2, skill_bindings_snapshot = $3, config_hash = $4, updated_at = $5
+		 WHERE id = $6`,
+		systemPrompt, modelConfig, skillBindings, nullableConfigHash(configHash), time.Now().UTC(), sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("chat: update session snapshots: %w", err)
@@ -316,6 +316,13 @@ func (r *postgresRepository) UpdateSessionSnapshots(ctx context.Context, session
 		return ErrNotFound
 	}
 	return nil
+}
+
+func nullableConfigHash(hash string) *string {
+	if hash == "" {
+		return nil
+	}
+	return &hash
 }
 
 func (r *postgresRepository) FindAgentsForRouting(ctx context.Context) ([]AgentRoutingInfo, error) {
@@ -360,7 +367,7 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 	}
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, session_id, role, content,
+		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
 		        message_type, tool_calls, tool_call_id,
 		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
@@ -379,7 +386,7 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 	for rows.Next() {
 		var m ChatMessage
 		if err := rows.Scan(
-			&m.ID, &m.SessionID, &m.Role, &m.Content,
+			&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
 			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 			&m.CreatedAt,
@@ -407,15 +414,18 @@ func (r *postgresRepository) CreateMessage(ctx context.Context, m ChatMessage) (
 	if m.MessageType == "" {
 		m.MessageType = MessageTypeText
 	}
+	if len(m.Attachments) == 0 {
+		m.Attachments = json.RawMessage("[]")
+	}
 
 	_, err = conn.Exec(ctx,
 		`INSERT INTO chat_message
-		 (id, session_id, role, content,
+		 (id, session_id, role, content, attachments,
 		  message_type, tool_calls, tool_call_id,
 		  metadata, token_usage, finish_reason, turn_index, run_id,
 		  created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-		m.ID, m.SessionID, m.Role, m.Content,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		m.ID, m.SessionID, m.Role, m.Content, m.Attachments,
 		m.MessageType, m.ToolCalls, m.ToolCallID,
 		m.Metadata, m.TokenUsage, m.FinishReason, m.TurnIndex, m.RunID,
 		m.CreatedAt,
@@ -436,9 +446,9 @@ func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sess
 
 	var m ChatMessage
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, role, content,
+		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
 		        message_type, tool_calls, tool_call_id,
-		        metadata, token_usage, finish_reason, turn_index,
+		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1 AND role = 'assistant' AND created_at > $2
@@ -446,7 +456,7 @@ func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sess
 		 LIMIT 1`,
 		sessionID, after,
 	).Scan(
-		&m.ID, &m.SessionID, &m.Role, &m.Content,
+		&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
 		&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 		&m.CreatedAt,
@@ -469,7 +479,7 @@ func (r *postgresRepository) FindAllMessages(ctx context.Context, sessionID uuid
 	defer release()
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, session_id, role, content,
+		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
 		        message_type, tool_calls, tool_call_id,
 		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
@@ -487,7 +497,7 @@ func (r *postgresRepository) FindAllMessages(ctx context.Context, sessionID uuid
 	for rows.Next() {
 		var m ChatMessage
 		if err := rows.Scan(
-			&m.ID, &m.SessionID, &m.Role, &m.Content,
+			&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
 			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 			&m.CreatedAt,
@@ -512,9 +522,9 @@ func (r *postgresRepository) GetLatestCompactSummary(ctx context.Context, sessio
 
 	var m ChatMessage
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, role, content,
+		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
 		        message_type, tool_calls, tool_call_id,
-		        metadata, token_usage, finish_reason, turn_index,
+		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1 AND message_type = 'compact_summary'
@@ -522,7 +532,7 @@ func (r *postgresRepository) GetLatestCompactSummary(ctx context.Context, sessio
 		 LIMIT 1`,
 		sessionID,
 	).Scan(
-		&m.ID, &m.SessionID, &m.Role, &m.Content,
+		&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
 		&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 		&m.CreatedAt,

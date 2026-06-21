@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	agentdomain "github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
@@ -72,6 +73,7 @@ type RunInput struct {
 	SessionID    uuid.UUID
 	AgentID      uuid.UUID
 	UserMessage  string
+	Attachments  json.RawMessage
 	SystemPrompt string
 	TenantID     string
 	// UserMessageID is non-nil when the user message was already persisted by the
@@ -296,18 +298,25 @@ func snapshotAgent(agentCfg *AgentRunConfig, sess *ChatSession) {
 	if agentCfg == nil {
 		return
 	}
-	if agentCfg.SystemPrompt != "" {
-		snapshot := agentCfg.SystemPrompt
-		sess.SystemPromptSnapshot = &snapshot
+	snapshot := agentCfg.SystemPrompt
+	sess.SystemPromptSnapshot = &snapshot
+
+	modelConfig := agentCfg.ModelConfig
+	if len(modelConfig) == 0 {
+		modelConfig = json.RawMessage(`{}`)
 	}
-	if len(agentCfg.ModelConfig) > 2 {
-		sess.ModelConfigSnapshot = agentCfg.ModelConfig
+	sess.ModelConfigSnapshot = agentdomain.SanitizeModelConfig(modelConfig)
+	if hash := HashModelConfig(modelConfig); hash != "" {
+		sess.ConfigHash = &hash
 	}
-	if len(agentCfg.SkillIDs) > 0 {
-		snapshotData := SkillBindingsSnapshotData{SkillIDs: agentCfg.SkillIDs}
-		if snapshotJSON, err := json.Marshal(snapshotData); err == nil {
-			sess.SkillBindingsSnapshot = snapshotJSON
-		}
+
+	skillIDs := agentCfg.SkillIDs
+	if skillIDs == nil {
+		skillIDs = []uuid.UUID{}
+	}
+	snapshotData := SkillBindingsSnapshotData{SkillIDs: skillIDs}
+	if snapshotJSON, err := json.Marshal(snapshotData); err == nil {
+		sess.SkillBindingsSnapshot = snapshotJSON
 	}
 }
 
@@ -396,7 +405,11 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 	default:
 		return ChatMessageResponse{}, fmt.Errorf("chat service: role must be \"user\" (got %q)", req.Role)
 	}
-	if req.Content == "" {
+	attachments, err := NormalizeChatAttachments(req.Attachments)
+	if err != nil {
+		return ChatMessageResponse{}, err
+	}
+	if req.Content == "" && !HasChatAttachments(attachments) {
 		return ChatMessageResponse{}, fmt.Errorf("chat service: content is required")
 	}
 	// Bug 163: cap content em 64KB. Chat messages podem ser longas (code
@@ -423,6 +436,7 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 		SessionID:   sessionID,
 		Role:        req.Role,
 		Content:     req.Content,
+		Attachments: attachments,
 		MessageType: req.MessageType,
 	}
 
@@ -457,8 +471,17 @@ func (s *Service) ApplyClientState(sessionID uuid.UUID, patch ClientStatePatch) 
 // It loads the session, validates it has an agent, then delegates to the SessionRunner.
 // The caller (SSE handler) consumes the returned channel for streaming.
 func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error) {
+	return s.RunSessionWithAttachments(ctx, sessionID, userMessage, tenantID, nil)
+}
+
+func (s *Service) RunSessionWithAttachments(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, rawAttachments json.RawMessage) (<-chan RunEvent, error) {
 	if s.runner == nil {
 		return nil, fmt.Errorf("chat service: agentic features not configured")
+	}
+
+	attachments, err := NormalizeChatAttachments(rawAttachments)
+	if err != nil {
+		return nil, err
 	}
 
 	session, err := s.repo.GetSessionByID(ctx, sessionID)
@@ -485,10 +508,20 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 			if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *routed); err == nil {
 				snapshotAgent(agentCfg, &session)
 				if err := s.repo.UpdateSessionSnapshots(ctx, sessionID,
-					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot); err != nil {
+					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot, configHashValue(session.ConfigHash)); err != nil {
 					slog.Warn("chat service: failed to persist routed-agent snapshot",
 						"sessionID", sessionID, "agentID", *routed, "error", err)
 				}
+			}
+		}
+	}
+	if session.AgentID != nil && s.agentLoader != nil && sessionNeedsSnapshot(session) {
+		if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
+			snapshotAgent(agentCfg, &session)
+			if err := s.repo.UpdateSessionSnapshots(ctx, sessionID,
+				session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot, configHashValue(session.ConfigHash)); err != nil {
+				slog.Warn("chat service: failed to persist first-run snapshot",
+					"sessionID", sessionID, "agentID", *session.AgentID, "error", err)
 			}
 		}
 	}
@@ -498,9 +531,10 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 	var userMsgID *uuid.UUID
 	if userMessage != "" {
 		msg := ChatMessage{
-			SessionID: sessionID,
-			Role:      "user",
-			Content:   userMessage,
+			SessionID:   sessionID,
+			Role:        "user",
+			Content:     userMessage,
+			Attachments: attachments,
 		}
 		persisted, err := s.repo.CreateMessage(ctx, msg)
 		if err != nil {
@@ -532,6 +566,7 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		SessionID:              sessionID,
 		AgentID:                *session.AgentID,
 		UserMessage:            userMessage,
+		Attachments:            attachments,
 		TenantID:               tenantID,
 		UserMessageID:          userMsgID,
 		SystemPromptSnapshot:   session.SystemPromptSnapshot,
@@ -539,6 +574,21 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		SkillIDsSnapshot:       skillIDsSnapshot,
 		MCPServerNamesSnapshot: mcpServerNames,
 	})
+}
+
+func sessionNeedsSnapshot(session ChatSession) bool {
+	return session.SystemPromptSnapshot == nil ||
+		len(session.ModelConfigSnapshot) == 0 ||
+		len(session.SkillBindingsSnapshot) == 0 ||
+		session.ConfigHash == nil ||
+		*session.ConfigHash == ""
+}
+
+func configHashValue(hash *string) string {
+	if hash == nil {
+		return ""
+	}
+	return *hash
 }
 
 // agentRouter is the subset of Repository needed to route a user message to a

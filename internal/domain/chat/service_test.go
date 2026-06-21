@@ -144,7 +144,7 @@ func (m *mockChatRepo) UpdateSessionAgent(_ context.Context, sessionID uuid.UUID
 	return nil
 }
 
-func (m *mockChatRepo) UpdateSessionSnapshots(_ context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage) error {
+func (m *mockChatRepo) UpdateSessionSnapshots(_ context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage, configHash string) error {
 	s, ok := m.sessions[sessionID]
 	if !ok {
 		return chat.ErrNotFound
@@ -152,6 +152,11 @@ func (m *mockChatRepo) UpdateSessionSnapshots(_ context.Context, sessionID uuid.
 	s.SystemPromptSnapshot = systemPrompt
 	s.ModelConfigSnapshot = modelConfig
 	s.SkillBindingsSnapshot = skillBindings
+	if configHash != "" {
+		s.ConfigHash = &configHash
+	} else {
+		s.ConfigHash = nil
+	}
 	m.sessions[sessionID] = s
 	return nil
 }
@@ -502,6 +507,36 @@ func TestRunSession_UserMessagePersistedBeforeRun(t *testing.T) {
 	assert.True(t, found, "user message must be persisted in the repo before the runner is called")
 }
 
+func TestRunSession_WithAttachmentsPersistsAndPassesToRunner(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(repo, runner)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	attachments, err := json.Marshal([]chat.ChatAttachment{{
+		ID:   uuid.New(),
+		Name: "notes.txt",
+		Type: "text/plain",
+		Size: 5,
+		Kind: chat.AttachmentKindText,
+		Text: "hello",
+	}})
+	require.NoError(t, err)
+
+	_, err = svc.RunSessionWithAttachments(context.Background(), session.ID, "Use this file", "tenant", attachments)
+	require.NoError(t, err)
+
+	require.JSONEq(t, string(attachments), string(runner.lastInput.Attachments))
+	require.Len(t, repo.messages, 1)
+	require.JSONEq(t, string(attachments), string(repo.messages[0].Attachments))
+}
+
 // TestRunSession_RunnerError_UserMessageStillPersisted verifies that even when the
 // runner returns an error (e.g. agent not published), the user message is already
 // in the repository and is not lost.
@@ -565,6 +600,30 @@ func TestCreateSession_SnapshotsSystemPromptAtCreation(t *testing.T) {
 	assert.Equal(t, prompt, *stored.SystemPromptSnapshot)
 }
 
+func TestCreateSession_SnapshotsRedactedModelConfigAndHash(t *testing.T) {
+	repo := newMockRepo()
+	rawConfig := json.RawMessage(`{"provider":"openai","model":"gpt-4o","apiKey":"sk-secret"}`)
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		SystemPrompt: "You are helpful.",
+		ModelConfig:  rawConfig,
+		Status:       "PUBLISHED",
+	}}
+	svc := chat.NewService(repo, nil).WithAgentLoader(loader)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	stored := repo.sessions[session.ID]
+	assert.NotContains(t, string(stored.ModelConfigSnapshot), "apiKey")
+	assert.NotContains(t, string(stored.ModelConfigSnapshot), "sk-secret")
+	require.NotNil(t, stored.ConfigHash)
+	assert.Equal(t, chat.HashModelConfig(rawConfig), *stored.ConfigHash)
+}
+
 func TestCreateSession_NoLoader_NoSnapshot(t *testing.T) {
 	repo := newMockRepo()
 	svc := chat.NewService(repo, nil) // no agent loader wired
@@ -603,6 +662,37 @@ func TestRunSession_PassesSnapshotToRunner(t *testing.T) {
 	assert.Equal(t, snapshot, *runner.lastInput.SystemPromptSnapshot)
 }
 
+func TestRunSession_CapturesMissingSnapshotOnFirstRun(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+	agentID := uuid.New()
+	skillID := uuid.New()
+	sessionID := uuid.New()
+	repo.sessions[sessionID] = chat.ChatSession{
+		ID:      sessionID,
+		AgentID: &agentID,
+		Status:  chat.StatusActive,
+	}
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		SystemPrompt: "Pinned prompt",
+		ModelConfig:  json.RawMessage(`{"provider":"openai","model":"gpt-4o"}`),
+		Status:       "PUBLISHED",
+		SkillIDs:     []uuid.UUID{skillID},
+	}}
+	svc := chat.NewService(repo, runner).WithAgentLoader(loader)
+
+	_, err := svc.RunSession(context.Background(), sessionID, "Hello", "tenant")
+	require.NoError(t, err)
+
+	stored := repo.sessions[sessionID]
+	require.NotNil(t, stored.SystemPromptSnapshot)
+	assert.Equal(t, "Pinned prompt", *stored.SystemPromptSnapshot)
+	assert.JSONEq(t, `{"provider":"openai","model":"gpt-4o"}`, string(stored.ModelConfigSnapshot))
+	require.NotNil(t, stored.ConfigHash)
+	assert.Equal(t, chat.HashModelConfig(json.RawMessage(`{"provider":"openai","model":"gpt-4o"}`)), *stored.ConfigHash)
+	assert.Equal(t, []uuid.UUID{skillID}, runner.lastInput.SkillIDsSnapshot)
+}
+
 // TestCreateSession_SnapshotsSkillBindings verifies that skill IDs from the agent loader
 // are captured as a JSON snapshot in the session at creation time. P-C115-1.
 func TestCreateSession_SnapshotsSkillBindings(t *testing.T) {
@@ -629,6 +719,26 @@ func TestCreateSession_SnapshotsSkillBindings(t *testing.T) {
 	var snap chat.SkillBindingsSnapshotData
 	require.NoError(t, json.Unmarshal(stored.SkillBindingsSnapshot, &snap))
 	assert.ElementsMatch(t, []uuid.UUID{skillID1, skillID2}, snap.SkillIDs)
+}
+
+func TestCreateSession_SnapshotsEmptySkillBindings(t *testing.T) {
+	repo := newMockRepo()
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		SystemPrompt: "You are helpful.",
+		Status:       "PUBLISHED",
+	}}
+	svc := chat.NewService(repo, nil).WithAgentLoader(loader)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	stored := repo.sessions[session.ID]
+	require.NotEmpty(t, stored.SkillBindingsSnapshot)
+	assert.JSONEq(t, `{"skillIds":[]}`, string(stored.SkillBindingsSnapshot))
 }
 
 // TestRunSession_PassesSkillSnapshotToRunner verifies that the runner receives

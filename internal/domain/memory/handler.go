@@ -60,6 +60,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/agents/{agentId}/memory/recall", h.recall)
 	r.Get("/api/agents/{agentId}/memory/search", h.search)
 	r.Get("/api/agents/{agentId}/memory/stats", h.stats)
+	r.Get("/api/agents/{agentId}/memories/summary", h.stats)
 	r.Post("/api/agents/{agentId}/memory/bulk", h.bulkUpsert)
 }
 

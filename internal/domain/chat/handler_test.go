@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"testing"
 	"time"
 
@@ -26,6 +29,19 @@ type mockChatSvc struct {
 	runEvents              []chat.RunEvent
 	lastClientState        chat.ClientStatePatch
 	lastClientStateSession uuid.UUID
+}
+
+type recordingAttachmentStorage struct {
+	key         string
+	size        int64
+	contentType string
+}
+
+func (s *recordingAttachmentStorage) Upload(_ context.Context, key string, _ io.Reader, size int64, contentType string) (string, error) {
+	s.key = key
+	s.size = size
+	s.contentType = contentType
+	return key, nil
 }
 
 func newMockChatSvc() *mockChatSvc {
@@ -148,6 +164,17 @@ func (m *mockChatSvc) ApplyClientState(sessionID uuid.UUID, patch chat.ClientSta
 func setupChat() (*chi.Mux, *mockChatSvc) {
 	svc := newMockChatSvc()
 	h := chat.NewHandler(svc, nil)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r, svc
+}
+
+func setupChatWithHandler(configure func(*chat.Handler)) (*chi.Mux, *mockChatSvc) {
+	svc := newMockChatSvc()
+	h := chat.NewHandler(svc, nil)
+	if configure != nil {
+		configure(h)
+	}
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
 	return r, svc
@@ -282,6 +309,41 @@ func TestChatHandler_AddMessage_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusCreated, w.Code)
+}
+
+func TestChatHandler_UploadAttachment_Success(t *testing.T) {
+	storage := &recordingAttachmentStorage{}
+	r, svc := setupChatWithHandler(func(h *chat.Handler) {
+		h.WithAttachmentStorage(storage)
+	})
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Chat", Status: chat.StatusActive}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="file"; filename="notes.md"`)
+	header.Set("Content-Type", "text/markdown")
+	part, err := writer.CreatePart(header)
+	require.NoError(t, err)
+	_, err = part.Write([]byte("# Notes\nhello"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/attachments", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code)
+	var resp chat.ChatAttachment
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "notes.md", resp.Name)
+	assert.Equal(t, chat.AttachmentKindText, resp.Kind)
+	assert.Contains(t, resp.URL, "chat-attachments/unknown/"+sessionID.String()+"/")
+	assert.Equal(t, storage.key, resp.URL)
+	assert.Equal(t, int64(len("# Notes\nhello")), storage.size)
+	assert.Equal(t, "text/markdown", storage.contentType)
 }
 
 func TestChatHandler_ListMessages_Success(t *testing.T) {

@@ -1,6 +1,7 @@
 package agentic_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -235,6 +236,25 @@ func TestRedactSecrets_Empty(t *testing.T) {
 func TestRedactSecrets_EmptyMarker(t *testing.T) {
 	content := "sk-ant-abcdefghijklmnopqrstuvwxyz"
 	assert.Equal(t, content, agentic.RedactSecrets(content, ""))
+}
+
+func TestRedactSensitiveFields_RedactsNestedCredentialKeys(t *testing.T) {
+	raw := json.RawMessage(`{
+		"ok": true,
+		"apiKey": "short-secret",
+		"nested": {"clientSecret": "nested-secret"},
+		"items": [{"authorization": "Bearer short-token"}]
+	}`)
+	redacted := agentic.RedactSensitiveFields(raw)
+	assert.JSONEq(t, `{
+		"ok": true,
+		"apiKey": "[REDACTED]",
+		"nested": {"clientSecret": "[REDACTED]"},
+		"items": [{"authorization": "[REDACTED]"}]
+	}`, string(redacted))
+	assert.NotContains(t, string(redacted), "short-secret")
+	assert.NotContains(t, string(redacted), "nested-secret")
+	assert.NotContains(t, string(redacted), "short-token")
 }
 
 // --- SecretRuleCount ---
