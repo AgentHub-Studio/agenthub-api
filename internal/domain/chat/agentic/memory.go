@@ -46,8 +46,8 @@ type MemoryEvaluator interface {
 // legacy format (memoryType/key/value). When both are set, Type takes precedence.
 // Inspired by Claude Code's four-type taxonomy: user|feedback|project|reference.
 type ExtractedMemory struct {
-	Key        string `json:"key"`
-	Value      string `json:"value"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
 	// Type is the canonical field name matching the memory_eval_prompt template output.
 	Type string `json:"type,omitempty"` // user|feedback|project|reference
 	// MemoryType is the legacy field name kept for backwards compatibility.
@@ -57,12 +57,29 @@ type ExtractedMemory struct {
 // resolvedType returns the effective memory type, preferring Type over MemoryType.
 func (e ExtractedMemory) resolvedType() string {
 	if e.Type != "" {
-		return e.Type
+		return normalizeExtractedMemoryType(e.Type)
 	}
 	if e.MemoryType != "" {
-		return e.MemoryType
+		return normalizeExtractedMemoryType(e.MemoryType)
 	}
 	return "general"
+}
+
+func normalizeExtractedMemoryType(raw string) string {
+	switch memory.MemoryType(strings.ToLower(strings.TrimSpace(raw))) {
+	case memory.MemoryTypeUser:
+		return string(memory.MemoryTypeUser)
+	case memory.MemoryTypeFeedback:
+		return string(memory.MemoryTypeFeedback)
+	case memory.MemoryTypeProject:
+		return string(memory.MemoryTypeProject)
+	case memory.MemoryTypeReference:
+		return string(memory.MemoryTypeReference)
+	case memory.MemoryTypeGeneral:
+		return string(memory.MemoryTypeGeneral)
+	default:
+		return string(memory.MemoryTypeGeneral)
+	}
 }
 
 // --- MemoryBridge ---
@@ -102,7 +119,7 @@ type MemoryDistiller interface {
 type MemoryBridge struct {
 	embedder    Embedder
 	recaller    MemoryRecaller
-	lister      MemoryLister  // optional: used for recent-memory fallback (BUG-MEM7)
+	lister      MemoryLister // optional: used for recent-memory fallback (BUG-MEM7)
 	upserter    MemoryUpserter
 	evaluator   MemoryEvaluator
 	distiller   MemoryDistiller
