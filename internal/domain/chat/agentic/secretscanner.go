@@ -1,8 +1,11 @@
 package agentic
 
 import (
+	"encoding/json"
 	"regexp"
 	"sync"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/redact"
 )
 
 // Client-side secret/credential detection.
@@ -197,6 +200,16 @@ func RedactSecrets(content string, marker string) string {
 		result = rule.pattern.ReplaceAllString(result, marker)
 	}
 	return result
+}
+
+// RedactSensitiveFields redacts secret-like JSON fields and high-confidence
+// credential patterns from a tool result payload.
+func RedactSensitiveFields(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	redacted := redact.RedactSensitiveJSONFields(raw, "[REDACTED]")
+	return json.RawMessage(RedactSecrets(string(redacted), "[REDACTED]"))
 }
 
 // SecretRuleCount returns the number of compiled detection rules.

@@ -26,6 +26,9 @@ const (
 	EventStopHookSummary  RunEventType = "stop_hook_summary"
 	EventTranscription    RunEventType = "transcription"
 	EventAudioDelta       RunEventType = "audio_delta"
+	// EventConfigChanged is emitted when the live agent configuration differs
+	// from the session snapshot currently pinned for the conversation.
+	EventConfigChanged RunEventType = "config_changed"
 	// EventInputRequest is emitted when the agentic loop needs structured user input
 	// via an elicitation request (form, URL confirmation, etc.).
 	EventInputRequest RunEventType = "input_request"
@@ -68,6 +71,14 @@ func NewRunEvent(typ RunEventType, data any) RunEvent {
 }
 
 // --- typed payloads ---
+
+// ConfigChangedData tells the UI that future sessions can use newer agent config,
+// while this session remains pinned to its snapshot.
+type ConfigChangedData struct {
+	SessionID string `json:"sessionId"`
+	AgentID   string `json:"agentId"`
+	Message   string `json:"message"`
+}
 
 // TextDeltaData carries a chunk of streamed assistant text.
 type TextDeltaData struct {

@@ -859,13 +859,14 @@ func TestGetWithReadiness_NotFound_ReturnsError(t *testing.T) {
 
 // --- TR-01-TASK-38: sanitizar HTML em campos de texto (P-C280-1) ---
 
-func TestCreate_StripHTMLFromName(t *testing.T) {
+func TestCreate_RejectHTMLFromName(t *testing.T) {
 	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
-	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 		Name: "<script>alert('xss')</script>My Agent",
 	})
-	require.NoError(t, err)
-	assert.Equal(t, "My Agent", resp.Name)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "HTML")
 }
 
 func TestCreate_StripHTMLFromDescription(t *testing.T) {
@@ -878,14 +879,15 @@ func TestCreate_StripHTMLFromDescription(t *testing.T) {
 	assert.Equal(t, "Bold description with link", resp.Description)
 }
 
-func TestUpdate_StripHTMLFromName(t *testing.T) {
+func TestUpdate_RejectHTMLFromName(t *testing.T) {
 	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Clean"})
 
 	malicious := `<img src=x onerror="alert(1)">Updated`
-	resp, err := svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{Name: &malicious})
-	require.NoError(t, err)
-	assert.Equal(t, "Updated", resp.Name)
+	_, err := svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{Name: &malicious})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "HTML")
 }
 
 func TestUpdate_StripHTMLFromDescription(t *testing.T) {
@@ -903,6 +905,22 @@ func TestCreate_PlainTextName_Unchanged(t *testing.T) {
 	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "My Normal Agent"})
 	require.NoError(t, err)
 	assert.Equal(t, "My Normal Agent", resp.Name)
+}
+
+func TestCreate_RejectInvalidCanonicalSlug(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent", Slug: "bad_slug"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "slug must match")
+}
+
+func TestCreate_RejectLongCanonicalSlug(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent", Slug: strings.Repeat("a", 65)})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "slug must match")
 }
 
 // --- TR-01-TASK-40: persistir knowledgeBaseIds no agente (P-C285-1) ---

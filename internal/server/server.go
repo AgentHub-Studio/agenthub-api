@@ -170,7 +170,21 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentTemplateHandler := agenttemplate.NewHandler(agentTemplateSvc)
 	providerHandler := provider.NewHandler(provider.NewService(provider.NewRepository(pool)))
 	probeHandler := probe.NewHandler(probe.NewService())
-	analyticsHandler := analytics.NewHandler(analytics.NewService(analytics.NewPostgresStore(pool)))
+	analyticsStore := analytics.AnalyticsStore(analytics.NewPostgresStore(pool))
+	var runMetricsFactory chat.RunMetricsCollectorFactory
+	if cfg.ClickHouse.IsConfigured() {
+		clickHouseClient := analytics.NewClickHouseClient(cfg.ClickHouse)
+		if err := clickHouseClient.EnsureSchema(context.Background()); err != nil {
+			slog.Warn("analytics: clickhouse disabled after schema bootstrap failure", "err", err)
+		} else {
+			analyticsStore = analytics.NewClickHouseStore(clickHouseClient)
+			runMetricsFactory = &runMetricsCollectorFactory{
+				sink: analytics.NewAsyncSink(analytics.NewClickHouseSink(clickHouseClient), 100),
+			}
+			slog.Info("analytics: clickhouse pipeline enabled")
+		}
+	}
+	analyticsHandler := analytics.NewHandler(analytics.NewService(analyticsStore))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookSvc := webhook.NewService(webhook.NewRepository(pool)).
 		WithTenantLister(&webhookTenantListerAdapter{repo: tenant.NewRepository(pool)})
@@ -219,7 +233,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
-	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo)
+	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo, agentSvc)
 	voiceSvc := chat.NewOpenAIVoiceServiceFromEnv()
 
 	var chatExecutor *chat.AsyncExecutor
@@ -235,6 +249,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		// Persist agent_metrics rows after every completed async run.
 		chatExecutor = chatExecutor.WithMetricsRecorder(&metricsRecorderAdapter{svc: metricsSvc})
 		chatExecutor = chatExecutor.WithVoiceService(voiceSvc)
+		if runMetricsFactory != nil {
+			chatExecutor = chatExecutor.WithRunMetricsCollectorFactory(runMetricsFactory)
+		}
 		// Bug 244: validate agent existence before accepting runs (sessions
 		// outlive their agents when DELETE /api/agents/{id} runs).
 		if agentRepo != nil {
@@ -262,10 +279,34 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			if tokens > 0 {
 				tokensPtr = &tokens
 			}
-			if err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, turnsPtr, tokensPtr, errPtr); err != nil {
-				// Most chat runs aren't from triggers — UPDATE simply matches 0 rows.
-				// Only log when it's an actual DB error.
-				slog.Debug("trigger.completion: skipped (not a trigger run or no rows)", "sessionId", sessionID)
+			triggerRun, parentTrigger, updated, err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, turnsPtr, tokensPtr, errPtr)
+			if err != nil {
+				slog.Debug("trigger.completion: failed to complete trigger run", "sessionId", sessionID, "err", err)
+				return
+			}
+			if !updated || parentTrigger.NotificationWebhookID == nil {
+				return
+			}
+			payload := map[string]any{
+				"event":       "trigger.run.completed",
+				"triggerId":   parentTrigger.ID,
+				"triggerName": parentTrigger.Name,
+				"agentId":     parentTrigger.AgentID,
+				"runId":       triggerRun.ID,
+				"sessionId":   triggerRun.SessionID,
+				"chatRunId":   runID,
+				"status":      triggerRun.Status,
+				"startedAt":   triggerRun.StartedAt,
+				"completedAt": triggerRun.CompletedAt,
+				"totalTurns":  triggerRun.TotalTurns,
+				"totalTokens": triggerRun.TotalTokens,
+				"error":       triggerRun.Error,
+			}
+			if _, err := webhookSvc.DispatchEvent(ctx, *parentTrigger.NotificationWebhookID, "trigger.run.completed", payload); err != nil {
+				slog.Warn("trigger.notification: dispatch failed",
+					"triggerID", parentTrigger.ID,
+					"webhookID", *parentTrigger.NotificationWebhookID,
+					"err", err)
 			}
 		})
 		go func() {
@@ -354,6 +395,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		slog.Warn("minio: MINIO_ENDPOINT not set, document uploads will not be stored")
 		docStorage = &document.NoopStorageClient{}
 	}
+	chatHandler.WithAttachmentStorage(docStorage)
 	// Build document event publisher — optional; requires RABBITMQ_URL.
 	var docPublisher document.EventPublisher = &document.NoopEventPublisher{}
 	if cfg.RabbitMQURL != "" {
@@ -802,6 +844,7 @@ func buildAgenticRunner(
 	integSvc *integration.Service,
 	coreToolLoader *core.CoreToolLoader,
 	bindingRepo agent.BindingRepository,
+	agentDeleter agent.Deleter,
 ) chat.SessionRunner {
 	// Build an env-based fallback for agents that have no provider configured.
 	// This keeps backward-compatibility with existing deployments that set env vars.
@@ -858,6 +901,7 @@ func buildAgenticRunner(
 
 	// Wire permission audit logger so every permission decision is persisted.
 	adapter.WithPermissionAuditLogger(agentic.NewPermissionAuditRepository(pool))
+	adapter.WithAgentDeleter(agentDeleter)
 
 	// P-C253-1: wire the MCP client so agents with bound MCP servers get their tools.
 	// HTTPMCPClient calls the agenthub-mcp-client-runtime service which proxies
@@ -937,6 +981,33 @@ func (m *metricsRecorderAdapter) Record(ctx context.Context, tenantID string, re
 		LatencyMs:        req.LatencyMs,
 	})
 	return err
+}
+
+// runMetricsCollectorFactory bridges chat async events to the agentic analytics
+// collector without importing ClickHouse details into the chat package.
+type runMetricsCollectorFactory struct {
+	sink agentic.AnalyticsSink
+}
+
+func (f *runMetricsCollectorFactory) NewCollector(tenantID string, agentID, sessionID uuid.UUID, runID, provider, model string) chat.RunMetricsCollector {
+	return &runMetricsCollectorAdapter{
+		collector: agentic.NewMetricsCollector(f.sink, tenantID, agentID, sessionID, runID, provider, model),
+	}
+}
+
+type runMetricsCollectorAdapter struct {
+	collector *agentic.MetricsCollector
+}
+
+func (a *runMetricsCollectorAdapter) Collect(event chat.RunEvent) {
+	a.collector.Collect(agentic.RunEvent{
+		Type: agentic.RunEventType(event.Type),
+		Data: event.Data,
+	})
+}
+
+func (a *runMetricsCollectorAdapter) Flush() error {
+	return a.collector.Flush()
 }
 
 // agentConfigAdapter adapts agent.Repository to chat.AgentLoader.

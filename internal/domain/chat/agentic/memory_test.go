@@ -196,10 +196,30 @@ func TestMemoryBridge_MaybeStore_NewTypeFieldTakesPrecedence(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 4, stored)
-	assert.Equal(t, "user", upserter.calls[0].Req.MemoryType)    // Type field wins over MemoryType
-	assert.Equal(t, "project", upserter.calls[1].Req.MemoryType) // new format
+	assert.Equal(t, "user", upserter.calls[0].Req.MemoryType)     // Type field wins over MemoryType
+	assert.Equal(t, "project", upserter.calls[1].Req.MemoryType)  // new format
 	assert.Equal(t, "feedback", upserter.calls[2].Req.MemoryType) // legacy format still works
 	assert.Equal(t, "general", upserter.calls[3].Req.MemoryType)  // default
+}
+
+func TestMemoryBridge_MaybeStore_NormalizesUnknownMemoryType(t *testing.T) {
+	agentID := uuid.New()
+	embedder := &mockEmbedder{result: []float32{0.5}}
+	upserter := &mockUpserter{}
+	evaluator := &mockEvaluator{results: []agentic.ExtractedMemory{
+		{Key: "project", Value: "Release freeze May 2026", Type: " Project "},
+		{Key: "custom", Value: "Dark mode preference", Type: "preference"},
+	}}
+
+	bridge := defaultBridge(embedder, nil, upserter, evaluator)
+	stored, err := bridge.MaybeStore(context.Background(), agentID, 0, []agentic.TurnMessage{
+		{Role: "user", Content: "test"},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, stored)
+	assert.Equal(t, "project", upserter.calls[0].Req.MemoryType)
+	assert.Equal(t, "general", upserter.calls[1].Req.MemoryType)
 }
 
 func TestMemoryBridge_Recall_FiltersByRelevance(t *testing.T) {

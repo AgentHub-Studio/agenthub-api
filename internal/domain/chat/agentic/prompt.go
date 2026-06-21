@@ -153,6 +153,8 @@ type PromptInput struct {
 	// skills present in this set are listed in "## Available Tools". Skills absent
 	// from the set are excluded so the LLM cannot hallucinate calls to a slug that
 	// has no callable implementation (BUG-SKILL-EMPTY).
+	// For "## Skill Instructions", a non-nil set is authoritative: instructions
+	// from skills absent from the set are omitted, including when the set is empty.
 	ActiveSkillSlugs map[string]bool
 	// RequestContext supplies per-request identity (user, tenant) used to resolve
 	// {{user.email}}, {{tenant.id}}, etc. placeholders in SystemPrompt. MA-09.
@@ -217,11 +219,8 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 		}
 
 		// 2b. Skill Instructions (cached — stable across turns).
-		// P-C152-2: behavioral instructions (no tool references) are always included.
-		// Tool-referencing instructions require active tool bindings to avoid hallucination;
-		// they are handled by FormatSkillInstructionsSection when tool info is available.
-		// Without tool info here, we safely include only behavioral (non-tool-referencing)
-		// instructions so that formatting, tone, and workflow rules always reach the LLM.
+		// P-C152-2: include only behavioral instructions (no tool references), and
+		// when active skill bindings are known, only from skills with active tools.
 		instrSection, instrErr := b.getCachedOrCompute("skill-instructions:"+in.AgentID.String(), func() (string, error) {
 			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
 			if err != nil {
@@ -229,15 +228,11 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 			}
 			var sb strings.Builder
 			for _, s := range skills {
-				if s.Instructions == "" || s.DisableModelInvocation {
+				if !shouldIncludeSkillInstructions(s, activeSlugSnapshot) {
 					continue
 				}
-				// Only include behavioral instructions — ones that don't reference a
-				// specific tool by name — to prevent LLM from hallucinating tool calls.
-				if !referencesToolByName(s.Instructions) {
-					sb.WriteString(s.Instructions)
-					sb.WriteString("\n")
-				}
+				sb.WriteString(s.Instructions)
+				sb.WriteString("\n")
 			}
 			return sb.String(), nil
 		})
@@ -324,6 +319,16 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	}
 
 	return prompt, nil
+}
+
+func shouldIncludeSkillInstructions(s skill.Skill, activeSkillSlugs map[string]bool) bool {
+	if s.Instructions == "" || s.DisableModelInvocation {
+		return false
+	}
+	if activeSkillSlugs != nil && !activeSkillSlugs[s.Slug] {
+		return false
+	}
+	return !referencesToolByName(s.Instructions)
 }
 
 func (b *PromptBuilder) resolvePromptSection(

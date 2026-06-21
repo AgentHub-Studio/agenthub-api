@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"testing"
 	"time"
 
@@ -29,6 +31,19 @@ type mockChatSvc struct {
 	lastClientStateSession uuid.UUID
 }
 
+type recordingAttachmentStorage struct {
+	key         string
+	size        int64
+	contentType string
+}
+
+func (s *recordingAttachmentStorage) Upload(_ context.Context, key string, _ io.Reader, size int64, contentType string) (string, error) {
+	s.key = key
+	s.size = size
+	s.contentType = contentType
+	return key, nil
+}
+
 func newMockChatSvc() *mockChatSvc {
 	return &mockChatSvc{
 		sessions: make(map[uuid.UUID]chat.ChatSession),
@@ -47,10 +62,12 @@ func (m *mockChatSvc) ListSessions(_ context.Context, req pagination.PageRequest
 func (m *mockChatSvc) CreateSession(_ context.Context, req chat.CreateSessionRequest) (chat.ChatSessionResponse, error) {
 	id := uuid.New()
 	s := chat.ChatSession{
-		ID:      id,
-		AgentID: req.AgentID,
-		Title:   req.Title,
-		Status:  chat.StatusActive,
+		ID:        id,
+		AgentID:   req.AgentID,
+		Mode:      req.Mode,
+		PersonaID: req.PersonaID,
+		Title:     req.Title,
+		Status:    chat.StatusActive,
 	}
 	m.sessions[id] = s
 	return chat.SessionResponseFrom(s), nil
@@ -165,6 +182,17 @@ func setupChat() (*chi.Mux, *mockChatSvc) {
 	return r, svc
 }
 
+func setupChatWithHandler(configure func(*chat.Handler)) (*chi.Mux, *mockChatSvc) {
+	svc := newMockChatSvc()
+	h := chat.NewHandler(svc, nil)
+	if configure != nil {
+		configure(h)
+	}
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r, svc
+}
+
 func setupChatWithVoice() (*chi.Mux, *mockChatSvc, *mockVoiceSvc) {
 	svc := newMockChatSvc()
 	voice := &mockVoiceSvc{}
@@ -248,6 +276,51 @@ func TestChatHandler_VoiceInputTranscribesMultipartAudio(t *testing.T) {
 	assert.Nil(t, resp.RunID)
 }
 
+func TestChatHandler_CreateSession_AgentFixedUnchanged(t *testing.T) {
+	r, _ := setupChat()
+	agentID := uuid.New()
+	body, _ := json.Marshal(chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Mode:    chat.ModeAgentFixed,
+		Title:   "Fixed Agent Chat",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	var resp chat.ChatSessionResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Fixed Agent Chat", resp.Title)
+	assert.Equal(t, "AGENT_FIXED", resp.Mode)
+	require.NotNil(t, resp.AgentID)
+	assert.Equal(t, agentID, *resp.AgentID)
+}
+
+func TestChatHandler_CreateSession_DynamicSkillWithPersona(t *testing.T) {
+	r, _ := setupChat()
+	personaID := uuid.New()
+	body, _ := json.Marshal(chat.CreateSessionRequest{
+		Mode:      chat.ModeDynamicSkill,
+		PersonaID: &personaID,
+		Title:     "Dynamic Chat",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	var resp chat.ChatSessionResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Dynamic Chat", resp.Title)
+	assert.Equal(t, "DYNAMIC_SKILL", resp.Mode)
+	assert.Nil(t, resp.AgentID)
+	require.NotNil(t, resp.PersonaID)
+	assert.Equal(t, personaID, *resp.PersonaID)
+}
+
 func TestChatHandler_CreateSession_InvalidBody(t *testing.T) {
 	r, _ := setupChat()
 	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", bytes.NewReader([]byte("not-json")))
@@ -301,6 +374,41 @@ func TestChatHandler_AddMessage_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusCreated, w.Code)
+}
+
+func TestChatHandler_UploadAttachment_Success(t *testing.T) {
+	storage := &recordingAttachmentStorage{}
+	r, svc := setupChatWithHandler(func(h *chat.Handler) {
+		h.WithAttachmentStorage(storage)
+	})
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Chat", Status: chat.StatusActive}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="file"; filename="notes.md"`)
+	header.Set("Content-Type", "text/markdown")
+	part, err := writer.CreatePart(header)
+	require.NoError(t, err)
+	_, err = part.Write([]byte("# Notes\nhello"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/attachments", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code)
+	var resp chat.ChatAttachment
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "notes.md", resp.Name)
+	assert.Equal(t, chat.AttachmentKindText, resp.Kind)
+	assert.Contains(t, resp.URL, "chat-attachments/unknown/"+sessionID.String()+"/")
+	assert.Equal(t, storage.key, resp.URL)
+	assert.Equal(t, int64(len("# Notes\nhello")), storage.size)
+	assert.Equal(t, "text/markdown", storage.contentType)
 }
 
 func TestChatHandler_ListMessages_Success(t *testing.T) {
@@ -667,7 +775,8 @@ func TestHandler_GetTasks_200(t *testing.T) {
 			{ID: "task-2", SessionID: sessionID, Status: "completed", Phase: "implementation"},
 		},
 	}
-	r, _ := setupChatWithTasks(repo)
+	r, svc := setupChatWithTasks(repo)
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Task Session", Status: chat.StatusActive}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/tasks", nil)
 	w := httptest.NewRecorder()
@@ -703,7 +812,8 @@ func TestHandler_GetTasks_NoRepo_Returns501(t *testing.T) {
 func TestHandler_GetTaskNotifications_200(t *testing.T) {
 	sessionID := uuid.New()
 	repo := &mockHandlerTaskRepo{}
-	r, _ := setupChatWithTasks(repo)
+	r, svc := setupChatWithTasks(repo)
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Task Session", Status: chat.StatusActive}
 
 	url := "/api/chat/sessions/" + sessionID.String() + "/tasks/task-1/notifications"
 	req := httptest.NewRequest(http.MethodGet, url, nil)

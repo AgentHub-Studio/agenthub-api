@@ -182,7 +182,7 @@ func TestBuildAgenticRunner_ReturnsRunnerWithoutEnvProvider(t *testing.T) {
 	// The runner is still constructed; provider resolution may happen later via settings.
 	runner := buildAgenticRunner(
 		&config.Config{SkillRuntimeURL: "http://localhost:8083"},
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
 	assert.NotNil(t, runner)
 }
@@ -194,7 +194,7 @@ func TestBuildAgenticRunner_ReturnsRunnerWhenProviderConfigured(t *testing.T) {
 	// the repos are wrapped in adapters but not called at construction time.
 	runner := buildAgenticRunner(
 		&config.Config{SkillRuntimeURL: "http://localhost:8083"},
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 	)
 	assert.NotNil(t, runner)
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -11,8 +12,8 @@ import (
 )
 
 func TestHashConfig_EmptyReturnsEmpty(t *testing.T) {
-	assert.Equal(t, "", hashConfig(nil))
-	assert.Equal(t, "", hashConfig(json.RawMessage{}))
+	assert.NotEmpty(t, hashConfig(nil))
+	assert.Equal(t, hashConfig(json.RawMessage(`{}`)), hashConfig(json.RawMessage{}))
 }
 
 func TestHashConfig_SameInputSameHash(t *testing.T) {
@@ -62,4 +63,18 @@ func TestDetectConfigChange_DifferentHash_ReturnsTrue(t *testing.T) {
 	h := hashConfig(oldCfg)
 	session := chat.ChatSession{ConfigHash: &h}
 	assert.True(t, detectConfigChange(session, newCfg))
+}
+
+func TestNewConfigChangedEvent_Shape(t *testing.T) {
+	sessionID := uuid.New()
+	agentID := uuid.New()
+
+	ev := newConfigChangedEvent(sessionID, agentID)
+
+	assert.Equal(t, string(EventConfigChanged), ev.Type)
+	var data ConfigChangedData
+	require.NoError(t, json.Unmarshal(ev.Data, &data))
+	assert.Equal(t, sessionID.String(), data.SessionID)
+	assert.Equal(t, agentID.String(), data.AgentID)
+	assert.Contains(t, data.Message, "pinned snapshot")
 }

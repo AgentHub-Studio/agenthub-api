@@ -16,7 +16,7 @@ import (
 
 // mockRepository is a test double for knowledgebase.Repository.
 type mockRepository struct {
-	items  map[uuid.UUID]knowledgebase.KnowledgeBase
+	items     map[uuid.UUID]knowledgebase.KnowledgeBase
 	createErr error
 	getErr    error
 	deleteErr error
@@ -134,6 +134,31 @@ func TestService_Create_MissingName(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "name is required")
+}
+
+func TestService_Create_RejectsHTMLName(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+
+	_, err := svc.Create(context.Background(), knowledgebase.CreateRequest{Name: `<img src=x onerror="alert(1)">KB`})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, knowledgebase.ErrValidation)
+	assert.Contains(t, err.Error(), "HTML")
+}
+
+func TestService_Update_RejectsHTMLName(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+	created, err := svc.Create(context.Background(), knowledgebase.CreateRequest{Name: "KB"})
+	require.NoError(t, err)
+
+	name := `<script>alert(1)</script>KB`
+	_, err = svc.Update(context.Background(), created.ID, knowledgebase.UpdateRequest{Name: &name})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, knowledgebase.ErrValidation)
+	assert.Contains(t, err.Error(), "HTML")
 }
 
 func TestService_Create_RepositoryError(t *testing.T) {

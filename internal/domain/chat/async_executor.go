@@ -24,10 +24,11 @@ const ChatRunQueue = "chat.run.queue"
 
 // ChatRunTask is the message payload for RabbitMQ.
 type ChatRunTask struct {
-	RunID     uuid.UUID `json:"runId"`
-	SessionID uuid.UUID `json:"sessionId"`
-	TenantID  string    `json:"tenantId"`
-	Message   string    `json:"message"`
+	RunID       uuid.UUID       `json:"runId"`
+	SessionID   uuid.UUID       `json:"sessionId"`
+	TenantID    string          `json:"tenantId"`
+	Message     string          `json:"message"`
+	Attachments json.RawMessage `json:"attachments,omitempty"`
 	// VoiceOutput tells the worker to synthesize the assistant answer and emit
 	// an audio_delta event before run_complete.
 	VoiceOutput bool `json:"voiceOutput,omitempty"`
@@ -86,7 +87,19 @@ type MetricsRecord struct {
 }
 
 type EnqueueRunOptions struct {
+	Attachments json.RawMessage
 	VoiceOutput bool
+}
+
+// RunMetricsCollector consumes run events and flushes an analytics batch.
+type RunMetricsCollector interface {
+	Collect(event RunEvent)
+	Flush() error
+}
+
+// RunMetricsCollectorFactory creates a per-run analytics collector.
+type RunMetricsCollectorFactory interface {
+	NewCollector(tenantID string, agentID, sessionID uuid.UUID, runID, provider, model string) RunMetricsCollector
 }
 
 // AsyncExecutor handles asynchronous execution of chat runs via RabbitMQ.
@@ -104,16 +117,17 @@ type AgentExister interface {
 type RunCompletionHook func(ctx context.Context, sessionID, runID uuid.UUID, status ChatRunStatus, turns, tokens int, errMsg string)
 
 type AsyncExecutor struct {
-	repo            Repository
-	runner          SessionRunner
-	agentLoader     AgentLoader // optional: used to enrich RunInput with agent bindings
-	agentExister    AgentExister
-	metricsRecorder MetricsRecorder
-	voiceSvc        VoiceService
-	completionHooks []RunCompletionHook
-	connURL         string
-	runTimeout      time.Duration
-	bufferRegistry  *RunEventBufferRegistry
+	repo              Repository
+	runner            SessionRunner
+	agentLoader       AgentLoader // optional: used to enrich RunInput with agent bindings
+	agentExister      AgentExister
+	metricsRecorder   MetricsRecorder
+	voiceSvc          VoiceService
+	runMetricsFactory RunMetricsCollectorFactory
+	completionHooks   []RunCompletionHook
+	connURL           string
+	runTimeout        time.Duration
+	bufferRegistry    *RunEventBufferRegistry
 	// cancellers maps runID → context.CancelFunc for in-flight worker tasks
 	// in this process. Populated in processTask and cleared on completion.
 	// Allows the HTTP handler to abort an async run from POST /run/{id}/cancel.
@@ -134,6 +148,12 @@ func (e *AsyncExecutor) WithMetricsRecorder(rec MetricsRecorder) *AsyncExecutor 
 // WithVoiceService wires optional text-to-speech output for voice-originated runs.
 func (e *AsyncExecutor) WithVoiceService(svc VoiceService) *AsyncExecutor {
 	e.voiceSvc = svc
+	return e
+}
+
+// WithRunMetricsCollectorFactory wires structured RunEvent analytics.
+func (e *AsyncExecutor) WithRunMetricsCollectorFactory(factory RunMetricsCollectorFactory) *AsyncExecutor {
+	e.runMetricsFactory = factory
 	return e
 }
 
@@ -219,8 +239,16 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 	return e.EnqueueRunWithOptions(ctx, sessionID, tenantID, message, EnqueueRunOptions{})
 }
 
+func (e *AsyncExecutor) EnqueueRunWithAttachments(ctx context.Context, sessionID uuid.UUID, tenantID, message string, rawAttachments json.RawMessage) (uuid.UUID, error) {
+	return e.EnqueueRunWithOptions(ctx, sessionID, tenantID, message, EnqueueRunOptions{Attachments: rawAttachments})
+}
+
 // EnqueueRunWithOptions persists a run and forwards execution options to the worker.
 func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uuid.UUID, tenantID, message string, opts EnqueueRunOptions) (uuid.UUID, error) {
+	attachments, err := NormalizeChatAttachments(opts.Attachments)
+	if err != nil {
+		return uuid.Nil, err
+	}
 	// Bug 244: validar que session existe e o agent ainda existe ANTES de
 	// criar o run e enfileirar. Sem isso, sessions órfãs (agent deletado)
 	// aceitam runs que silenciosamente fazem fallback para um default agent
@@ -329,6 +357,7 @@ func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uui
 		SessionID:   sessionID,
 		TenantID:    tenantID,
 		Message:     message,
+		Attachments: attachments,
 		VoiceOutput: opts.VoiceOutput,
 		RawToken:    tenant.TokenFromContext(ctx),
 	})
@@ -533,9 +562,18 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 			if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *routed); err == nil {
 				snapshotAgent(agentCfg, &session)
 				if err := e.repo.UpdateSessionSnapshots(ctx, task.SessionID,
-					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot); err != nil {
+					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot, configHashValue(session.ConfigHash)); err != nil {
 					slog.Warn("chat: failed to persist routed-agent snapshot", "runId", task.RunID, "err", err)
 				}
+			}
+		}
+	}
+	if session.AgentID != nil && e.agentLoader != nil && sessionNeedsSnapshot(session) {
+		if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
+			snapshotAgent(agentCfg, &session)
+			if err := e.repo.UpdateSessionSnapshots(ctx, task.SessionID,
+				session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot, configHashValue(session.ConfigHash)); err != nil {
+				slog.Warn("chat: failed to persist first-run snapshot", "runId", task.RunID, "err", err)
 			}
 		}
 	}
@@ -562,12 +600,34 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	}
 
 	// 2. Execute the run
+	var runMetrics RunMetricsCollector
+	if e.runMetricsFactory != nil && session.AgentID != nil {
+		provider, model := modelIdentityFromSnapshot(session.ModelConfigSnapshot)
+		runMetrics = e.runMetricsFactory.NewCollector(
+			strings.TrimPrefix(task.TenantID, "ah_"),
+			*session.AgentID,
+			task.SessionID,
+			task.RunID.String(),
+			provider,
+			model,
+		)
+		defer func() {
+			if runMetrics == nil {
+				return
+			}
+			if err := runMetrics.Flush(); err != nil {
+				slog.Warn("analytics: run metrics flush failed", "runId", task.RunID, "err", err)
+			}
+		}()
+	}
+
 	runEvents, err := e.runner.RunSession(ctx, RunInput{
 		RunID:                  task.RunID,
 		SessionID:              task.SessionID,
 		AgentID:                *session.AgentID,
 		TenantID:               task.TenantID,
 		UserMessage:            task.Message,
+		Attachments:            task.Attachments,
 		SystemPromptSnapshot:   session.SystemPromptSnapshot,
 		ModelConfigSnapshot:    session.ModelConfigSnapshot,
 		SkillIDsSnapshot:       skillIDsSnapshot,
@@ -612,6 +672,9 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		}
 		if buf != nil {
 			buf.Append(event)
+		}
+		if runMetrics != nil {
+			runMetrics.Collect(event)
 		}
 		if event.Type == "error" {
 			slog.Error("chat: background run error event", "runId", task.RunID, "data", string(event.Data))
@@ -767,6 +830,28 @@ func (e *AsyncExecutor) recordMetricsFromRun(ctx context.Context, task ChatRunTa
 	}); err != nil {
 		slog.Warn("metrics: record failed", "runId", task.RunID, "err", err)
 	}
+}
+
+func modelIdentityFromSnapshot(raw json.RawMessage) (provider, model string) {
+	provider = "unknown"
+	model = "unknown"
+	if len(raw) == 0 {
+		return provider, model
+	}
+	var snap struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	}
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return provider, model
+	}
+	if strings.TrimSpace(snap.Provider) != "" {
+		provider = strings.TrimSpace(snap.Provider)
+	}
+	if strings.TrimSpace(snap.Model) != "" {
+		model = strings.TrimSpace(snap.Model)
+	}
+	return provider, model
 }
 
 // providerNameRE captures the provider slug out of error strings like
