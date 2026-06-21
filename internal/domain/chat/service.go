@@ -222,10 +222,27 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		return ChatSessionResponse{}, fmt.Errorf("chat service: title exceeds maximum length of 500 chars (got %d)", len(req.Title))
 	}
 
+	mode, err := normalizeSessionMode(req.Mode, req.AgentID)
+	if err != nil {
+		return ChatSessionResponse{}, err
+	}
+	if mode == ModeAgentFixed && req.AgentID == nil {
+		return ChatSessionResponse{}, fmt.Errorf("chat service: AGENT_FIXED sessions require agentId")
+	}
+	if mode == ModeAgentFixed && req.PersonaID != nil {
+		return ChatSessionResponse{}, fmt.Errorf("chat service: personaId is only valid for DYNAMIC_SKILL sessions")
+	}
+	if mode == ModeDynamicSkill && req.AgentID != nil {
+		return ChatSessionResponse{}, fmt.Errorf("chat service: DYNAMIC_SKILL sessions cannot include agentId")
+	}
+
 	session := ChatSession{
-		AgentID: req.AgentID,
-		Title:   req.Title,
-		Status:  StatusActive,
+		AgentID:        req.AgentID,
+		Mode:           mode,
+		PersonaID:      req.PersonaID,
+		StickySkillSet: json.RawMessage(`[]`),
+		Title:          req.Title,
+		Status:         StatusActive,
 	}
 
 	// P-C115-1 / P-C330-1: capture agent snapshot at session creation so that
@@ -255,6 +272,21 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	}
 
 	return SessionResponseFrom(created), nil
+}
+
+func normalizeSessionMode(mode ChatSessionMode, agentID *uuid.UUID) (ChatSessionMode, error) {
+	normalized := ChatSessionMode(strings.ToUpper(strings.TrimSpace(string(mode))))
+	switch normalized {
+	case "":
+		if agentID == nil {
+			return ModeDynamicSkill, nil
+		}
+		return ModeAgentFixed, nil
+	case ModeAgentFixed, ModeDynamicSkill:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("chat service: unsupported session mode %q", mode)
+	}
 }
 
 // snapshotAgent captures the agent's persona, model config and skill bindings
