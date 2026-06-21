@@ -54,7 +54,14 @@ func (m *mockSkillRepo) Update(_ context.Context, id uuid.UUID, req skill.Update
 	}
 	s.Name = req.Name
 	s.Description = req.Description
+	s.Instructions = req.Instructions
 	s.Category = req.Category
+	s.AllowedTools = req.AllowedTools
+	s.DisableModelInvocation = req.DisableModelInvocation
+	s.ContextMode = req.ContextMode
+	s.WhenToUse = req.WhenToUse
+	s.ArgumentHint = req.ArgumentHint
+	s.ShouldDefer = req.ShouldDefer
 	m.data[id] = s
 	return s, nil
 }
@@ -176,6 +183,24 @@ func TestSkillService_Update_InstructionsEmpty_Preserved(t *testing.T) {
 	got, err := svc.GetByID(context.Background(), created.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "Do something.", got.Instructions)
+}
+
+func TestSkillService_Update_InstructionsTrimmed(t *testing.T) {
+	repo := newMockRepo()
+	svc := skill.NewService(repo)
+	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Skill", Category: "misc", Instructions: "Old guidance."})
+	require.NoError(t, err)
+
+	updated, err := svc.Update(context.Background(), created.ID, skill.UpdateRequest{
+		Name:         "Skill",
+		Instructions: "  New guidance.  \n",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "New guidance.", updated.Instructions)
+
+	got, err := svc.GetByID(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "New guidance.", got.Instructions)
 }
 
 func TestSkillService_Update_AllowedToolsNoInstructions_Accepted(t *testing.T) {

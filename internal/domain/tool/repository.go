@@ -54,6 +54,13 @@ type Repository struct {
 	pool *pgxpool.Pool
 }
 
+const updateToolSQL = `UPDATE tool SET name=$1, slug=$2, type=COALESCE(NULLIF($3, ''), type), config=$4, input_schema=$5, description=$6, labels=$7, read_only=$8, updated_at=NOW()
+		 WHERE id=$9
+		 RETURNING id, name, slug, type, config, input_schema, description, labels, read_only,
+		           should_defer, is_destructive, search_hint, always_load, concurrency_safe,
+		           max_result_chars, interrupt_behavior, is_search_or_read,
+		           created_at, updated_at`
+
 // NewRepository creates a new Repository.
 func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
@@ -220,12 +227,7 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, t Tool) (Tool, er
 		slug = ToSlug(t.Name)
 	}
 	row := conn.QueryRow(ctx,
-		`UPDATE tool SET name=$1, slug=$2, type=$3, config=$4, input_schema=$5, description=$6, labels=$7, read_only=$8, updated_at=NOW()
-		 WHERE id=$9
-		 RETURNING id, name, slug, type, config, input_schema, description, labels, read_only,
-		           should_defer, is_destructive, search_hint, always_load, concurrency_safe,
-		           max_result_chars, interrupt_behavior, is_search_or_read,
-		           created_at, updated_at`,
+		updateToolSQL,
 		t.Name, slug, t.Type, cfg, inputSchema, t.Description, labels, t.ReadOnly, id,
 	)
 	updated, err := scanTool(row)
