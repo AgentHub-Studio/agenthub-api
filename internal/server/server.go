@@ -170,7 +170,21 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentTemplateHandler := agenttemplate.NewHandler(agentTemplateSvc)
 	providerHandler := provider.NewHandler(provider.NewService(provider.NewRepository(pool)))
 	probeHandler := probe.NewHandler(probe.NewService())
-	analyticsHandler := analytics.NewHandler(analytics.NewService(analytics.NewPostgresStore(pool)))
+	analyticsStore := analytics.AnalyticsStore(analytics.NewPostgresStore(pool))
+	var runMetricsFactory chat.RunMetricsCollectorFactory
+	if cfg.ClickHouse.IsConfigured() {
+		clickHouseClient := analytics.NewClickHouseClient(cfg.ClickHouse)
+		if err := clickHouseClient.EnsureSchema(context.Background()); err != nil {
+			slog.Warn("analytics: clickhouse disabled after schema bootstrap failure", "err", err)
+		} else {
+			analyticsStore = analytics.NewClickHouseStore(clickHouseClient)
+			runMetricsFactory = &runMetricsCollectorFactory{
+				sink: analytics.NewAsyncSink(analytics.NewClickHouseSink(clickHouseClient), 100),
+			}
+			slog.Info("analytics: clickhouse pipeline enabled")
+		}
+	}
+	analyticsHandler := analytics.NewHandler(analytics.NewService(analyticsStore))
 	executionHandler := execution.NewHandler(execution.NewService(execution.NewRepository(pool)))
 	webhookSvc := webhook.NewService(webhook.NewRepository(pool)).
 		WithTenantLister(&webhookTenantListerAdapter{repo: tenant.NewRepository(pool)})
@@ -233,6 +247,9 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		}
 		// Persist agent_metrics rows after every completed async run.
 		chatExecutor = chatExecutor.WithMetricsRecorder(&metricsRecorderAdapter{svc: metricsSvc})
+		if runMetricsFactory != nil {
+			chatExecutor = chatExecutor.WithRunMetricsCollectorFactory(runMetricsFactory)
+		}
 		// Bug 244: validate agent existence before accepting runs (sessions
 		// outlive their agents when DELETE /api/agents/{id} runs).
 		if agentRepo != nil {
@@ -937,6 +954,33 @@ func (m *metricsRecorderAdapter) Record(ctx context.Context, tenantID string, re
 		LatencyMs:        req.LatencyMs,
 	})
 	return err
+}
+
+// runMetricsCollectorFactory bridges chat async events to the agentic analytics
+// collector without importing ClickHouse details into the chat package.
+type runMetricsCollectorFactory struct {
+	sink agentic.AnalyticsSink
+}
+
+func (f *runMetricsCollectorFactory) NewCollector(tenantID string, agentID, sessionID uuid.UUID, runID, provider, model string) chat.RunMetricsCollector {
+	return &runMetricsCollectorAdapter{
+		collector: agentic.NewMetricsCollector(f.sink, tenantID, agentID, sessionID, runID, provider, model),
+	}
+}
+
+type runMetricsCollectorAdapter struct {
+	collector *agentic.MetricsCollector
+}
+
+func (a *runMetricsCollectorAdapter) Collect(event chat.RunEvent) {
+	a.collector.Collect(agentic.RunEvent{
+		Type: agentic.RunEventType(event.Type),
+		Data: event.Data,
+	})
+}
+
+func (a *runMetricsCollectorAdapter) Flush() error {
+	return a.collector.Flush()
 }
 
 // agentConfigAdapter adapts agent.Repository to chat.AgentLoader.

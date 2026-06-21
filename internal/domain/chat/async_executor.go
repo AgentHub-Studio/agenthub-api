@@ -83,6 +83,17 @@ type MetricsRecord struct {
 	LatencyMs        int64
 }
 
+// RunMetricsCollector consumes run events and flushes an analytics batch.
+type RunMetricsCollector interface {
+	Collect(event RunEvent)
+	Flush() error
+}
+
+// RunMetricsCollectorFactory creates a per-run analytics collector.
+type RunMetricsCollectorFactory interface {
+	NewCollector(tenantID string, agentID, sessionID uuid.UUID, runID, provider, model string) RunMetricsCollector
+}
+
 // AsyncExecutor handles asynchronous execution of chat runs via RabbitMQ.
 // AgentExister checks if an agent ID exists in the tenant's catalog.
 // Bug 244: chat session can outlive its agent (DELETE agent leaves the
@@ -98,15 +109,16 @@ type AgentExister interface {
 type RunCompletionHook func(ctx context.Context, sessionID, runID uuid.UUID, status ChatRunStatus, turns, tokens int, errMsg string)
 
 type AsyncExecutor struct {
-	repo            Repository
-	runner          SessionRunner
-	agentLoader     AgentLoader // optional: used to enrich RunInput with agent bindings
-	agentExister    AgentExister
-	metricsRecorder MetricsRecorder
-	completionHooks []RunCompletionHook
-	connURL         string
-	runTimeout      time.Duration
-	bufferRegistry  *RunEventBufferRegistry
+	repo              Repository
+	runner            SessionRunner
+	agentLoader       AgentLoader // optional: used to enrich RunInput with agent bindings
+	agentExister      AgentExister
+	metricsRecorder   MetricsRecorder
+	runMetricsFactory RunMetricsCollectorFactory
+	completionHooks   []RunCompletionHook
+	connURL           string
+	runTimeout        time.Duration
+	bufferRegistry    *RunEventBufferRegistry
 	// cancellers maps runID → context.CancelFunc for in-flight worker tasks
 	// in this process. Populated in processTask and cleared on completion.
 	// Allows the HTTP handler to abort an async run from POST /run/{id}/cancel.
@@ -121,6 +133,12 @@ type AsyncExecutor struct {
 // populated by external POST /api/metrics calls.
 func (e *AsyncExecutor) WithMetricsRecorder(rec MetricsRecorder) *AsyncExecutor {
 	e.metricsRecorder = rec
+	return e
+}
+
+// WithRunMetricsCollectorFactory wires structured RunEvent analytics.
+func (e *AsyncExecutor) WithRunMetricsCollectorFactory(factory RunMetricsCollectorFactory) *AsyncExecutor {
+	e.runMetricsFactory = factory
 	return e
 }
 
@@ -534,6 +552,27 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	}
 
 	// 2. Execute the run
+	var runMetrics RunMetricsCollector
+	if e.runMetricsFactory != nil && session.AgentID != nil {
+		provider, model := modelIdentityFromSnapshot(session.ModelConfigSnapshot)
+		runMetrics = e.runMetricsFactory.NewCollector(
+			strings.TrimPrefix(task.TenantID, "ah_"),
+			*session.AgentID,
+			task.SessionID,
+			task.RunID.String(),
+			provider,
+			model,
+		)
+		defer func() {
+			if runMetrics == nil {
+				return
+			}
+			if err := runMetrics.Flush(); err != nil {
+				slog.Warn("analytics: run metrics flush failed", "runId", task.RunID, "err", err)
+			}
+		}()
+	}
+
 	runEvents, err := e.runner.RunSession(ctx, RunInput{
 		RunID:                  task.RunID,
 		SessionID:              task.SessionID,
@@ -577,6 +616,9 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	for event := range runEvents {
 		if buf != nil {
 			buf.Append(event)
+		}
+		if runMetrics != nil {
+			runMetrics.Collect(event)
 		}
 		if event.Type == "error" {
 			slog.Error("chat: background run error event", "runId", task.RunID, "data", string(event.Data))
@@ -729,6 +771,28 @@ func (e *AsyncExecutor) recordMetricsFromRun(ctx context.Context, task ChatRunTa
 	}); err != nil {
 		slog.Warn("metrics: record failed", "runId", task.RunID, "err", err)
 	}
+}
+
+func modelIdentityFromSnapshot(raw json.RawMessage) (provider, model string) {
+	provider = "unknown"
+	model = "unknown"
+	if len(raw) == 0 {
+		return provider, model
+	}
+	var snap struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	}
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return provider, model
+	}
+	if strings.TrimSpace(snap.Provider) != "" {
+		provider = strings.TrimSpace(snap.Provider)
+	}
+	if strings.TrimSpace(snap.Model) != "" {
+		model = strings.TrimSpace(snap.Model)
+	}
+	return provider, model
 }
 
 // providerNameRE captures the provider slug out of error strings like
