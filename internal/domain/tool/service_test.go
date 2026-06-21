@@ -191,6 +191,45 @@ func TestToolService_Create_HTTPRejectsSSRFURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid URL")
 }
 
+func TestToolService_Create_HTTPRejectsSensitiveBodyTemplatePlaceholder(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name: "Webhook",
+		Type: tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{
+			"url":"https://api.example.com/endpoint",
+			"method":"POST",
+			"body_template":"{\"apiKey\":\"{{input.apiKey}}\"}"
+		}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
+	assert.Contains(t, err.Error(), "body_template")
+	assert.Contains(t, err.Error(), "credential-like")
+}
+
+func TestToolService_Update_HTTPRejectsEnvironmentBodyTemplatePlaceholder(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "Webhook",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"url":"https://api.example.com/endpoint","method":"POST"}`),
+	})
+	require.NoError(t, err)
+
+	_, err = svc.Update(context.Background(), created.ID, tool.UpdateRequest{
+		Config: json.RawMessage(`{
+			"url":"https://api.example.com/endpoint",
+			"method":"POST",
+			"bodyTemplate":"{\"token\":\"${API_TOKEN}\"}"
+		}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
+	assert.Contains(t, err.Error(), "bodyTemplate")
+	assert.Contains(t, err.Error(), "environment variable")
+}
+
 func TestToolService_Create_WithLabels(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
 	created, err := svc.Create(context.Background(), tool.CreateRequest{
