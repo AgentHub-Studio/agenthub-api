@@ -277,10 +277,34 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 			if tokens > 0 {
 				tokensPtr = &tokens
 			}
-			if err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, turnsPtr, tokensPtr, errPtr); err != nil {
-				// Most chat runs aren't from triggers — UPDATE simply matches 0 rows.
-				// Only log when it's an actual DB error.
-				slog.Debug("trigger.completion: skipped (not a trigger run or no rows)", "sessionId", sessionID)
+			triggerRun, parentTrigger, updated, err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, turnsPtr, tokensPtr, errPtr)
+			if err != nil {
+				slog.Debug("trigger.completion: failed to complete trigger run", "sessionId", sessionID, "err", err)
+				return
+			}
+			if !updated || parentTrigger.NotificationWebhookID == nil {
+				return
+			}
+			payload := map[string]any{
+				"event":       "trigger.run.completed",
+				"triggerId":   parentTrigger.ID,
+				"triggerName": parentTrigger.Name,
+				"agentId":     parentTrigger.AgentID,
+				"runId":       triggerRun.ID,
+				"sessionId":   triggerRun.SessionID,
+				"chatRunId":   runID,
+				"status":      triggerRun.Status,
+				"startedAt":   triggerRun.StartedAt,
+				"completedAt": triggerRun.CompletedAt,
+				"totalTurns":  triggerRun.TotalTurns,
+				"totalTokens": triggerRun.TotalTokens,
+				"error":       triggerRun.Error,
+			}
+			if _, err := webhookSvc.DispatchEvent(ctx, *parentTrigger.NotificationWebhookID, "trigger.run.completed", payload); err != nil {
+				slog.Warn("trigger.notification: dispatch failed",
+					"triggerID", parentTrigger.ID,
+					"webhookID", *parentTrigger.NotificationWebhookID,
+					"err", err)
 			}
 		})
 		go func() {
