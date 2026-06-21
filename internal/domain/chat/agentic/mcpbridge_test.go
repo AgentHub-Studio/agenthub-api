@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -440,4 +442,33 @@ func TestCircuitBreaker_Reset_ReEnablesServer(t *testing.T) {
 
 	cb.Reset("flaky")
 	assert.False(t, cb.IsDisabled("flaky"), "Reset should re-enable the server")
+}
+
+func TestHTTPMCPClient_SendsTenantHeader(t *testing.T) {
+	var listTenant string
+	var callTenant string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tools":
+			listTenant = r.Header.Get("X-Tenant-ID")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tools":[]}`))
+		case "/api/tools/call":
+			callTenant = r.Header.Get("X-Tenant-ID")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"output":{"ok":true},"isError":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := agentic.NewHTTPMCPClient(srv.URL)
+	_, err := client.ListTools(context.Background(), "tenant-a")
+	require.NoError(t, err)
+	_, err = client.CallTool(context.Background(), "tenant-a", "github", "list_repos", json.RawMessage(`{}`))
+	require.NoError(t, err)
+
+	assert.Equal(t, "tenant-a", listTenant)
+	assert.Equal(t, "tenant-a", callTenant)
 }
