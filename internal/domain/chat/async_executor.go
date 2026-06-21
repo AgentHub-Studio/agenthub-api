@@ -28,6 +28,9 @@ type ChatRunTask struct {
 	SessionID uuid.UUID `json:"sessionId"`
 	TenantID  string    `json:"tenantId"`
 	Message   string    `json:"message"`
+	// VoiceOutput tells the worker to synthesize the assistant answer and emit
+	// an audio_delta event before run_complete.
+	VoiceOutput bool `json:"voiceOutput,omitempty"`
 	// RawToken is the caller's Bearer JWT forwarded so that background workers
 	// can authenticate outbound calls to the skill-runtime. Without this, all
 	// tool executions fail with 401 because the async context has no token.
@@ -82,6 +85,10 @@ type MetricsRecord struct {
 	LatencyMs        int64
 }
 
+type EnqueueRunOptions struct {
+	VoiceOutput bool
+}
+
 // AsyncExecutor handles asynchronous execution of chat runs via RabbitMQ.
 // AgentExister checks if an agent ID exists in the tenant's catalog.
 // Bug 244: chat session can outlive its agent (DELETE agent leaves the
@@ -102,6 +109,7 @@ type AsyncExecutor struct {
 	agentLoader     AgentLoader // optional: used to enrich RunInput with agent bindings
 	agentExister    AgentExister
 	metricsRecorder MetricsRecorder
+	voiceSvc        VoiceService
 	completionHooks []RunCompletionHook
 	connURL         string
 	runTimeout      time.Duration
@@ -120,6 +128,12 @@ type AsyncExecutor struct {
 // populated by external POST /api/metrics calls.
 func (e *AsyncExecutor) WithMetricsRecorder(rec MetricsRecorder) *AsyncExecutor {
 	e.metricsRecorder = rec
+	return e
+}
+
+// WithVoiceService wires optional text-to-speech output for voice-originated runs.
+func (e *AsyncExecutor) WithVoiceService(svc VoiceService) *AsyncExecutor {
+	e.voiceSvc = svc
 	return e
 }
 
@@ -202,6 +216,11 @@ func (e *AsyncExecutor) wasCancelled(runID uuid.UUID) bool {
 // P-C99-1: rejects the request with ErrRunAlreadyActive when a run is already
 // in progress for the session, preventing concurrent runs that corrupt history.
 func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, tenantID, message string) (uuid.UUID, error) {
+	return e.EnqueueRunWithOptions(ctx, sessionID, tenantID, message, EnqueueRunOptions{})
+}
+
+// EnqueueRunWithOptions persists a run and forwards execution options to the worker.
+func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uuid.UUID, tenantID, message string, opts EnqueueRunOptions) (uuid.UUID, error) {
 	// Bug 244: validar que session existe e o agent ainda existe ANTES de
 	// criar o run e enfileirar. Sem isso, sessions órfãs (agent deletado)
 	// aceitam runs que silenciosamente fazem fallback para um default agent
@@ -306,11 +325,12 @@ func (e *AsyncExecutor) EnqueueRun(ctx context.Context, sessionID uuid.UUID, ten
 	}
 
 	body, _ := json.Marshal(ChatRunTask{
-		RunID:     run.ID,
-		SessionID: sessionID,
-		TenantID:  tenantID,
-		Message:   message,
-		RawToken:  tenant.TokenFromContext(ctx),
+		RunID:       run.ID,
+		SessionID:   sessionID,
+		TenantID:    tenantID,
+		Message:     message,
+		VoiceOutput: opts.VoiceOutput,
+		RawToken:    tenant.TokenFromContext(ctx),
 	})
 
 	err = ch.PublishWithContext(ctx, "", q.Name, false, false, amqp.Publishing{
@@ -393,6 +413,33 @@ func appendBufferedError(buf *EventBuffer, message, code string) {
 		"code":    code,
 	})
 	buf.Append(RunEvent{Type: "error", Data: data})
+}
+
+func extractTextDelta(data json.RawMessage) string {
+	var payload struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return ""
+	}
+	return payload.Content
+}
+
+func (e *AsyncExecutor) appendVoiceAudioDelta(ctx context.Context, buf *EventBuffer, runID uuid.UUID, text string) bool {
+	if buf == nil || e.voiceSvc == nil || strings.TrimSpace(text) == "" {
+		return false
+	}
+	audio, err := e.voiceSvc.Synthesize(ctx, VoiceSynthesisInput{Text: text})
+	if err != nil {
+		slog.Warn("voice: failed to synthesize assistant answer", "runId", runID, "err", err)
+		return false
+	}
+	data, err := json.Marshal(VoiceAudioDelta{Chunk: audio.Base64, Format: audio.Format})
+	if err != nil {
+		return false
+	}
+	buf.Append(RunEvent{Type: EventAudioDelta, Data: data})
+	return true
 }
 
 func (e *AsyncExecutor) processTask(task ChatRunTask) {
@@ -554,7 +601,15 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// do NOT write user messages — those must NOT suppress the timeout message.
 	runnerWroteUserMessage := false
 	var lastLLMErrorMsg string // non-empty when a fatal LLM error (llm_call/stream_consume) occurred
+	var assistantText strings.Builder
+	voiceAudioEmitted := false
 	for event := range runEvents {
+		if event.Type == "text_delta" {
+			assistantText.WriteString(extractTextDelta(event.Data))
+		}
+		if task.VoiceOutput && event.Type == "run_complete" {
+			voiceAudioEmitted = e.appendVoiceAudioDelta(ctx, buf, task.RunID, assistantText.String())
+		}
 		if buf != nil {
 			buf.Append(event)
 		}
@@ -573,6 +628,9 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 				}
 			}
 		}
+	}
+	if task.VoiceOutput && !voiceAudioEmitted {
+		e.appendVoiceAudioDelta(ctx, buf, task.RunID, assistantText.String())
 	}
 
 	// P-C102-1: if the context expired (timeout), mark run failed and surface error to user.
@@ -712,13 +770,17 @@ func (e *AsyncExecutor) recordMetricsFromRun(ctx context.Context, task ChatRunTa
 }
 
 // providerNameRE captures the provider slug out of error strings like
-//   build model for provider "anthropic": chat model: claude.apiKey not configured
+//
+//	build model for provider "anthropic": chat model: claude.apiKey not configured
+//
 // so the friendly message can point the user at the specific provider row
 // in the tenant settings.
 var providerNameRE = regexp.MustCompile(`provider\s+"([^"]+)"`)
 
 // settingKeyRE captures the settings key that the backend expected, e.g.
-//   chat model: claude.apiKey not configured
+//
+//	chat model: claude.apiKey not configured
+//
 // Used to tell the user which setting to fill in.
 var settingKeyRE = regexp.MustCompile(`([a-z][a-zA-Z0-9_]*\.[a-zA-Z][a-zA-Z0-9_]*)\s+not configured`)
 

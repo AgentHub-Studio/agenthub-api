@@ -16,29 +16,29 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/config"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/abtest"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/admintenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/auth"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agenttemplate"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/analytics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/approval"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/channel"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/core"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/auth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/channel"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/suggest"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/copilot"
 	chatTask "github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chatsession"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/copilot"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/core"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration/probe"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
 	mkplInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
 	mkplListing "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
@@ -47,6 +47,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/metrics"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/oauth"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/pipeline"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/prompttemplate"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/provider"
 	regDependency "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/dependency"
@@ -58,7 +59,6 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skilleval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
-	"github.com/AgentHub-Studio/agenthub-api/internal/domain/admintenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenantsignup"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/trigger"
@@ -220,6 +220,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
 	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo)
+	voiceSvc := chat.NewOpenAIVoiceServiceFromEnv()
 
 	var chatExecutor *chat.AsyncExecutor
 	if cfg.RabbitMQURL != "" {
@@ -233,6 +234,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		}
 		// Persist agent_metrics rows after every completed async run.
 		chatExecutor = chatExecutor.WithMetricsRecorder(&metricsRecorderAdapter{svc: metricsSvc})
+		chatExecutor = chatExecutor.WithVoiceService(voiceSvc)
 		// Bug 244: validate agent existence before accepting runs (sessions
 		// outlive their agents when DELETE /api/agents/{id} runs).
 		if agentRepo != nil {
@@ -283,7 +285,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	permAuditRepo := agentic.NewPermissionAuditRepository(pool)
 	chatHandler := chat.NewHandler(chatSvc, chatExecutor).
 		WithTaskRepository(chatTask.NewRepository(pool)).
-		WithPermissionAuditReader(&permissionAuditReaderAdapter{repo: permAuditRepo})
+		WithPermissionAuditReader(&permissionAuditReaderAdapter{repo: permAuditRepo}).
+		WithVoiceService(voiceSvc)
 
 	// Bug 237 fase 2: wire trigger Firer agora que chatSvc + chatExecutor
 	// existem, e starta o scheduler.
@@ -545,8 +548,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		mcpHandler.RegisterRoutes(r)
 		approvalHandler.RegisterRoutes(r)
 		coreHandler.RegisterRoutes(r)
-			// BUG-DEPR1: read-only deprecated pipeline endpoints (Sunset: 2026-07-01).
-			pipelineHandler.RegisterRoutes(r)
+		// BUG-DEPR1: read-only deprecated pipeline endpoints (Sunset: 2026-07-01).
+		pipelineHandler.RegisterRoutes(r)
 		// Marketplace
 		mkplListingHandler.RegisterRoutes(r)
 		mkplReviewHandler.RegisterRoutes(r)

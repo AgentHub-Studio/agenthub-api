@@ -24,6 +24,8 @@ const (
 	EventSubtaskProgress  RunEventType = "subtask_progress"
 	EventToolUseSummary   RunEventType = "tool_use_summary"
 	EventStopHookSummary  RunEventType = "stop_hook_summary"
+	EventTranscription    RunEventType = "transcription"
+	EventAudioDelta       RunEventType = "audio_delta"
 	// EventInputRequest is emitted when the agentic loop needs structured user input
 	// via an elicitation request (form, URL confirmation, etc.).
 	EventInputRequest RunEventType = "input_request"
@@ -77,6 +79,17 @@ type ThinkingDeltaData struct {
 	Content string `json:"content"`
 }
 
+type TranscriptionData struct {
+	Text       string  `json:"text"`
+	Language   string  `json:"language,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+}
+
+type AudioDeltaData struct {
+	Chunk  string `json:"chunk"`
+	Format string `json:"format"`
+}
+
 // ToolCallStartData is emitted when the LLM requests a tool execution.
 type ToolCallStartData struct {
 	ID    string          `json:"id"`
@@ -114,8 +127,8 @@ type ModelFallbackData struct {
 // TurnCompleteData is emitted at the end of each agentic turn
 // (one LLM call that may be followed by tool executions).
 type TurnCompleteData struct {
-	TurnIndex  int        `json:"turnIndex"`
-	TokenUsage TokenUsage `json:"tokenUsage"`
+	TurnIndex   int        `json:"turnIndex"`
+	TokenUsage  TokenUsage `json:"tokenUsage"`
 	BudgetUsed  int        `json:"budgetUsed,omitempty"`
 	BudgetLimit int        `json:"budgetLimit,omitempty"`
 	// Model is the model that actually served this turn (may differ from
@@ -132,13 +145,13 @@ type TurnCompleteData struct {
 // - CumulativeOutputTokens: sum of all output tokens across all turns
 // - CumulativeCacheReadTokens/CacheCreationTokens: sum across all turns
 type RunCompleteData struct {
-	TotalTurns               int     `json:"totalTurns"`
-	TotalTokens              int     `json:"totalTokens"`
-	TotalCost                float64 `json:"totalCostUsd,omitempty"`
-	LatestInputTokens        int     `json:"latestInputTokens,omitempty"`
-	CumulativeOutputTokens   int     `json:"cumulativeOutputTokens,omitempty"`
-	CumulativeCacheReadTokens    int `json:"cumulativeCacheReadTokens,omitempty"`
-	CumulativeCacheCreationTokens int `json:"cumulativeCacheCreationTokens,omitempty"`
+	TotalTurns                    int     `json:"totalTurns"`
+	TotalTokens                   int     `json:"totalTokens"`
+	TotalCost                     float64 `json:"totalCostUsd,omitempty"`
+	LatestInputTokens             int     `json:"latestInputTokens,omitempty"`
+	CumulativeOutputTokens        int     `json:"cumulativeOutputTokens,omitempty"`
+	CumulativeCacheReadTokens     int     `json:"cumulativeCacheReadTokens,omitempty"`
+	CumulativeCacheCreationTokens int     `json:"cumulativeCacheCreationTokens,omitempty"`
 }
 
 // ErrorData carries error information.
@@ -274,7 +287,6 @@ type UiFormPayloadDto struct {
 	Elements    []UiElementDto `json:"elements"`
 	SubmitLabel string         `json:"submitLabel,omitempty"`
 }
-
 
 // WarningData is emitted for non-fatal advisories during a run.
 type WarningData struct {

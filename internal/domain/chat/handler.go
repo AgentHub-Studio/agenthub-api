@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -69,6 +70,7 @@ type Handler struct {
 	bufferRegistry  *RunEventBufferRegistry
 	taskRepo        task.Repository       // nil means task endpoints return 501
 	permAuditReader PermissionAuditReader // nil means endpoint returns 501
+	voiceSvc        VoiceService          // nil means voice endpoint returns 503
 }
 
 // NewHandler creates a new Handler.
@@ -100,6 +102,12 @@ func (h *Handler) WithPermissionAuditReader(reader PermissionAuditReader) *Handl
 	return h
 }
 
+// WithVoiceService injects speech-to-text / text-to-speech support.
+func (h *Handler) WithVoiceService(svc VoiceService) *Handler {
+	h.voiceSvc = svc
+	return h
+}
+
 // WithRunLookup overrides the run lookup used by GET /api/chat/runs/{id}.
 // Intended for use in unit tests where a real AsyncExecutor is not available.
 func (h *Handler) WithRunLookup(rl RunLookup) *Handler {
@@ -118,6 +126,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/chat/sessions/{id}/messages", h.listMessages)
 	r.Post("/api/chat/sessions/{id}/messages", h.addMessage)
 	r.Post("/api/chat/sessions/{id}/run", h.runSession)
+	r.Post("/api/chat/sessions/{id}/voice/input", h.voiceInput)
+	r.Post("/api/chat/sessions/{id}/audio", h.voiceInput)
 	r.Get("/api/chat/sessions/{id}/run/{runId}/status", h.runStatus)
 	r.Post("/api/chat/sessions/{id}/run/{runId}/cancel", h.cancelRun)
 	r.Get("/api/chat/sessions/{id}/run/{runId}/resume", h.resumeSession)
@@ -352,6 +362,138 @@ type runSessionRequest struct {
 	Message string `json:"message"`
 }
 
+const maxVoiceUploadBytes = 25 << 20
+
+// voiceInput handles POST /api/chat/sessions/{id}/voice/input.
+func (h *Handler) voiceInput(w http.ResponseWriter, r *http.Request) {
+	if h.voiceSvc == nil {
+		respond.Error(w, http.StatusServiceUnavailable, "voice provider is not configured")
+		return
+	}
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	if _, err := h.svc.GetSession(r.Context(), sessionID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "session not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to load session")
+		return
+	}
+
+	input, err := readVoiceInput(w, r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	transcription, err := h.voiceSvc.Transcribe(r.Context(), input)
+	if err != nil {
+		respond.Error(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if strings.TrimSpace(transcription.Text) == "" {
+		respond.Error(w, http.StatusUnprocessableEntity, "audio transcription is empty")
+		return
+	}
+
+	resp := VoiceInputResponse{
+		SessionID:     sessionID.String(),
+		Status:        "transcribed",
+		Transcription: transcription,
+	}
+	status := http.StatusOK
+	if r.URL.Query().Get("run") != "false" && h.executor != nil {
+		tenantID := tenant.FromContext(r.Context())
+		runID, err := h.executor.EnqueueRunWithOptions(r.Context(), sessionID, tenantID, transcription.Text, EnqueueRunOptions{
+			VoiceOutput: true,
+		})
+		if err != nil {
+			if errors.Is(err, ErrRunAlreadyActive) {
+				respond.Error(w, http.StatusConflict, "a run is already in progress for this session")
+				return
+			}
+			if errors.Is(err, ErrAgentNotFound) {
+				respond.Error(w, http.StatusGone, "agent has been deleted; cannot run on orphaned session")
+				return
+			}
+			if errors.Is(err, ErrSessionArchived) {
+				respond.Error(w, http.StatusConflict, err.Error())
+				return
+			}
+			respond.Error(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue voice run: %v", err))
+			return
+		}
+		runIDText := runID.String()
+		resp.RunID = &runIDText
+		resp.Status = "accepted"
+		h.appendVoiceTranscriptionEvent(runIDText, transcription)
+		status = http.StatusAccepted
+	}
+	respond.JSON(w, status, resp)
+}
+
+func (h *Handler) appendVoiceTranscriptionEvent(runID string, transcription VoiceTranscription) {
+	data, err := json.Marshal(transcription)
+	if err != nil {
+		return
+	}
+	h.bufferRegistry.GetOrCreate(runID, DefaultEventBufferSize).Append(RunEvent{
+		Type: EventTranscription,
+		Data: data,
+	})
+}
+
+func readVoiceInput(w http.ResponseWriter, r *http.Request) (VoiceTranscriptionInput, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxVoiceUploadBytes)
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(maxVoiceUploadBytes); err != nil {
+			return VoiceTranscriptionInput{}, fmt.Errorf("invalid multipart audio upload")
+		}
+		file, header, err := r.FormFile("audio")
+		if err != nil {
+			file, header, err = r.FormFile("file")
+		}
+		if err != nil {
+			return VoiceTranscriptionInput{}, fmt.Errorf("audio file is required")
+		}
+		defer file.Close()
+		audio, err := io.ReadAll(io.LimitReader(file, maxVoiceUploadBytes+1))
+		if err != nil {
+			return VoiceTranscriptionInput{}, fmt.Errorf("failed to read audio")
+		}
+		if len(audio) > maxVoiceUploadBytes {
+			return VoiceTranscriptionInput{}, fmt.Errorf("audio file exceeds 25MB")
+		}
+		return VoiceTranscriptionInput{
+			Filename:    header.Filename,
+			ContentType: header.Header.Get("Content-Type"),
+			Audio:       audio,
+			Language:    r.FormValue("language"),
+		}, nil
+	}
+
+	audio, err := io.ReadAll(io.LimitReader(r.Body, maxVoiceUploadBytes+1))
+	if err != nil {
+		return VoiceTranscriptionInput{}, fmt.Errorf("failed to read audio")
+	}
+	if len(audio) == 0 {
+		return VoiceTranscriptionInput{}, fmt.Errorf("audio body is required")
+	}
+	if len(audio) > maxVoiceUploadBytes {
+		return VoiceTranscriptionInput{}, fmt.Errorf("audio file exceeds 25MB")
+	}
+	return VoiceTranscriptionInput{
+		Filename:    r.URL.Query().Get("filename"),
+		ContentType: contentType,
+		Audio:       audio,
+		Language:    r.URL.Query().Get("language"),
+	}, nil
+}
+
 // runSession handles POST /api/chat/sessions/{id}/run.
 // It starts the agentic loop and streams RunEvents as SSE to the client.
 // The run continues in the background even if the SSE client disconnects.
@@ -529,8 +671,8 @@ type runStatusResponse struct {
 // runStatus handles GET /api/chat/sessions/{id}/run/{runId}/status.
 //
 // Runs are tracked in two places depending on the execution path:
-//   1. bgRegistry (in-memory) — synchronous SSE runs held for the HTTP handler's lifetime
-//   2. chat_run persistent store — async runs dispatched via AsyncExecutor/RabbitMQ
+//  1. bgRegistry (in-memory) — synchronous SSE runs held for the HTTP handler's lifetime
+//  2. chat_run persistent store — async runs dispatched via AsyncExecutor/RabbitMQ
 //
 // The handler consults both so programmatic polling works for every run type.
 // P-C102-2: async runs are not in bgRegistry and previously returned 404.
