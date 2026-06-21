@@ -4,28 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
-	"unicode"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
-
-// slugPattern enforces kebab-case (skill canonical format).
-var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
-// Bug 179: stripHTML cross-cutting com agent/service.go (P-C280-1).
-// Previne stored XSS quando description é renderizada na UI.
-var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
-var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
-
-func stripHTML(s string) string {
-	s = htmlDangerousPattern.ReplaceAllString(s, "")
-	s = htmlTagPattern.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
-}
 
 // ErrSkillBoundToAgents is returned when a skill cannot be deleted because one or
 // more agents still reference it. P-C185-1: management executor must not bypass this check.
@@ -52,8 +37,8 @@ type ToolBinder interface {
 
 // Service holds business logic for skills.
 type Service struct {
-	repo        SkillRepository
-	toolBinder  ToolBinder // optional: enables toolId auto-bind on Create
+	repo       SkillRepository
+	toolBinder ToolBinder // optional: enables toolId auto-bind on Create
 }
 
 // NewService creates a new Service.
@@ -83,8 +68,10 @@ func (s *Service) List(ctx context.Context, category *string, req pagination.Pag
 
 // Create creates a new skill, auto-generating the slug if not provided.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, error) {
-	// Bug 181: strip HTML do name (XSS prevention cross-cutting com agent).
-	req.Name = stripHTML(req.Name)
+	req.Name = strings.TrimSpace(req.Name)
+	if sanitize.ContainsHTML(req.Name) {
+		return Response{}, fmt.Errorf("%w: name must not contain HTML tags", ErrValidation)
+	}
 	// Bug 130: name varchar(255) — gate length antes do INSERT
 	// (sem este gate Create vazava SQL 22001 com 500).
 	if len(req.Name) > 255 {
@@ -104,7 +91,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
 	// Bug 179: strip HTML do description (XSS prevention cross-cutting).
-	req.Description = stripHTML(req.Description)
+	req.Description = sanitize.StripHTML(req.Description)
 
 	// DX-01-J (ACT-F3-04): reject skills that are completely inert — no instructions
 	// AND no tool restrictions means binding this skill to an agent has no effect.
@@ -132,13 +119,11 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)
-	} else if !slugPattern.MatchString(slug) {
-		return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrValidation, slug)
-	}
-	// Bug 133: slug varchar(255) — gate length antes do INSERT
-	// (slugPattern aceita qualquer tamanho desde que match os chars).
-	if len(slug) > 255 {
-		return Response{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrValidation, len(slug))
+	} else {
+		slug = strings.TrimSpace(slug)
+		if !sanitize.ValidSlug(slug) {
+			return Response{}, fmt.Errorf("%w: slug must match %s (got %q)", ErrValidation, sanitize.CanonicalSlugPattern, slug)
+		}
 	}
 
 	// ensure slug uniqueness within tenant
@@ -151,7 +136,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		if !exists {
 			break
 		}
-		slug = fmt.Sprintf("%s_%d", base, i)
+		slug = sanitize.SlugWithNumericSuffix(base, i)
 	}
 
 	sk := Skill{
@@ -207,12 +192,13 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 	if req.Name == "" {
 		req.Name = existing.Name
-	} else if len(req.Name) > 255 {
+	} else if sanitize.ContainsHTML(req.Name) {
+		return Response{}, fmt.Errorf("%w: name must not contain HTML tags", ErrValidation)
+	} else if len(strings.TrimSpace(req.Name)) > 255 {
 		// Bug 137: name varchar(255) — gate length em Update.
-		return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+		return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(strings.TrimSpace(req.Name)))
 	} else {
-		// Bug 181: strip HTML do name (XSS prevention).
-		req.Name = stripHTML(req.Name)
+		req.Name = strings.TrimSpace(req.Name)
 	}
 	if req.Description == "" {
 		req.Description = existing.Description
@@ -221,7 +207,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	} else {
 		// Bug 179: strip HTML do description (XSS prevention).
-		req.Description = stripHTML(req.Description)
+		req.Description = sanitize.StripHTML(req.Description)
 	}
 	if req.Category == "" {
 		req.Category = existing.Category
@@ -295,19 +281,5 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 // toSlug converts a name to a kebab-case slug.
 // "Document Search" → "document-search", "My  Tool!" → "my-tool"
 func toSlug(name string) string {
-	name = strings.ToLower(name)
-	var b strings.Builder
-	for _, r := range name {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('-')
-		}
-	}
-	// collapse consecutive hyphens
-	result := b.String()
-	for strings.Contains(result, "--") {
-		result = strings.ReplaceAll(result, "--", "-")
-	}
-	return strings.Trim(result, "-")
+	return sanitize.ToSlug(name, "skill")
 }

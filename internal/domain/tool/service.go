@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -15,21 +16,9 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/redact"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
-
-// slugPattern enforces kebab-case + underscore for tool slugs (ToSlug uses _).
-var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-
-// Bug 179: stripHTML cross-cutting com agent/service.go (P-C280-1).
-var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
-var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
-
-func stripHTML(s string) string {
-	s = htmlDangerousPattern.ReplaceAllString(s, "")
-	s = htmlTagPattern.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
-}
 
 // SettingsReader is a minimal interface for reading tenant settings.
 type SettingsReader interface {
@@ -109,11 +98,12 @@ func (s *Service) ListLabels(ctx context.Context) ([]string, error) {
 
 // Create creates a new tool.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, error) {
-	// Bug 181: strip HTML do name (XSS prevention cross-cutting).
-	req.Name = stripHTML(req.Name)
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return Response{}, fmt.Errorf("%w: name is required", ErrValidation)
+	}
+	if sanitize.ContainsHTML(req.Name) {
+		return Response{}, fmt.Errorf("%w: name must not contain HTML tags", ErrValidation)
 	}
 	// Bug 129: name varchar(255) — gate length antes do INSERT.
 	if len(req.Name) > 255 {
@@ -130,6 +120,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		}
 		if err := ssrf.ValidateURL(u); err != nil {
 			return Response{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
+		}
+		if err := validateHTTPURLTemplates(req.Config); err != nil {
+			return Response{}, err
 		}
 		if err := validateHTTPMethodAndTimeout(req.Config); err != nil {
 			return Response{}, err
@@ -198,19 +191,15 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
 		slug = ToSlug(req.Name)
-	} else if !slugPattern.MatchString(slug) {
-		return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-_]* (got %q)", ErrValidation, slug)
-	}
-	// Bug 133: slug varchar(255) — gate length antes do INSERT.
-	if len(slug) > 255 {
-		return Response{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrValidation, len(slug))
+	} else if !sanitize.ValidSlug(slug) {
+		return Response{}, fmt.Errorf("%w: slug must match %s (got %q)", ErrValidation, sanitize.CanonicalSlugPattern, slug)
 	}
 	// Bug 159: cap description em 32KB.
 	if len(req.Description) > 32000 {
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
 	// Bug 179: strip HTML do description (XSS prevention cross-cutting).
-	req.Description = stripHTML(req.Description)
+	req.Description = sanitize.StripHTML(req.Description)
 	// Bug 166: cap config + inputSchema em 64KB cada (JSONB raw bytes).
 	// Config real (HTTP/SQL/DOCUMENT_SEARCH) cabe em <2KB; inputSchema
 	// JSON Schema cabe em <16KB; 500KB+ é storage waste e perf hit.
@@ -268,23 +257,26 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	// Merge only the fields that were explicitly included in the request.
 	if req.Name != nil {
 		// Bug 136: name varchar(255) — gate length em Update.
-		if len(*req.Name) > 255 {
-			return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(*req.Name))
+		trimmed := strings.TrimSpace(*req.Name)
+		if trimmed == "" {
+			return Response{}, fmt.Errorf("%w: name is required", ErrValidation)
 		}
-		existing.Name = *req.Name
+		if len(trimmed) > 255 {
+			return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(trimmed))
+		}
+		if sanitize.ContainsHTML(trimmed) {
+			return Response{}, fmt.Errorf("%w: name must not contain HTML tags", ErrValidation)
+		}
+		existing.Name = trimmed
 	}
 	if req.Slug != nil {
 		trimmed := strings.TrimSpace(*req.Slug)
 		if trimmed != "" {
 			// Bug 121: Update precisa do mesmo gate que Create —
-			// pattern [a-z0-9][a-z0-9_-]*. Sem isso admin podia
+			// Sem isso admin podia
 			// salvar slug="INVALID!" via PATCH e quebrar lookups.
-			if !slugPattern.MatchString(trimmed) {
-				return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-_]* (got %q)", ErrValidation, trimmed)
-			}
-			// Bug 138: slug varchar(255) — gate length em Update.
-			if len(trimmed) > 255 {
-				return Response{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrValidation, len(trimmed))
+			if !sanitize.ValidSlug(trimmed) {
+				return Response{}, fmt.Errorf("%w: slug must match %s (got %q)", ErrValidation, sanitize.CanonicalSlugPattern, trimmed)
 			}
 			existing.Slug = trimmed
 		}
@@ -317,7 +309,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 			return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
 		}
 		// Bug 179: strip HTML do description (XSS prevention).
-		existing.Description = stripHTML(*req.Description)
+		existing.Description = sanitize.StripHTML(*req.Description)
 	}
 	if req.Labels != nil {
 		existing.Labels = req.Labels
@@ -387,6 +379,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if err := ssrf.ValidateURL(u); err != nil {
 			return Response{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
 		}
+		if err := validateHTTPURLTemplates(existing.Config); err != nil {
+			return Response{}, err
+		}
 		// Bug 108: Update precisa do mesmo gate de method enum + timeout
 		// que Create — senão admin podia criar tool são e depois PATCH
 		// com method=BLAH ou timeoutSeconds=99999 (nunca executa, ou
@@ -401,6 +396,46 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		return Response{}, err
 	}
 	return ResponseFrom(t), nil
+}
+
+// validateHTTPURLTemplates rejects traversal and encoded slash payloads in URL templates.
+func validateHTTPURLTemplates(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	for _, field := range []string{"url", "urlTemplate"} {
+		v, _ := cfg[field].(string)
+		if v == "" {
+			continue
+		}
+		if containsUnsafeURLPathToken(v) {
+			return fmt.Errorf("%w: %s must not contain path traversal or encoded slashes", ErrValidation, field)
+		}
+	}
+	return nil
+}
+
+func containsUnsafeURLPathToken(raw string) bool {
+	candidate := strings.TrimSpace(raw)
+	for i := 0; i < 3; i++ {
+		lower := strings.ToLower(candidate)
+		if strings.Contains(lower, "../") ||
+			strings.Contains(lower, `..\`) ||
+			strings.Contains(lower, "%2f") ||
+			strings.Contains(lower, "%5c") {
+			return true
+		}
+		decoded, err := url.PathUnescape(candidate)
+		if err != nil || decoded == candidate {
+			break
+		}
+		candidate = decoded
+	}
+	return false
 }
 
 // validateHTTPMethodAndTimeout checks the optional "method" and
@@ -478,19 +513,23 @@ func validateHTTPBodyTemplate(raw json.RawMessage) error {
 	return nil
 }
 
-// extractURLFromConfig extracts the "url" field from a JSON config blob.
-// Returns empty string when the config is nil, unparseable, or has no url field.
+// extractURLFromConfig extracts the "url" or "urlTemplate" field from a JSON config blob.
+// Returns empty string when the config is nil, unparseable, or has no URL field.
 func extractURLFromConfig(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	var cfg struct {
-		URL string `json:"url"`
+		URL         string `json:"url"`
+		URLTemplate string `json:"urlTemplate"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return ""
 	}
-	return cfg.URL
+	if strings.TrimSpace(cfg.URL) != "" {
+		return strings.TrimSpace(cfg.URL)
+	}
+	return strings.TrimSpace(cfg.URLTemplate)
 }
 
 // isSQLToolType returns true for SQL / DATABASE tool types.

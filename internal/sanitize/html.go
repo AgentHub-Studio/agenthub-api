@@ -12,6 +12,7 @@ import (
 
 var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
 var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
+var htmlNamedTagPattern = regexp.MustCompile(`(?is)</?[a-z][a-z0-9:-]*(?:\s[^>]*)?/?>`)
 
 // StripHTML removes dangerous HTML elements (scripts, iframes, etc) including
 // their text content, then strips all remaining HTML tags but preserves their
@@ -23,4 +24,10 @@ func StripHTML(s string) string {
 	s = htmlDangerousPattern.ReplaceAllString(s, "")
 	s = htmlTagPattern.ReplaceAllString(s, "")
 	return strings.TrimSpace(s)
+}
+
+// ContainsHTML reports whether s contains an actual HTML tag.
+// It intentionally does not treat plain comparison text like "2 < 3" as HTML.
+func ContainsHTML(s string) bool {
+	return htmlNamedTagPattern.MatchString(s)
 }
