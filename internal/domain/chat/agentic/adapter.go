@@ -522,6 +522,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		SessionID:              in.SessionID,
 		AgentID:                in.AgentID,
 		UserMessage:            in.UserMessage,
+		Attachments:            in.Attachments,
 		SystemPrompt:           effectiveSystemPrompt,
 		TenantID:               in.TenantID,
 		PermissionRules:        ParsePermissionRules(agentCfg.PermissionRules),

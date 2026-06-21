@@ -45,6 +45,7 @@ type RunInput struct {
 	SessionID       uuid.UUID
 	AgentID         uuid.UUID
 	UserMessage     string
+	Attachments     json.RawMessage
 	SystemPrompt    string
 	TenantID        string
 	PermissionRules *PermissionRules
@@ -743,9 +744,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	// 5. Append user message.
+	userMessageForModel := chat.UserMessageWithAttachmentContext(in.UserMessage, in.Attachments)
 	messages = append(messages, ai.Message{
 		Role:    ai.RoleUser,
-		Content: in.UserMessage,
+		Content: userMessageForModel,
 	})
 
 	// Persist user message — only when not already persisted by the caller.
@@ -757,6 +759,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			SessionID:   in.SessionID,
 			Role:        "user",
 			Content:     in.UserMessage,
+			Attachments: in.Attachments,
 			MessageType: chat.MessageTypeText,
 			RunID:       &r.runID,
 		}
@@ -1890,6 +1893,9 @@ func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID) ([]ai.Mes
 			Role:       m.Role,
 			Content:    m.Content,
 			ToolCallID: derefString(m.ToolCallID),
+		}
+		if m.Role == ai.RoleUser {
+			aiMsg.Content = chat.UserMessageWithAttachmentContext(m.Content, m.Attachments)
 		}
 
 		// Parse tool_calls from assistant messages.
