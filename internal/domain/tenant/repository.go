@@ -37,6 +37,31 @@ type pgRepository struct {
 	pool *pgxpool.Pool
 }
 
+const createTenantSQL = `
+	INSERT INTO public.tenants (id, name, status, created_at, updated_at)
+	VALUES ($1, $2, $3, NOW(), NOW())
+	RETURNING id, name, status, created_at, updated_at`
+
+const defaultTenantChatName = "Assistente"
+
+const defaultTenantChatSystemPrompt = "Você é o assistente padrão do AgentHub. Responda em português do Brasil, seja direto e use as ferramentas disponíveis quando elas forem relevantes para a solicitação do usuário."
+
+const defaultTenantChatModelConfig = `{"provider":"","model":"","temperature":0.3}`
+
+const defaultTenantChatRetrievalConfig = `{"topK":8,"driftThreshold":0.55,"maxStickySize":15,"allowDrift":true,"refreshPolicy":"drift_or_invalidation","minScore":0.30}`
+
+const createTenantChatDefaultSQL = `
+	INSERT INTO public.tenant_chat_default (
+		tenant_id,
+		name,
+		system_prompt,
+		model_config,
+		retrieval_config,
+		enable_management
+	)
+	VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, false)
+	ON CONFLICT (tenant_id) DO NOTHING`
+
 // NewRepository creates a new PostgreSQL-backed tenant Repository.
 func NewRepository(pool *pgxpool.Pool) Repository {
 	return &pgRepository{pool: pool}
@@ -54,11 +79,13 @@ func scanTenant(row pgx.Row) (Tenant, error) {
 }
 
 func (r *pgRepository) Create(ctx context.Context, t Tenant) (Tenant, error) {
-	const query = `
-		INSERT INTO public.tenants (id, name, status, created_at, updated_at)
-		VALUES ($1, $2, $3, NOW(), NOW())
-		RETURNING id, name, status, created_at, updated_at`
-	row := r.pool.QueryRow(ctx, query, t.ID, t.Name, string(t.Status))
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Tenant{}, fmt.Errorf("tenant.Create begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	row := tx.QueryRow(ctx, createTenantSQL, t.ID, t.Name, string(t.Status))
 	created, err := scanTenant(row)
 	if err != nil {
 		if isPKViolation(err) {
@@ -66,6 +93,22 @@ func (r *pgRepository) Create(ctx context.Context, t Tenant) (Tenant, error) {
 		}
 		return Tenant{}, fmt.Errorf("tenant.Create: %w", err)
 	}
+
+	if _, err := tx.Exec(ctx,
+		createTenantChatDefaultSQL,
+		created.ID,
+		defaultTenantChatName,
+		defaultTenantChatSystemPrompt,
+		defaultTenantChatModelConfig,
+		defaultTenantChatRetrievalConfig,
+	); err != nil {
+		return Tenant{}, fmt.Errorf("tenant.Create chat default: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Tenant{}, fmt.Errorf("tenant.Create commit: %w", err)
+	}
+
 	return created, nil
 }
 

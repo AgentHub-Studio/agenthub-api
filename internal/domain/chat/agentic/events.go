@@ -24,6 +24,9 @@ const (
 	EventSubtaskProgress  RunEventType = "subtask_progress"
 	EventToolUseSummary   RunEventType = "tool_use_summary"
 	EventStopHookSummary  RunEventType = "stop_hook_summary"
+	// EventConfigChanged is emitted when the live agent configuration differs
+	// from the session snapshot currently pinned for the conversation.
+	EventConfigChanged RunEventType = "config_changed"
 	// EventInputRequest is emitted when the agentic loop needs structured user input
 	// via an elicitation request (form, URL confirmation, etc.).
 	EventInputRequest RunEventType = "input_request"
@@ -66,6 +69,14 @@ func NewRunEvent(typ RunEventType, data any) RunEvent {
 }
 
 // --- typed payloads ---
+
+// ConfigChangedData tells the UI that future sessions can use newer agent config,
+// while this session remains pinned to its snapshot.
+type ConfigChangedData struct {
+	SessionID string `json:"sessionId"`
+	AgentID   string `json:"agentId"`
+	Message   string `json:"message"`
+}
 
 // TextDeltaData carries a chunk of streamed assistant text.
 type TextDeltaData struct {
@@ -114,8 +125,8 @@ type ModelFallbackData struct {
 // TurnCompleteData is emitted at the end of each agentic turn
 // (one LLM call that may be followed by tool executions).
 type TurnCompleteData struct {
-	TurnIndex  int        `json:"turnIndex"`
-	TokenUsage TokenUsage `json:"tokenUsage"`
+	TurnIndex   int        `json:"turnIndex"`
+	TokenUsage  TokenUsage `json:"tokenUsage"`
 	BudgetUsed  int        `json:"budgetUsed,omitempty"`
 	BudgetLimit int        `json:"budgetLimit,omitempty"`
 	// Model is the model that actually served this turn (may differ from
@@ -132,13 +143,13 @@ type TurnCompleteData struct {
 // - CumulativeOutputTokens: sum of all output tokens across all turns
 // - CumulativeCacheReadTokens/CacheCreationTokens: sum across all turns
 type RunCompleteData struct {
-	TotalTurns               int     `json:"totalTurns"`
-	TotalTokens              int     `json:"totalTokens"`
-	TotalCost                float64 `json:"totalCostUsd,omitempty"`
-	LatestInputTokens        int     `json:"latestInputTokens,omitempty"`
-	CumulativeOutputTokens   int     `json:"cumulativeOutputTokens,omitempty"`
-	CumulativeCacheReadTokens    int `json:"cumulativeCacheReadTokens,omitempty"`
-	CumulativeCacheCreationTokens int `json:"cumulativeCacheCreationTokens,omitempty"`
+	TotalTurns                    int     `json:"totalTurns"`
+	TotalTokens                   int     `json:"totalTokens"`
+	TotalCost                     float64 `json:"totalCostUsd,omitempty"`
+	LatestInputTokens             int     `json:"latestInputTokens,omitempty"`
+	CumulativeOutputTokens        int     `json:"cumulativeOutputTokens,omitempty"`
+	CumulativeCacheReadTokens     int     `json:"cumulativeCacheReadTokens,omitempty"`
+	CumulativeCacheCreationTokens int     `json:"cumulativeCacheCreationTokens,omitempty"`
 }
 
 // ErrorData carries error information.
@@ -274,7 +285,6 @@ type UiFormPayloadDto struct {
 	Elements    []UiElementDto `json:"elements"`
 	SubmitLabel string         `json:"submitLabel,omitempty"`
 }
-
 
 // WarningData is emitted for non-fatal advisories during a run.
 type WarningData struct {

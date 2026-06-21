@@ -32,6 +32,14 @@ const (
 	StatusArchived ChatStatus = "ARCHIVED"
 )
 
+// ChatSessionMode represents the routing mode used by a chat session.
+type ChatSessionMode string
+
+const (
+	ModeAgentFixed   ChatSessionMode = "AGENT_FIXED"
+	ModeDynamicSkill ChatSessionMode = "DYNAMIC_SKILL"
+)
+
 // ChatRunStatus represents the current state of a ChatRun.
 type ChatRunStatus string
 
@@ -51,6 +59,9 @@ const (
 type ChatSession struct {
 	ID                    uuid.UUID       `db:"id"`
 	AgentID               *uuid.UUID      `db:"agent_id"`
+	Mode                  ChatSessionMode `db:"mode"`
+	PersonaID             *uuid.UUID      `db:"persona_id"`
+	StickySkillSet        json.RawMessage `db:"sticky_skill_set"`
 	Title                 string          `db:"title"`
 	Status                ChatStatus      `db:"status"`
 	SystemPromptSnapshot  *string         `db:"system_prompt_snapshot"`  // P-C115-1: snapshot at session creation
@@ -84,6 +95,7 @@ type ChatMessage struct {
 	SessionID    uuid.UUID       `db:"session_id"`
 	Role         string          `db:"role"`
 	Content      string          `db:"content"`
+	Attachments  json.RawMessage `db:"attachments"`
 	MessageType  MessageType     `db:"message_type"`
 	ToolCalls    json.RawMessage `db:"tool_calls"`
 	ToolCallID   *string         `db:"tool_call_id"`
@@ -113,6 +125,8 @@ type ChatRun struct {
 type ChatSessionResponse struct {
 	ID        uuid.UUID  `json:"id"`
 	AgentID   *uuid.UUID `json:"agentId,omitempty"`
+	Mode      string     `json:"mode"`
+	PersonaID *uuid.UUID `json:"personaId,omitempty"`
 	Title     string     `json:"title"`
 	Status    ChatStatus `json:"status"`
 	CreatedAt time.Time  `json:"createdAt"`
@@ -125,6 +139,7 @@ type ChatMessageResponse struct {
 	SessionID    uuid.UUID       `json:"sessionId"`
 	Role         string          `json:"role"`
 	Content      string          `json:"content"`
+	Attachments  json.RawMessage `json:"attachments,omitempty"`
 	MessageType  MessageType     `json:"messageType"`
 	ToolCalls    json.RawMessage `json:"toolCalls,omitempty"`
 	ToolCallID   *string         `json:"toolCallId,omitempty"`
@@ -157,9 +172,15 @@ type ChatSessionListStamp struct {
 
 // SessionResponseFrom maps a ChatSession entity to a ChatSessionResponse DTO.
 func SessionResponseFrom(s ChatSession) ChatSessionResponse {
+	mode := s.Mode
+	if mode == "" {
+		mode = ModeAgentFixed
+	}
 	return ChatSessionResponse{
 		ID:        s.ID,
 		AgentID:   s.AgentID,
+		Mode:      string(mode),
+		PersonaID: s.PersonaID,
 		Title:     s.Title,
 		Status:    s.Status,
 		CreatedAt: s.CreatedAt,
@@ -188,17 +209,19 @@ func RunResponseFrom(r ChatRun) ChatRunResponse {
 
 // CreateSessionRequest is the payload for creating a chat session.
 type CreateSessionRequest struct {
-	AgentID *uuid.UUID `json:"agentId,omitempty"`
-	Title   string     `json:"title"`
+	AgentID   *uuid.UUID      `json:"agentId,omitempty"`
+	Mode      ChatSessionMode `json:"mode,omitempty"`
+	PersonaID *uuid.UUID      `json:"personaId,omitempty"`
+	Title     string          `json:"title"`
 }
 
 // PendingElicitationInfo describes an unresolved ask_user elicitation request.
 // P-C101-1: returned by GetPendingElicitations so async (RabbitMQ) callers can
 // discover pending user-input requests when the original SSE stream is gone.
 type PendingElicitationInfo struct {
-	RequestID string          `json:"requestId"`
-	Payload   interface{}     `json:"payload,omitempty"`
-	CreatedAt time.Time       `json:"createdAt"`
+	RequestID string      `json:"requestId"`
+	Payload   interface{} `json:"payload,omitempty"`
+	CreatedAt time.Time   `json:"createdAt"`
 }
 
 // AgentRoutingInfo carries lightweight agent metadata used by the smart router
@@ -214,6 +237,7 @@ type AgentRoutingInfo struct {
 type CreateMessageRequest struct {
 	Role         string          `json:"role"`
 	Content      string          `json:"content"`
+	Attachments  json.RawMessage `json:"attachments,omitempty"`
 	MessageType  MessageType     `json:"messageType,omitempty"`
 	ToolCalls    json.RawMessage `json:"toolCalls,omitempty"`
 	ToolCallID   *string         `json:"toolCallId,omitempty"`

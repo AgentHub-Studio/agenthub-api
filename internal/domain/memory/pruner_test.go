@@ -14,6 +14,7 @@ func TestDefaultPrunerConfig_ProvidesConservativeDefaults(t *testing.T) {
 	cfg := memory.DefaultPrunerConfig()
 	assert.Equal(t, 6*time.Hour, cfg.Interval)
 	assert.Equal(t, 90*24*time.Hour, cfg.StaleAfter)
+	assert.Equal(t, 0.05, cfg.MinRelevance)
 }
 
 func TestNewPruner_FillsZeroIntervalWithDefault(t *testing.T) {

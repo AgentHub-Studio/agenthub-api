@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"time"
 
@@ -15,31 +14,9 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
-
-// htmlDangerousPattern matches dangerous HTML elements including their content.
-// These are stripped completely (tag + content) because their inner text is executable.
-var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
-
-// htmlTagPattern matches any remaining HTML tag including attributes.
-var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
-
-// slugPattern enforces kebab-case: lowercase letters, digits and hyphens.
-// Must start with alphanumeric to avoid leading-hyphen collisions.
-var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
-// stripHTML removes all HTML from s.
-// Dangerous elements (script, style, etc.) are removed including their content.
-// Other tags are stripped but their text content is preserved.
-// P-C280-1: prevents stored XSS in name/description fields.
-func stripHTML(s string) string {
-	// Step 1: remove dangerous elements including their inner text.
-	s = htmlDangerousPattern.ReplaceAllString(s, "")
-	// Step 2: strip remaining HTML tags, keeping their text content.
-	s = htmlTagPattern.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
-}
 
 // Service defines business logic operations for Agent.
 type Service interface {
@@ -187,6 +164,9 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if len(req.Name) > 255 {
 		return AgentResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(req.Name))
 	}
+	if sanitize.ContainsHTML(req.Name) {
+		return AgentResponse{}, fmt.Errorf("%w: name must not contain HTML tags", ErrInvalidRequest)
+	}
 	// ACT-F3-05: enforce maximum system prompt size.
 	if req.SystemPrompt != nil && len(*req.SystemPrompt) > maxSystemPromptChars {
 		return AgentResponse{}, fmt.Errorf("%w: systemPrompt exceeds maximum length of %d chars (got %d)", ErrInvalidRequest, maxSystemPromptChars, len(*req.SystemPrompt))
@@ -206,23 +186,18 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if err := validateConfigMaxIterations(req.Config); err != nil {
 		return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
 	}
-	// P-C280-1: strip HTML from user-supplied text fields before persisting.
-	req.Name = stripHTML(req.Name)
-	req.Description = stripHTML(req.Description)
+	req.Description = sanitize.StripHTML(req.Description)
 	// Bug 158: cap description em 32KB (espelha skill.instructions cap).
 	// Sem isso 200KB+ aceita silenciosamente — DoS storage e perf
 	// hit em listings.
 	if len(req.Description) > 32000 {
 		return AgentResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrInvalidRequest, len(req.Description))
 	}
-	slug := req.Slug
+	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
 		slug = toSlug(req.Name)
-	} else if !slugPattern.MatchString(slug) {
-		return AgentResponse{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrInvalidRequest, slug)
-	}
-	if len(slug) > 255 {
-		return AgentResponse{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(slug))
+	} else if !sanitize.ValidSlug(slug) {
+		return AgentResponse{}, fmt.Errorf("%w: slug must match %s (got %q)", ErrInvalidRequest, sanitize.CanonicalSlugPattern, slug)
 	}
 	// Bug 169: cap skillIds/kbIds count em 100 cada. Agents reais
 	// bind <20 skills/kbs; 1000+ é abuso e perf hit no SyncSkills loop.
@@ -298,8 +273,7 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	}
 	before := ResponseFrom(a)
 	if req.Name != nil {
-		// P-C280-1: strip HTML from user-supplied text fields.
-		trimmed := strings.TrimSpace(stripHTML(*req.Name))
+		trimmed := strings.TrimSpace(*req.Name)
 		if trimmed == "" {
 			// Bug 116: era 500 — wrap em ErrInvalidRequest pra
 			// handler mapear → 422.
@@ -309,23 +283,23 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		if len(trimmed) > 255 {
 			return AgentResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(trimmed))
 		}
+		if sanitize.ContainsHTML(trimmed) {
+			return AgentResponse{}, fmt.Errorf("%w: name must not contain HTML tags", ErrInvalidRequest)
+		}
 		a.Name = trimmed
 	}
 	if req.Slug != nil {
-		// Bug 121: Update precisa do mesmo gate que Create —
-		// pattern [a-z0-9][a-z0-9-]* + length <= 255. Sem isso admin
+		// Bug 121: Update precisa do mesmo gate que Create.
+		// Sem isso admin
 		// podia salvar slug="INVALID!" via PATCH e quebrar lookups.
-		if !slugPattern.MatchString(*req.Slug) {
-			return AgentResponse{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrInvalidRequest, *req.Slug)
+		trimmed := strings.TrimSpace(*req.Slug)
+		if !sanitize.ValidSlug(trimmed) {
+			return AgentResponse{}, fmt.Errorf("%w: slug must match %s (got %q)", ErrInvalidRequest, sanitize.CanonicalSlugPattern, trimmed)
 		}
-		if len(*req.Slug) > 255 {
-			return AgentResponse{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(*req.Slug))
-		}
-		a.Slug = *req.Slug
+		a.Slug = trimmed
 	}
 	if req.Description != nil {
-		// P-C280-1: strip HTML from user-supplied text fields.
-		desc := stripHTML(*req.Description)
+		desc := sanitize.StripHTML(*req.Description)
 		// Bug 158: mesmo cap 32KB do Create.
 		if len(desc) > 32000 {
 			return AgentResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrInvalidRequest, len(desc))
@@ -712,24 +686,7 @@ func validateModelConfig(raw json.RawMessage) error {
 
 // toSlug converts a name to a kebab-case slug.
 func toSlug(name string) string {
-	s := strings.ToLower(name)
-	// Replace non-alphanumeric characters with hyphens.
-	var b strings.Builder
-	prevHyphen := true
-	for _, c := range s {
-		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
-			b.WriteRune(c)
-			prevHyphen = false
-		} else if !prevHyphen {
-			b.WriteRune('-')
-			prevHyphen = true
-		}
-	}
-	result := strings.TrimRight(b.String(), "-")
-	if result == "" {
-		return "agent-" + uuid.New().String()[:8]
-	}
-	return result
+	return sanitize.ToSlug(name, "agent")
 }
 
 // VersionService defines business logic for AgentVersion.

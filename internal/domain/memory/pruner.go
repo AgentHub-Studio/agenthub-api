@@ -11,10 +11,10 @@ import (
 // Pruner runs a background goroutine that periodically cleans stale memory
 // entries across all tenants. Two cleanup paths run on each tick:
 //
-//   1. DeleteExpired — drops rows whose ExpiresAt is in the past (admin-controlled TTL).
-//   2. PruneStaleGeneral — drops "general" type memories older than StaleAfter
-//      (default 90 days). Structured types (user/feedback/project/reference)
-//      are preserved indefinitely.
+//  1. DeleteExpired — drops rows whose ExpiresAt is in the past (admin-controlled TTL).
+//  2. PruneStaleGeneral — drops "general" type memories older than StaleAfter
+//     (default 90 days). Structured types (user/feedback/project/reference)
+//     are preserved indefinitely.
 //
 // Mirrors the pattern of trigger.Scheduler so observability (logs/metrics)
 // stays consistent.
@@ -23,6 +23,7 @@ type Pruner struct {
 	repo         *Repository
 	interval     time.Duration
 	staleAfter   time.Duration
+	minRelevance float64
 }
 
 // TenantLister is the subset of tenant.Repository the pruner needs.
@@ -32,8 +33,9 @@ type TenantLister interface {
 
 // PrunerConfig captures the tunables for the pruner.
 type PrunerConfig struct {
-	Interval   time.Duration
-	StaleAfter time.Duration
+	Interval     time.Duration
+	StaleAfter   time.Duration
+	MinRelevance float64
 }
 
 // DefaultPrunerConfig returns conservative defaults:
@@ -41,8 +43,9 @@ type PrunerConfig struct {
 //   - prune general memories untouched for 90 days
 func DefaultPrunerConfig() PrunerConfig {
 	return PrunerConfig{
-		Interval:   6 * time.Hour,
-		StaleAfter: 90 * 24 * time.Hour,
+		Interval:     6 * time.Hour,
+		StaleAfter:   90 * 24 * time.Hour,
+		MinRelevance: 0.05,
 	}
 }
 
@@ -54,11 +57,15 @@ func NewPruner(tenantLister TenantLister, repo *Repository, cfg PrunerConfig) *P
 	if cfg.StaleAfter <= 0 {
 		cfg.StaleAfter = 90 * 24 * time.Hour
 	}
+	if cfg.MinRelevance <= 0 {
+		cfg.MinRelevance = 0.05
+	}
 	return &Pruner{
 		tenantLister: tenantLister,
 		repo:         repo,
 		interval:     cfg.Interval,
 		staleAfter:   cfg.StaleAfter,
+		minRelevance: cfg.MinRelevance,
 	}
 }
 
@@ -71,6 +78,7 @@ func (p *Pruner) loop(ctx context.Context) {
 	slog.Info("memory.pruner: starting",
 		"interval", p.interval,
 		"staleAfter", p.staleAfter,
+		"minRelevance", p.minRelevance,
 	)
 	p.tick(ctx)
 	ticker := time.NewTicker(p.interval)
@@ -109,7 +117,7 @@ func (p *Pruner) tickTenant(parentCtx context.Context, tenantID string, cutoff t
 		slog.Info("memory.pruner: expired removed", "tenantId", tenantID, "count", expired)
 	}
 
-	stale, err := p.repo.PruneStaleGeneral(ctx, cutoff)
+	stale, err := p.repo.PruneStaleGeneralBelowRelevance(ctx, cutoff, p.minRelevance)
 	if err != nil {
 		slog.Warn("memory.pruner: prune stale general failed", "tenantId", tenantID, "err", err)
 	} else if stale > 0 {

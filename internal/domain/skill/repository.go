@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -47,6 +48,13 @@ type SkillRepository interface {
 // Repository handles persistence for skills.
 type Repository struct {
 	pool *pgxpool.Pool
+}
+
+type EmbeddingSearchResult struct {
+	ID                  uuid.UUID
+	Slug                string
+	Score               float64
+	EmbeddingSourceHash string
 }
 
 // NewRepository creates a new Repository.
@@ -345,4 +353,95 @@ func (r *Repository) ListByIDs(ctx context.Context, ids []uuid.UUID) ([]Skill, e
 		skills = []Skill{}
 	}
 	return skills, rows.Err()
+}
+
+func (r *Repository) SearchByEmbedding(ctx context.Context, embedding []float32, topK int) ([]EmbeddingSearchResult, error) {
+	if len(embedding) == 0 {
+		return []EmbeddingSearchResult{}, nil
+	}
+	if topK <= 0 {
+		topK = 8
+	}
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT id, slug, 1 - (embedding <=> $1::vector) AS score, COALESCE(embedding_source_hash, '')
+		 FROM skill
+		 WHERE embedding IS NOT NULL
+		 ORDER BY embedding <=> $1::vector
+		 LIMIT $2`,
+		formatFloat32Vector(embedding), topK,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("skill: search by embedding: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]EmbeddingSearchResult, 0, topK)
+	for rows.Next() {
+		var result EmbeddingSearchResult
+		if err := rows.Scan(&result.ID, &result.Slug, &result.Score, &result.EmbeddingSourceHash); err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func (r *Repository) EmbeddingSourceHashesByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	hashes := make(map[uuid.UUID]string, len(ids))
+	if len(ids) == 0 {
+		return hashes, nil
+	}
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx,
+		`SELECT id, COALESCE(embedding_source_hash, '')
+		 FROM skill
+		 WHERE id = ANY($1)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("skill: source hashes by ids: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id uuid.UUID
+		var hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			return nil, err
+		}
+		hashes[id] = hash
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return hashes, nil
+}
+
+func formatFloat32Vector(v []float32) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, f := range v {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(fmt.Sprintf("%f", f))
+	}
+	b.WriteByte(']')
+	return b.String()
 }
