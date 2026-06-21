@@ -59,7 +59,7 @@ func (r *asyncExecutorRepoStub) UpdateSessionConfigHash(context.Context, uuid.UU
 	return nil
 }
 
-func (r *asyncExecutorRepoStub) UpdateSessionSnapshots(context.Context, uuid.UUID, *string, json.RawMessage, json.RawMessage) error {
+func (r *asyncExecutorRepoStub) UpdateSessionSnapshots(context.Context, uuid.UUID, *string, json.RawMessage, json.RawMessage, string) error {
 	return nil
 }
 

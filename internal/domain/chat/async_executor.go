@@ -486,9 +486,18 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 			if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *routed); err == nil {
 				snapshotAgent(agentCfg, &session)
 				if err := e.repo.UpdateSessionSnapshots(ctx, task.SessionID,
-					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot); err != nil {
+					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot, configHashValue(session.ConfigHash)); err != nil {
 					slog.Warn("chat: failed to persist routed-agent snapshot", "runId", task.RunID, "err", err)
 				}
+			}
+		}
+	}
+	if session.AgentID != nil && e.agentLoader != nil && sessionNeedsSnapshot(session) {
+		if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
+			snapshotAgent(agentCfg, &session)
+			if err := e.repo.UpdateSessionSnapshots(ctx, task.SessionID,
+				session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot, configHashValue(session.ConfigHash)); err != nil {
+				slog.Warn("chat: failed to persist first-run snapshot", "runId", task.RunID, "err", err)
 			}
 		}
 	}
@@ -712,13 +721,17 @@ func (e *AsyncExecutor) recordMetricsFromRun(ctx context.Context, task ChatRunTa
 }
 
 // providerNameRE captures the provider slug out of error strings like
-//   build model for provider "anthropic": chat model: claude.apiKey not configured
+//
+//	build model for provider "anthropic": chat model: claude.apiKey not configured
+//
 // so the friendly message can point the user at the specific provider row
 // in the tenant settings.
 var providerNameRE = regexp.MustCompile(`provider\s+"([^"]+)"`)
 
 // settingKeyRE captures the settings key that the backend expected, e.g.
-//   chat model: claude.apiKey not configured
+//
+//	chat model: claude.apiKey not configured
+//
 // Used to tell the user which setting to fill in.
 var settingKeyRE = regexp.MustCompile(`([a-z][a-zA-Z0-9_]*\.[a-zA-Z][a-zA-Z0-9_]*)\s+not configured`)
 
