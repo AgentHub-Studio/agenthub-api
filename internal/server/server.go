@@ -35,6 +35,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/experiment"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration/probe"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
@@ -362,6 +363,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// A/B Testing — route sessions to challenger agent versions.
 	abtestHandler := abtest.NewHandler(abtest.NewService(abtest.NewRepository(pool)))
+	// Prompt experiments remain available for the existing experiment result API.
+	experimentHandler := experiment.NewHandler(experiment.NewService(experiment.NewRepository(pool)))
 
 	// Device Node Network — MCP-discoverable devices and agent bindings.
 	deviceHandler := device.NewHandler(device.NewService(device.NewRepository(pool)))
@@ -564,6 +567,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		probeHandler.RegisterRoutes(r)
 		channelHandler.RegisterRoutes(r)
 		abtestHandler.RegisterRoutes(r)
+		r.Mount("/api/experiments", experimentHandler.Routes())
 		deviceHandler.RegisterRoutes(r)
 		skillevalHandler.RegisterRoutes(r)
 		analyticsHandler.RegisterRoutes(r)
