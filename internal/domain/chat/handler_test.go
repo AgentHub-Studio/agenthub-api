@@ -63,12 +63,15 @@ func (m *mockChatSvc) ListSessions(_ context.Context, req pagination.PageRequest
 func (m *mockChatSvc) CreateSession(_ context.Context, req chat.CreateSessionRequest) (chat.ChatSessionResponse, error) {
 	id := uuid.New()
 	s := chat.ChatSession{
-		ID:        id,
-		AgentID:   req.AgentID,
-		Mode:      req.Mode,
-		PersonaID: req.PersonaID,
-		Title:     req.Title,
-		Status:    chat.StatusActive,
+		ID:      id,
+		AgentID: req.AgentID,
+		Mode:    req.Mode,
+		Title:   req.Title,
+		Status:  chat.StatusActive,
+	}
+	if req.Mode == chat.ModeDynamicSkill {
+		personaID := uuid.New()
+		s.PersonaID = &personaID
 	}
 	m.sessions[id] = s
 	return chat.SessionResponseFrom(s), nil
@@ -300,13 +303,11 @@ func TestChatHandler_CreateSession_AgentFixedUnchanged(t *testing.T) {
 	assert.Equal(t, agentID, *resp.AgentID)
 }
 
-func TestChatHandler_CreateSession_DynamicSkillWithPersona(t *testing.T) {
+func TestChatHandler_CreateSession_DynamicSkillUsesServerPersona(t *testing.T) {
 	r, _ := setupChat()
-	personaID := uuid.New()
 	body, _ := json.Marshal(chat.CreateSessionRequest{
-		Mode:      chat.ModeDynamicSkill,
-		PersonaID: &personaID,
-		Title:     "Dynamic Chat",
+		Mode:  chat.ModeDynamicSkill,
+		Title: "Dynamic Chat",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -320,7 +321,6 @@ func TestChatHandler_CreateSession_DynamicSkillWithPersona(t *testing.T) {
 	assert.Equal(t, "DYNAMIC_SKILL", resp.Mode)
 	assert.Nil(t, resp.AgentID)
 	require.NotNil(t, resp.PersonaID)
-	assert.Equal(t, personaID, *resp.PersonaID)
 }
 
 func TestChatHandler_CreateSession_InvalidBody(t *testing.T) {

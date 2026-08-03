@@ -114,6 +114,35 @@ func TestPromptBuilder_Build_AllSections(t *testing.T) {
 	assert.Contains(t, prompt, "API endpoints")
 }
 
+func TestPromptBuilder_Build_UsesExplicitDynamicSkillSet(t *testing.T) {
+	selectedID := uuid.New()
+	otherID := uuid.New()
+	builder := agentic.NewPromptBuilder(&mockSkillLister{skills: []skill.Skill{
+		{ID: selectedID, Name: "Selected", Slug: "selected", Description: "chosen by retrieval"},
+		{ID: otherID, Name: "Other", Slug: "other", Description: "must not leak"},
+	}}, &mockKBLister{}, nil, agentic.DefaultPromptConfig())
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:     uuid.Nil,
+		SessionID:   uuid.New(),
+		SkillIDs:    []uuid.UUID{selectedID},
+		UseSkillIDs: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "selected")
+	assert.NotContains(t, prompt, "must not leak")
+
+	secondPrompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:     uuid.Nil,
+		SessionID:   uuid.New(),
+		SkillIDs:    []uuid.UUID{otherID},
+		UseSkillIDs: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, secondPrompt, "must not leak")
+	assert.NotContains(t, secondPrompt, "chosen by retrieval")
+}
+
 func TestPromptBuilder_Build_MinimalPrompt(t *testing.T) {
 	skills := &mockSkillLister{skills: nil}
 	kbs := &mockKBLister{kbs: nil}

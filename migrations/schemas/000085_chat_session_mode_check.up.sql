@@ -1,5 +1,5 @@
 -- DSR-04: normalize chat session modes and enforce mode/agent consistency.
--- Depends on 000069_dynamic_skill_retrieval.
+-- Depends on 000084_dynamic_skill_retrieval.
 
 UPDATE chat_session
 SET mode = CASE

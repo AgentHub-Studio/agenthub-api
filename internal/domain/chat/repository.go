@@ -178,7 +178,7 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s ChatSession) (
 		}
 	}
 	if len(s.StickySkillSet) == 0 {
-		s.StickySkillSet = json.RawMessage(`[]`)
+		s.StickySkillSet = json.RawMessage(`{}`)
 	}
 
 	_, err = conn.Exec(ctx,
@@ -289,6 +289,68 @@ func (r *postgresRepository) UpdateSessionAgent(ctx context.Context, sessionID u
 	)
 	if err != nil {
 		return fmt.Errorf("chat: update session agent: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetTenantChatDefault loads the only dynamic persona owned by a tenant from
+// the public schema. It intentionally uses a parameterized tenant ID rather
+// than the tenant schema search path.
+func (r *postgresRepository) GetTenantChatDefault(ctx context.Context, tenantID string) (DynamicPersona, error) {
+	var persona DynamicPersona
+	var retrievalConfig json.RawMessage
+	err := r.pool.QueryRow(ctx,
+		`SELECT id, tenant_id, name, system_prompt, model_config, retrieval_config, enable_management
+		 FROM public.tenant_chat_default
+		 WHERE tenant_id = $1`,
+		tenantID,
+	).Scan(
+		&persona.ID,
+		&persona.TenantID,
+		&persona.Name,
+		&persona.SystemPrompt,
+		&persona.ModelConfig,
+		&retrievalConfig,
+		&persona.EnableManagement,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return DynamicPersona{}, fmt.Errorf("chat: tenant default persona not found")
+		}
+		return DynamicPersona{}, fmt.Errorf("chat: load tenant default persona: %w", err)
+	}
+	if len(retrievalConfig) > 0 && string(retrievalConfig) != "null" {
+		if err := json.Unmarshal(retrievalConfig, &persona.RetrievalConfig); err != nil {
+			return DynamicPersona{}, fmt.Errorf("chat: decode tenant retrieval config: %w", err)
+		}
+	}
+	persona.RetrievalConfig = persona.RetrievalConfig.Normalize()
+	return persona, nil
+}
+
+// UpdateSessionDynamicSkillSet persists the complete retrieval state before the
+// LLM starts. A later skill mutation is therefore detectable by source hash.
+func (r *postgresRepository) UpdateSessionDynamicSkillSet(ctx context.Context, sessionID uuid.UUID, snapshot DynamicSkillSetSnapshot) error {
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("chat: encode sticky skill set: %w", err)
+	}
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer release()
+	tag, err := conn.Exec(ctx,
+		`UPDATE chat_session
+		 SET sticky_skill_set = $1, updated_at = NOW()
+		 WHERE id = $2 AND mode = $3`,
+		raw, sessionID, ModeDynamicSkill,
+	)
+	if err != nil {
+		return fmt.Errorf("chat: update sticky skill set: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

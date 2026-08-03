@@ -645,7 +645,9 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 
 	tenantID := tenant.FromContext(r.Context())
 
-	// If AsyncExecutor is available, use it to start the run in background.
+	// If AsyncExecutor is available, use it to start the run in background and
+	// stream its replay buffer immediately. POST /run is always SSE; clients no
+	// longer need to branch on a JSON 202 response when RabbitMQ is enabled.
 	if h.executor != nil {
 		runID, err := h.executor.EnqueueRunWithOptions(r.Context(), sessionID, tenantID, req.Message, EnqueueRunOptions{
 			Attachments: req.Attachments,
@@ -674,11 +676,7 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue run: %v", err))
 			return
 		}
-		respond.JSON(w, http.StatusAccepted, map[string]interface{}{
-			"runId":     runID,
-			"status":    "accepted",
-			"sessionId": sessionID,
-		})
+		h.streamBufferedRun(w, r, flusher, runID.String(), 0)
 		return
 	}
 
@@ -785,6 +783,48 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 					buf.MarkDone()
 					return
 				}
+			}
+		}
+	}
+}
+
+// streamBufferedRun is the SSE writer for an asynchronous run. The worker is
+// the sole producer of the EventBuffer; this method merely tails it and is safe
+// to return when the browser disconnects because the worker keeps running.
+func (h *Handler) streamBufferedRun(w http.ResponseWriter, r *http.Request, flusher http.Flusher, runID string, afterSeq uint64) {
+	buf := h.bufferRegistry.Get(runID)
+	if buf == nil {
+		respond.Error(w, http.StatusInternalServerError, "run event buffer not available")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("X-Run-ID", runID)
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	lastSent := afterSeq
+	ticker := newTicker(50 * millisecondsUnit)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C():
+			events, _ := buf.EventsSince(lastSent)
+			for _, event := range events {
+				if _, err := fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, event.ID, event.Event.Type, event.Event.Data); err != nil {
+					return
+				}
+				lastSent = event.ID
+				flusher.Flush()
+			}
+			if buf.IsDone() && len(events) == 0 {
+				return
 			}
 		}
 	}

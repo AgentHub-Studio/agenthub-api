@@ -928,6 +928,14 @@ func buildAgenticRunner(
 		// Wire MemoryBridge so the memory_store builtin tool can persist and
 		// recall memories. Shares the same embedding service as document search.
 		embedder := agentic.NewHTTPEmbedder(cfg.EmbeddingURL)
+		if concreteSkillRepo != nil {
+			adapter.WithSkillSetResolver(agentic.NewSkillSetResolver(
+				concreteSkillRepo,
+				embedder,
+				agentic.DefaultSkillSetResolverConfig(),
+			))
+			slog.Info("agentic: dynamic skill retrieval wired", "embeddingURL", cfg.EmbeddingURL)
+		}
 		memSvc := memory.NewService(memory.NewRepository(pool))
 		bridge := agentic.NewMemoryBridge(
 			embedder,

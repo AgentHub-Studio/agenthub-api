@@ -101,6 +101,10 @@ type RunInput struct {
 	// creation. The toolBuilder uses these instead of the agent's current bindings
 	// so the tool set stays consistent throughout the conversation. P-C115-1.
 	SkillIDsSnapshot []uuid.UUID
+	// UseSkillIDsSnapshot makes SkillIDsSnapshot authoritative even when it is
+	// empty. DYNAMIC_SKILL sessions use this to ensure an empty retrieval result
+	// does not fall back to every skill bound to an agent.
+	UseSkillIDsSnapshot bool
 
 	// MCPServerNamesSnapshot, when non-empty, contains the MCP server names bound to
 	// the agent at session creation. Only tools from servers in this list are exposed
@@ -569,7 +573,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	toolBuilder.WithDisableAskUser(in.DisableAskUser)
 	toolBuilder.WithDisableAgentDelegation(in.DisableAgentDelegation)
 	// P-C115-1: use skill snapshot IDs when available to ensure consistent tool set.
-	if len(in.SkillIDsSnapshot) > 0 {
+	if in.UseSkillIDsSnapshot || len(in.SkillIDsSnapshot) > 0 {
 		toolBuilder.WithSkillIDsSnapshot(in.SkillIDsSnapshot)
 	}
 	toolResult, err := toolBuilder.BuildWithDeferred(ctx, in.AgentID)
@@ -672,6 +676,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		DeferredToolNames: toolResult.DeferredToolNames(),
 		UserOnlySkills:    toolResult.UserOnlySkills,
 		ActiveSkillSlugs:  activeSkillSlugs,
+		SkillIDs:          in.SkillIDsSnapshot,
+		UseSkillIDs:       in.UseSkillIDsSnapshot,
 	})
 	if err != nil {
 		localEmitError("prompt_build", err)
@@ -1574,6 +1580,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 							DeferredToolNames: toolResult.DeferredToolNames(),
 							UserOnlySkills:    toolResult.UserOnlySkills,
 							ActiveSkillSlugs:  activeSkillSlugs,
+							SkillIDs:          in.SkillIDsSnapshot,
+							UseSkillIDs:       in.UseSkillIDsSnapshot,
 						}); err == nil {
 							systemPrompt = rebuilt
 							// CopilotKit Phase 2: re-append <app_state> after compaction

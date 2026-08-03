@@ -16,7 +16,7 @@ CREATE INDEX IF NOT EXISTS idx_skill_embedded_at
 ALTER TABLE chat_session
     ADD COLUMN IF NOT EXISTS mode             VARCHAR(32) NOT NULL DEFAULT 'AGENT',
     ADD COLUMN IF NOT EXISTS persona_id       UUID,
-    ADD COLUMN IF NOT EXISTS sticky_skill_set JSONB       NOT NULL DEFAULT '[]'::jsonb;
+    ADD COLUMN IF NOT EXISTS sticky_skill_set JSONB       NOT NULL DEFAULT '{}'::jsonb;
 
 ALTER TABLE chat_session
     ALTER COLUMN agent_id DROP NOT NULL;

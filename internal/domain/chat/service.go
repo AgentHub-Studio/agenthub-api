@@ -15,6 +15,7 @@ import (
 	agentdomain "github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // AgentLoader returns agent configuration needed by the Runner.
@@ -72,6 +73,7 @@ type RunInput struct {
 	RunID        uuid.UUID // ID of the persisted run
 	SessionID    uuid.UUID
 	AgentID      uuid.UUID
+	Mode         ChatSessionMode
 	UserMessage  string
 	Attachments  json.RawMessage
 	SystemPrompt string
@@ -94,6 +96,11 @@ type RunInput struct {
 	// the agent at session creation time. Passed to the runner to filter MCP tools.
 	// P-C253-1: agent-level MCP binding enforcement.
 	MCPServerNamesSnapshot []string
+	// DynamicPersona is populated only for DYNAMIC_SKILL sessions. The persona
+	// comes from the server-owned tenant default, never from the public request.
+	DynamicPersona *DynamicPersona
+	// StickySkillSet is the persisted retrieval state before the current turn.
+	StickySkillSet json.RawMessage
 }
 
 // RunOverrides contains transient Agent Studio values for a single run.
@@ -289,9 +296,6 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	if mode == ModeAgentFixed && req.AgentID == nil {
 		return ChatSessionResponse{}, fmt.Errorf("chat service: AGENT_FIXED sessions require agentId")
 	}
-	if mode == ModeAgentFixed && req.PersonaID != nil {
-		return ChatSessionResponse{}, fmt.Errorf("chat service: personaId is only valid for DYNAMIC_SKILL sessions")
-	}
 	if mode == ModeDynamicSkill && req.AgentID != nil {
 		return ChatSessionResponse{}, fmt.Errorf("chat service: DYNAMIC_SKILL sessions cannot include agentId")
 	}
@@ -299,10 +303,26 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	session := ChatSession{
 		AgentID:        req.AgentID,
 		Mode:           mode,
-		PersonaID:      req.PersonaID,
-		StickySkillSet: json.RawMessage(`[]`),
+		StickySkillSet: json.RawMessage(`{}`),
 		Title:          req.Title,
 		Status:         StatusActive,
+	}
+	if mode == ModeDynamicSkill {
+		store, err := dynamicSessionStore(s.repo)
+		if err != nil {
+			return ChatSessionResponse{}, err
+		}
+		persona, err := store.GetTenantChatDefault(ctx, tenant.FromContext(ctx))
+		if err != nil {
+			return ChatSessionResponse{}, fmt.Errorf("chat service: get tenant default persona: %w", err)
+		}
+		session.PersonaID = &persona.ID
+		systemPrompt := persona.SystemPrompt
+		session.SystemPromptSnapshot = &systemPrompt
+		session.ModelConfigSnapshot = append(json.RawMessage(nil), persona.ModelConfig...)
+		if hash := HashModelConfig(session.ModelConfigSnapshot); hash != "" {
+			session.ConfigHash = &hash
+		}
 	}
 
 	// P-C115-1 / P-C330-1: capture agent snapshot at session creation so that
@@ -347,6 +367,14 @@ func normalizeSessionMode(mode ChatSessionMode, agentID *uuid.UUID) (ChatSession
 	default:
 		return "", fmt.Errorf("chat service: unsupported session mode %q", mode)
 	}
+}
+
+func dynamicSessionStore(repo Repository) (DynamicSessionStore, error) {
+	store, ok := repo.(DynamicSessionStore)
+	if !ok {
+		return nil, errors.New("chat service: dynamic skill retrieval is not configured")
+	}
+	return store, nil
 }
 
 // snapshotAgent captures the agent's persona, model config and skill bindings
@@ -557,7 +585,28 @@ func (s *Service) RunSessionWithAttachmentsAndOverrides(ctx context.Context, ses
 	if err != nil {
 		return nil, fmt.Errorf("chat service: get session: %w", err)
 	}
-	if session.AgentID == nil {
+	if session.Mode == "" {
+		session.Mode = ModeAgentFixed
+	}
+
+	var dynamicPersona *DynamicPersona
+	if session.Mode == ModeDynamicSkill {
+		if session.AgentID != nil || session.PersonaID == nil {
+			return nil, errors.New("chat service: invalid DYNAMIC_SKILL session binding")
+		}
+		store, err := dynamicSessionStore(s.repo)
+		if err != nil {
+			return nil, err
+		}
+		persona, err := store.GetTenantChatDefault(ctx, tenantID)
+		if err != nil {
+			return nil, fmt.Errorf("chat service: get tenant default persona: %w", err)
+		}
+		if persona.ID != *session.PersonaID {
+			return nil, errors.New("chat service: dynamic session persona no longer matches tenant default")
+		}
+		dynamicPersona = &persona
+	} else if session.AgentID == nil {
 		routed, err := routeAgentID(ctx, s.repo, userMessage)
 		if err != nil {
 			return nil, fmt.Errorf("chat service: route agent: %w", err)
@@ -584,7 +633,7 @@ func (s *Service) RunSessionWithAttachmentsAndOverrides(ctx context.Context, ses
 			}
 		}
 	}
-	if session.AgentID != nil && s.agentLoader != nil && sessionNeedsSnapshot(session) {
+	if session.Mode != ModeDynamicSkill && session.AgentID != nil && s.agentLoader != nil && sessionNeedsSnapshot(session) {
 		if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
 			snapshotAgent(agentCfg, &session)
 			if err := s.repo.UpdateSessionSnapshots(ctx, sessionID,
@@ -625,7 +674,7 @@ func (s *Service) RunSessionWithAttachmentsAndOverrides(ctx context.Context, ses
 	// P-C253-1: load MCP server names bound to the agent so the runner can filter
 	// MCP tools to only those from servers explicitly bound to this agent.
 	var mcpServerNames []string
-	if s.agentLoader != nil {
+	if session.Mode != ModeDynamicSkill && session.AgentID != nil && s.agentLoader != nil {
 		if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
 			mcpServerNames = agentCfg.MCPServerNames
 		}
@@ -637,9 +686,17 @@ func (s *Service) RunSessionWithAttachmentsAndOverrides(ctx context.Context, ses
 		overrides,
 	)
 
+	runAgentID := uuid.Nil
+	if session.AgentID != nil {
+		runAgentID = *session.AgentID
+	}
+
 	return s.runner.RunSession(ctx, RunInput{
 		SessionID:              sessionID,
-		AgentID:                *session.AgentID,
+		AgentID:                runAgentID,
+		Mode:                   session.Mode,
+		DynamicPersona:         dynamicPersona,
+		StickySkillSet:         session.StickySkillSet,
 		UserMessage:            userMessage,
 		Attachments:            attachments,
 		TenantID:               tenantID,

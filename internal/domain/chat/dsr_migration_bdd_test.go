@@ -11,7 +11,7 @@ import (
 )
 
 func TestDSR01Migrations_CoverRequiredUpSchemaChanges(t *testing.T) {
-	schemaUp := readMigrationFile(t, "schemas", "000069_dynamic_skill_retrieval.up.sql")
+	schemaUp := readMigrationFile(t, "schemas", "000084_dynamic_skill_retrieval.up.sql")
 	publicUp := readMigrationFile(t, "public", "000017_tenant_chat_default.up.sql")
 
 	assert.Contains(t, schemaUp, "ADD COLUMN IF NOT EXISTS embedding             vector(1024)")
@@ -19,7 +19,7 @@ func TestDSR01Migrations_CoverRequiredUpSchemaChanges(t *testing.T) {
 	assert.Contains(t, schemaUp, "ADD COLUMN IF NOT EXISTS embedded_at           TIMESTAMPTZ")
 	assert.Contains(t, schemaUp, "ADD COLUMN IF NOT EXISTS mode             VARCHAR(32) NOT NULL DEFAULT 'AGENT'")
 	assert.Contains(t, schemaUp, "ADD COLUMN IF NOT EXISTS persona_id       UUID")
-	assert.Contains(t, schemaUp, "ADD COLUMN IF NOT EXISTS sticky_skill_set JSONB       NOT NULL DEFAULT '[]'::jsonb")
+	assert.Contains(t, schemaUp, "ADD COLUMN IF NOT EXISTS sticky_skill_set JSONB       NOT NULL DEFAULT '{}'::jsonb")
 	assert.Contains(t, schemaUp, "ALTER COLUMN agent_id DROP NOT NULL")
 
 	assert.Contains(t, publicUp, "CREATE TABLE IF NOT EXISTS public.tenant_chat_default")
@@ -31,7 +31,7 @@ func TestDSR01Migrations_CoverRequiredUpSchemaChanges(t *testing.T) {
 }
 
 func TestDSR01Migrations_CoverDownReversalWithoutDeletingTenantData(t *testing.T) {
-	schemaDown := readMigrationFile(t, "schemas", "000069_dynamic_skill_retrieval.down.sql")
+	schemaDown := readMigrationFile(t, "schemas", "000084_dynamic_skill_retrieval.down.sql")
 	publicDown := readMigrationFile(t, "public", "000017_tenant_chat_default.down.sql")
 
 	assert.Contains(t, schemaDown, "DROP COLUMN IF EXISTS sticky_skill_set")

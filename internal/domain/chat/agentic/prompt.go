@@ -112,6 +112,17 @@ func (b *PromptBuilder) ClearCacheForAgent(agentID uuid.UUID) {
 	}
 }
 
+// ClearCacheForDynamicSession invalidates the per-session cache used by an
+// explicit dynamic skill set. It never touches other agents or sessions.
+func (b *PromptBuilder) ClearCacheForDynamicSession(sessionID uuid.UUID) {
+	suffix := "dynamic:" + sessionID.String()
+	for k := range b.sectionCache {
+		if strings.Contains(k, suffix) {
+			delete(b.sectionCache, k)
+		}
+	}
+}
+
 // getCachedOrCompute returns a cached section or computes and caches it.
 func (b *PromptBuilder) getCachedOrCompute(name string, compute func() (string, error)) (string, error) {
 	if cached, ok := b.sectionCache[name]; ok {
@@ -131,6 +142,11 @@ func (b *PromptBuilder) getCachedOrCompute(name string, compute func() (string, 
 type PromptInput struct {
 	// AgentID is used to look up skills and knowledge bases.
 	AgentID uuid.UUID
+	// SkillIDs is an explicit set selected for this run. Together with
+	// UseSkillIDs it supports DYNAMIC_SKILL sessions without falling back to
+	// agent bindings when retrieval returns an empty result.
+	SkillIDs    []uuid.UUID
+	UseSkillIDs bool
 	// SessionID is used to find the latest compact summary.
 	SessionID uuid.UUID
 	// SystemPrompt is the agent's custom identity/instructions (editable by user).
@@ -169,6 +185,12 @@ type PromptInput struct {
 // DANGEROUS_uncachedSystemPromptSection (volatile) pattern.
 func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, error) {
 	var sections []string
+	promptCacheScope := in.AgentID.String()
+	if in.UseSkillIDs {
+		// Dynamic selections vary per session, not per virtual agent ID.
+		promptCacheScope = "dynamic:" + in.SessionID.String()
+	}
+	skillCacheScope := promptCacheScope
 
 	// 1. Agent Identity & Instructions (cached — stable across turns)
 	if in.SystemPrompt != "" {
@@ -186,7 +208,7 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	userInteractionSection, err := b.resolvePromptSection(
 		ctx,
 		in.AgentID,
-		"prompt-section:user_interaction_policy:"+in.AgentID.String(),
+		"prompt-section:user_interaction_policy:"+promptCacheScope,
 		promptTemplateSlugUserInteractionPolicy,
 		userInteractionPolicy,
 	)
@@ -201,8 +223,8 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 		// from this Build() call. The cache is cleared per-agent at run start so
 		// a stale snapshot cannot persist across runs.
 		activeSlugSnapshot := in.ActiveSkillSlugs
-		toolsSection, err := b.getCachedOrCompute("tools:"+in.AgentID.String(), func() (string, error) {
-			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
+		toolsSection, err := b.getCachedOrCompute("tools:"+skillCacheScope, func() (string, error) {
+			skills, err := b.skillsForInput(ctx, in)
 			if err != nil {
 				return "", fmt.Errorf("prompt: list skills: %w", err)
 			}
@@ -221,8 +243,8 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 		// 2b. Skill Instructions (cached — stable across turns).
 		// P-C152-2: include only behavioral instructions (no tool references), and
 		// when active skill bindings are known, only from skills with active tools.
-		instrSection, instrErr := b.getCachedOrCompute("skill-instructions:"+in.AgentID.String(), func() (string, error) {
-			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
+		instrSection, instrErr := b.getCachedOrCompute("skill-instructions:"+skillCacheScope, func() (string, error) {
+			skills, err := b.skillsForInput(ctx, in)
 			if err != nil {
 				return "", fmt.Errorf("prompt: list skills for instructions: %w", err)
 			}
@@ -248,7 +270,7 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	toolUsageSection, err := b.resolvePromptSection(
 		ctx,
 		in.AgentID,
-		"prompt-section:tool_usage_instructions:"+in.AgentID.String(),
+		"prompt-section:tool_usage_instructions:"+promptCacheScope,
 		promptTemplateSlugToolUsageInstructions,
 		toolUsageInstructions,
 	)
@@ -276,7 +298,7 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 
 	// 4. Knowledge Base Context (cached — only changes on KB config changes)
 	if b.kbs != nil {
-		kbSection, err := b.getCachedOrCompute("kbs:"+in.AgentID.String(), func() (string, error) {
+		kbSection, err := b.getCachedOrCompute("kbs:"+promptCacheScope, func() (string, error) {
 			kbs, err := b.kbs.ListByAgentID(ctx, in.AgentID)
 			if err != nil {
 				return "", fmt.Errorf("prompt: list knowledge bases: %w", err)
@@ -319,6 +341,13 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	}
 
 	return prompt, nil
+}
+
+func (b *PromptBuilder) skillsForInput(ctx context.Context, in PromptInput) ([]skill.Skill, error) {
+	if in.UseSkillIDs {
+		return b.skills.ListByIDs(ctx, in.SkillIDs)
+	}
+	return b.skills.ListByAgentID(ctx, in.AgentID)
 }
 
 func shouldIncludeSkillInstructions(s skill.Skill, activeSkillSlugs map[string]bool) bool {

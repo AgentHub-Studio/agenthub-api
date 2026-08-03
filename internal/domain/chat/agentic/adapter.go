@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +66,9 @@ type SessionRunnerAdapter struct {
 	mcpRepo      mcp.Repository
 	mcpClient    MCPClientService
 	docSearch    knowledge.DocumentSearchClient // P-E1-2: wired when embedding service is available
+	// skillResolver selects the tenant-scoped subset used by DYNAMIC_SKILL
+	// sessions. It is nil only when no embedding service was configured.
+	skillResolver *SkillSetResolver
 
 	// llmCallTimeout overrides the default per-LLM-call timeout set by DefaultRunConfig.
 	// P-C102-1: sourced from LLM_CALL_TIMEOUT_SECS env var at server startup.
@@ -261,6 +266,13 @@ func (a *SessionRunnerAdapter) WithDocumentSearchClient(client knowledge.Documen
 	return a
 }
 
+// WithSkillSetResolver wires dynamic per-turn skill retrieval. The resolver is
+// shared safely because tenant-specific thresholds are passed per Resolve call.
+func (a *SessionRunnerAdapter) WithSkillSetResolver(resolver *SkillSetResolver) *SessionRunnerAdapter {
+	a.skillResolver = resolver
+	return a
+}
+
 // WithMemoryBridge wires the memory bridge so the memory_store builtin tool
 // can persist and recall memories across sessions.
 func (a *SessionRunnerAdapter) WithMemoryBridge(bridge *MemoryBridge) *SessionRunnerAdapter {
@@ -379,26 +391,38 @@ func resolveRunConfig(ctx context.Context, factory ChatModelFactory, modelConfig
 // EventInputRequest events into the SSE stream and registers the handler so that
 // HTTP respond calls (POST /elicitation/{requestId}/respond) can unblock the loop.
 func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput) (<-chan chat.RunEvent, error) {
-	// P-C343-1: invalidate cached prompt sections for this agent at the start of
-	// every run so that edits to skills, tools, or KBs are reflected without a
-	// server restart. The cache is per-agent-ID, so other agents are unaffected.
-	if a.prompt != nil {
-		a.prompt.ClearCacheForAgent(in.AgentID)
-	}
+	dynamic := in.Mode == chat.ModeDynamicSkill
+	var (
+		agentCfg     *chat.AgentRunConfig
+		preRunEvents []chat.RunEvent
+		err          error
+	)
+	if dynamic {
+		agentCfg, preRunEvents, err = a.prepareDynamicRun(ctx, &in)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// P-C343-1: invalidate cached prompt sections for this agent at the start of
+		// every run so that edits to skills, tools, or KBs are reflected without a
+		// server restart. The cache is per-agent-ID, so other agents are unaffected.
+		if a.prompt != nil {
+			a.prompt.ClearCacheForAgent(in.AgentID)
+		}
+		agentCfg, err = a.agentLoader.GetAgentForRun(ctx, in.AgentID)
+		if err != nil {
+			return nil, fmt.Errorf("session runner: load agent: %w", err)
+		}
 
-	agentCfg, err := a.agentLoader.GetAgentForRun(ctx, in.AgentID)
-	if err != nil {
-		return nil, fmt.Errorf("session runner: load agent: %w", err)
-	}
-
-	// P-C178-1: reject runs for agents that are not PUBLISHED.
-	switch agentCfg.Status {
-	case string(agent.StatusDraft):
-		return nil, fmt.Errorf("%w: agent %s is in DRAFT status", chat.ErrAgentNotPublished, in.AgentID)
-	case string(agent.StatusArchived):
-		return nil, fmt.Errorf("%w: agent %s", chat.ErrAgentArchived, in.AgentID)
-	case string(agent.StatusPublished), "": // empty = legacy records without status
-		// OK — proceed
+		// P-C178-1: reject runs for agents that are not PUBLISHED.
+		switch agentCfg.Status {
+		case string(agent.StatusDraft):
+			return nil, fmt.Errorf("%w: agent %s is in DRAFT status", chat.ErrAgentNotPublished, in.AgentID)
+		case string(agent.StatusArchived):
+			return nil, fmt.Errorf("%w: agent %s", chat.ErrAgentArchived, in.AgentID)
+		case string(agent.StatusPublished), "": // empty = legacy records without status
+			// OK — proceed
+		}
 	}
 
 	// P-C115-1: use session snapshot when available to preserve persona consistency.
@@ -416,19 +440,24 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	}
 	// P-I1-1: log the effective model/provider at run start so operators can verify
 	// which model is executing without querying the DB.
-	slog.Info("agentic: run started", "model", config.Model, "provider", config.Provider, "agentID", in.AgentID)
+	slog.Info("agentic: run started", "model", config.Model, "provider", config.Provider, "agentID", in.AgentID, "mode", in.Mode)
 
 	// Create a shared mailbox for inter-agent messaging within this run.
 	agentMailbox := NewAgentMailbox()
 
 	factory := &adapterRunnerFactory{adapter: a, chatModel: chatModel, agentMailbox: agentMailbox}
+	runnerMemory := a.memory
+	if dynamic {
+		// agent_memory has a strict agent FK; dynamic personas are not agents.
+		runnerMemory = nil
+	}
 	runner := NewRunner(
 		chatModel,
 		a.skillClient,
 		a.prompt,
 		a.tools,
 		a.ctxManager,
-		a.memory,
+		runnerMemory,
 		a.repo,
 		&repoHistoryLoader{repo: a.repo},
 		a.hookExecutor,
@@ -443,7 +472,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 			runner.WithManagementExecutor(managementExec)
 		}
 	}
-	if a.mcpClient != nil {
+	if a.mcpClient != nil && !dynamic {
 		runner.WithMCPClient(a.mcpClient)
 	}
 	// P-E1-2: wire document search client so document_search builtin tool executes
@@ -455,11 +484,13 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	subtaskExec := NewSubtaskExecutor(factory)
 	subtaskExec.WithAgentMailbox(agentMailbox)
 	runner.WithSubtaskExecutor(subtaskExec)
-	a.attachAuxiliaryComponents(runner, factory, chatModel, config)
+	if !dynamic {
+		a.attachAuxiliaryComponents(runner, factory, chatModel, config)
+	}
 
 	// Register memory as turn-end handler (decoupled from runner loop).
-	if a.memory != nil {
-		runner.WithTurnEndHandlers(NewMemoryTurnEndHandler(a.memory))
+	if runnerMemory != nil {
+		runner.WithTurnEndHandlers(NewMemoryTurnEndHandler(runnerMemory))
 	}
 
 	// Create an ElicitationHandler for this run and wire the OnEnqueue callback
@@ -501,19 +532,21 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	currentHash := hashConfig(agentCfg.ModelConfig)
 	shouldPersistConfigHash := false
 	configChangedEvent := chat.RunEvent{}
-	if session, err := a.repo.GetSessionByID(ctx, in.SessionID); err == nil {
-		shouldPersistConfigHash = session.ConfigHash == nil || *session.ConfigHash == ""
-		if detectConfigChange(session, agentCfg.ModelConfig) {
-			notif := chat.ChatMessage{
-				SessionID:   in.SessionID,
-				Role:        "system",
-				Content:     "[system] Agent configuration changed, but this session remains pinned to its original snapshot.",
-				MessageType: chat.MessageTypeSystem,
+	if !dynamic {
+		if session, err := a.repo.GetSessionByID(ctx, in.SessionID); err == nil {
+			shouldPersistConfigHash = session.ConfigHash == nil || *session.ConfigHash == ""
+			if detectConfigChange(session, agentCfg.ModelConfig) {
+				notif := chat.ChatMessage{
+					SessionID:   in.SessionID,
+					Role:        "system",
+					Content:     "[system] Agent configuration changed, but this session remains pinned to its original snapshot.",
+					MessageType: chat.MessageTypeSystem,
+				}
+				if _, msgErr := a.repo.CreateMessage(ctx, notif); msgErr != nil {
+					slog.Warn("agentic: failed to persist config-change notification", "error", msgErr)
+				}
+				configChangedEvent = newConfigChangedEvent(in.SessionID, in.AgentID)
 			}
-			if _, msgErr := a.repo.CreateMessage(ctx, notif); msgErr != nil {
-				slog.Warn("agentic: failed to persist config-change notification", "error", msgErr)
-			}
-			configChangedEvent = newConfigChangedEvent(in.SessionID, in.AgentID)
 		}
 	}
 
@@ -531,10 +564,11 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		IsAdmin:                callerHasAdminRole(ctx),   // P-C298-1
 		EnableManagement:       agentCfg.EnableManagement, // P-C184-2
 		DisableAskUser:         agentCfg.DisableAskUser,
-		DisableAgentDelegation: agentCfg.DisableAgentDelegation,
-		SkillIDsSnapshot:       in.SkillIDsSnapshot,       // P-C115-1: use snapshot if available
+		DisableAgentDelegation: dynamic || agentCfg.DisableAgentDelegation,
+		SkillIDsSnapshot:       in.SkillIDsSnapshot, // P-C115-1: use snapshot if available
+		UseSkillIDsSnapshot:    dynamic || len(in.SkillIDsSnapshot) > 0,
 		MCPServerNamesSnapshot: in.MCPServerNamesSnapshot, // P-C253-1: filter MCP tools by bound servers
-		PermissionAudit:        a.permAudit,
+		PermissionAudit:        permissionAuditForRun(dynamic, a.permAudit),
 	})
 
 	chatCh := make(chan chat.RunEvent, config.StreamBufferSize)
@@ -557,6 +591,10 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		// proxies (Traefik, nginx) or browsers may close the idle connection.
 		heartbeat := time.NewTicker(15 * time.Second)
 		defer heartbeat.Stop()
+
+		for _, event := range preRunEvents {
+			chatCh <- event
+		}
 
 		if configChangedEvent.Type != "" {
 			chatCh <- configChangedEvent
@@ -587,6 +625,154 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	}()
 
 	return chatCh, nil
+}
+
+func (a *SessionRunnerAdapter) prepareDynamicRun(ctx context.Context, in *chat.RunInput) (*chat.AgentRunConfig, []chat.RunEvent, error) {
+	if in.DynamicPersona == nil {
+		return nil, nil, errors.New("session runner: dynamic persona is required")
+	}
+	if in.AgentID != uuid.Nil {
+		return nil, nil, errors.New("session runner: dynamic sessions cannot use an agent ID")
+	}
+	if a.skillResolver == nil {
+		return nil, nil, errors.New("session runner: dynamic skill retrieval requires an embedding service")
+	}
+	store, ok := a.repo.(chat.DynamicSessionStore)
+	if !ok {
+		return nil, nil, errors.New("session runner: dynamic skill session store is not configured")
+	}
+
+	previous, err := chat.ParseDynamicSkillSetSnapshot(in.StickySkillSet)
+	if err != nil {
+		return nil, nil, err
+	}
+	state := SkillSetState{
+		SkillIDs:       append([]uuid.UUID(nil), previous.SkillIDs...),
+		SourceHashes:   dynamicSourceHashes(previous.SourceHashes),
+		QueryEmbedding: append([]float32(nil), previous.QueryEmbedding...),
+	}
+	policy := in.DynamicPersona.RetrievalConfig.Normalize()
+	resolved, err := a.skillResolver.ResolveWithConfig(ctx, SkillSetResolveInput{
+		UserMessage: in.UserMessage,
+		Previous:    state,
+	}, SkillSetResolverConfig{
+		TopK:           policy.TopK,
+		DriftThreshold: policy.DriftThreshold,
+		MaxStickySize:  policy.MaxStickySize,
+		AllowDrift:     policy.AllowDrift,
+		RefreshPolicy:  policy.RefreshPolicy,
+		MinScore:       policy.MinScore,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("session runner: resolve dynamic skills: %w", err)
+	}
+	in.SkillIDsSnapshot = append([]uuid.UUID(nil), resolved.SkillIDs...)
+
+	var events []chat.RunEvent
+	if resolved.Refreshed {
+		snapshot := chat.DynamicSkillSetSnapshot{
+			SkillIDs:           append([]uuid.UUID(nil), resolved.State.SkillIDs...),
+			SourceHashes:       dynamicSourceHashesForStorage(resolved.State.SourceHashes),
+			QueryEmbedding:     append([]float32(nil), resolved.State.QueryEmbedding...),
+			QueryEmbeddingHash: chat.HashDynamicQueryEmbedding(resolved.State.QueryEmbedding),
+			RetrievedAt:        time.Now().UTC(),
+			ScoreP50:           medianSearchScore(resolved.SearchScore),
+			Source:             "embedding",
+		}
+		if err := store.UpdateSessionDynamicSkillSet(ctx, in.SessionID, snapshot); err != nil {
+			return nil, nil, fmt.Errorf("session runner: persist dynamic skill set: %w", err)
+		}
+		if event := a.dynamicSkillSetEvent(ctx, resolved); event.Type != "" {
+			events = append(events, event)
+		}
+	}
+
+	if a.prompt != nil {
+		a.prompt.ClearCacheForDynamicSession(in.SessionID)
+	}
+	return &chat.AgentRunConfig{
+		ID:                     uuid.Nil,
+		SystemPrompt:           in.DynamicPersona.SystemPrompt,
+		ModelConfig:            append(json.RawMessage(nil), in.DynamicPersona.ModelConfig...),
+		EnableManagement:       in.DynamicPersona.EnableManagement,
+		DisableAgentDelegation: true,
+		Status:                 string(agent.StatusPublished),
+	}, events, nil
+}
+
+func dynamicSourceHashes(source map[string]string) map[uuid.UUID]string {
+	if len(source) == 0 {
+		return map[uuid.UUID]string{}
+	}
+	result := make(map[uuid.UUID]string, len(source))
+	for id, hash := range source {
+		parsed, err := uuid.Parse(id)
+		if err == nil {
+			result[parsed] = hash
+		}
+	}
+	return result
+}
+
+func dynamicSourceHashesForStorage(source map[uuid.UUID]string) map[string]string {
+	result := make(map[string]string, len(source))
+	for id, hash := range source {
+		result[id.String()] = hash
+	}
+	return result
+}
+
+func medianSearchScore(scores map[uuid.UUID]float64) float64 {
+	if len(scores) == 0 {
+		return 0
+	}
+	values := make([]float64, 0, len(scores))
+	for _, score := range scores {
+		values = append(values, score)
+	}
+	sort.Float64s(values)
+	middle := len(values) / 2
+	if len(values)%2 == 1 {
+		return values[middle]
+	}
+	return (values[middle-1] + values[middle]) / 2
+}
+
+func (a *SessionRunnerAdapter) dynamicSkillSetEvent(ctx context.Context, resolved SkillSetResolveResult) chat.RunEvent {
+	if !resolved.Refreshed {
+		return chat.RunEvent{}
+	}
+	entries := make([]SkillSetEntry, 0, len(resolved.SkillIDs))
+	byID := map[uuid.UUID]string{}
+	if a.skillRepo != nil && len(resolved.SkillIDs) > 0 {
+		if skills, err := a.skillRepo.ListByIDs(ctx, resolved.SkillIDs); err == nil {
+			for _, item := range skills {
+				byID[item.ID] = item.Slug
+			}
+		}
+	}
+	for _, id := range resolved.SkillIDs {
+		entries = append(entries, SkillSetEntry{
+			ID: id.String(), Slug: byID[id], Score: resolved.SearchScore[id],
+		})
+	}
+	payload := SkillSetData{Skills: entries, Reason: resolved.Reason, DriftScore: resolved.DriftScore}
+	if resolved.Reason == "initial" {
+		return chat.RunEvent{Type: string(EventSkillSetInitial), Data: mustMarshal(payload)}
+	}
+	return chat.RunEvent{Type: string(EventSkillSetChanged), Data: mustMarshal(payload)}
+}
+
+func permissionAuditForRun(dynamic bool, audit PermissionAuditLogger) PermissionAuditLogger {
+	if dynamic {
+		return nil
+	}
+	return audit
+}
+
+func mustMarshal(value any) json.RawMessage {
+	data, _ := json.Marshal(value)
+	return data
 }
 
 // RespondElicitation routes a user's elicitation response to the active run

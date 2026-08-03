@@ -18,10 +18,17 @@ type SkillVectorStore interface {
 type SkillSetResolverConfig struct {
 	TopK           int
 	DriftThreshold float64
+	MaxStickySize  int
+	AllowDrift     bool
+	RefreshPolicy  string
+	MinScore       float64
 }
 
 func DefaultSkillSetResolverConfig() SkillSetResolverConfig {
-	return SkillSetResolverConfig{TopK: 8, DriftThreshold: 0.55}
+	return SkillSetResolverConfig{
+		TopK: 8, DriftThreshold: 0.55, MaxStickySize: 15,
+		AllowDrift: true, RefreshPolicy: "drift_or_invalidation", MinScore: 0.30,
+	}
 }
 
 type SkillSetState struct {
@@ -51,16 +58,28 @@ type SkillSetResolver struct {
 }
 
 func NewSkillSetResolver(store SkillVectorStore, embedder Embedder, cfg SkillSetResolverConfig) *SkillSetResolver {
-	if cfg.TopK <= 0 {
-		cfg.TopK = DefaultSkillSetResolverConfig().TopK
-	}
-	if cfg.DriftThreshold <= 0 {
-		cfg.DriftThreshold = DefaultSkillSetResolverConfig().DriftThreshold
-	}
+	cfg = normalizeSkillSetResolverConfig(cfg)
 	return &SkillSetResolver{store: store, embedder: embedder, config: cfg}
 }
 
 func (r *SkillSetResolver) Resolve(ctx context.Context, in SkillSetResolveInput) (SkillSetResolveResult, error) {
+	if r == nil {
+		return SkillSetResolveResult{}, fmt.Errorf("skillresolver: resolver is required")
+	}
+	return r.resolve(ctx, in, r.config)
+}
+
+// ResolveWithConfig applies the tenant persona policy for one request without
+// changing the shared resolver. This keeps tenant configuration isolated across
+// concurrently running sessions.
+func (r *SkillSetResolver) ResolveWithConfig(ctx context.Context, in SkillSetResolveInput, cfg SkillSetResolverConfig) (SkillSetResolveResult, error) {
+	if r == nil {
+		return SkillSetResolveResult{}, fmt.Errorf("skillresolver: resolver is required")
+	}
+	return r.resolve(ctx, in, normalizeSkillSetResolverConfig(cfg))
+}
+
+func (r *SkillSetResolver) resolve(ctx context.Context, in SkillSetResolveInput, cfg SkillSetResolverConfig) (SkillSetResolveResult, error) {
 	if r == nil || r.store == nil {
 		return SkillSetResolveResult{}, fmt.Errorf("skillresolver: store is required")
 	}
@@ -83,7 +102,9 @@ func (r *SkillSetResolver) Resolve(ctx context.Context, in SkillSetResolveInput)
 		driftScore = cosineDrift(in.Previous.QueryEmbedding, queryEmbedding)
 	}
 
-	if len(in.Previous.SkillIDs) > 0 && !invalidated && driftScore <= r.config.DriftThreshold {
+	refreshForDrift := cfg.AllowDrift && driftScore > cfg.DriftThreshold
+	refreshAlways := cfg.RefreshPolicy == "always"
+	if len(in.Previous.SkillIDs) > 0 && !invalidated && !refreshForDrift && !refreshAlways {
 		return SkillSetResolveResult{
 			SkillIDs:   append([]uuid.UUID(nil), in.Previous.SkillIDs...),
 			State:      in.Previous,
@@ -99,7 +120,31 @@ func (r *SkillSetResolver) Resolve(ctx context.Context, in SkillSetResolveInput)
 	} else if len(in.Previous.SkillIDs) > 0 {
 		reason = "drift"
 	}
-	return r.retrieve(ctx, queryEmbedding, driftScore, reason)
+	return r.retrieve(ctx, queryEmbedding, driftScore, reason, cfg)
+}
+
+func normalizeSkillSetResolverConfig(cfg SkillSetResolverConfig) SkillSetResolverConfig {
+	defaults := DefaultSkillSetResolverConfig()
+	if cfg.TopK <= 0 {
+		cfg.TopK = defaults.TopK
+	}
+	if cfg.DriftThreshold <= 0 || cfg.DriftThreshold > 2 {
+		cfg.DriftThreshold = defaults.DriftThreshold
+	}
+	if cfg.MaxStickySize <= 0 {
+		cfg.MaxStickySize = defaults.MaxStickySize
+	}
+	if cfg.MaxStickySize < cfg.TopK {
+		cfg.MaxStickySize = cfg.TopK
+	}
+	if cfg.RefreshPolicy == "" {
+		cfg.RefreshPolicy = defaults.RefreshPolicy
+		cfg.AllowDrift = defaults.AllowDrift
+	}
+	if cfg.MinScore < 0 || cfg.MinScore > 1 {
+		cfg.MinScore = defaults.MinScore
+	}
+	return cfg
 }
 
 func (r *SkillSetResolver) hasInvalidatedSkill(ctx context.Context, state SkillSetState) (bool, error) {
@@ -118,8 +163,8 @@ func (r *SkillSetResolver) hasInvalidatedSkill(ctx context.Context, state SkillS
 	return false, nil
 }
 
-func (r *SkillSetResolver) retrieve(ctx context.Context, embedding []float32, driftScore float64, reason string) (SkillSetResolveResult, error) {
-	candidates, err := r.store.SearchByEmbedding(ctx, embedding, r.config.TopK)
+func (r *SkillSetResolver) retrieve(ctx context.Context, embedding []float32, driftScore float64, reason string, cfg SkillSetResolverConfig) (SkillSetResolveResult, error) {
+	candidates, err := r.store.SearchByEmbedding(ctx, embedding, cfg.TopK)
 	if err != nil {
 		return SkillSetResolveResult{}, fmt.Errorf("skillresolver: search skills: %w", err)
 	}
@@ -128,6 +173,9 @@ func (r *SkillSetResolver) retrieve(ctx context.Context, embedding []float32, dr
 	hashes := make(map[uuid.UUID]string, len(candidates))
 	scores := make(map[uuid.UUID]float64, len(candidates))
 	for _, candidate := range candidates {
+		if candidate.Score < cfg.MinScore || len(ids) >= cfg.MaxStickySize {
+			continue
+		}
 		ids = append(ids, candidate.ID)
 		hashes[candidate.ID] = candidate.EmbeddingSourceHash
 		scores[candidate.ID] = candidate.Score

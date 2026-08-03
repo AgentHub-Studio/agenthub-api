@@ -263,19 +263,19 @@ func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uui
 	// (a) AgentID nil = agent já foi deletado e FK setou NULL
 	// (b) AgentID set mas GetByID retorna erro = agent foi deletado
 	//     em outro tenant ou inconsistência rara.
-	if e.agentExister != nil {
-		session, err := e.repo.GetSessionByID(ctx, sessionID)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return uuid.Nil, ErrNotFound
-			}
-			return uuid.Nil, fmt.Errorf("chat: lookup session: %w", err)
+	session, err := e.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return uuid.Nil, ErrNotFound
 		}
-		// Bug 246: rejeitar runs em session ARCHIVED — usuário arquivou
-		// como sinal de "não usar mais"; aceitar runs subverte isso.
-		if session.Status == StatusArchived {
-			return uuid.Nil, ErrSessionArchived
-		}
+		return uuid.Nil, fmt.Errorf("chat: lookup session: %w", err)
+	}
+	// Bug 246: rejeitar runs em session ARCHIVED — usuário arquivou
+	// como sinal de "não usar mais"; aceitar runs subverte isso.
+	if session.Status == StatusArchived {
+		return uuid.Nil, ErrSessionArchived
+	}
+	if e.agentExister != nil && session.Mode != ModeDynamicSkill {
 		// OOB / Bug 244: um AgentID nil é permitido aqui — significa ou uma
 		// sessão intencionalmente sem agente (criada para o roteador escolher)
 		// ou uma sessão cujo agente foi deletado (FK ON DELETE SET NULL). Ambos
@@ -334,9 +334,24 @@ func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uui
 		e.bufferRegistry.GetOrCreate(run.ID.String(), DefaultEventBufferSize)
 	}
 
-	// 2. Publish to RabbitMQ
+	task := ChatRunTask{
+		RunID:       run.ID,
+		SessionID:   sessionID,
+		TenantID:    tenantID,
+		Message:     message,
+		Attachments: attachments,
+		Overrides:   opts.Overrides.normalized(),
+		VoiceOutput: opts.VoiceOutput,
+		RawToken:    tenant.TokenFromContext(ctx),
+	}
+
+	// 2. Publish to RabbitMQ. In an environment without RabbitMQ, execute in
+	// process so the POST endpoint can still honour the always-SSE contract.
 	if e.connURL == "" {
-		slog.Warn("rabbitmq: no URL configured, async execution disabled")
+		slog.Warn("rabbitmq: no URL configured, executing chat run in process")
+		if e.runner != nil {
+			go e.processTask(task)
+		}
 		return run.ID, nil
 	}
 
@@ -365,16 +380,7 @@ func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uui
 		return run.ID, fmt.Errorf("rabbitmq: queue declare: %w", err)
 	}
 
-	body, _ := json.Marshal(ChatRunTask{
-		RunID:       run.ID,
-		SessionID:   sessionID,
-		TenantID:    tenantID,
-		Message:     message,
-		Attachments: attachments,
-		Overrides:   opts.Overrides.normalized(),
-		VoiceOutput: opts.VoiceOutput,
-		RawToken:    tenant.TokenFromContext(ctx),
-	})
+	body, _ := json.Marshal(task)
 
 	err = ch.PublishWithContext(ctx, "", q.Name, false, false, amqp.Publishing{
 		ContentType: "application/json",
@@ -550,7 +556,36 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		return
 	}
 
-	if session.AgentID == nil {
+	if session.Mode == "" {
+		session.Mode = ModeAgentFixed
+	}
+	var dynamicPersona *DynamicPersona
+	if session.Mode == ModeDynamicSkill {
+		if session.AgentID != nil || session.PersonaID == nil {
+			reason := "invalid DYNAMIC_SKILL session binding"
+			_ = e.repo.MarkRunFailed(ctx, task.RunID, reason)
+			appendBufferedError(buf, reason, "startup")
+			return
+		}
+		store, ok := e.repo.(DynamicSessionStore)
+		if !ok {
+			reason := "dynamic skill session store is not configured"
+			_ = e.repo.MarkRunFailed(ctx, task.RunID, reason)
+			appendBufferedError(buf, reason, "startup")
+			return
+		}
+		persona, err := store.GetTenantChatDefault(ctx, tenantID)
+		if err != nil || persona.ID != *session.PersonaID {
+			reason := "failed to load tenant default persona"
+			if err != nil {
+				reason += ": " + err.Error()
+			}
+			_ = e.repo.MarkRunFailed(ctx, task.RunID, reason)
+			appendBufferedError(buf, reason, "startup")
+			return
+		}
+		dynamicPersona = &persona
+	} else if session.AgentID == nil {
 		// P-C292-1 / OOB: mirror the SSE path — route the message to the best
 		// published agent before giving up, so async runs on agentless sessions
 		// behave identically. Covers both intentionally agentless sessions and
@@ -594,7 +629,7 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 			}
 		}
 	}
-	if session.AgentID != nil && e.agentLoader != nil && sessionNeedsSnapshot(session) {
+	if session.Mode != ModeDynamicSkill && session.AgentID != nil && e.agentLoader != nil && sessionNeedsSnapshot(session) {
 		if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
 			snapshotAgent(agentCfg, &session)
 			if err := e.repo.UpdateSessionSnapshots(ctx, task.SessionID,
@@ -608,7 +643,7 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// from servers explicitly bound to this agent. Without this, all MCP tools
 	// from all running servers would be included regardless of agent binding.
 	var mcpServerNames []string
-	if e.agentLoader != nil {
+	if session.Mode != ModeDynamicSkill && session.AgentID != nil && e.agentLoader != nil {
 		if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
 			mcpServerNames = agentCfg.MCPServerNames
 		}
@@ -618,7 +653,7 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// the same tool set captured at session creation (or when the agent was
 	// routed). Mirrors chat.Service.RunSession.
 	var skillIDsSnapshot []uuid.UUID
-	if len(session.SkillBindingsSnapshot) > 2 {
+	if session.Mode != ModeDynamicSkill && len(session.SkillBindingsSnapshot) > 2 {
 		var snap SkillBindingsSnapshotData
 		if err := json.Unmarshal(session.SkillBindingsSnapshot, &snap); err == nil {
 			skillIDsSnapshot = snap.SkillIDs
@@ -654,10 +689,17 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		}()
 	}
 
+	runAgentID := uuid.Nil
+	if session.AgentID != nil {
+		runAgentID = *session.AgentID
+	}
 	runEvents, err := e.runner.RunSession(ctx, RunInput{
 		RunID:                  task.RunID,
 		SessionID:              task.SessionID,
-		AgentID:                *session.AgentID,
+		AgentID:                runAgentID,
+		Mode:                   session.Mode,
+		DynamicPersona:         dynamicPersona,
+		StickySkillSet:         session.StickySkillSet,
 		TenantID:               task.TenantID,
 		UserMessage:            task.Message,
 		Attachments:            task.Attachments,

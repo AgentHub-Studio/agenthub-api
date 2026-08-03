@@ -129,6 +129,7 @@ type ToolSchemaBuilder struct {
 	disableAskUser         bool        // per-agent opt-out — removes ask_user from the builtin set
 	disableAgentDelegation bool        // per-agent opt-out — removes the agent sub-agent spawner
 	skillIDsSnapshot       []uuid.UUID // P-C115-1: when set, use these IDs instead of querying by agentID
+	useSkillIDsSnapshot    bool        // explicit empty snapshots must not fall back to agent bindings
 	lastUserOnlySkills     []skill.Skill
 	lastWarnings           []string
 }
@@ -219,7 +220,8 @@ func (b *ToolSchemaBuilder) WithEnableManagement(enabled bool) *ToolSchemaBuilde
 // P-C115-1: when set, Build() uses these IDs to ensure the tool set is fixed for
 // the lifetime of the session even if the agent's bindings change mid-conversation.
 func (b *ToolSchemaBuilder) WithSkillIDsSnapshot(ids []uuid.UUID) *ToolSchemaBuilder {
-	b.skillIDsSnapshot = ids
+	b.skillIDsSnapshot = append([]uuid.UUID(nil), ids...)
+	b.useSkillIDsSnapshot = true
 	return b
 }
 
@@ -253,7 +255,7 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	// agent's current bindings so the tool set stays fixed for the session.
 	var skills []skill.Skill
 	var err error
-	if len(b.skillIDsSnapshot) > 0 {
+	if b.useSkillIDsSnapshot {
 		skills, err = b.skills.ListByIDs(ctx, b.skillIDsSnapshot)
 	} else {
 		skills, err = b.skills.ListByAgentID(ctx, agentID)
@@ -262,24 +264,28 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 		return nil, fmt.Errorf("toolschema: list skills: %w", err)
 	}
 
-	// 2. Load integration-based skills automatically (simplification)
+	// 2. Load integration-based skills automatically (simplification).
 	// We include all skills from 'INTEGRATION_HTTP' and 'INTEGRATION_DATABASE'
 	// as they are managed via the Integrations tab and should be globally available.
-	integrationCategories := []string{"INTEGRATION_HTTP", "INTEGRATION_DATABASE"}
-	for _, cat := range integrationCategories {
-		content, _, err := b.skills.List(ctx, &cat, pagination.PageRequest{Page: 0, Size: 100})
-		if err == nil {
-			for _, skItem := range content {
-				// Avoid duplicates if already explicitly linked
-				exists := false
-				for _, sk := range skills {
-					if sk.ID == skItem.ID {
-						exists = true
-						break
+	// An explicit snapshot is authoritative, including an empty DYNAMIC_SKILL
+	// retrieval result, so it deliberately skips this legacy auto-append behavior.
+	if !b.useSkillIDsSnapshot {
+		integrationCategories := []string{"INTEGRATION_HTTP", "INTEGRATION_DATABASE"}
+		for _, cat := range integrationCategories {
+			content, _, err := b.skills.List(ctx, &cat, pagination.PageRequest{Page: 0, Size: 100})
+			if err == nil {
+				for _, skItem := range content {
+					// Avoid duplicates if already explicitly linked
+					exists := false
+					for _, sk := range skills {
+						if sk.ID == skItem.ID {
+							exists = true
+							break
+						}
 					}
-				}
-				if !exists {
-					skills = append(skills, skItem)
+					if !exists {
+						skills = append(skills, skItem)
+					}
 				}
 			}
 		}

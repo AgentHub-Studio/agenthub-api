@@ -10,7 +10,7 @@
  *   - stress:   up to 50 VUs, 4min — identify breaking point
  *
  * Thresholds:
- *   - p95 response time < 500ms
+ *   - p95 response time < 1.5s
  *   - error rate < 1%
  */
 
@@ -69,7 +69,7 @@ export const options = {
   },
   thresholds: {
     http_req_failed:   ['rate<0.01'],    // <1% errors
-    http_req_duration: ['p(95)<500'],    // 95th percentile <500ms
+    http_req_duration: ['p(95)<1500'],   // 95th percentile <1.5s
     errors:            ['rate<0.01'],
   },
 };

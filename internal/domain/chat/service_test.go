@@ -16,16 +16,32 @@ import (
 )
 
 type mockChatRepo struct {
-	sessions      map[uuid.UUID]chat.ChatSession
-	messages      []chat.ChatMessage
-	routingAgents []chat.AgentRoutingInfo
-	routingErr    error
+	sessions       map[uuid.UUID]chat.ChatSession
+	messages       []chat.ChatMessage
+	routingAgents  []chat.AgentRoutingInfo
+	routingErr     error
+	dynamicPersona chat.DynamicPersona
 }
 
 func uuidPtr() *uuid.UUID { id := uuid.New(); return &id }
 
 func newMockRepo() *mockChatRepo {
-	return &mockChatRepo{sessions: make(map[uuid.UUID]chat.ChatSession)}
+	return &mockChatRepo{
+		sessions: make(map[uuid.UUID]chat.ChatSession),
+		dynamicPersona: chat.DynamicPersona{
+			ID:           uuid.New(),
+			TenantID:     "tenant",
+			SystemPrompt: "You are the tenant default assistant.",
+			ModelConfig:  json.RawMessage(`{"provider":"openrouter","model":"test"}`),
+		},
+	}
+}
+
+func createLegacyAgentlessSession(repo *mockChatRepo) chat.ChatSessionResponse {
+	id := uuid.New()
+	session := chat.ChatSession{ID: id, Mode: chat.ModeAgentFixed, Title: "legacy agentless", Status: chat.StatusActive}
+	repo.sessions[id] = session
+	return chat.SessionResponseFrom(session)
 }
 
 func (m *mockChatRepo) FindSessions(_ context.Context, _ pagination.PageRequest) ([]chat.ChatSession, int64, error) {
@@ -161,6 +177,24 @@ func (m *mockChatRepo) UpdateSessionSnapshots(_ context.Context, sessionID uuid.
 	return nil
 }
 
+func (m *mockChatRepo) GetTenantChatDefault(_ context.Context, _ string) (chat.DynamicPersona, error) {
+	return m.dynamicPersona, nil
+}
+
+func (m *mockChatRepo) UpdateSessionDynamicSkillSet(_ context.Context, sessionID uuid.UUID, snapshot chat.DynamicSkillSetSnapshot) error {
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		return chat.ErrNotFound
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	s.StickySkillSet = raw
+	m.sessions[sessionID] = s
+	return nil
+}
+
 func (m *mockChatRepo) FindAgentsForRouting(_ context.Context) ([]chat.AgentRoutingInfo, error) {
 	return m.routingAgents, m.routingErr
 }
@@ -220,19 +254,18 @@ func TestChatService_CreateSession_DefaultsAgentFixedWhenAgentProvided(t *testin
 	assert.Equal(t, agentID, *s.AgentID)
 }
 
-func TestChatService_CreateSession_DynamicSkillWithPersona(t *testing.T) {
-	svc := chat.NewService(newMockRepo(), nil)
-	personaID := uuid.New()
+func TestChatService_CreateSession_DynamicSkillUsesTenantDefaultPersona(t *testing.T) {
+	repo := newMockRepo()
+	svc := chat.NewService(repo, nil)
 	s, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
-		Mode:      chat.ModeDynamicSkill,
-		PersonaID: &personaID,
-		Title:     "Dynamic Chat",
+		Mode:  chat.ModeDynamicSkill,
+		Title: "Dynamic Chat",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "DYNAMIC_SKILL", s.Mode)
 	assert.Nil(t, s.AgentID)
 	require.NotNil(t, s.PersonaID)
-	assert.Equal(t, personaID, *s.PersonaID)
+	assert.Equal(t, repo.dynamicPersona.ID, *s.PersonaID)
 }
 
 func TestChatService_CreateSession_AgentFixedRequiresAgent(t *testing.T) {
@@ -347,13 +380,10 @@ func TestChatService_RunSession_NoAgent(t *testing.T) {
 	runner := &mockSessionRunner{}
 	svc := chat.NewService(repo, runner)
 
-	// Create session WITHOUT an agent; the mock repo has no routable agents.
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
-		Title: "no-agent",
-	})
-	require.NoError(t, err)
+	// A legacy AGENT_FIXED session without an agent is still routed on first run.
+	session := createLegacyAgentlessSession(repo)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "Hello", "tenant", chat.RunOverrides{})
+	_, err := svc.RunSession(context.Background(), session.ID, "Hello", "tenant", chat.RunOverrides{})
 	require.ErrorIs(t, err, chat.ErrNoAgentAvailable)
 }
 
@@ -367,10 +397,9 @@ func TestRunSession_RoutesSingleAgent(t *testing.T) {
 	runner := &mockSessionRunner{}
 	svc := chat.NewService(repo, runner)
 
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
-	require.NoError(t, err)
+	session := createLegacyAgentlessSession(repo)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "olá, tudo bem?", "tenant", chat.RunOverrides{})
+	_, err := svc.RunSession(context.Background(), session.ID, "olá, tudo bem?", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 	assert.Equal(t, agentID, runner.lastInput.AgentID, "runner should receive the routed agent")
 
@@ -393,10 +422,9 @@ func TestRunSession_RoutesBestOfMultiple(t *testing.T) {
 	runner := &mockSessionRunner{}
 	svc := chat.NewService(repo, runner)
 
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
-	require.NoError(t, err)
+	session := createLegacyAgentlessSession(repo)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "I have a billing question", "tenant", chat.RunOverrides{})
+	_, err := svc.RunSession(context.Background(), session.ID, "I have a billing question", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 	assert.Equal(t, billing, runner.lastInput.AgentID)
 }
@@ -408,10 +436,9 @@ func TestRunSession_RoutingRepoError(t *testing.T) {
 	repo.routingErr = errors.New("db unavailable")
 	svc := chat.NewService(repo, &mockSessionRunner{})
 
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
-	require.NoError(t, err)
+	session := createLegacyAgentlessSession(repo)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "Hello", "tenant", chat.RunOverrides{})
+	_, err := svc.RunSession(context.Background(), session.ID, "Hello", "tenant", chat.RunOverrides{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "route agent")
 }
@@ -433,10 +460,9 @@ func TestRunSession_SnapshotOnFirstRoute(t *testing.T) {
 	runner := &mockSessionRunner{}
 	svc := chat.NewService(repo, runner).WithAgentLoader(loader)
 
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{Title: "agentless"})
-	require.NoError(t, err)
+	session := createLegacyAgentlessSession(repo)
 
-	_, err = svc.RunSession(context.Background(), session.ID, "do something useful", "tenant", chat.RunOverrides{})
+	_, err := svc.RunSession(context.Background(), session.ID, "do something useful", "tenant", chat.RunOverrides{})
 	require.NoError(t, err)
 
 	// Forwarded to the runner for this run.

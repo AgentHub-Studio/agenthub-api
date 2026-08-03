@@ -173,11 +173,13 @@ func TestNewHandler_WiresExecutorBufferRegistry(t *testing.T) {
 }
 
 func TestAsyncExecutor_EnqueueRun_CreatesBuffer(t *testing.T) {
-	repo := &asyncExecutorRepoStub{}
+	sessionID := uuid.New()
+	agentID := uuid.New()
+	repo := &asyncExecutorRepoStub{session: ChatSession{ID: sessionID, AgentID: &agentID}}
 	reg := NewRunEventBufferRegistry()
 	exec := NewAsyncExecutor(repo, nil, "").WithEventBufferRegistry(reg)
 
-	runID, err := exec.EnqueueRun(context.Background(), uuid.New(), "test", "hello")
+	runID, err := exec.EnqueueRun(context.Background(), sessionID, "test", "hello")
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, reg.Len())

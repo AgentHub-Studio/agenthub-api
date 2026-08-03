@@ -128,6 +128,33 @@ func TestSkillSetResolverRefreshesWhenStickySkillHashChanges(t *testing.T) {
 	}
 }
 
+func TestSkillSetResolverHonorsTenantScoreAndSizeLimits(t *testing.T) {
+	id1 := uuid.New()
+	id2 := uuid.New()
+	id3 := uuid.New()
+	store := &fakeSkillVectorStore{results: []skill.EmbeddingSearchResult{
+		{ID: id1, Score: 0.93, EmbeddingSourceHash: "h1"},
+		{ID: id2, Score: 0.81, EmbeddingSourceHash: "h2"},
+		{ID: id3, Score: 0.12, EmbeddingSourceHash: "h3"},
+	}}
+	resolver := NewSkillSetResolver(store, &fakeResolverEmbedder{vectors: [][]float32{{1, 0}}}, DefaultSkillSetResolverConfig())
+
+	got, err := resolver.ResolveWithConfig(context.Background(), SkillSetResolveInput{UserMessage: "search"}, SkillSetResolverConfig{
+		TopK:           1,
+		MaxStickySize:  1,
+		MinScore:       0.50,
+		AllowDrift:     true,
+		RefreshPolicy:  "drift_or_invalidation",
+		DriftThreshold: 0.55,
+	})
+	if err != nil {
+		t.Fatalf("ResolveWithConfig() error = %v", err)
+	}
+	if len(got.SkillIDs) != 1 || got.SkillIDs[0] != id1 {
+		t.Fatalf("SkillIDs = %v, want only highest-scoring permitted skill %s", got.SkillIDs, id1)
+	}
+}
+
 type fakeSkillVectorStore struct {
 	results     []skill.EmbeddingSearchResult
 	hashes      map[uuid.UUID]string

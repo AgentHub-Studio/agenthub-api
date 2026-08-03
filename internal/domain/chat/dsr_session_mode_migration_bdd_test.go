@@ -8,8 +8,8 @@ import (
 )
 
 func TestDSR04MigrationAddsModeAgentCheckConstraint(t *testing.T) {
-	up := readSchemaMigration(t, "000070_chat_session_mode_check.up.sql")
-	down := readSchemaMigration(t, "000070_chat_session_mode_check.down.sql")
+	up := readSchemaMigration(t, "000085_chat_session_mode_check.up.sql")
+	down := readSchemaMigration(t, "000085_chat_session_mode_check.down.sql")
 
 	for _, want := range []string{
 		"WHEN agent_id IS NULL THEN 'DYNAMIC_SKILL'",

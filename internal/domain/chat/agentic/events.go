@@ -49,6 +49,12 @@ const (
 	// client posts it back through the same `client-state` endpoint with
 	// `actionResults: [{id, status, result?, error?}]`.
 	EventFrontendActionCall RunEventType = "frontend_action_call"
+	// EventSkillSetInitial reports the skill set selected for the first dynamic
+	// turn of a session.
+	EventSkillSetInitial RunEventType = "skill_set_initial"
+	// EventSkillSetChanged reports a dynamic re-retrieval caused by drift or an
+	// invalidated source embedding.
+	EventSkillSetChanged RunEventType = "skill_set_changed"
 )
 
 // ToolUseSummaryData carries a human-readable summary of a completed tool batch.
@@ -78,6 +84,20 @@ type ConfigChangedData struct {
 	SessionID string `json:"sessionId"`
 	AgentID   string `json:"agentId"`
 	Message   string `json:"message"`
+}
+
+// SkillSetData makes dynamic retrieval observable to SSE clients without
+// exposing embeddings or other internal vector details.
+type SkillSetData struct {
+	Skills     []SkillSetEntry `json:"skills"`
+	Reason     string          `json:"reason"`
+	DriftScore float64         `json:"driftScore,omitempty"`
+}
+
+type SkillSetEntry struct {
+	ID    string  `json:"id"`
+	Slug  string  `json:"slug,omitempty"`
+	Score float64 `json:"score,omitempty"`
 }
 
 // TextDeltaData carries a chunk of streamed assistant text.

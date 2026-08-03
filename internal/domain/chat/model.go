@@ -207,12 +207,13 @@ func RunResponseFrom(r ChatRun) ChatRunResponse {
 	}
 }
 
-// CreateSessionRequest is the payload for creating a chat session.
+// CreateSessionRequest is the payload for creating a chat session. Dynamic
+// sessions intentionally do not accept a persona ID: the service selects the
+// authenticated tenant's server-owned default persona.
 type CreateSessionRequest struct {
-	AgentID   *uuid.UUID      `json:"agentId,omitempty"`
-	Mode      ChatSessionMode `json:"mode,omitempty"`
-	PersonaID *uuid.UUID      `json:"personaId,omitempty"`
-	Title     string          `json:"title"`
+	AgentID *uuid.UUID      `json:"agentId,omitempty"`
+	Mode    ChatSessionMode `json:"mode,omitempty"`
+	Title   string          `json:"title"`
 }
 
 // PendingElicitationInfo describes an unresolved ask_user elicitation request.

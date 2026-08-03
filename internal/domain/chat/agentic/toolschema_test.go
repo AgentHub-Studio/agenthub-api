@@ -101,6 +101,28 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	assert.Contains(t, string(tools[9].InputSchema), `"query"`)
 }
 
+func TestToolSchemaBuilder_ExplicitEmptySnapshotDoesNotFallBackToAgentSkills(t *testing.T) {
+	skillID := uuid.New()
+	toolID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{{ID: skillID, Name: "Hidden", Slug: "hidden"}}}
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools:    []tool.Tool{{ID: toolID, Name: "Hidden Tool", Type: "HTTP", Config: json.RawMessage(`{"inputSchema":{"type":"object"}}`)}},
+	}
+
+	result, err := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+		WithSkillIDsSnapshot([]uuid.UUID{}).
+		Build(context.Background(), uuid.Nil)
+	require.NoError(t, err)
+	for _, item := range result {
+		assert.NotEqual(t, "hidden", item.Name)
+	}
+}
+
 func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
 	skills := &mockSkillLister{skills: nil}
 	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{
