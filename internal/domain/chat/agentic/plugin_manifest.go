@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -296,7 +297,9 @@ func splitSemver(v string) [3]int {
 	parts := strings.Split(v, ".")
 	out := [3]int{}
 	for i := 0; i < 3 && i < len(parts); i++ {
-		fmt.Sscanf(parts[i], "%d", &out[i])
+		if parsed, err := strconv.Atoi(parts[i]); err == nil {
+			out[i] = parsed
+		}
 	}
 	return out
 }

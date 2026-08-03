@@ -66,32 +66,22 @@ func AllMemoryHierarchyScopes() []MemoryHierarchyScope {
 	return out
 }
 
-// scopeRank returns the specificity tier (0 = most specific).
-func scopeRank(s MemoryHierarchyScope) int {
-	for i, v := range scopeOrder {
-		if v == s {
-			return i
-		}
-	}
-	return len(scopeOrder)
-}
-
 // HierarchicalFact is one layered fact.
 type HierarchicalFact struct {
-	Scope   MemoryHierarchyScope `json:"scope"`
+	Scope MemoryHierarchyScope `json:"scope"`
 	// ScopeID identifies the bound subject for this scope:
 	//   session  → SessionID
 	//   user     → UserID
 	//   agent    → AgentID
 	//   tenant   → TenantID
 	//   global   → "" (no subject)
-	ScopeID string        `json:"scopeId"`
-	Key     string        `json:"key"`
-	Value   string        `json:"value"`
-	SetAt   time.Time     `json:"setAt"`
+	ScopeID string    `json:"scopeId"`
+	Key     string    `json:"key"`
+	Value   string    `json:"value"`
+	SetAt   time.Time `json:"setAt"`
 	// MaxAge is the staleness window. Zero = never expires.
-	MaxAge   time.Duration `json:"maxAge"`
-	Source   string        `json:"source"`
+	MaxAge time.Duration `json:"maxAge"`
+	Source string        `json:"source"`
 }
 
 // IsStale returns true when the fact is older than MaxAge.
@@ -131,7 +121,7 @@ func (c LookupContext) scopeIDFor(s MemoryHierarchyScope) string {
 
 // LookupTrace records which scopes were checked and which matched.
 type LookupTrace struct {
-	Scopes  []ScopeProbe `json:"scopes"`
+	Scopes  []ScopeProbe         `json:"scopes"`
 	Matched MemoryHierarchyScope `json:"matched,omitempty"` // "" if no match
 }
 

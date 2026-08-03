@@ -125,22 +125,27 @@ func TestContextWindowMonitor_LimitPct_ReducesEffectiveWindow(t *testing.T) {
 
 func TestContextWindowMonitor_TurnNumberIncrements(t *testing.T) {
 	m, _ := NewContextWindowMonitor("s", "claude-opus-4-7", 100)
-	m.RecordTurn(0)
-	m.RecordTurn(0)
-	m.RecordTurn(0)
+	_, err := m.RecordTurn(0)
+	require.NoError(t, err)
+	_, err = m.RecordTurn(0)
+	require.NoError(t, err)
+	_, err = m.RecordTurn(0)
+	require.NoError(t, err)
 	turn, _, _ := m.Snapshot()
 	assert.Equal(t, 3, turn)
 }
 
 func TestContextWindowMonitor_LastAlert_NilUntilThreshold(t *testing.T) {
 	m, _ := NewContextWindowMonitor("s", "claude-sonnet-4-6", 100)
-	m.RecordTurn(1000)
+	_, err := m.RecordTurn(1000)
+	require.NoError(t, err)
 	assert.Nil(t, m.LastAlert())
 }
 
 func TestContextWindowMonitor_LastAlert_SetAfterAlert(t *testing.T) {
 	m, _ := NewContextWindowMonitor("s", "claude-sonnet-4-6", 100)
 	_, _, limit := m.Snapshot()
-	m.RecordTurn(limit - ManualCompactBufferTokens + 1)
+	_, err := m.RecordTurn(limit - ManualCompactBufferTokens + 1)
+	require.NoError(t, err)
 	assert.NotNil(t, m.LastAlert())
 }

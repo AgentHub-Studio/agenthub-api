@@ -101,8 +101,10 @@ func TestAdvisorService_Consult_RecordsHistory(t *testing.T) {
 	}
 
 	svc := agentic.NewAdvisorService(agentic.AdvisorConfig{Enabled: true}, fn)
-	svc.Consult(context.Background(), "ctx1", "action1")
-	svc.Consult(context.Background(), "ctx2", "action2")
+	_, err := svc.Consult(context.Background(), "ctx1", "action1")
+	require.NoError(t, err)
+	_, err = svc.Consult(context.Background(), "ctx2", "action2")
+	require.NoError(t, err)
 	assert.Equal(t, 2, svc.ConsultationCount())
 }
 
@@ -190,8 +192,10 @@ func TestAdvisorService_LastResponse(t *testing.T) {
 	}
 
 	svc := agentic.NewAdvisorService(agentic.AdvisorConfig{Enabled: true}, fn)
-	svc.Consult(context.Background(), "ctx1", "a1")
-	svc.Consult(context.Background(), "ctx2", "a2")
+	_, err := svc.Consult(context.Background(), "ctx1", "a1")
+	require.NoError(t, err)
+	_, err = svc.Consult(context.Background(), "ctx2", "a2")
+	require.NoError(t, err)
 
 	resp, err := svc.LastResponse()
 	require.NoError(t, err)

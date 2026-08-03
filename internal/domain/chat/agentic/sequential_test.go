@@ -38,7 +38,8 @@ func TestSequentialFunc_SerializesConcurrentCalls(t *testing.T) {
 		wg.Add(1)
 		go func(v int) {
 			defer wg.Done()
-			fn(context.Background(), v)
+			err := fn(context.Background(), v)
+			assert.NoError(t, err)
 		}(i)
 	}
 	wg.Wait()
@@ -107,7 +108,8 @@ func TestSequentialFuncResult_Serializes(t *testing.T) {
 		wg.Add(1)
 		go func(v int) {
 			defer wg.Done()
-			fn(context.Background(), v)
+			_, err := fn(context.Background(), v)
+			assert.NoError(t, err)
 		}(i)
 	}
 	wg.Wait()
@@ -127,13 +129,13 @@ func TestSequentialQueue_EnqueueWait(t *testing.T) {
 		wg.Add(1)
 		go func(v int) {
 			defer wg.Done()
-			sq.EnqueueWait(context.Background(), func(_ context.Context) error {
+			assert.NoError(t, sq.EnqueueWait(context.Background(), func(_ context.Context) error {
 				time.Sleep(5 * time.Millisecond)
 				mu.Lock()
 				order = append(order, v)
 				mu.Unlock()
 				return nil
-			})
+			}))
 		}(i)
 	}
 	wg.Wait()
@@ -173,7 +175,7 @@ func TestSequentialQueue_SerializesExecution(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sq.EnqueueWait(context.Background(), func(_ context.Context) error {
+			assert.NoError(t, sq.EnqueueWait(context.Background(), func(_ context.Context) error {
 				cur := atomic.AddInt32(&running, 1)
 				for {
 					old := atomic.LoadInt32(&maxRunning)
@@ -184,7 +186,7 @@ func TestSequentialQueue_SerializesExecution(t *testing.T) {
 				time.Sleep(5 * time.Millisecond)
 				atomic.AddInt32(&running, -1)
 				return nil
-			})
+			}))
 		}()
 	}
 	wg.Wait()

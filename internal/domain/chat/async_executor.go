@@ -344,13 +344,21 @@ func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uui
 	if err != nil {
 		return run.ID, fmt.Errorf("rabbitmq: dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			slog.Warn("rabbitmq: close publisher connection", "err", closeErr)
+		}
+	}()
 
 	ch, err := conn.Channel()
 	if err != nil {
 		return run.ID, fmt.Errorf("rabbitmq: channel: %w", err)
 	}
-	defer ch.Close()
+	defer func() {
+		if closeErr := ch.Close(); closeErr != nil {
+			slog.Warn("rabbitmq: close publisher channel", "err", closeErr)
+		}
+	}()
 
 	q, err := ch.QueueDeclare(ChatRunQueue, true, false, false, false, nil)
 	if err != nil {
@@ -389,13 +397,21 @@ func (e *AsyncExecutor) StartWorker(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			slog.Warn("rabbitmq: close worker connection", "err", closeErr)
+		}
+	}()
 
 	ch, err := conn.Channel()
 	if err != nil {
 		return err
 	}
-	defer ch.Close()
+	defer func() {
+		if closeErr := ch.Close(); closeErr != nil {
+			slog.Warn("rabbitmq: close worker channel", "err", closeErr)
+		}
+	}()
 
 	q, err := ch.QueueDeclare(ChatRunQueue, true, false, false, false, nil)
 	if err != nil {
@@ -421,13 +437,17 @@ func (e *AsyncExecutor) StartWorker(ctx context.Context) error {
 			var task ChatRunTask
 			if err := json.Unmarshal(d.Body, &task); err != nil {
 				slog.Error("rabbitmq: unmarshal task", "err", err)
-				d.Nack(false, false)
+				if nackErr := d.Nack(false, false); nackErr != nil {
+					slog.Error("rabbitmq: nack invalid task", "err", nackErr)
+				}
 				continue
 			}
 
 			// Execute the run
 			go e.processTask(task)
-			d.Ack(false)
+			if ackErr := d.Ack(false); ackErr != nil {
+				slog.Error("rabbitmq: ack task", "err", ackErr)
+			}
 		}
 	}
 }

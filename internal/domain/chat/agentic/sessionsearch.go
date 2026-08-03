@@ -80,22 +80,22 @@ Response format:
 func BuildSessionSearchUserPrompt(query string, sessions []SessionSearchEntry) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("Query: %s\n\nSessions:\n", query))
+	fmt.Fprintf(&b, "Query: %s\n\nSessions:\n", query)
 
 	for _, s := range sessions {
-		b.WriteString(fmt.Sprintf("\n--- Session %d ---\n", s.Index))
+		fmt.Fprintf(&b, "\n--- Session %d ---\n", s.Index)
 		if s.Title != "" {
-			b.WriteString(fmt.Sprintf("Title: %s\n", s.Title))
+			fmt.Fprintf(&b, "Title: %s\n", s.Title)
 		}
 		if len(s.Tags) > 0 {
-			b.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(s.Tags, ", ")))
+			fmt.Fprintf(&b, "Tags: %s\n", strings.Join(s.Tags, ", "))
 		}
 		if s.Summary != "" {
-			b.WriteString(fmt.Sprintf("Summary: %s\n", s.Summary))
+			fmt.Fprintf(&b, "Summary: %s\n", s.Summary)
 		}
-		b.WriteString(fmt.Sprintf("Messages: %d | Created: %s\n", s.MessageCount, s.CreatedAt.Format("2006-01-02")))
+		fmt.Fprintf(&b, "Messages: %d | Created: %s\n", s.MessageCount, s.CreatedAt.Format("2006-01-02"))
 		if s.Excerpt != "" {
-			b.WriteString(fmt.Sprintf("Excerpt:\n%s\n", s.Excerpt))
+			fmt.Fprintf(&b, "Excerpt:\n%s\n", s.Excerpt)
 		}
 	}
 

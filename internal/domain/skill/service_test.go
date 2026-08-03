@@ -350,12 +350,6 @@ func TestSkillService_Create_InstructionsTooLong(t *testing.T) {
 func TestSkillService_Create_InstructionsAtLimit_Accepted(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	// Exactly 32000 non-whitespace chars should be accepted.
-	instructions := string(make([]byte, 32000))
-	for i := range instructions {
-		instructions = instructions[:i] + "x" + instructions[i+1:]
-		break
-	}
-	instructions = "x" + string(make([]byte, 31999))
 	// Fill with printable chars
 	buf := make([]byte, 32000)
 	for i := range buf {

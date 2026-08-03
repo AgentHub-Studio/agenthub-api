@@ -21,7 +21,6 @@ import (
 var (
 	indexedArgRe   = regexp.MustCompile(`\$ARGUMENTS\[(\d+)\]`)
 	shorthandArgRe = regexp.MustCompile(`\$(\d+)(?:\b|$)`)
-	namedArgRe     = regexp.MustCompile(`\$([a-zA-Z_][a-zA-Z0-9_]*)`)
 )
 
 // ParseArguments splits an arguments string into individual arguments.

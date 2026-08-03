@@ -408,7 +408,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 	switch c.AuthType {
 	case AuthTypeOAuth2ClientCredentials, AuthTypeOAuth2AuthorizationCode:
 		// Check database status first
- 	if c.AuthType == AuthTypeOAuth2AuthorizationCode {
+		if c.AuthType == AuthTypeOAuth2AuthorizationCode {
 			if c.BearerToken != nil && *c.BearerToken != "" && (c.ExpiresAt == nil || time.Now().Before(c.ExpiresAt.Add(-30*time.Second))) {
 				tokenPtr, _ := s.DecryptSecret(c.BearerToken)
 				if tokenPtr != nil && *tokenPtr != "" {
@@ -625,7 +625,7 @@ func (s *Service) doFullTokenRequest(ctx context.Context, tokenURL string, param
 	if err != nil {
 		return "", "", 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", "", 0, fmt.Errorf("oauth: token endpoint returned %d", resp.StatusCode)

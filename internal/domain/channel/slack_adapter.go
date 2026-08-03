@@ -74,7 +74,9 @@ func (a *SlackAdapter) VerifyRequest(_ context.Context, ch Channel, headers map[
 
 	// Reject requests older than 5 minutes to prevent replay attacks.
 	tsInt := int64(0)
-	fmt.Sscanf(ts, "%d", &tsInt)
+	if _, err := fmt.Sscanf(ts, "%d", &tsInt); err != nil {
+		return fmt.Errorf("slack: invalid request timestamp: %w", err)
+	}
 	if time.Now().Unix()-tsInt > 300 {
 		return fmt.Errorf("slack: request timestamp too old")
 	}
@@ -155,7 +157,7 @@ func (a *SlackAdapter) SendReply(_ context.Context, ch Channel, msg OutboundMess
 	if err != nil {
 		return fmt.Errorf("slack: send reply: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("slack: send reply: HTTP %d", resp.StatusCode)

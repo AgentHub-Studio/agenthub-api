@@ -85,7 +85,7 @@ func (c *APIClient) do(method, path string, body io.Reader, result any) int {
 	if err != nil {
 		c.t.Fatalf("do request %s %s: %v", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if result != nil {
 		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {

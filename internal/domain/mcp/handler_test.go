@@ -172,7 +172,7 @@ func setupFakeKeycloak(t *testing.T, realm string) (*rsa.PrivateKey, string) {
 				"kty": "RSA",
 				"use": "sig",
 				"alg": "RS256",
-				"n":   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+				"n":   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
 				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
 			},
 		},

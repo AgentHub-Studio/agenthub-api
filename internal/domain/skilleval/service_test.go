@@ -203,8 +203,10 @@ func TestServiceCreateSuite_missingSkillID(t *testing.T) {
 func TestServiceListSuites_filterBySkill(t *testing.T) {
 	svc, _ := buildService()
 	skillID := uuid.New()
-	svc.CreateSuite(context.Background(), skilleval.CreateSuiteRequest{SkillID: skillID, Name: "s1"})
-	svc.CreateSuite(context.Background(), skilleval.CreateSuiteRequest{SkillID: uuid.New(), Name: "s2"})
+	_, err := svc.CreateSuite(context.Background(), skilleval.CreateSuiteRequest{SkillID: skillID, Name: "s1"})
+	require.NoError(t, err)
+	_, err = svc.CreateSuite(context.Background(), skilleval.CreateSuiteRequest{SkillID: uuid.New(), Name: "s2"})
+	require.NoError(t, err)
 
 	suites, err := svc.ListSuites(context.Background(), &skillID)
 	require.NoError(t, err)
@@ -264,16 +266,18 @@ func TestServiceRunSuite_allPass(t *testing.T) {
 	suite, _ := svc.CreateSuite(context.Background(), skilleval.CreateSuiteRequest{
 		SkillID: skillID, Name: "math-suite",
 	})
-	svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
+	_, err := svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
 		InputText:      "what is 6x7?",
 		ExpectedOutput: "42",
 		GraderType:     skilleval.GraderContains,
 	})
-	svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
+	require.NoError(t, err)
+	_, err = svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
 		InputText:      "what is the answer?",
 		ExpectedOutput: "answer",
 		GraderType:     skilleval.GraderContains,
 	})
+	require.NoError(t, err)
 
 	run, err := svc.RunSuite(context.Background(), suite.ID)
 	require.NoError(t, err)
@@ -294,11 +298,12 @@ func TestServiceRunSuite_someFail(t *testing.T) {
 	suite, _ := svc.CreateSuite(context.Background(), skilleval.CreateSuiteRequest{
 		SkillID: skillID, Name: "s",
 	})
-	svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
+	_, err := svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
 		InputText:      "what is 6x7?",
 		ExpectedOutput: "42",
 		GraderType:     skilleval.GraderContains,
 	})
+	require.NoError(t, err)
 
 	run, err := svc.RunSuite(context.Background(), suite.ID)
 	require.NoError(t, err)
@@ -316,9 +321,10 @@ func TestServiceRunSuite_evaluatorError(t *testing.T) {
 	suite, _ := svc.CreateSuite(context.Background(), skilleval.CreateSuiteRequest{
 		SkillID: skillID, Name: "s",
 	})
-	svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
+	_, err := svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
 		InputText: "hello", ExpectedOutput: "world",
 	})
+	require.NoError(t, err)
 
 	run, err := svc.RunSuite(context.Background(), suite.ID)
 	require.NoError(t, err)
@@ -341,11 +347,12 @@ func TestServiceRunSuite_toolTriggerCheck(t *testing.T) {
 		SkillID: skillID, Name: "trigger-suite",
 	})
 	shouldTrigger := true
-	svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
+	_, err := svc.AddCase(context.Background(), suite.ID, skilleval.CreateCaseRequest{
 		InputText:     "find docs about X",
 		ExpectedTool:  "document_search",
 		ShouldTrigger: &shouldTrigger,
 	})
+	require.NoError(t, err)
 
 	run, err := svc.RunSuite(context.Background(), suite.ID)
 	require.NoError(t, err)

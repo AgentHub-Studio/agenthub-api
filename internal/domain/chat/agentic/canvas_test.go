@@ -3,6 +3,8 @@ package agentic
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // collectCanvasEvents drains a buffered channel and returns all events.
@@ -64,7 +66,7 @@ func TestHandleCanvasUpdate_DefaultsToMarkdown(t *testing.T) {
 		t.Fatalf("expected 1 canvas event, got %d", len(canvasEvents))
 	}
 	var data CanvasUpdateData
-	json.Unmarshal(canvasEvents[0].Data, &data)
+	require.NoError(t, json.Unmarshal(canvasEvents[0].Data, &data))
 	if data.Format != CanvasFormatMarkdown {
 		t.Errorf("expected default markdown, got %s", data.Format)
 	}
@@ -93,7 +95,7 @@ func TestHandleCanvasUpdate_PreservesID(t *testing.T) {
 	events := collectCanvasEvents(ch)
 	canvasEvents := filterByType(events, EventCanvasUpdate)
 	var data CanvasUpdateData
-	json.Unmarshal(canvasEvents[0].Data, &data)
+	require.NoError(t, json.Unmarshal(canvasEvents[0].Data, &data))
 	if data.ID != "my-artifact-id" {
 		t.Errorf("expected ID 'my-artifact-id', got %q", data.ID)
 	}
@@ -114,12 +116,12 @@ func TestHandleCanvasFeedback_Thumbs(t *testing.T) {
 		t.Fatalf("expected 1 input_request event, got %d", len(inputEvents))
 	}
 	var data InputRequestData
-	json.Unmarshal(inputEvents[0].Data, &data)
+	require.NoError(t, json.Unmarshal(inputEvents[0].Data, &data))
 	if data.RequestID == "" {
 		t.Error("expected non-empty requestId")
 	}
 	var payload UiFormPayloadDto
-	json.Unmarshal(data.Payload, &payload)
+	require.NoError(t, json.Unmarshal(data.Payload, &payload))
 	if len(payload.Elements) == 0 {
 		t.Error("expected form elements")
 	}
@@ -159,7 +161,7 @@ func TestHandleCanvasExportTable(t *testing.T) {
 		t.Fatalf("expected 1 canvas event, got %d", len(canvasEvents))
 	}
 	var data CanvasUpdateData
-	json.Unmarshal(canvasEvents[0].Data, &data)
+	require.NoError(t, json.Unmarshal(canvasEvents[0].Data, &data))
 	if data.Format != CanvasFormatTable {
 		t.Errorf("expected table format, got %s", data.Format)
 	}

@@ -304,12 +304,14 @@ func TestService_List(t *testing.T) {
 	svc := trigger.NewService(repo, cron)
 
 	agentID := uuid.New()
-	svc.Create(context.Background(), agentID, trigger.CreateTriggerRequest{
+	_, err := svc.Create(context.Background(), agentID, trigger.CreateTriggerRequest{
 		Name: "t1", CronExpression: "0 * * * *",
 	})
-	svc.Create(context.Background(), agentID, trigger.CreateTriggerRequest{
+	require.NoError(t, err)
+	_, err = svc.Create(context.Background(), agentID, trigger.CreateTriggerRequest{
 		Name: "t2", CronExpression: "*/5 * * * *",
 	})
+	require.NoError(t, err)
 
 	page, err := svc.List(context.Background(), agentID, pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)

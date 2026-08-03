@@ -397,8 +397,11 @@ func ContextWindowAccessTierMutabilityRanksAreContiguous() bool {
 // ContextWindowAccessTierOrderMatchesRank validates that contextWindowAccessTierProfiles
 // is sorted in ascending MutabilityRank order (the canonical Figure 6 top-to-bottom order).
 func ContextWindowAccessTierOrderMatchesRank() bool {
-	for i := 1; i < len(contextWindowAccessTierProfiles); i++ {
-		if contextWindowAccessTierProfiles[i].MutabilityRank <= contextWindowAccessTierProfiles[i-1].MutabilityRank {
+	if len(contextWindowAccessTierProfiles) != len(contextWindowAccessTierOrder) {
+		return false
+	}
+	for i, p := range contextWindowAccessTierProfiles {
+		if p.TierID != contextWindowAccessTierOrder[i] || p.MutabilityRank != i+1 {
 			return false
 		}
 	}

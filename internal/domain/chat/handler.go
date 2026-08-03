@@ -213,9 +213,16 @@ func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
 	if run, found, _ := h.svc.GetActiveRun(r.Context(), id); found {
 		// Include active run in session metadata or just as a separate field if we update DTO.
 		// For now, we can add it to a map if we want to extend the response without breaking DTO.
-		data, _ := json.Marshal(resp)
+		data, err := json.Marshal(resp)
+		if err != nil {
+			respond.Error(w, http.StatusInternalServerError, "failed to serialize chat session")
+			return
+		}
 		var m map[string]interface{}
-		json.Unmarshal(data, &m)
+		if err := json.Unmarshal(data, &m); err != nil {
+			respond.Error(w, http.StatusInternalServerError, "failed to serialize chat session")
+			return
+		}
 		m["activeRun"] = run
 		respond.JSON(w, http.StatusOK, m)
 		return
@@ -405,7 +412,11 @@ func (h *Handler) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "file is required")
 		return
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			slog.Debug("chat: close attachment", "err", closeErr)
+		}
+	}()
 
 	data, err := io.ReadAll(io.LimitReader(file, MaxAttachmentSizeBytes+1))
 	if err != nil {
@@ -556,7 +567,11 @@ func readVoiceInput(w http.ResponseWriter, r *http.Request) (VoiceTranscriptionI
 		if err != nil {
 			return VoiceTranscriptionInput{}, fmt.Errorf("audio file is required")
 		}
-		defer file.Close()
+		defer func() {
+			if closeErr := file.Close(); closeErr != nil {
+				slog.Debug("chat: close voice upload", "err", closeErr)
+			}
+		}()
 		audio, err := io.ReadAll(io.LimitReader(file, maxVoiceUploadBytes+1))
 		if err != nil {
 			return VoiceTranscriptionInput{}, fmt.Errorf("failed to read audio")
@@ -739,7 +754,9 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			seq := buf.Append(ev)
-			fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data)
+			if _, err := fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-done:
 			// Run goroutine is done; drain any remaining buffered events.
@@ -751,14 +768,18 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					seq := buf.Append(ev)
-					fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data)
+					if _, err := fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data); err != nil {
+						return
+					}
 					flusher.Flush()
 				default:
 					// No more events pending; done signal may have raced with close(sseCh).
 					// Wait for sseCh to be closed to ensure MarkDone is called.
 					for ev := range sseCh {
 						seq := buf.Append(ev)
-						fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data)
+						if _, err := fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data); err != nil {
+							return
+						}
 						flusher.Flush()
 					}
 					buf.MarkDone()
@@ -981,14 +1002,18 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 			Message:     "events lost: buffer overflow since last event id",
 			LastEventID: lastEventID,
 		})
-		fmt.Fprintf(w, "event: reconnect_overflow\ndata: %s\n\n", overflowData)
+		if _, err := fmt.Fprintf(w, "event: reconnect_overflow\ndata: %s\n\n", overflowData); err != nil {
+			return
+		}
 		flusher.Flush()
 	}
 	events = filterReplayableEvents(events)
 
 	// Send replayed events.
 	for _, ev := range events {
-		fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, ev.ID, ev.Event.Type, ev.Event.Data)
+		if _, err := fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, ev.ID, ev.Event.Type, ev.Event.Data); err != nil {
+			return
+		}
 		flusher.Flush()
 	}
 
@@ -1011,7 +1036,9 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C():
 			newEvents, _ := buf.EventsSince(lastSent)
 			for _, ev := range newEvents {
-				fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, ev.ID, ev.Event.Type, ev.Event.Data)
+				if _, err := fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, ev.ID, ev.Event.Type, ev.Event.Data); err != nil {
+					return
+				}
 				flusher.Flush()
 				lastSent = ev.ID
 			}

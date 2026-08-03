@@ -139,13 +139,14 @@ func TestHandlerRunSuite_success(t *testing.T) {
 	ev.output = skilleval.EvalOutput{Text: "42 is the answer"}
 	s := seedSuite(t, repo)
 	// Add a case
-	repo.CreateCase(context.Background(), skilleval.EvalCase{
+	_, err := repo.CreateCase(context.Background(), skilleval.EvalCase{
 		SuiteID:        s.ID,
 		InputText:      "6x7?",
 		ExpectedOutput: "42",
 		GraderType:     skilleval.GraderContains,
 		ShouldTrigger:  true,
 	})
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/skill-evals/suites/"+s.ID.String()+"/run", nil)
 	w := httptest.NewRecorder()
@@ -199,10 +200,11 @@ func TestHandlerRunSuite_withEvaluatorError(t *testing.T) {
 	s, _ := repo.CreateSuite(context.Background(), skilleval.EvalSuite{
 		SkillID: uuid.New(), Name: "fail-suite",
 	})
-	repo.CreateCase(context.Background(), skilleval.EvalCase{
+	_, err := repo.CreateCase(context.Background(), skilleval.EvalCase{
 		SuiteID: s.ID, InputText: "hello", ExpectedOutput: "world",
 		GraderType: skilleval.GraderContains, ShouldTrigger: true,
 	})
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/skill-evals/suites/"+s.ID.String()+"/run", nil)
 	w := httptest.NewRecorder()

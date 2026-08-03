@@ -23,13 +23,13 @@ type ModelInfo struct {
 
 // OpenRouterModelInfo represents a model from the OpenRouter API with pricing details.
 type OpenRouterModelInfo struct {
-	ID               string  `json:"id"`
-	Name             string  `json:"name"`
-	Description      string  `json:"description,omitempty"`
-	Modality         string  `json:"modality,omitempty"`
-	ContextLength    int64   `json:"contextLength,omitempty"`
-	PromptPrice      string  `json:"promptPrice,omitempty"`
-	CompletionPrice  string  `json:"completionPrice,omitempty"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Description     string `json:"description,omitempty"`
+	Modality        string `json:"modality,omitempty"`
+	ContextLength   int64  `json:"contextLength,omitempty"`
+	PromptPrice     string `json:"promptPrice,omitempty"`
+	CompletionPrice string `json:"completionPrice,omitempty"`
 }
 
 // ProviderInfo describes an available AI provider.
@@ -64,7 +64,7 @@ func ListOpenAIModels(ctx context.Context, apiKey string) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("openai: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -113,7 +113,7 @@ func ListOllamaModels(ctx context.Context, baseURL string) ([]ModelInfo, error) 
 	if err != nil {
 		return nil, fmt.Errorf("%w: ollama: %v", ErrUpstream, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -150,7 +150,7 @@ func ListOpenRouterModels(ctx context.Context, apiKey string) ([]OpenRouterModel
 	if err != nil {
 		return nil, fmt.Errorf("openrouter: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -237,7 +237,9 @@ func TestSMTPConnection(ctx context.Context, req SmtpTestRequest) error {
 	if err != nil {
 		return fmt.Errorf("smtp: cannot connect to %s: %w", addr, err)
 	}
-	conn.Close()
+	if err := conn.Close(); err != nil {
+		return fmt.Errorf("smtp: close connection: %w", err)
+	}
 	return nil
 }
 

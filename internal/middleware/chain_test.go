@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -215,8 +214,8 @@ func mustSetupFakeKeycloak(t *testing.T, realm string) (*rsa.PrivateKey, string)
 	require.NoError(t, err)
 
 	// Build a minimal JWKS document.
-	nBytes := key.PublicKey.N.Bytes()
-	eVal := key.PublicKey.E
+	nBytes := key.N.Bytes()
+	eVal := key.E
 	eBytes := make([]byte, 4)
 	eBytes[0] = byte(eVal >> 24)
 	eBytes[1] = byte(eVal >> 16)
@@ -305,9 +304,4 @@ func mustSignJWTWithRoles(
 	signed, err := token.SignedString(key)
 	require.NoError(t, err)
 	return signed
-}
-
-// bigIntToBytes converts a *big.Int to its minimal big-endian byte representation.
-func bigIntToBytes(n *big.Int) []byte {
-	return n.Bytes()
 }

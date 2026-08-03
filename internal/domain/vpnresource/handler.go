@@ -209,7 +209,11 @@ func (h *Handler) uploadConfig(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "field 'file' is required")
 		return
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			slog.Debug("vpn: close ovpn upload", "err", closeErr)
+		}
+	}()
 
 	updated, err := h.svc.UploadOvpnConfig(r.Context(), tenantID, id, file, header.Size)
 	if err != nil {
@@ -251,7 +255,11 @@ func (h *Handler) uploadAuth(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "field 'file' is required")
 		return
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			slog.Debug("vpn: close auth upload", "err", closeErr)
+		}
+	}()
 
 	updated, err := h.svc.UploadAuthFile(r.Context(), tenantID, id, io.Reader(file), header.Size)
 	if err != nil {

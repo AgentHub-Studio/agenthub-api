@@ -812,6 +812,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		effectiveBudget = in.RemainingBudgetUSD
 		gates.HasBudgetLimit = true // override: parent passed an explicit budget
 	}
+	var cacheSafeParams *CacheSafeParams
 
 	for turnIndex < r.config.MaxIterations {
 		slog.Info("agentic: loop iteration start", "turn", turnIndex, "maxIterations", r.config.MaxIterations, "ctxErr", ctx.Err())
@@ -874,14 +875,6 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			Effort:       gates.ResolvedEffort,
 			ToolChoice:   resolveToolChoice(r.config.ToolMode, aiTools, r.chatModel.GetProviderName()),
 		}
-		cacheSafeParams := NewCacheSafeParams(
-			systemPrompt,
-			aiTools,
-			r.chatModel.GetProviderName(),
-			opts.Model,
-			gates.CacheControl,
-		)
-
 		// Determine query source for this turn.
 		turnSource := SourceMainLoop
 		if in.CurrentDepth > 0 {
@@ -898,7 +891,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		// 5a. Call LLM with streaming (with retry + model fallback).
 		// P-C102-1: wrap in a per-call timeout so a stalled provider never blocks forever.
-		callCtx := ctx
+		var callCtx context.Context
 		var cancelCall context.CancelFunc
 		if r.config.LLMCallTimeout > 0 {
 			callCtx, cancelCall = context.WithTimeout(ctx, r.config.LLMCallTimeout)
@@ -956,7 +949,6 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				// Verify compaction actually reduced tokens; escalate if needed.
 				compactResult, compactErr = r.ctxManager.VerifyCompaction(ctx, compactResult, systemTokens, r.config, nil)
 				if compactErr != nil {
-					compactFailures++
 					localEmitError("llm_call", err)
 					return
 				}

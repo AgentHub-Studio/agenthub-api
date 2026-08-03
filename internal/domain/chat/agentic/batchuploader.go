@@ -49,16 +49,15 @@ type BatchUploadFunc func(batch []json.RawMessage) (retryAfter time.Duration, er
 
 // BatchUploader buffers events and uploads them in serial batches.
 type BatchUploader struct {
-	mu                   sync.Mutex
-	config               BatchUploaderConfig
-	queue                []json.RawMessage
-	uploadFn             BatchUploadFunc
-	consecutiveFailures  int
-	droppedBatches       int
-	totalUploaded        int
-	closed               bool
-	backpressure         *sync.Cond
-	flushDone            chan struct{}
+	mu                  sync.Mutex
+	config              BatchUploaderConfig
+	queue               []json.RawMessage
+	uploadFn            BatchUploadFunc
+	consecutiveFailures int
+	droppedBatches      int
+	totalUploaded       int
+	closed              bool
+	backpressure        *sync.Cond
 }
 
 // NewBatchUploader creates a batch uploader.

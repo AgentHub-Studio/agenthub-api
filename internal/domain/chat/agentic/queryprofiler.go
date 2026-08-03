@@ -120,13 +120,13 @@ func (qp *QueryProfile) Report() string {
 	defer qp.mu.Unlock()
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("=== Query Profile: %s ===\n", qp.id))
+	fmt.Fprintf(&b, "=== Query Profile: %s ===\n", qp.id)
 
 	total := qp.endTime.Sub(qp.startTime)
 	if qp.endTime.IsZero() {
 		total = time.Since(qp.startTime)
 	}
-	b.WriteString(fmt.Sprintf("Total: %s\n\n", total.Round(time.Microsecond)))
+	fmt.Fprintf(&b, "Total: %s\n\n", total.Round(time.Microsecond))
 
 	if len(qp.checkpoints) > 0 {
 		b.WriteString("Phase breakdown:\n")
@@ -143,17 +143,17 @@ func (qp *QueryProfile) Report() string {
 				pct = float64(cp.DurationFromPrev) / float64(total) * 100
 			}
 			bar := strings.Repeat("█", int(pct/5))
-			b.WriteString(fmt.Sprintf("  %-*s  %8s  (%5.1f%%) %s\n",
+			fmt.Fprintf(&b, "  %-*s  %8s  (%5.1f%%) %s\n",
 				maxNameLen, cp.Name,
 				cp.DurationFromPrev.Round(time.Microsecond),
-				pct, bar))
+				pct, bar)
 		}
 	}
 
 	if len(qp.metadata) > 0 {
 		b.WriteString("\nMetadata:\n")
 		for k, v := range qp.metadata {
-			b.WriteString(fmt.Sprintf("  %s: %v\n", k, v))
+			fmt.Fprintf(&b, "  %s: %v\n", k, v)
 		}
 	}
 

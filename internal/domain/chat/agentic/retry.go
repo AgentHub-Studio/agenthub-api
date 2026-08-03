@@ -16,9 +16,9 @@ import (
 
 // FallbackResult is returned by retryStreamWithFallback to indicate which model was used.
 type FallbackResult struct {
-	Stream       <-chan ai.StreamChunk
-	ModelUsed    string // the model that succeeded
-	WasFallback  bool   // true if a fallback model was used
+	Stream      <-chan ai.StreamChunk
+	ModelUsed   string // the model that succeeded
+	WasFallback bool   // true if a fallback model was used
 }
 
 // retryStreamWithFallback wraps retryStream with model fallback support.
@@ -47,10 +47,17 @@ func retryStreamWithFallbackSource(
 	source QuerySource,
 	onFallback func(from, to string, err error),
 ) (*FallbackResult, error) {
-	// Try primary model with full retries.
-	stream, err := retryStream(ctx, model, messages, opts, config.RetryMaxAttempts, source)
+	streamFallbackConfig := DefaultStreamFallbackConfig()
+	streamFallbackConfig.MaxAttempts = config.RetryMaxAttempts
+
+	// Try the primary model through the SSE-preserving non-streaming fallback.
+	streamResult, err := retryStreamWithNonStreamingFallback(ctx, model, messages, opts, streamFallbackConfig, source)
 	if err == nil {
-		return &FallbackResult{Stream: stream, ModelUsed: opts.Model}, nil
+		modelUsed := streamResult.Model
+		if modelUsed == "" {
+			modelUsed = opts.Model
+		}
+		return &FallbackResult{Stream: streamResult.Stream, ModelUsed: modelUsed}, nil
 	}
 
 	// No fallbacks configured — return the original error.
@@ -81,11 +88,17 @@ func retryStreamWithFallbackSource(
 		fallbackOpts := opts
 		fallbackOpts.Model = fallbackModel
 
-		stream, err := retryStream(ctx, model, messages, fallbackOpts, 1, source)
+		fallbackStreamConfig := streamFallbackConfig
+		fallbackStreamConfig.MaxAttempts = 1
+		streamResult, err := retryStreamWithNonStreamingFallback(ctx, model, messages, fallbackOpts, fallbackStreamConfig, source)
 		if err == nil {
+			modelUsed := streamResult.Model
+			if modelUsed == "" {
+				modelUsed = fallbackModel
+			}
 			return &FallbackResult{
-				Stream:      stream,
-				ModelUsed:   fallbackModel,
+				Stream:      streamResult.Stream,
+				ModelUsed:   modelUsed,
 				WasFallback: true,
 			}, nil
 		}
@@ -435,18 +448,18 @@ func getPromptTooLongTokenGap(errMsg string) int {
 type APIErrorClass string
 
 const (
-	ErrorClassNone             APIErrorClass = ""
-	ErrorClassRateLimit        APIErrorClass = "rate_limit"
-	ErrorClassServerOverload   APIErrorClass = "server_overload"
-	ErrorClassConnection       APIErrorClass = "connection_error"
-	ErrorClassStaleConnection  APIErrorClass = "stale_connection"
-	ErrorClassTimeout          APIErrorClass = "api_timeout"
-	ErrorClassAuth             APIErrorClass = "auth_error"
-	ErrorClassPromptTooLong    APIErrorClass = "prompt_too_long"
-	ErrorClassMediaSize        APIErrorClass = "media_size_error"
-	ErrorClassAborted          APIErrorClass = "aborted"
-	ErrorClassServerError      APIErrorClass = "server_error"
-	ErrorClassUnknown          APIErrorClass = "unknown"
+	ErrorClassNone            APIErrorClass = ""
+	ErrorClassRateLimit       APIErrorClass = "rate_limit"
+	ErrorClassServerOverload  APIErrorClass = "server_overload"
+	ErrorClassConnection      APIErrorClass = "connection_error"
+	ErrorClassStaleConnection APIErrorClass = "stale_connection"
+	ErrorClassTimeout         APIErrorClass = "api_timeout"
+	ErrorClassAuth            APIErrorClass = "auth_error"
+	ErrorClassPromptTooLong   APIErrorClass = "prompt_too_long"
+	ErrorClassMediaSize       APIErrorClass = "media_size_error"
+	ErrorClassAborted         APIErrorClass = "aborted"
+	ErrorClassServerError     APIErrorClass = "server_error"
+	ErrorClassUnknown         APIErrorClass = "unknown"
 )
 
 // classifyAPIError maps an error to a structured class for analytics and retry decisions.

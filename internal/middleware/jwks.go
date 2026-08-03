@@ -69,7 +69,7 @@ func fetchRealmJWKS(keycloakBaseURL, realm string) (map[string]*rsa.PublicKey, e
 	if err != nil {
 		return nil, fmt.Errorf("jwks: fetch %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("jwks: fetch %s returned HTTP %d", url, resp.StatusCode)

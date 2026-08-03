@@ -184,10 +184,6 @@ func GenerateHeatmap(dailyActivity map[string]int, opts HeatmapOptions) [][]Heat
 
 // RenderHeatmap produces a text representation of the heatmap.
 func RenderHeatmap(dailyActivity map[string]int, opts HeatmapOptions) string {
-	if opts.ShowMonthLabels || opts.ShowDayLabels {
-		// defaults
-	}
-
 	grid := GenerateHeatmap(dailyActivity, opts)
 	if len(grid) == 0 || len(grid[0]) == 0 {
 		return ""
@@ -219,7 +215,7 @@ func RenderHeatmap(dailyActivity map[string]int, opts HeatmapOptions) string {
 	// Grid rows.
 	for row := 0; row < 7; row++ {
 		if opts.ShowDayLabels {
-			b.WriteString(fmt.Sprintf("%-4s", dayLabels[row]))
+			fmt.Fprintf(&b, "%-4s", dayLabels[row])
 		}
 		for col := 0; col < len(grid[row]); col++ {
 			b.WriteString(HeatmapChar(grid[row][col].Intensity))

@@ -83,7 +83,7 @@ func (r *pgRepository) Create(ctx context.Context, t Tenant) (Tenant, error) {
 	if err != nil {
 		return Tenant{}, fmt.Errorf("tenant.Create begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	row := tx.QueryRow(ctx, createTenantSQL, t.ID, t.Name, string(t.Status))
 	created, err := scanTenant(row)

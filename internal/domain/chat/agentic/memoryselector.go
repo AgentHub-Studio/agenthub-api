@@ -69,10 +69,10 @@ func DefaultMemorySelectorConfig() MemorySelectorConfig {
 
 // MemorySelector selects relevant memories for the current context.
 type MemorySelector struct {
-	mu         sync.Mutex
-	config     MemorySelectorConfig
-	scoreFn    MemoryRelevanceFunc
-	surfaced   map[string]time.Time // filePath → when surfaced (dedup)
+	mu       sync.Mutex
+	config   MemorySelectorConfig
+	scoreFn  MemoryRelevanceFunc
+	surfaced map[string]time.Time // filePath → when surfaced (dedup)
 }
 
 // NewMemorySelector creates a memory selector.
@@ -178,12 +178,12 @@ func FormatMemoryManifest(headers []MemoryHeader) string {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(fmt.Sprintf("- [%s]", h.Filename))
+		fmt.Fprintf(&b, "- [%s]", h.Filename)
 		if h.Type != "" {
-			b.WriteString(fmt.Sprintf(" (%s)", h.Type))
+			fmt.Fprintf(&b, " (%s)", h.Type)
 		}
 		if h.Description != "" {
-			b.WriteString(fmt.Sprintf(": %s", h.Description))
+			fmt.Fprintf(&b, ": %s", h.Description)
 		}
 	}
 	return b.String()

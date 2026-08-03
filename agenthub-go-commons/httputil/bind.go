@@ -16,7 +16,7 @@ func BindJSON(r *http.Request, v any) error {
 	if r.Body == nil {
 		return fmt.Errorf("request body is required")
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
 	if err != nil {

@@ -344,15 +344,9 @@ func (s *Service) IngestWebhook(ctx context.Context, token, sourceType string, p
 	return log, nil
 }
 
-// dispatchWithRetry forwards the payload to the webhook's target URL with exponential backoff.
-// Delays: 1s, 2s, 4s, 8s, 16s (2^attempt * baseDelay, capped at ingestMaxRetries attempts).
-func (s *Service) dispatchWithRetry(w WebhookConfig, d WebhookDeliveryLog) {
-	s.dispatchWithRetryCtx(context.Background(), w, d)
-}
-
-// dispatchWithRetryCtx é como dispatchWithRetry mas preserva o tenant
-// context do request original, sem isso UpdateDelivery não acha o
-// schema ah_{tenantId} e a delivery fica eternamente PENDING.
+// dispatchWithRetryCtx forwards the payload with exponential backoff and preserves
+// the original request tenant context; otherwise UpdateDelivery cannot resolve
+// the ah_{tenantId} schema and the delivery remains PENDING.
 func (s *Service) dispatchWithRetryCtx(parentCtx context.Context, w WebhookConfig, d WebhookDeliveryLog) {
 	maxAttempts := w.RetryCount
 	if maxAttempts <= 0 || maxAttempts > ingestMaxRetries {
@@ -399,7 +393,7 @@ func doHTTPPost(client *http.Client, url string, payload []byte) (int, string, e
 	if err != nil {
 		return 0, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	return resp.StatusCode, string(b), nil
 }

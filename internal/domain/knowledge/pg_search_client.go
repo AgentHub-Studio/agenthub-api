@@ -60,7 +60,7 @@ func (c *PgDocumentSearchClient) embed(ctx context.Context, text string) ([]floa
 	if err != nil {
 		return nil, fmt.Errorf("knowledge: embed request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("knowledge: embedding service returned HTTP %d", resp.StatusCode)

@@ -64,12 +64,11 @@ type CoordinatorModeConfig struct {
 
 // CoordinatorModeState tracks the current mode and metadata.
 type CoordinatorModeState struct {
-	mu           sync.RWMutex
-	mode         AgentMode
-	phase        WorkflowPhase
-	config       CoordinatorModeConfig
-	workerCount  int
-	sessionID    string
+	mu          sync.RWMutex
+	mode        AgentMode
+	phase       WorkflowPhase
+	config      CoordinatorModeConfig
+	workerCount int
 }
 
 // NewCoordinatorModeState creates a coordinator mode tracker.
@@ -226,9 +225,9 @@ func BuildCoordinatorModePrompt(config CoordinatorModeConfig) string {
 	if len(config.Workers) > 0 {
 		b.WriteString("## Available Workers\n")
 		for _, w := range config.Workers {
-			b.WriteString(fmt.Sprintf("- **%s** (parallelism: %s", w.Name, w.Parallelism))
+			fmt.Fprintf(&b, "- **%s** (parallelism: %s", w.Name, w.Parallelism)
 			if w.MaxTurns > 0 {
-				b.WriteString(fmt.Sprintf(", max turns: %d", w.MaxTurns))
+				fmt.Fprintf(&b, ", max turns: %d", w.MaxTurns)
 			}
 			b.WriteString(")\n")
 		}

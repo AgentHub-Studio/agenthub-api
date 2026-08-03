@@ -24,7 +24,7 @@ func (c *AdminClient) CreateUser(ctx context.Context, tenantID string, user User
 	if err != nil {
 		return "", fmt.Errorf("keycloak: create user: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		b, _ := io.ReadAll(resp.Body)
@@ -46,7 +46,7 @@ func (c *AdminClient) GetUser(ctx context.Context, tenantID, userID string) (*Us
 	if err != nil {
 		return nil, fmt.Errorf("keycloak: get user: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("keycloak: user %q not found", userID)

@@ -342,7 +342,7 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 
 		// Convert legacy knowledgebase.KnowledgeBase to the internal type if needed
 		// or use the response format.
-		var kbs []knowledgebase.KnowledgeBase = kbsResp
+		var kbs = kbsResp
 
 		// Auto-include tenant-wide KBs that are not explicitly linked
 		allKbs, _, err := b.kbs.List(ctx, pagination.PageRequest{Page: 0, Size: 100})

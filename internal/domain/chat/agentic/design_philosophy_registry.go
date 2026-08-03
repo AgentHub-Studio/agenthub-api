@@ -65,15 +65,6 @@ const (
 	ConceptAlternativeDesignFamilies PhilosophyConceptID = "alternative_design_families"
 )
 
-// alternativeDesignFamilyConceptIDs is the bounded set.
-var alternativeDesignFamilyConceptIDs = []PhilosophyConceptID{
-	ConceptDecisionLogicRatio,
-	ConceptMinimalScaffoldingThesis,
-	ConceptOSKernelAnalogy,
-	ConceptConvergenceThesis,
-	ConceptAlternativeDesignFamilies,
-}
-
 // AlternativeDesignFamilyID is a slug for one of the three §2.2 design families
 // that Claude Code does NOT adopt.
 type AlternativeDesignFamilyID string
@@ -96,38 +87,38 @@ const (
 // AlternativeDesignFamily describes one of the three design families that
 // §2.2 explicitly names as contrasting with Claude Code's approach.
 type AlternativeDesignFamily struct {
-	ID             AlternativeDesignFamilyID
-	Label          string   // short human-readable name
+	ID              AlternativeDesignFamilyID
+	Label           string   // short human-readable name
 	ExemplarSystems []string // systems cited in §2.2 as exemplars
-	CoreMechanism  string   // what they invest in (instead of harness)
-	Contrast       string   // how Claude Code differs
-	PDFSection     string   // PDF section where this family is named
+	CoreMechanism   string   // what they invest in (instead of harness)
+	Contrast        string   // how Claude Code differs
+	PDFSection      string   // PDF section where this family is named
 }
 
 var alternativeDesignFamilies = map[AlternativeDesignFamilyID]AlternativeDesignFamily{
 	FamilyRuleBasedOrchestration: {
-		ID:             FamilyRuleBasedOrchestration,
-		Label:          "Rule-based orchestration",
+		ID:              FamilyRuleBasedOrchestration,
+		Label:           "Rule-based orchestration",
 		ExemplarSystems: []string{"LangGraph"},
-		CoreMechanism:  "Explicit state graphs with typed edges encode decision logic; scaffolding constrains model choices.",
-		Contrast:       "Claude Code gives the model maximum decision latitude within a rich operational harness; no explicit planning graph is imposed.",
-		PDFSection:     "2.2",
+		CoreMechanism:   "Explicit state graphs with typed edges encode decision logic; scaffolding constrains model choices.",
+		Contrast:        "Claude Code gives the model maximum decision latitude within a rich operational harness; no explicit planning graph is imposed.",
+		PDFSection:      "2.2",
 	},
 	FamilyContainerIsolatedExecution: {
-		ID:             FamilyContainerIsolatedExecution,
-		Label:          "Container-isolated execution",
+		ID:              FamilyContainerIsolatedExecution,
+		Label:           "Container-isolated execution",
 		ExemplarSystems: []string{"SWEAgent", "OpenHands"},
-		CoreMechanism:  "Docker container isolation as the primary trust boundary; per-action safety classification is minimal.",
-		Contrast:       "Claude Code uses layered policy enforcement (deny-first rules, ML classifier, sandboxing) rather than container isolation as the sole boundary.",
-		PDFSection:     "2.2",
+		CoreMechanism:   "Docker container isolation as the primary trust boundary; per-action safety classification is minimal.",
+		Contrast:        "Claude Code uses layered policy enforcement (deny-first rules, ML classifier, sandboxing) rather than container isolation as the sole boundary.",
+		PDFSection:      "2.2",
 	},
 	FamilyVersionControlAsSafety: {
-		ID:             FamilyVersionControlAsSafety,
-		Label:          "Version-control-as-safety",
+		ID:              FamilyVersionControlAsSafety,
+		Label:           "Version-control-as-safety",
 		ExemplarSystems: []string{"Aider"},
-		CoreMechanism:  "Git rollback as the primary safety mechanism; changes are reversible via version control rather than prevented by evaluation.",
-		Contrast:       "Claude Code uses deny-first evaluation at time of action rather than relying on post-hoc rollback as the primary safety guarantee.",
-		PDFSection:     "2.2",
+		CoreMechanism:   "Git rollback as the primary safety mechanism; changes are reversible via version control rather than prevented by evaluation.",
+		Contrast:        "Claude Code uses deny-first evaluation at time of action rather than relying on post-hoc rollback as the primary safety guarantee.",
+		PDFSection:      "2.2",
 	},
 }
 
@@ -162,54 +153,54 @@ type PhilosophyConcept struct {
 
 var philosophyConcepts = map[PhilosophyConceptID]PhilosophyConcept{
 	ConceptDecisionLogicRatio: {
-		ID:         ConceptDecisionLogicRatio,
-		Label:      "Decision-logic ratio (1.6% / 98.4%)",
-		Description: "An estimated 1.6% of the Claude Code codebase constitutes decision logic; the remaining 98.4% is operational harness (permission gates, tool routing, context management, recovery logic). §11.1 states this ratio is not accidental — it is the intended consequence of the minimal-scaffolding design principle.",
-		PDFSection:         "11.1",
+		ID:                  ConceptDecisionLogicRatio,
+		Label:               "Decision-logic ratio (1.6% / 98.4%)",
+		Description:         "An estimated 1.6% of the Claude Code codebase constitutes decision logic; the remaining 98.4% is operational harness (permission gates, tool routing, context management, recovery logic). §11.1 states this ratio is not accidental — it is the intended consequence of the minimal-scaffolding design principle.",
+		PDFSection:          "11.1",
 		GroundedInPrinciple: PrincipleMinimalScaffoldingMaximalHarness,
-		QuantitativeClaim:  "decision_logic=1.6%, operational_harness=98.4%",
-		DesignImplication:  "Agent builders can measure how much of their codebase is scaffolding vs. harness; a high scaffolding fraction suggests the design is constraining model choices rather than enabling them.",
-		IsQuantified:       true,
+		QuantitativeClaim:   "decision_logic=1.6%, operational_harness=98.4%",
+		DesignImplication:   "Agent builders can measure how much of their codebase is scaffolding vs. harness; a high scaffolding fraction suggests the design is constraining model choices rather than enabling them.",
+		IsQuantified:        true,
 	},
 	ConceptMinimalScaffoldingThesis: {
-		ID:         ConceptMinimalScaffoldingThesis,
-		Label:      "Minimal scaffolding, maximal harness thesis",
-		Description: "The architecture intentionally invests in operational infrastructure — permission gates, context assembly, recovery mechanisms, tool routing — rather than decision scaffolding (explicit planners, state graphs, typed edges). The harness creates conditions under which the model can decide well, rather than constraining its choices. The model is invoked as a stateless completion endpoint inside a rich deterministic context.",
-		PDFSection:         "11.1",
+		ID:                  ConceptMinimalScaffoldingThesis,
+		Label:               "Minimal scaffolding, maximal harness thesis",
+		Description:         "The architecture intentionally invests in operational infrastructure — permission gates, context assembly, recovery mechanisms, tool routing — rather than decision scaffolding (explicit planners, state graphs, typed edges). The harness creates conditions under which the model can decide well, rather than constraining its choices. The model is invoked as a stateless completion endpoint inside a rich deterministic context.",
+		PDFSection:          "11.1",
 		GroundedInPrinciple: PrincipleMinimalScaffoldingMaximalHarness,
-		QuantitativeClaim:  "",
-		DesignImplication:  "Investing in deterministic infrastructure (context management, safety layering, recovery mechanisms) may yield greater reliability gains than adding planning scaffolding around increasingly capable models.",
-		IsQuantified:       false,
+		QuantitativeClaim:   "",
+		DesignImplication:   "Investing in deterministic infrastructure (context management, safety layering, recovery mechanisms) may yield greater reliability gains than adding planning scaffolding around increasingly capable models.",
+		IsQuantified:        false,
 	},
 	ConceptOSKernelAnalogy: {
-		ID:         ConceptOSKernelAnalogy,
-		Label:      "OS-kernel analogy",
-		Description: "§11.1 raises the question of whether coding tools are converging toward operating-system-like abstractions in which the agent loop serves as the kernel and everything else constitutes the OS. In this framing: queryLoop() is the kernel; the permission system, context management pipeline, extensibility architecture, subagent delegation, and session persistence are the surrounding OS layers. All entry surfaces (CLI, API, IDE extension) converge on the same agent loop, consistent with the kernel framing.",
-		PDFSection:         "11.1",
+		ID:                  ConceptOSKernelAnalogy,
+		Label:               "OS-kernel analogy",
+		Description:         "§11.1 raises the question of whether coding tools are converging toward operating-system-like abstractions in which the agent loop serves as the kernel and everything else constitutes the OS. In this framing: queryLoop() is the kernel; the permission system, context management pipeline, extensibility architecture, subagent delegation, and session persistence are the surrounding OS layers. All entry surfaces (CLI, API, IDE extension) converge on the same agent loop, consistent with the kernel framing.",
+		PDFSection:          "11.1",
 		GroundedInPrinciple: "",
-		QuantitativeClaim:  "",
-		DesignImplication:  "The kernel framing suggests architectural priorities: the loop must be minimal and stable (kernel), while surrounding subsystems can evolve independently (OS modules).",
-		IsQuantified:       false,
+		QuantitativeClaim:   "",
+		DesignImplication:   "The kernel framing suggests architectural priorities: the loop must be minimal and stable (kernel), while surrounding subsystems can evolve independently (OS modules).",
+		IsQuantified:        false,
 	},
 	ConceptConvergenceThesis: {
-		ID:         ConceptConvergenceThesis,
-		Label:      "Frontier-model convergence thesis",
-		Description: "§11.1 argues that as frontier models converge in practical coding capability, the quality of the surrounding operational harness becomes the principal differentiator. An architecture that invests in infrastructure over decision scaffolding is validated when model capability is no longer the bottleneck — what remains is the harness's ability to route, recover, compress, and enforce policy correctly. This validates the minimal-scaffolding investment as a long-term architectural bet.",
-		PDFSection:         "11.1",
+		ID:                  ConceptConvergenceThesis,
+		Label:               "Frontier-model convergence thesis",
+		Description:         "§11.1 argues that as frontier models converge in practical coding capability, the quality of the surrounding operational harness becomes the principal differentiator. An architecture that invests in infrastructure over decision scaffolding is validated when model capability is no longer the bottleneck — what remains is the harness's ability to route, recover, compress, and enforce policy correctly. This validates the minimal-scaffolding investment as a long-term architectural bet.",
+		PDFSection:          "11.1",
 		GroundedInPrinciple: PrincipleMinimalScaffoldingMaximalHarness,
-		QuantitativeClaim:  "",
-		DesignImplication:  "Agent builders should prioritise harness quality over scaffolding sophistication, because harness quality compounds as model capability improves.",
-		IsQuantified:       false,
+		QuantitativeClaim:   "",
+		DesignImplication:   "Agent builders should prioritise harness quality over scaffolding sophistication, because harness quality compounds as model capability improves.",
+		IsQuantified:        false,
 	},
 	ConceptAlternativeDesignFamilies: {
-		ID:         ConceptAlternativeDesignFamilies,
-		Label:      "Alternative design families",
-		Description: "§2.2 names three alternative design families that make different bets: (1) rule-based orchestration (LangGraph) — encode decision logic as explicit state graphs, scaffolding constrains model choices; (2) container-isolated execution (SWEAgent, OpenHands) — Docker isolation as primary trust boundary; (3) version-control-as-safety (Aider) — Git rollback as primary safety mechanism. Claude Code's principle set is distinctive in combining minimal decision scaffolding with layered policy enforcement, values-based judgment with deny-first defaults, and progressive context management with composable extensibility.",
-		PDFSection:         "2.2",
+		ID:                  ConceptAlternativeDesignFamilies,
+		Label:               "Alternative design families",
+		Description:         "§2.2 names three alternative design families that make different bets: (1) rule-based orchestration (LangGraph) — encode decision logic as explicit state graphs, scaffolding constrains model choices; (2) container-isolated execution (SWEAgent, OpenHands) — Docker isolation as primary trust boundary; (3) version-control-as-safety (Aider) — Git rollback as primary safety mechanism. Claude Code's principle set is distinctive in combining minimal decision scaffolding with layered policy enforcement, values-based judgment with deny-first defaults, and progressive context management with composable extensibility.",
+		PDFSection:          "2.2",
 		GroundedInPrinciple: "",
-		QuantitativeClaim:  "",
-		DesignImplication:  "The three families represent distinct positions in the design space; the choice between them follows from deployment context (trust model, user expectations, operational constraints) rather than from model capability alone.",
-		IsQuantified:       false,
+		QuantitativeClaim:   "",
+		DesignImplication:   "The three families represent distinct positions in the design space; the choice between them follows from deployment context (trust model, user expectations, operational constraints) rather than from model capability alone.",
+		IsQuantified:        false,
 	},
 }
 

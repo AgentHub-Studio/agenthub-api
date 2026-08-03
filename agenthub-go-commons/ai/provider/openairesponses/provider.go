@@ -58,13 +58,13 @@ type responsesRequest struct {
 
 // inputItem represents an item in the Responses API input array.
 type inputItem struct {
-	Type    string `json:"type"`              // "message", "function_call_output"
-	Role    string `json:"role,omitempty"`     // for message items
-	Content any    `json:"content,omitempty"`  // string or []contentPart for message items
-	CallID  string `json:"call_id,omitempty"`  // for function_call_output items
-	Output  string `json:"output,omitempty"`   // for function_call_output items
-	ID      string `json:"id,omitempty"`       // for function_call items (assistant tool calls in history)
-	Name    string `json:"name,omitempty"`     // for function_call items
+	Type    string `json:"type"`                // "message", "function_call_output"
+	Role    string `json:"role,omitempty"`      // for message items
+	Content any    `json:"content,omitempty"`   // string or []contentPart for message items
+	CallID  string `json:"call_id,omitempty"`   // for function_call_output items
+	Output  string `json:"output,omitempty"`    // for function_call_output items
+	ID      string `json:"id,omitempty"`        // for function_call items (assistant tool calls in history)
+	Name    string `json:"name,omitempty"`      // for function_call items
 	Args    string `json:"arguments,omitempty"` // for function_call items
 }
 
@@ -87,14 +87,14 @@ type responsesResponse struct {
 }
 
 type outputItem struct {
-	Type      string          `json:"type"` // "message", "function_call"
-	ID        string          `json:"id,omitempty"`
-	Role      string          `json:"role,omitempty"`
-	Content   []contentPart   `json:"content,omitempty"`
-	Name      string          `json:"name,omitempty"`      // function_call
-	CallID    string          `json:"call_id,omitempty"`   // function_call
-	Arguments string          `json:"arguments,omitempty"` // function_call
-	Status    string          `json:"status,omitempty"`
+	Type      string        `json:"type"` // "message", "function_call"
+	ID        string        `json:"id,omitempty"`
+	Role      string        `json:"role,omitempty"`
+	Content   []contentPart `json:"content,omitempty"`
+	Name      string        `json:"name,omitempty"`      // function_call
+	CallID    string        `json:"call_id,omitempty"`   // function_call
+	Arguments string        `json:"arguments,omitempty"` // function_call
+	Status    string        `json:"status,omitempty"`
 }
 
 type contentPart struct {
@@ -116,7 +116,7 @@ type rError struct {
 // ---- Streaming event types ----
 
 type streamEvent struct {
-	Type     string          `json:"type"`
+	Type    string          `json:"type"`
 	RawData json.RawMessage `json:"-"` // the full event data
 }
 
@@ -160,7 +160,7 @@ func (p *Provider) Chat(ctx context.Context, messages []ai.Message, opts ai.Chat
 	if err != nil {
 		return nil, fmt.Errorf("openai-responses: do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, p.parseHTTPError(resp)
@@ -196,7 +196,7 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return nil, p.parseHTTPError(resp)
 	}
 
@@ -208,7 +208,7 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 
 func (p *Provider) consumeStream(resp *http.Response, ch chan<- ai.StreamChunk) {
 	defer close(ch)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Track current function call being streamed.
 	var currentToolCallID string

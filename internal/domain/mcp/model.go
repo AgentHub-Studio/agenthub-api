@@ -70,20 +70,7 @@ type McpServerConfigBootstrapResponse struct {
 
 // ResponseFrom maps a McpServerConfig entity to a McpServerConfigResponse DTO.
 func ResponseFrom(c McpServerConfig) McpServerConfigResponse {
-	return McpServerConfigResponse{
-		ID:                c.ID,
-		Name:              c.Name,
-		TransportType:     c.TransportType,
-		HTTPBaseURL:       c.HTTPBaseURL,
-		Command:           c.Command,
-		Args:              c.Args,
-		Env:               c.Env,
-		OAuthCredentialID: c.OAuthCredentialID,
-		AutoStart:         c.AutoStart,
-		Enabled:           c.Enabled,
-		CreatedAt:         c.CreatedAt,
-		UpdatedAt:         c.UpdatedAt,
-	}
+	return McpServerConfigResponse(c)
 }
 
 // BootstrapResponseFrom maps an MCP config to the runtime bootstrap DTO.

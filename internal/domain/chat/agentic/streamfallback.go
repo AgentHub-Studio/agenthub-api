@@ -37,6 +37,9 @@ type StreamFallbackConfig struct {
 	// Max529Retries is the number of consecutive 529 errors before triggering
 	// a model fallback (if FallbackModel is set). Default: 3.
 	Max529Retries int
+	// MaxAttempts is the maximum number of streaming attempts before trying
+	// the non-streaming fallback. A non-positive value uses the default.
+	MaxAttempts int
 }
 
 // DefaultStreamFallbackConfig returns sensible defaults for local environments.
@@ -45,6 +48,7 @@ func DefaultStreamFallbackConfig() StreamFallbackConfig {
 		Enabled:       true,
 		TimeoutMs:     300_000,
 		Max529Retries: 3,
+		MaxAttempts:   3,
 	}
 }
 
@@ -77,7 +81,11 @@ func retryStreamWithNonStreamingFallback(
 	source QuerySource,
 ) (StreamFallbackResult, error) {
 	// First, try the streaming path with retries.
-	stream, err := retryStream(ctx, model, messages, opts, 3, source)
+	maxAttempts := retryOpts.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = DefaultStreamFallbackConfig().MaxAttempts
+	}
+	stream, err := retryStream(ctx, model, messages, opts, maxAttempts, source)
 	if err == nil {
 		return StreamFallbackResult{Stream: stream}, nil
 	}
@@ -119,6 +127,9 @@ func retryStreamWithNonStreamingFallback(
 		)
 		return StreamFallbackResult{}, fmt.Errorf("streaming and non-streaming both failed: streaming=%v, non-streaming=%w", err, nsErr)
 	}
+	if response == nil {
+		return StreamFallbackResult{}, fmt.Errorf("streaming and non-streaming both failed: streaming=%v, non-streaming returned an empty response", err)
+	}
 
 	// Convert the non-streaming response into a single-chunk stream.
 	// StreamChunk uses Delta (not Content) and ToolCallDelta (single, not slice).
@@ -135,8 +146,8 @@ func retryStreamWithNonStreamingFallback(
 	close(ch)
 
 	return StreamFallbackResult{
-		Stream:          ch,
-		Model:           response.Model,
+		Stream:           ch,
+		Model:            response.Model,
 		UsedNonStreaming: true,
 	}, nil
 }

@@ -12,8 +12,8 @@ import (
 type ChatRunTask struct {
 	RunID     string `json:"runId"`
 	SessionID string `json:"sessionId"`
-	TenantID  string    `json:"tenantId"`
-	Message   string    `json:"message"`
+	TenantID  string `json:"tenantId"`
+	Message   string `json:"message"`
 }
 
 func main() {
@@ -26,13 +26,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			log.Printf("Failed to close RabbitMQ connection: %v", closeErr)
+		}
+	}()
 
 	ch, err := conn.Channel()
 	if err != nil {
 		log.Fatalf("Failed to open a channel: %v", err)
 	}
-	defer ch.Close()
+	defer func() {
+		if closeErr := ch.Close(); closeErr != nil {
+			log.Printf("Failed to close RabbitMQ channel: %v", closeErr)
+		}
+	}()
 
 	q, err := ch.QueueDeclare("chat.run.queue", true, false, false, false, nil)
 	if err != nil {

@@ -193,7 +193,7 @@ func TestPrepareAwaySummary_CustomWindowSize(t *testing.T) {
 	require.NoError(t, err)
 
 	var parsed []map[string]interface{}
-	json.Unmarshal(windowed, &parsed)
+	require.NoError(t, json.Unmarshal(windowed, &parsed))
 	assert.Len(t, parsed, 5)
 }
 

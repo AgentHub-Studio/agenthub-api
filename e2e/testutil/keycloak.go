@@ -65,7 +65,7 @@ func (k *KeycloakClient) CreateAdminUser(realm, username, password string) (stri
 	if err != nil {
 		return "", fmt.Errorf("keycloak: create user: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
 		raw, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("keycloak: create user %d: %s", resp.StatusCode, raw)
@@ -81,7 +81,7 @@ func (k *KeycloakClient) CreateAdminUser(realm, username, password string) (stri
 	if err != nil {
 		return userID, fmt.Errorf("keycloak: get admin role: %w", err)
 	}
-	defer roleResp.Body.Close()
+	defer func() { _ = roleResp.Body.Close() }()
 	rawRole, _ := io.ReadAll(roleResp.Body)
 
 	// 3. Assign role
@@ -91,7 +91,7 @@ func (k *KeycloakClient) CreateAdminUser(realm, username, password string) (stri
 	if err != nil {
 		return userID, fmt.Errorf("keycloak: assign role: %w", err)
 	}
-	defer assignResp.Body.Close()
+	defer func() { _ = assignResp.Body.Close() }()
 	return userID, nil
 }
 
@@ -107,7 +107,7 @@ func (k *KeycloakClient) DeleteRealm(realm string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return nil
 }
 
@@ -142,7 +142,7 @@ func (k *KeycloakClient) fetchToken(realm, clientID, username, password string) 
 	if err != nil {
 		return "", fmt.Errorf("keycloak: token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("keycloak: token %d: %s", resp.StatusCode, raw)

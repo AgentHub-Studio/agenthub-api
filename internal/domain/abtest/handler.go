@@ -146,7 +146,9 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("abtest: encode response", "err", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

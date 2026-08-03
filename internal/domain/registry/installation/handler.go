@@ -105,7 +105,7 @@ func (h *Handler) uploadAsset(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "file field is required")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	contentType := header.Header.Get("Content-Type")
 	if contentType == "" {

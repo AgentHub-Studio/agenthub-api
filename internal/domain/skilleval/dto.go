@@ -18,14 +18,7 @@ type SuiteResponse struct {
 }
 
 func SuiteResponseFrom(s EvalSuite) SuiteResponse {
-	return SuiteResponse{
-		ID:          s.ID,
-		SkillID:     s.SkillID,
-		Name:        s.Name,
-		Description: s.Description,
-		CreatedAt:   s.CreatedAt,
-		UpdatedAt:   s.UpdatedAt,
-	}
+	return SuiteResponse(s)
 }
 
 // CaseResponse is the JSON representation of an EvalCase.
@@ -43,18 +36,7 @@ type CaseResponse struct {
 }
 
 func CaseResponseFrom(ec EvalCase) CaseResponse {
-	return CaseResponse{
-		ID:             ec.ID,
-		SuiteID:        ec.SuiteID,
-		Description:    ec.Description,
-		InputText:      ec.InputText,
-		ExpectedTool:   ec.ExpectedTool,
-		ExpectedOutput: ec.ExpectedOutput,
-		GraderType:     ec.GraderType,
-		GraderConfig:   ec.GraderConfig,
-		ShouldTrigger:  ec.ShouldTrigger,
-		CreatedAt:      ec.CreatedAt,
-	}
+	return CaseResponse(ec)
 }
 
 // RunResponse is the JSON representation of an EvalRun, optionally with case results.
@@ -104,17 +86,7 @@ type ResultResponse struct {
 }
 
 func ResultResponseFrom(r CaseResult) ResultResponse {
-	return ResultResponse{
-		ID:           r.ID,
-		RunID:        r.RunID,
-		CaseID:       r.CaseID,
-		Passed:       r.Passed,
-		ActualOutput: r.ActualOutput,
-		Score:        r.Score,
-		ErrorMsg:     r.ErrorMsg,
-		DurationMs:   r.DurationMs,
-		CreatedAt:    r.CreatedAt,
-	}
+	return ResultResponse(r)
 }
 
 // --- request types ---

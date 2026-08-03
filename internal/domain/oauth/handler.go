@@ -258,7 +258,9 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		// scripts, styles inline ou iframes — só texto estático seguro.
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
-		w.Write([]byte("<h1>Authentication Successful!</h1><p>You can close this window now.</p>"))
+		if _, err := w.Write([]byte("<h1>Authentication Successful!</h1><p>You can close this window now.</p>")); err != nil {
+			return
+		}
 		return
 	}
 

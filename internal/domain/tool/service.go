@@ -694,7 +694,7 @@ func (s *Service) testHTTPTool(ctx context.Context, cfg, inputs map[string]any) 
 	if err != nil {
 		return "", fmt.Errorf("tool: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var buf strings.Builder
 	fmt.Fprintf(&buf, "Status: %d %s\n\n", resp.StatusCode, resp.Status)

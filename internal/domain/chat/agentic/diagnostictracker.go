@@ -198,7 +198,7 @@ func FormatDiagnosticSummary(files []DiagnosticFile) string {
 	totalWarnings := 0
 
 	for _, f := range files {
-		b.WriteString(fmt.Sprintf("## %s\n", f.Path))
+		fmt.Fprintf(&b, "## %s\n", f.Path)
 		for _, d := range f.Diagnostics {
 			switch d.Severity {
 			case SeverityError:
@@ -215,15 +215,15 @@ func FormatDiagnosticSummary(files []DiagnosticFile) string {
 				}
 			}
 
-			b.WriteString(fmt.Sprintf("  [%s]%s %s", d.Severity.String(), loc, d.Message))
+			fmt.Fprintf(&b, "  [%s]%s %s", d.Severity.String(), loc, d.Message)
 			if d.Code != "" {
-				b.WriteString(fmt.Sprintf(" (%s)", d.Code))
+				fmt.Fprintf(&b, " (%s)", d.Code)
 			}
 			b.WriteString("\n")
 		}
 	}
 
-	b.WriteString(fmt.Sprintf("\nTotal: %d error(s), %d warning(s)\n", totalErrors, totalWarnings))
+	fmt.Fprintf(&b, "\nTotal: %d error(s), %d warning(s)\n", totalErrors, totalWarnings)
 	return b.String()
 }
 

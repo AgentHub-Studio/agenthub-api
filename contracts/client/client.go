@@ -43,7 +43,7 @@ func (c *Client) do(method, path string, body io.Reader) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("client: do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {

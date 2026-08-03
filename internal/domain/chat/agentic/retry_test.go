@@ -22,6 +22,23 @@ type stubResult struct {
 	err error
 }
 
+type streamFallbackTestModel struct {
+	streamErr error
+	response  *ai.ChatResponse
+	calls     int
+}
+
+func (m *streamFallbackTestModel) Chat(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (*ai.ChatResponse, error) {
+	return m.response, nil
+}
+
+func (m *streamFallbackTestModel) ChatStream(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+	m.calls++
+	return nil, m.streamErr
+}
+
+func (m *streamFallbackTestModel) GetProviderName() string { return "stub" }
+
 func (s *stubChatModel) Chat(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (*ai.ChatResponse, error) {
 	return nil, nil
 }
@@ -41,9 +58,9 @@ func (s *stubChatModel) GetProviderName() string { return "stub" }
 
 // modelTrackingChatModel tracks which models were requested.
 type modelTrackingChatModel struct {
-	calls       int
-	modelsUsed  []string
-	results     []stubResult
+	calls      int
+	modelsUsed []string
+	results    []stubResult
 }
 
 func (s *modelTrackingChatModel) Chat(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (*ai.ChatResponse, error) {
@@ -251,11 +268,39 @@ func TestRetryStreamWithFallback_PrimarySuccess(t *testing.T) {
 	assert.Equal(t, 1, model.calls)
 }
 
+func TestRetryStreamWithFallback_NonStreamingFallbackPreservesStream(t *testing.T) {
+	model := &streamFallbackTestModel{
+		streamErr: fmt.Errorf("404 streaming endpoint unavailable"),
+		response: &ai.ChatResponse{
+			Content:      "fallback response",
+			FinishReason: "stop",
+			Model:        "primary",
+		},
+	}
+
+	result, err := retryStreamWithFallbackSource(
+		context.Background(), model, nil, ai.ChatOptions{Model: "primary"},
+		RunConfig{RetryMaxAttempts: 1}, SourceMainLoop, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result.Stream)
+	chunks := make([]ai.StreamChunk, 0, 2)
+	for chunk := range result.Stream {
+		chunks = append(chunks, chunk)
+	}
+	require.Len(t, chunks, 2)
+	assert.Equal(t, "fallback response", chunks[0].Delta)
+	assert.Equal(t, "stop", chunks[1].FinishReason)
+	assert.Equal(t, "primary", result.ModelUsed)
+	assert.False(t, result.WasFallback)
+	assert.Equal(t, 1, model.calls)
+}
+
 func TestRetryStreamWithFallback_FallbackOnRateLimit(t *testing.T) {
 	model := &stubChatModel{
 		results: []stubResult{
 			{err: fmt.Errorf("429 rate limit exceeded")}, // primary fails with rate limit
-			{err: nil},                                    // fallback1 succeeds
+			{err: nil}, // fallback1 succeeds
 		},
 	}
 	cfg := RunConfig{ModelFallbacks: []string{"fallback1"}, RetryMaxAttempts: 1}
@@ -718,7 +763,7 @@ func TestRetryStreamWithFallback_FallbackAfterRateLimit(t *testing.T) {
 	model := &modelTrackingChatModel{
 		results: []stubResult{
 			{err: fmt.Errorf("429 rate limit exceeded")}, // primary fails
-			{err: nil},                                    // fallback succeeds
+			{err: nil}, // fallback succeeds
 		},
 	}
 	config := DefaultRunConfig()
@@ -745,7 +790,7 @@ func TestRetryStreamWithFallback_FallbackAfterRateLimit(t *testing.T) {
 func TestRetryStreamWithFallback_FallbackChain(t *testing.T) {
 	model := &modelTrackingChatModel{
 		results: []stubResult{
-			{err: fmt.Errorf("429 rate limit")},     // primary fails
+			{err: fmt.Errorf("429 rate limit")},      // primary fails
 			{err: fmt.Errorf("503 service unavail")}, // first fallback fails
 			{err: nil},                               // second fallback succeeds
 		},
@@ -861,7 +906,7 @@ func TestRetryStreamWithFallback_PrimaryRetriesThenFallback(t *testing.T) {
 		results: []stubResult{
 			{err: fmt.Errorf("429 rate limit")}, // primary attempt 1
 			{err: fmt.Errorf("429 rate limit")}, // primary attempt 2
-			{err: nil},                           // fallback succeeds
+			{err: nil},                          // fallback succeeds
 		},
 	}
 	config := DefaultRunConfig()

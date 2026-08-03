@@ -97,7 +97,7 @@ func TestToolInvocationBudget_Record_TotalWarnAllows(t *testing.T) {
 		TotalCap: 1,
 		Policy:   ToolBudgetPolicyWarn,
 	})
-	b.Record(ToolCategoryRead)
+	require.NoError(t, b.Record(ToolCategoryRead))
 	// second call exceeds cap but policy is warn — no error
 	require.NoError(t, b.Record(ToolCategoryRead))
 	snap := b.Snapshot()
@@ -132,7 +132,7 @@ func TestToolInvocationBudget_Snapshot_PercentUsed(t *testing.T) {
 		Policy:   ToolBudgetPolicyWarn,
 	})
 	for i := 0; i < 5; i++ {
-		b.Record(ToolCategoryRead)
+		require.NoError(t, b.Record(ToolCategoryRead))
 	}
 	snap := b.Snapshot()
 	assert.Equal(t, 50, snap.PercentUsed())
@@ -144,8 +144,8 @@ func TestToolInvocationBudget_Snapshot_IsExhausted(t *testing.T) {
 		Policy:   ToolBudgetPolicyWarn,
 	})
 	assert.False(t, b.Snapshot().IsExhausted())
-	b.Record(ToolCategoryRead)
-	b.Record(ToolCategoryRead)
+	require.NoError(t, b.Record(ToolCategoryRead))
+	require.NoError(t, b.Record(ToolCategoryRead))
 	assert.True(t, b.Snapshot().IsExhausted())
 }
 
@@ -154,8 +154,8 @@ func TestToolInvocationBudget_Reset(t *testing.T) {
 		TotalCap: 10,
 		Policy:   ToolBudgetPolicyDeny,
 	})
-	b.Record(ToolCategoryRead)
-	b.Record(ToolCategoryMutate)
+	require.NoError(t, b.Record(ToolCategoryRead))
+	require.NoError(t, b.Record(ToolCategoryMutate))
 	b.Reset()
 	snap := b.Snapshot()
 	assert.Equal(t, 0, snap.TotalCalled)
@@ -174,7 +174,7 @@ func TestToolInvocationBudget_ConcurrentSafe(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			b.Record(ToolCategoryRead)
+			assert.NoError(t, b.Record(ToolCategoryRead))
 		}()
 	}
 	wg.Wait()

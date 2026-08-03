@@ -49,7 +49,7 @@ func TestBDD_ToolRegistryAssembly(t *testing.T) {
 		// Then the impostor is dropped and the unique MCP tool is appended —
 		//      builtins win on conflict, MCP additions never override.
 		assert.Len(t, when, 3, "merge keeps 2 builtins + 1 unique MCP")
-		var found map[string]bool = make(map[string]bool)
+		var found = make(map[string]bool)
 		for _, item := range when {
 			found[item.Name] = true
 		}

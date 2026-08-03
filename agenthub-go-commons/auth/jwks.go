@@ -87,7 +87,7 @@ func (c *jwksCache) fetchJWKS(ctx context.Context, tenantID string) (map[string]
 	if err != nil {
 		return nil, fmt.Errorf("auth: fetch JWKS for tenant %q: %w", tenantID, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("auth: JWKS endpoint returned %d for tenant %q", resp.StatusCode, tenantID)

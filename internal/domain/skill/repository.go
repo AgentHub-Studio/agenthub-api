@@ -440,7 +440,7 @@ func formatFloat32Vector(v []float32) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(fmt.Sprintf("%f", f))
+		fmt.Fprintf(&b, "%f", f)
 	}
 	b.WriteByte(']')
 	return b.String()

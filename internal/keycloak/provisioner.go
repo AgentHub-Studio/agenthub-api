@@ -91,7 +91,7 @@ func (p *Provisioner) getAdminToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("token response %d: %s", resp.StatusCode, body)
@@ -136,7 +136,7 @@ func (p *Provisioner) DeleteRealm(ctx context.Context, tenantID string) error {
 	if err != nil {
 		return fmt.Errorf("keycloak delete realm: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
 		return nil
 	}
@@ -166,7 +166,7 @@ func (p *Provisioner) createRealm(ctx context.Context, tenantID string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusConflict {
 		// Realm already exists — idempotent.
 		return nil
@@ -194,7 +194,7 @@ func (p *Provisioner) createClient(ctx context.Context, tenantID string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusConflict {
 		return nil
 	}
@@ -214,7 +214,7 @@ func (p *Provisioner) createRealmRoles(ctx context.Context, tenantID string, rol
 			return fmt.Errorf("role %q: %w", role, err)
 		}
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusConflict {
 			continue // already exists
 		}

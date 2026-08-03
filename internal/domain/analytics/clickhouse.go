@@ -133,7 +133,7 @@ func (c *ClickHouseClient) do(ctx context.Context, database string, body []byte)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("clickhouse: status %d: %s", resp.StatusCode, string(respBody))

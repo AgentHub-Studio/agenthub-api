@@ -72,7 +72,7 @@ func callLLM(ctx context.Context, cfg llmConfig, systemPrompt, userPrompt string
 	if err != nil {
 		return "", fmt.Errorf("llm: http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -131,7 +131,7 @@ func callAnthropic(ctx context.Context, cfg llmConfig, systemPrompt, userPrompt 
 	if err != nil {
 		return "", fmt.Errorf("anthropic: http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {

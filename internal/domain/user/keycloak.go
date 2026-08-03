@@ -95,9 +95,9 @@ func NewKeycloakUserClient(cfg KeycloakClientConfig) KeycloakUserClient {
 		// dá margem para Keycloak pod sob carga sem aborta requests
 		// legítimos. Logs mostravam: context deadline exceeded em 15s
 		// para chamadas que de fato respondem em 25-30s.
-		httpClient:     &http.Client{Timeout: 60 * time.Second},
-		clientUUIDs:    make(map[string]string),
-		rolesCache:     make(map[string]rolesCacheEntry),
+		httpClient:  &http.Client{Timeout: 60 * time.Second},
+		clientUUIDs: make(map[string]string),
+		rolesCache:  make(map[string]rolesCacheEntry),
 	}
 }
 
@@ -130,7 +130,7 @@ func (c *keycloakClient) getAdminToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("keycloak: token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("keycloak: token response %d: %s", resp.StatusCode, string(body))
@@ -212,7 +212,7 @@ func (c *keycloakClient) getClientUUID(ctx context.Context, tenantID string) (st
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("keycloak: get clients %d: %s", resp.StatusCode, string(body))
@@ -298,7 +298,7 @@ func (c *keycloakClient) getUserRoles(ctx context.Context, tenantID, userID stri
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		c.rolesCacheStore(tenantID, userID, []string{})
@@ -327,7 +327,7 @@ func (c *keycloakClient) ListUsers(ctx context.Context, tenantID string) ([]User
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("keycloak: list users %d: %s", resp.StatusCode, string(body))
@@ -360,7 +360,7 @@ func (c *keycloakClient) GetUser(ctx context.Context, tenantID string, userID st
 	if err != nil {
 		return User{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		return User{}, ErrNotFound
@@ -378,11 +378,11 @@ func (c *keycloakClient) GetUser(ctx context.Context, tenantID string, userID st
 
 func (c *keycloakClient) CreateUser(ctx context.Context, tenantID string, req CreateUserRequest) (User, error) {
 	type kcCreateReq struct {
-		Username  string `json:"username"`
-		Email     string `json:"email"`
-		FirstName string `json:"firstName"`
-		LastName  string `json:"lastName"`
-		Enabled   bool   `json:"enabled"`
+		Username    string `json:"username"`
+		Email       string `json:"email"`
+		FirstName   string `json:"firstName"`
+		LastName    string `json:"lastName"`
+		Enabled     bool   `json:"enabled"`
 		Credentials []struct {
 			Type      string `json:"type"`
 			Value     string `json:"value"`
@@ -409,7 +409,7 @@ func (c *keycloakClient) CreateUser(ctx context.Context, tenantID string, req Cr
 	if err != nil {
 		return User{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusConflict {
 		return User{}, ErrAlreadyExists
@@ -469,7 +469,7 @@ func (c *keycloakClient) UpdateUser(ctx context.Context, tenantID string, userID
 	if err != nil {
 		return User{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return User{}, ErrNotFound
 	}
@@ -487,7 +487,7 @@ func (c *keycloakClient) DeleteUser(ctx context.Context, tenantID string, userID
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
@@ -526,7 +526,7 @@ func (c *keycloakClient) manageRole(ctx context.Context, tenantID, userID, role,
 	if err != nil {
 		return err
 	}
-	defer roleResp.Body.Close()
+	defer func() { _ = roleResp.Body.Close() }()
 	roleBody, _ := io.ReadAll(roleResp.Body)
 	if roleResp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("keycloak: role %q not found", role)
@@ -544,7 +544,7 @@ func (c *keycloakClient) manageRole(ctx context.Context, tenantID, userID, role,
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
@@ -562,7 +562,7 @@ func (c *keycloakClient) ResetPassword(ctx context.Context, tenantID string, use
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
@@ -584,7 +584,7 @@ func (c *keycloakClient) ListRoles(ctx context.Context, tenantID string) ([]stri
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("keycloak: list roles %d: %s", resp.StatusCode, string(body))

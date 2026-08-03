@@ -28,21 +28,7 @@ type Response struct {
 
 // ResponseFrom converts the normalized domain model to the public DTO.
 func ResponseFrom(item Integration) Response {
-	return Response{
-		ID:          item.ID,
-		Name:        item.Name,
-		Slug:        item.Slug,
-		Type:        item.Type,
-		Description: item.Description,
-		Summary:     item.Summary,
-		Enabled:     item.Enabled,
-		Advanced:    item.Advanced,
-		Origin:      item.Origin,
-		SourceKind:  item.SourceKind,
-		LegacyPath:  item.LegacyPath,
-		CreatedAt:   item.CreatedAt,
-		UpdatedAt:   item.UpdatedAt,
-	}
+	return Response(item)
 }
 
 // HTTPCreateRequest is the simplified payload for HTTP/API integrations.

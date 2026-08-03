@@ -36,19 +36,19 @@ type discordConfig struct {
 // discordInteraction is the top-level payload sent by Discord to the webhook.
 type discordInteraction struct {
 	// Type: 1 = PING, 2 = APPLICATION_COMMAND, 3 = MESSAGE_COMPONENT, etc.
-	Type      int                      `json:"type"`
-	ID        string                   `json:"id"`
-	Token     string                   `json:"token"` // interaction token for follow-up
-	ChannelID string                   `json:"channel_id"`
-	Data      *discordInteractionData  `json:"data,omitempty"`
-	Member    *discordMember           `json:"member,omitempty"`
-	User      *discordUser             `json:"user,omitempty"` // DMs
+	Type      int                     `json:"type"`
+	ID        string                  `json:"id"`
+	Token     string                  `json:"token"` // interaction token for follow-up
+	ChannelID string                  `json:"channel_id"`
+	Data      *discordInteractionData `json:"data,omitempty"`
+	Member    *discordMember          `json:"member,omitempty"`
+	User      *discordUser            `json:"user,omitempty"` // DMs
 }
 
 // discordInteractionData holds the command payload.
 type discordInteractionData struct {
-	Name    string                    `json:"name"`
-	Options []discordCommandOption    `json:"options,omitempty"`
+	Name    string                 `json:"name"`
+	Options []discordCommandOption `json:"options,omitempty"`
 }
 
 // discordCommandOption holds a slash command option (e.g. value of a text parameter).
@@ -63,9 +63,9 @@ type discordMember struct {
 }
 
 type discordUser struct {
-	ID            string `json:"id"`
-	Username      string `json:"username"`
-	GlobalName    string `json:"global_name,omitempty"`
+	ID         string `json:"id"`
+	Username   string `json:"username"`
+	GlobalName string `json:"global_name,omitempty"`
 }
 
 // VerifyRequest validates the Discord Ed25519 signature.
@@ -193,7 +193,7 @@ func (a *DiscordAdapter) SendReply(_ context.Context, ch Channel, msg OutboundMe
 	if err != nil {
 		return fmt.Errorf("discord: send reply: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("discord: send reply: HTTP %d", resp.StatusCode)

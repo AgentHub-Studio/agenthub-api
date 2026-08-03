@@ -87,10 +87,14 @@ func TestSessionIngress_AppendLog_SendsLastUUID(t *testing.T) {
 	})
 
 	entry1 := agentic.NewTranscriptEntry("user", json.RawMessage(`{"content":"msg1"}`), nil)
-	si.AppendLog(context.Background(), "sess-1", entry1, server.URL, nil)
+	ok, err := si.AppendLog(context.Background(), "sess-1", entry1, server.URL, nil)
+	require.True(t, ok)
+	require.NoError(t, err)
 
 	entry2 := agentic.NewTranscriptEntry("assistant", json.RawMessage(`{"content":"msg2"}`), &entry1.UUID)
-	si.AppendLog(context.Background(), "sess-1", entry2, server.URL, nil)
+	ok, err = si.AppendLog(context.Background(), "sess-1", entry2, server.URL, nil)
+	require.True(t, ok)
+	require.NoError(t, err)
 
 	assert.Equal(t, 2, callCount)
 	assert.Equal(t, entry1.UUID, lastUUIDHeader, "second request should send first entry's UUID")
@@ -99,7 +103,9 @@ func TestSessionIngress_AppendLog_SendsLastUUID(t *testing.T) {
 func TestSessionIngress_AppendLog_AuthFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprint(w, "invalid token")
+		if _, err := fmt.Fprint(w, "invalid token"); err != nil {
+			return
+		}
 	}))
 	defer server.Close()
 
@@ -237,7 +243,10 @@ func TestSessionIngress_SequentialOrdering(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var entry agentic.TranscriptEntry
-		json.NewDecoder(r.Body).Decode(&entry)
+		if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		mu.Lock()
 		receivedOrder = append(receivedOrder, entry.UUID)
 		mu.Unlock()
@@ -256,14 +265,23 @@ func TestSessionIngress_SequentialOrdering(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	errCh := make(chan error, len(entries))
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			si.AppendLog(context.Background(), "sess-ordered", entries[idx], server.URL, nil)
+			ok, err := si.AppendLog(context.Background(), "sess-ordered", entries[idx], server.URL, nil)
+			if !ok && err == nil {
+				err = fmt.Errorf("append log did not persist entry")
+			}
+			errCh <- err
 		}(i)
 	}
 	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -278,7 +296,10 @@ func TestSessionIngress_MultiSessionIsolation(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var entry agentic.TranscriptEntry
-		json.NewDecoder(r.Body).Decode(&entry)
+		if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		mu.Lock()
 		sessionHits[entry.AgentID]++
 		mu.Unlock()
@@ -291,6 +312,7 @@ func TestSessionIngress_MultiSessionIsolation(t *testing.T) {
 	})
 
 	var wg sync.WaitGroup
+	errCh := make(chan error, 6)
 	for _, sessID := range []string{"sess-A", "sess-B"} {
 		for i := 0; i < 3; i++ {
 			wg.Add(1)
@@ -298,11 +320,19 @@ func TestSessionIngress_MultiSessionIsolation(t *testing.T) {
 				defer wg.Done()
 				entry := agentic.NewTranscriptEntry("user", nil, nil)
 				entry.AgentID = sid
-				si.AppendLog(context.Background(), sid, entry, server.URL, nil)
+				ok, err := si.AppendLog(context.Background(), sid, entry, server.URL, nil)
+				if !ok && err == nil {
+					err = fmt.Errorf("append log did not persist entry")
+				}
+				errCh <- err
 			}(sessID)
 		}
 	}
 	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -318,7 +348,9 @@ func TestSessionIngress_HydrateSession(t *testing.T) {
 		{UUID: "uuid-2", Type: "assistant", Timestamp: 2000},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(entries)
+		if err := json.NewEncoder(w).Encode(entries); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 	}))
 	defer server.Close()
 
@@ -332,7 +364,9 @@ func TestSessionIngress_HydrateSession(t *testing.T) {
 
 func TestSessionIngress_HydrateSession_Empty(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]agentic.TranscriptEntry{})
+		if err := json.NewEncoder(w).Encode([]agentic.TranscriptEntry{}); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 	}))
 	defer server.Close()
 
@@ -347,7 +381,9 @@ func TestSessionIngress_HydrateSession_Empty(t *testing.T) {
 func TestSessionIngress_HydrateSession_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "internal error")
+		if _, err := fmt.Fprint(w, "internal error"); err != nil {
+			return
+		}
 	}))
 	defer server.Close()
 
@@ -367,7 +403,9 @@ func TestSessionIngress_CleanupSession(t *testing.T) {
 	defer server.Close()
 
 	entry := agentic.NewTranscriptEntry("user", nil, nil)
-	si.AppendLog(context.Background(), "sess-cleanup", entry, server.URL, nil)
+	ok, err := si.AppendLog(context.Background(), "sess-cleanup", entry, server.URL, nil)
+	require.True(t, ok)
+	require.NoError(t, err)
 	assert.Equal(t, 1, si.ActiveSessions())
 
 	si.CleanupSession("sess-cleanup")
@@ -391,13 +429,15 @@ func TestSessionIngress_CustomHeaders(t *testing.T) {
 
 	entry := agentic.NewTranscriptEntry("user", nil, nil)
 	headers := map[string]string{"Authorization": "Bearer test-token"}
-	si.AppendLog(context.Background(), "sess-1", entry, server.URL, headers)
+	ok, err := si.AppendLog(context.Background(), "sess-1", entry, server.URL, headers)
+	require.True(t, ok)
+	require.NoError(t, err)
 
 	assert.Equal(t, "Bearer test-token", receivedAuth)
 }
 
 // helper
 func readBody(r *http.Request) ([]byte, error) {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	return io.ReadAll(r.Body)
 }

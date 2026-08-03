@@ -1,7 +1,6 @@
 package agentic_test
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -228,8 +227,7 @@ func TestInterpolateHeaders_NoVars(t *testing.T) {
 }
 
 func TestInterpolateHeaders_WithAllowedVar(t *testing.T) {
-	os.Setenv("TEST_TOKEN_HOOKTYPE", "secret123")
-	defer os.Unsetenv("TEST_TOKEN_HOOKTYPE")
+	t.Setenv("TEST_TOKEN_HOOKTYPE", "secret123")
 
 	headers := map[string]string{"Authorization": "Bearer $TEST_TOKEN_HOOKTYPE"}
 	result := agentic.InterpolateHeaders(headers, []string{"TEST_TOKEN_HOOKTYPE"})
@@ -237,8 +235,7 @@ func TestInterpolateHeaders_WithAllowedVar(t *testing.T) {
 }
 
 func TestInterpolateHeaders_DisallowedVar(t *testing.T) {
-	os.Setenv("SECRET_KEY", "should_not_appear")
-	defer os.Unsetenv("SECRET_KEY")
+	t.Setenv("SECRET_KEY", "should_not_appear")
 
 	headers := map[string]string{"X-Key": "$SECRET_KEY"}
 	result := agentic.InterpolateHeaders(headers, []string{"OTHER_VAR"})
@@ -246,10 +243,8 @@ func TestInterpolateHeaders_DisallowedVar(t *testing.T) {
 }
 
 func TestInterpolateHeaders_MultipleVars(t *testing.T) {
-	os.Setenv("HOOK_HOST", "example.com")
-	os.Setenv("HOOK_PORT", "8080")
-	defer os.Unsetenv("HOOK_HOST")
-	defer os.Unsetenv("HOOK_PORT")
+	t.Setenv("HOOK_HOST", "example.com")
+	t.Setenv("HOOK_PORT", "8080")
 
 	headers := map[string]string{"X-Target": "$HOOK_HOST:$HOOK_PORT"}
 	result := agentic.InterpolateHeaders(headers, []string{"HOOK_HOST", "HOOK_PORT"})
@@ -257,8 +252,7 @@ func TestInterpolateHeaders_MultipleVars(t *testing.T) {
 }
 
 func TestInterpolateHeaders_MixedAllowed(t *testing.T) {
-	os.Setenv("ALLOWED_VAR", "yes")
-	defer os.Unsetenv("ALLOWED_VAR")
+	t.Setenv("ALLOWED_VAR", "yes")
 
 	headers := map[string]string{"X-Mix": "$ALLOWED_VAR and $DENIED_VAR"}
 	result := agentic.InterpolateHeaders(headers, []string{"ALLOWED_VAR"})

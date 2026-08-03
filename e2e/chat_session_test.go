@@ -226,7 +226,7 @@ func TestE2E_ChatSessionStream(t *testing.T) {
 		t.Logf("stream request ended (expected on short timeout): %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")

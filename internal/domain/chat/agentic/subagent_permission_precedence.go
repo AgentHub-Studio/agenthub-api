@@ -322,10 +322,3 @@ func intersectAndDifference(parentAllow, childAllow []string) ([]string, []strin
 	}
 	return intersect, difference
 }
-
-func isEmpty(r *PermissionRules) bool {
-	if r == nil {
-		return true
-	}
-	return len(r.Allow) == 0 && len(r.Deny) == 0 && len(r.Confirm) == 0 && r.Mode == ""
-}

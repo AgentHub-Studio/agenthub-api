@@ -135,7 +135,7 @@ func (s *OpenAIVoiceService) Transcribe(ctx context.Context, in VoiceTranscripti
 	if err != nil {
 		return VoiceTranscription{}, fmt.Errorf("voice: transcribe request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return VoiceTranscription{}, fmt.Errorf("voice: transcribe status %d: %s", resp.StatusCode, string(respBody))
@@ -174,7 +174,7 @@ func (s *OpenAIVoiceService) Synthesize(ctx context.Context, in VoiceSynthesisIn
 	if err != nil {
 		return VoiceAudio{}, fmt.Errorf("voice: synthesize request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	audio, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return VoiceAudio{}, fmt.Errorf("voice: synthesize status %d: %s", resp.StatusCode, string(audio))

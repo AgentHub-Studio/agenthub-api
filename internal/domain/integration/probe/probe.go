@@ -67,8 +67,8 @@ type URLValidator func(string) error
 
 // Service encapsulates probe operations. Stateless, safe to share across requests.
 type Service struct {
-	httpClient   *http.Client
-	validateURL  URLValidator
+	httpClient  *http.Client
+	validateURL URLValidator
 }
 
 // NewService returns a probe Service with default timeouts and SSRF validation.
@@ -144,7 +144,7 @@ func (s *Service) HTTP(ctx context.Context, req HTTPRequest) Result {
 	if err != nil {
 		return Result{OK: false, LatencyMs: latency, ErrorHint: mapHTTPError(err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, sampleBodyMax))
 	sample := string(body)
@@ -193,7 +193,7 @@ func (s *Service) probePostgres(ctx context.Context, req DatabaseRequest, start 
 	if err != nil {
 		return Result{OK: false, LatencyMs: latency, ErrorHint: mapPostgresError(err)}
 	}
-	defer conn.Close(connCtx)
+	defer func() { _ = conn.Close(connCtx) }()
 
 	if err := conn.Ping(connCtx); err != nil {
 		return Result{OK: false, LatencyMs: time.Since(start).Milliseconds(), ErrorHint: mapPostgresError(err)}
@@ -248,7 +248,7 @@ func (s *Service) MCP(ctx context.Context, req MCPRequest) Result {
 	if err != nil {
 		return Result{OK: false, LatencyMs: latency, ErrorHint: mapHTTPError(err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, sampleBodyMax))
 	sample := string(respBody)

@@ -497,7 +497,7 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		return ConnectURLResponse{}, fmt.Errorf(
 			"mcp service: could not obtain clientID for MCP %s (URL: %s). "+
 				"OAuth discovery succeeded (auth=%s) but Dynamic Client Registration failed or is not supported. "+
-				"You may need to manually register an OAuth app and link the credential.",
+				"You may need to manually register an OAuth app and link the credential",
 			id, mcpURL, metadata.AuthorizationEndpoint)
 	}
 
@@ -587,7 +587,7 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, mcpServerID uuid.UUID
 		req, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/servers/%s", s.mcpRuntimeURL, config.Name), nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			log.Printf("mcp service: unregistered server %s from runtime to force token reload", config.Name)
 		} else {
 			log.Printf("mcp service: failed to unregister server %s: %v", config.Name, err)
@@ -621,7 +621,7 @@ func (s *Service) ListTools(ctx context.Context, id uuid.UUID) ([]ToolResponse, 
 	if err != nil {
 		return nil, fmt.Errorf("mcp service: tools: failed to contact runtime: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		var errResp struct {
@@ -660,7 +660,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 	for i := 0; i < 5; i++ {
 		resp, err := http.Get(statusURL)
 		if err == nil {
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode == http.StatusOK {
 				// Already registered, check status
 				var status struct {
@@ -676,7 +676,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 					startURL := fmt.Sprintf("%s/servers/%s/start", s.mcpRuntimeURL, config.Name)
 					startResp, startErr := http.Post(startURL, "application/json", nil)
 					if startErr == nil {
-						defer startResp.Body.Close()
+						defer func() { _ = startResp.Body.Close() }()
 						if startResp.StatusCode == http.StatusUnauthorized {
 							return fmt.Errorf("OAuth token expired or invalid for server '%s'. Please reconnect via the MCP server list (click 'Connect')", config.Name)
 						}
@@ -737,7 +737,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 	if err != nil {
 		return fmt.Errorf("failed to register server in runtime: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -883,7 +883,7 @@ func (s *Service) performDCR(ctx context.Context, registrationEndpoint, redirect
 	if err != nil {
 		return nil, fmt.Errorf("DCR request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -915,7 +915,7 @@ func fetchJSON[T any](ctx context.Context, httpClient *http.Client, targetURL st
 	if err != nil {
 		return zero, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return zero, fmt.Errorf("HTTP %d from %s", resp.StatusCode, targetURL)

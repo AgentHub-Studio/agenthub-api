@@ -1052,11 +1052,6 @@ func ptrStr(s string) *string { return &s }
 
 func TestCreate_SystemPromptTooLong_ReturnsError(t *testing.T) {
 	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
-	bigPrompt := string(make([]byte, 10001))
-	for i := range bigPrompt {
-		bigPrompt = bigPrompt[:i] + "x" + bigPrompt[i+1:]
-		break
-	}
 	buf := make([]byte, 10001)
 	for i := range buf {
 		buf[i] = 'x'
