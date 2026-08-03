@@ -13,6 +13,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/channel"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // --- in-memory repository stub ---
@@ -257,7 +258,7 @@ func TestServiceHandleInbound_success(t *testing.T) {
 	})
 	token := created.Token
 
-	msg, err := svc.HandleInbound(context.Background(), token, nil, []byte(`{}`))
+	msg, err := svc.HandleInbound(tenant.NewContext(context.Background(), "test-tenant"), token, nil, []byte(`{}`))
 	require.NoError(t, err)
 	assert.Equal(t, "hello", msg.Text)
 	assert.Equal(t, "hi there", adapter.sentReply.Text)
@@ -286,7 +287,7 @@ func TestServiceHandleInbound_verifyFails(t *testing.T) {
 		AgentID: uuid.New(),
 	})
 
-	_, err := svc.HandleInbound(context.Background(), created.Token, nil, []byte(`{}`))
+	_, err := svc.HandleInbound(tenant.NewContext(context.Background(), "test-tenant"), created.Token, nil, []byte(`{}`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "verify")
 }
@@ -307,7 +308,7 @@ func TestServiceHandleInbound_urlVerificationChallenge(t *testing.T) {
 		AgentID: uuid.New(),
 	})
 
-	msg, err := svc.HandleInbound(context.Background(), created.Token, nil, []byte(`{}`))
+	msg, err := svc.HandleInbound(tenant.NewContext(context.Background(), "test-tenant"), created.Token, nil, []byte(`{}`))
 	require.NoError(t, err)
 	assert.Equal(t, "abc123", msg.Challenge)
 	// dispatcher should NOT have been called

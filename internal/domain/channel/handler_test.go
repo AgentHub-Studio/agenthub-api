@@ -18,6 +18,10 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
+type stubTenantLister struct{ ids []string }
+
+func (l stubTenantLister) ListAllIDs(context.Context) ([]string, error) { return l.ids, nil }
+
 func buildTestRouter(t *testing.T) (*chi.Mux, *memRepo, *stubAdapter) {
 	t.Helper()
 	repo := newMemRepo()
@@ -27,7 +31,9 @@ func buildTestRouter(t *testing.T) (*chi.Mux, *memRepo, *stubAdapter) {
 	}
 	reg.Register(channel.ChannelTypeSlack, adapter)
 	disp := &stubDispatcher{reply: "response text"}
-	svc := channel.NewService(repo, reg).WithDispatcher(disp)
+	svc := channel.NewService(repo, reg).
+		WithDispatcher(disp).
+		WithTenantLister(stubTenantLister{ids: []string{"test-tenant"}})
 	h := channel.NewHandler(svc)
 
 	r := chi.NewRouter()
@@ -182,7 +188,7 @@ func TestHandlerInbound_verifyFails(t *testing.T) {
 	reg := channel.NewRegistry()
 	adapter := &stubAdapter{verifyErr: errors.New("bad sig")}
 	reg.Register(channel.ChannelTypeSlack, adapter)
-	svc := channel.NewService(repo, reg)
+	svc := channel.NewService(repo, reg).WithTenantLister(stubTenantLister{ids: []string{"test-tenant"}})
 	h := channel.NewHandler(svc)
 	r := chi.NewRouter()
 	h.RegisterPublicRoutes(r)
@@ -206,7 +212,9 @@ func TestHandlerInbound_urlVerificationChallenge(t *testing.T) {
 	}
 	reg.Register(channel.ChannelTypeSlack, adapter)
 	disp := &stubDispatcher{}
-	svc := channel.NewService(repo, reg).WithDispatcher(disp)
+	svc := channel.NewService(repo, reg).
+		WithDispatcher(disp).
+		WithTenantLister(stubTenantLister{ids: []string{"test-tenant"}})
 	h := channel.NewHandler(svc)
 	r := chi.NewRouter()
 	h.RegisterPublicRoutes(r)

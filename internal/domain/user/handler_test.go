@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -172,7 +173,7 @@ func TestUserHandler_Create_AlreadyExists(t *testing.T) {
 
 func TestUserHandler_Get_NotFound(t *testing.T) {
 	r, _ := setupUser()
-	req := httptest.NewRequest(http.MethodGet, "/api/users/nonexistent", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/users/"+uuid.NewString(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -181,9 +182,10 @@ func TestUserHandler_Get_NotFound(t *testing.T) {
 
 func TestUserHandler_Delete_Success(t *testing.T) {
 	r, svc := setupUser()
-	svc.users["del-user"] = user.UserResponse{ID: "del-user", Username: "todelete", Roles: []string{}}
+	userID := uuid.NewString()
+	svc.users[userID] = user.UserResponse{ID: userID, Username: "todelete", Roles: []string{}}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/users/del-user", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/users/"+userID, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -192,7 +194,7 @@ func TestUserHandler_Delete_Success(t *testing.T) {
 
 func TestUserHandler_Delete_NotFound(t *testing.T) {
 	r, _ := setupUser()
-	req := httptest.NewRequest(http.MethodDelete, "/api/users/missing", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/users/"+uuid.NewString(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -201,9 +203,10 @@ func TestUserHandler_Delete_NotFound(t *testing.T) {
 
 func TestUserHandler_AssignRole_Success(t *testing.T) {
 	r, svc := setupUser()
-	svc.users["u1"] = user.UserResponse{ID: "u1", Username: "alice", Roles: []string{}}
+	userID := uuid.NewString()
+	svc.users[userID] = user.UserResponse{ID: userID, Username: "alice", Roles: []string{}}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/users/u1/roles/admin", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/users/"+userID+"/roles/admin", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -212,7 +215,7 @@ func TestUserHandler_AssignRole_Success(t *testing.T) {
 
 func TestUserHandler_RemoveRole_NotFound(t *testing.T) {
 	r, _ := setupUser()
-	req := httptest.NewRequest(http.MethodDelete, "/api/users/ghost/roles/admin", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/users/"+uuid.NewString()+"/roles/admin", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

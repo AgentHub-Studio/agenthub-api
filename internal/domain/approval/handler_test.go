@@ -316,5 +316,7 @@ func TestApprovalHandler_Stream_SSEHeaders(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
-	assert.Equal(t, "no-cache", w.Header().Get("Cache-Control"))
+	cacheControl := w.Header().Get("Cache-Control")
+	assert.Contains(t, cacheControl, "no-cache")
+	assert.Contains(t, cacheControl, "no-store")
 }

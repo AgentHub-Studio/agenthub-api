@@ -2,6 +2,7 @@ package vpnresource_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -122,7 +123,7 @@ func TestVpnService_Update_Success(t *testing.T) {
 func TestVpnService_ListAll(t *testing.T) {
 	svc := vpnresource.NewService(newMockRepo())
 	for i := 0; i < 2; i++ {
-		_, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: "VPN", OvpnConfigPath: "/tmp/x.ovpn"})
+		_, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: fmt.Sprintf("VPN %d", i), OvpnConfigPath: "/tmp/x.ovpn"})
 		require.NoError(t, err)
 	}
 	items, total, err := svc.ListAll(context.Background(), tenantID, pagination.PageRequest{Page: 0, Size: 20})
