@@ -1051,6 +1051,16 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		latestInputTokens = usage.PromptTokens
 		cumulativeCacheReadTokens += usage.CacheReadTokens
 		cumulativeCacheCreationTokens += usage.CacheCreationTokens
+		if usage.CacheReadTokens > 0 || usage.CacheCreationTokens > 0 {
+			slog.Info("agentic: prompt cache usage",
+				"turn", turnIndex,
+				"model", effectiveModel,
+				"cacheHitRatio", PromptCacheHitRatio(usage),
+				"cacheReadTokens", usage.CacheReadTokens,
+				"cacheCreationTokens", usage.CacheCreationTokens,
+				"promptTokens", usage.PromptTokens,
+			)
+		}
 
 		// Check per-turn budget after consuming the stream.
 		if turnBudget > 0 && usage.TotalTokens > turnBudget {

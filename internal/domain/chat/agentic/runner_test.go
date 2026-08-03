@@ -1165,7 +1165,7 @@ func TestResolveEffortLevel_MaxKeptOnOpus46(t *testing.T) {
 
 func TestFormatToolResult_NormalOutput(t *testing.T) {
 	r := agentic.ToolExecResult{Output: json.RawMessage(`{"key": "value"}`)}
-	assert.Equal(t, `{"key": "value"}`, agentic.FormatToolResult(r))
+	assert.JSONEq(t, `{"key": "value"}`, agentic.FormatToolResult(r))
 }
 
 func TestFormatToolResult_RedactsSensitiveFields(t *testing.T) {

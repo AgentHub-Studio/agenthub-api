@@ -83,8 +83,8 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// 8 builtins + memory_store_bulk + execute-sql (skill).
-	require.Len(t, tools, 9)
+	// 9 builtins + execute-sql (skill).
+	require.Len(t, tools, 10)
 
 	assert.Equal(t, "agent", tools[0].Name)
 	assert.Equal(t, "agenthub_manage", tools[1].Name)
@@ -92,12 +92,13 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	assert.Equal(t, "canvas_export_table", tools[3].Name)
 	assert.Equal(t, "canvas_feedback", tools[4].Name)
 	assert.Equal(t, "canvas_update", tools[5].Name)
-	assert.Equal(t, "memory_store", tools[6].Name)
-	assert.Equal(t, "memory_store_bulk", tools[7].Name)
-	assert.Equal(t, "execute-sql", tools[8].Name)
+	assert.Equal(t, "memory_recall", tools[6].Name)
+	assert.Equal(t, "memory_store", tools[7].Name)
+	assert.Equal(t, "memory_store_bulk", tools[8].Name)
+	assert.Equal(t, "execute-sql", tools[9].Name)
 	// Description is enriched from the catalog for known slugs.
-	assert.Contains(t, tools[8].Description, "Executes SQL queries against configured PostgreSQL datasources")
-	assert.Contains(t, string(tools[8].InputSchema), `"query"`)
+	assert.Contains(t, tools[9].Description, "Executes SQL queries against configured PostgreSQL datasources")
+	assert.Contains(t, string(tools[9].InputSchema), `"query"`)
 }
 
 func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
@@ -112,7 +113,7 @@ func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 9)
+	require.Len(t, tools, 10)
 
 	assert.Equal(t, "agent", tools[0].Name)
 	assert.Equal(t, "agenthub_manage", tools[1].Name)
@@ -124,8 +125,9 @@ func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
 	assert.Contains(t, tools[6].Description, "Technical Docs")
 	assert.Contains(t, tools[6].Description, "FAQ")
 	assert.Contains(t, string(tools[6].InputSchema), `"query"`)
-	assert.Equal(t, "memory_store", tools[7].Name)
-	assert.Equal(t, "memory_store_bulk", tools[8].Name)
+	assert.Equal(t, "memory_recall", tools[7].Name)
+	assert.Equal(t, "memory_store", tools[8].Name)
+	assert.Equal(t, "memory_store_bulk", tools[9].Name)
 }
 
 func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T) {
@@ -155,7 +157,7 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 9)
+	require.Len(t, tools, 10)
 
 	// Builtins first, then skill tools.
 	assert.Equal(t, "agent", tools[0].Name)
@@ -164,10 +166,11 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_DerivesFromTool(t *testing.T
 	assert.Equal(t, "canvas_export_table", tools[3].Name)
 	assert.Equal(t, "canvas_feedback", tools[4].Name)
 	assert.Equal(t, "canvas_update", tools[5].Name)
-	assert.Equal(t, "memory_store", tools[6].Name)
-	assert.Equal(t, "memory_store_bulk", tools[7].Name)
-	assert.Equal(t, "http-call", tools[8].Name)
-	assert.Contains(t, string(tools[8].InputSchema), `"url"`)
+	assert.Equal(t, "memory_recall", tools[6].Name)
+	assert.Equal(t, "memory_store", tools[7].Name)
+	assert.Equal(t, "memory_store_bulk", tools[8].Name)
+	assert.Equal(t, "http-call", tools[9].Name)
+	assert.Contains(t, string(tools[9].InputSchema), `"url"`)
 }
 
 func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
@@ -181,7 +184,7 @@ func TestToolSchemaBuilder_Build_SkillWithoutSchema_NoToolConfig(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 8)
+	require.Len(t, tools, 9)
 	for _, tool := range tools {
 		assert.NotEqual(t, "empty-skill", tool.Name,
 			"skill without active bindings must not appear in tools[]")
@@ -194,15 +197,16 @@ func TestToolSchemaBuilder_Build_NoSkillsNoKBs(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 8)
+	require.Len(t, tools, 9)
 	assert.Equal(t, "agent", tools[0].Name)
 	assert.Equal(t, "agenthub_manage", tools[1].Name)
 	assert.Equal(t, "ask_user", tools[2].Name)
 	assert.Equal(t, "canvas_export_table", tools[3].Name)
 	assert.Equal(t, "canvas_feedback", tools[4].Name)
 	assert.Equal(t, "canvas_update", tools[5].Name)
-	assert.Equal(t, "memory_store", tools[6].Name)
-	assert.Equal(t, "memory_store_bulk", tools[7].Name)
+	assert.Equal(t, "memory_recall", tools[6].Name)
+	assert.Equal(t, "memory_store", tools[7].Name)
+	assert.Equal(t, "memory_store_bulk", tools[8].Name)
 }
 
 func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
@@ -235,25 +239,26 @@ func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 9)
+	require.Len(t, tools, 10)
 	assert.Equal(t, "agent", tools[0].Name)
 	assert.Equal(t, "agenthub_manage", tools[1].Name)
 	assert.Equal(t, "ask_user", tools[2].Name)
 	assert.Equal(t, "canvas_export_table", tools[3].Name)
 	assert.Equal(t, "canvas_feedback", tools[4].Name)
 	assert.Equal(t, "canvas_update", tools[5].Name)
-	assert.Equal(t, "memory_store", tools[6].Name)
-	assert.Equal(t, "memory_store_bulk", tools[7].Name)
-	assert.Equal(t, "bad-schema", tools[8].Name)
+	assert.Equal(t, "memory_recall", tools[6].Name)
+	assert.Equal(t, "memory_store", tools[7].Name)
+	assert.Equal(t, "memory_store_bulk", tools[8].Name)
+	assert.Equal(t, "bad-schema", tools[9].Name)
 	// Should fall back to empty schema for the skill.
-	assert.Contains(t, string(tools[8].InputSchema), `"type":"object"`)
+	assert.Contains(t, string(tools[9].InputSchema), `"type":"object"`)
 }
 
 // --- TR-01-TASK-20: all active tools exposed, no premature break (P-C175-2) ---
 
-// TestToolSchemaBuilder_Build_SkillWithMultipleTools_AllFlagsAggregated verifies that
-// removing the break causes flags from all active tools to be OR-combined.
-func TestToolSchemaBuilder_Build_SkillWithMultipleTools_AllFlagsAggregated(t *testing.T) {
+// TestToolSchemaBuilder_Build_SkillWithMultipleTools_ExposesEachToolFlags verifies that
+// skills with multiple active tools expose each tool under its own stable slug.
+func TestToolSchemaBuilder_Build_SkillWithMultipleTools_ExposesEachToolFlags(t *testing.T) {
 	skillID := uuid.New()
 	tool1ID := uuid.New()
 	tool2ID := uuid.New()
@@ -269,8 +274,8 @@ func TestToolSchemaBuilder_Build_SkillWithMultipleTools_AllFlagsAggregated(t *te
 			{ID: uuid.New(), SkillID: skillID, ToolID: tool2ID, IsActive: true},
 		},
 		tools: []tool.Tool{
-			{ID: tool1ID, Name: "tool-a", Type: "HTTP", IsDestructive: false, ReadOnly: true},
-			{ID: tool2ID, Name: "tool-b", Type: "HTTP", IsDestructive: true, ReadOnly: false},
+			{ID: tool1ID, Name: "tool-a", Slug: "tool-a", Type: "HTTP", IsDestructive: false, ReadOnly: true},
+			{ID: tool2ID, Name: "tool-b", Slug: "tool-b", Type: "HTTP", IsDestructive: true, ReadOnly: false},
 		},
 	}
 	skills := &mockSkillLister{skills: []skill.Skill{
@@ -282,17 +287,15 @@ func TestToolSchemaBuilder_Build_SkillWithMultipleTools_AllFlagsAggregated(t *te
 	llmTools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	// The skill should appear as a single LLM tool (skills are the granularity, not individual tools).
-	var multiTool *agentic.LLMTool
+	var destructiveTool *agentic.LLMTool
 	for i := range llmTools {
-		if llmTools[i].Name == "multi-tool" {
-			multiTool = &llmTools[i]
+		if llmTools[i].Name == "tool-b" {
+			destructiveTool = &llmTools[i]
 			break
 		}
 	}
-	require.NotNil(t, multiTool, "multi-tool skill must appear in tools[]")
-	// Both tools' flags should be aggregated: IsDestructive OR'd → true.
-	assert.True(t, multiTool.IsDestructive, "IsDestructive must be true after aggregating both tools")
+	require.NotNil(t, destructiveTool, "the destructive bound tool must appear in tools[]")
+	assert.True(t, destructiveTool.IsDestructive)
 }
 
 // TestToolSchemaBuilder_Build_SkillWithMixedActiveInactive_OnlyActiveCount verifies
@@ -365,10 +368,10 @@ func TestToolSchemaBuilder_Build_PrefersDatabaseDescriptionOverStaticCatalog(t *
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 9)
-	assert.Equal(t, "execute-sql", tools[8].Name)
-	assert.Equal(t, "Custom DB description for SQL tool.", tools[8].Description)
-	assert.NotContains(t, tools[8].Description, "PostgreSQL datasources")
+	require.Len(t, tools, 10)
+	assert.Equal(t, "execute-sql", tools[9].Name)
+	assert.Equal(t, "Custom DB description for SQL tool.", tools[9].Description)
+	assert.NotContains(t, tools[9].Description, "PostgreSQL datasources")
 }
 
 func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
@@ -377,7 +380,7 @@ func TestToolSchemaBuilder_Build_MemoryStoreSchema(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 8)
+	require.Len(t, tools, 9)
 
 	var schema map[string]any
 	var found bool
@@ -424,9 +427,9 @@ func TestToolSchemaBuilder_Build_SortedByPartition(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 11)
+	require.Len(t, tools, 12)
 
-	// Builtins first (8 builtins), then skills (alpha-tool, zebra-tool).
+	// Builtins first (10 builtins), then skills (alpha-tool, zebra-tool).
 	// Within each partition, sorted alphabetically.
 	builtinEnd := 0
 	for i, t := range tools {
@@ -435,7 +438,7 @@ func TestToolSchemaBuilder_Build_SortedByPartition(t *testing.T) {
 			break
 		}
 	}
-	assert.Equal(t, 9, builtinEnd, "should have 9 builtins as prefix")
+	assert.Equal(t, 10, builtinEnd, "should have 10 builtins as prefix")
 
 	// Builtins sorted.
 	for i := 1; i < builtinEnd; i++ {
@@ -516,9 +519,9 @@ func TestToolSchemaBuilder_Build_BuiltinsFormContiguousPrefix(t *testing.T) {
 	tools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	require.Len(t, tools, 12)
+	require.Len(t, tools, 13)
 
-	// Builtins (9 total) should be the first 9, sorted alphabetically.
+	// Builtins (10 total) should be the first 10, sorted alphabetically.
 	assert.True(t, tools[0].Builtin)
 	assert.Equal(t, "agent", tools[0].Name)
 	assert.True(t, tools[1].Builtin)
@@ -534,17 +537,19 @@ func TestToolSchemaBuilder_Build_BuiltinsFormContiguousPrefix(t *testing.T) {
 	assert.True(t, tools[6].Builtin)
 	assert.Equal(t, "document_search", tools[6].Name)
 	assert.True(t, tools[7].Builtin)
-	assert.Equal(t, "memory_store", tools[7].Name)
+	assert.Equal(t, "memory_recall", tools[7].Name)
 	assert.True(t, tools[8].Builtin)
-	assert.Equal(t, "memory_store_bulk", tools[8].Name)
+	assert.Equal(t, "memory_store", tools[8].Name)
+	assert.True(t, tools[9].Builtin)
+	assert.Equal(t, "memory_store_bulk", tools[9].Name)
 
 	// Skill tools should follow, also sorted alphabetically.
-	assert.False(t, tools[9].Builtin)
-	assert.Equal(t, "alpha-tool", tools[9].Name)
 	assert.False(t, tools[10].Builtin)
-	assert.Equal(t, "mid-tool", tools[10].Name)
+	assert.Equal(t, "alpha-tool", tools[10].Name)
 	assert.False(t, tools[11].Builtin)
-	assert.Equal(t, "zebra-tool", tools[11].Name)
+	assert.Equal(t, "mid-tool", tools[11].Name)
+	assert.False(t, tools[12].Builtin)
+	assert.Equal(t, "zebra-tool", tools[12].Name)
 }
 
 func TestToolSchemaBuilder_Build_BuiltinFlagIsSet(t *testing.T) {

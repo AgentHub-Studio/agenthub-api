@@ -247,18 +247,10 @@ func (h *HeuristicRunEvaluator) Evaluate(ctx context.Context, out RunOutput) (Qu
 	}
 	report.Dimensions["budget"] = budgetScore
 
-	// Overall score = unweighted mean of dimensions.
-	sum := 0.0
-	count := 0
-	for _, v := range report.Dimensions {
-		sum += v
-		count++
-	}
-	if count > 0 {
-		report.OverallScore = sum / float64(count)
-	} else {
-		report.OverallScore = 1.0
-	}
+	// Overall score = unweighted mean of dimensions. Keep the addition order
+	// explicit: Go deliberately randomizes map iteration, which would otherwise
+	// cause tiny floating-point differences for identical evaluations.
+	report.OverallScore = (lengthScore + failureRateScore + budgetScore) / 3
 
 	// Decision from thresholds.
 	switch {
