@@ -1165,7 +1165,7 @@ func (d *chatAgentDispatcher) Dispatch(ctx context.Context, agentID uuid.UUID, u
 		return "", fmt.Errorf("channel dispatch: create session: %w", err)
 	}
 
-	events, err := d.chatSvc.RunSession(ctx, session.ID, userText, tenantID)
+	events, err := d.chatSvc.RunSession(ctx, session.ID, userText, tenantID, chat.RunOverrides{})
 	if err != nil {
 		return "", fmt.Errorf("channel dispatch: run session: %w", err)
 	}

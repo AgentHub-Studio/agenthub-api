@@ -29,6 +29,7 @@ type ChatRunTask struct {
 	TenantID    string          `json:"tenantId"`
 	Message     string          `json:"message"`
 	Attachments json.RawMessage `json:"attachments,omitempty"`
+	Overrides   RunOverrides    `json:"overrides,omitempty"`
 	// VoiceOutput tells the worker to synthesize the assistant answer and emit
 	// an audio_delta event before run_complete.
 	VoiceOutput bool `json:"voiceOutput,omitempty"`
@@ -89,6 +90,7 @@ type MetricsRecord struct {
 type EnqueueRunOptions struct {
 	Attachments json.RawMessage
 	VoiceOutput bool
+	Overrides   RunOverrides
 }
 
 // RunMetricsCollector consumes run events and flushes an analytics batch.
@@ -245,6 +247,9 @@ func (e *AsyncExecutor) EnqueueRunWithAttachments(ctx context.Context, sessionID
 
 // EnqueueRunWithOptions persists a run and forwards execution options to the worker.
 func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uuid.UUID, tenantID, message string, opts EnqueueRunOptions) (uuid.UUID, error) {
+	if err := opts.Overrides.Validate(); err != nil {
+		return uuid.Nil, err
+	}
 	attachments, err := NormalizeChatAttachments(opts.Attachments)
 	if err != nil {
 		return uuid.Nil, err
@@ -358,6 +363,7 @@ func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uui
 		TenantID:    tenantID,
 		Message:     message,
 		Attachments: attachments,
+		Overrides:   opts.Overrides.normalized(),
 		VoiceOutput: opts.VoiceOutput,
 		RawToken:    tenant.TokenFromContext(ctx),
 	})
@@ -599,10 +605,17 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		}
 	}
 
+	// Apply Agent Studio overrides only for this run; session snapshots remain immutable.
+	systemPromptSnapshot, modelConfigSnapshot := applyRunOverrides(
+		session.SystemPromptSnapshot,
+		session.ModelConfigSnapshot,
+		task.Overrides,
+	)
+
 	// 2. Execute the run
 	var runMetrics RunMetricsCollector
 	if e.runMetricsFactory != nil && session.AgentID != nil {
-		provider, model := modelIdentityFromSnapshot(session.ModelConfigSnapshot)
+		provider, model := modelIdentityFromSnapshot(modelConfigSnapshot)
 		runMetrics = e.runMetricsFactory.NewCollector(
 			strings.TrimPrefix(task.TenantID, "ah_"),
 			*session.AgentID,
@@ -628,8 +641,8 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		TenantID:               task.TenantID,
 		UserMessage:            task.Message,
 		Attachments:            task.Attachments,
-		SystemPromptSnapshot:   session.SystemPromptSnapshot,
-		ModelConfigSnapshot:    session.ModelConfigSnapshot,
+		SystemPromptSnapshot:   systemPromptSnapshot,
+		ModelConfigSnapshot:    modelConfigSnapshot,
 		SkillIDsSnapshot:       skillIDsSnapshot,
 		MCPServerNamesSnapshot: mcpServerNames,
 	})

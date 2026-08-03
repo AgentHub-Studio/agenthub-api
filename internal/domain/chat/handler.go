@@ -32,7 +32,7 @@ type chatService interface {
 	AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
 	GetActiveRun(ctx context.Context, sessionID uuid.UUID) (ChatRunResponse, bool, error)
 	// RunSession starts an agentic run and returns a channel of events for SSE streaming.
-	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error)
+	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, overrides RunOverrides) (<-chan RunEvent, error)
 	// RespondElicitation routes a user response to an active elicitation request.
 	RespondElicitation(sessionID, requestID string, result ElicitationResult) bool
 	// ApplyClientState merges a CopilotKit client-state patch (frontend actions,
@@ -455,6 +455,7 @@ type elicitationRespondRequest struct {
 type runSessionRequest struct {
 	Message     string          `json:"message"`
 	Attachments json.RawMessage `json:"attachments,omitempty"`
+	Overrides   RunOverrides    `json:"overrides,omitempty"`
 }
 
 const maxVoiceUploadBytes = 25 << 20
@@ -606,6 +607,10 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if err := req.Overrides.Validate(); err != nil {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	attachments, err := NormalizeChatAttachments(req.Attachments)
 	if err != nil {
 		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
@@ -627,7 +632,10 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 
 	// If AsyncExecutor is available, use it to start the run in background.
 	if h.executor != nil {
-		runID, err := h.executor.EnqueueRunWithAttachments(r.Context(), sessionID, tenantID, req.Message, req.Attachments)
+		runID, err := h.executor.EnqueueRunWithOptions(r.Context(), sessionID, tenantID, req.Message, EnqueueRunOptions{
+			Attachments: req.Attachments,
+			Overrides:   req.Overrides,
+		})
 		if err != nil {
 			if errors.Is(err, ErrRunAlreadyActive) {
 				respond.Error(w, http.StatusConflict, "a run is already in progress for this session")
@@ -669,7 +677,7 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	rawToken := tenant.TokenFromContext(r.Context())
 	runCtx = tenant.NewContextWithToken(runCtx, tenantID, rawToken)
 
-	ch, err := h.runSessionWithAttachments(runCtx, sessionID, req.Message, tenantID, req.Attachments)
+	ch, err := h.runSessionWithAttachments(runCtx, sessionID, req.Message, tenantID, req.Attachments, req.Overrides)
 	if err != nil {
 		h.bgRegistry.Cancel(runID)
 		if errors.Is(err, ErrNotFound) {
@@ -761,13 +769,13 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) runSessionWithAttachments(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, attachments json.RawMessage) (<-chan RunEvent, error) {
+func (h *Handler) runSessionWithAttachments(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, attachments json.RawMessage, overrides RunOverrides) (<-chan RunEvent, error) {
 	if svc, ok := h.svc.(interface {
-		RunSessionWithAttachments(context.Context, uuid.UUID, string, string, json.RawMessage) (<-chan RunEvent, error)
+		RunSessionWithAttachmentsAndOverrides(context.Context, uuid.UUID, string, string, json.RawMessage, RunOverrides) (<-chan RunEvent, error)
 	}); ok {
-		return svc.RunSessionWithAttachments(ctx, sessionID, userMessage, tenantID, attachments)
+		return svc.RunSessionWithAttachmentsAndOverrides(ctx, sessionID, userMessage, tenantID, attachments, overrides)
 	}
-	return h.svc.RunSession(ctx, sessionID, userMessage, tenantID)
+	return h.svc.RunSession(ctx, sessionID, userMessage, tenantID, overrides)
 }
 
 // runStatusResponse is returned by the run status endpoint.

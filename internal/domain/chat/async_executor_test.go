@@ -224,6 +224,39 @@ func TestAsyncExecutor_ProcessTask_BuffersEventsForResume(t *testing.T) {
 	assert.Equal(t, uuid.Nil, repo.failedID)
 }
 
+func TestAsyncExecutor_ProcessTask_AppliesRunOverrides(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	basePrompt := "Original prompt."
+	repo := &asyncExecutorRepoStub{
+		session: ChatSession{
+			ID:                   sessionID,
+			AgentID:              &agentID,
+			SystemPromptSnapshot: &basePrompt,
+			ModelConfigSnapshot:  json.RawMessage(`{"provider":"openai","model":"gpt-4o"}`),
+		},
+	}
+	runner := &asyncExecutorRunnerStub{}
+	exec := NewAsyncExecutor(repo, runner, "")
+	overridePrompt := "Respond only in French."
+
+	exec.processTask(ChatRunTask{
+		RunID:     uuid.New(),
+		SessionID: sessionID,
+		TenantID:  "test",
+		Message:   "hello",
+		Overrides: RunOverrides{
+			SystemPrompt: &overridePrompt,
+			ModelConfig:  json.RawMessage(`{"provider":"openai","model":"gpt-4o-mini"}`),
+		},
+	})
+
+	require.NotNil(t, runner.input.SystemPromptSnapshot)
+	assert.Equal(t, overridePrompt, *runner.input.SystemPromptSnapshot)
+	assert.JSONEq(t, `{"provider":"openai","model":"gpt-4o-mini"}`, string(runner.input.ModelConfigSnapshot))
+	assert.Equal(t, basePrompt, *repo.session.SystemPromptSnapshot)
+}
+
 type asyncMetricsCollectorStub struct {
 	events  []RunEvent
 	flushed bool
