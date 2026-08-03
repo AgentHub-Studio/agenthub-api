@@ -85,9 +85,9 @@ type pgQuerier interface {
 // If kbIDs is empty all active KBs in the current tenant schema are searched.
 // When ctx carries a tenant ID (via tenant.FromContext) a dedicated connection is
 // acquired with the correct search_path so the per-tenant schema tables are visible.
-func (c *PgDocumentSearchClient) Search(ctx context.Context, query string, kbIDs []uuid.UUID, topK int) ([]SearchResult, error) {
-	if topK <= 0 {
-		topK = 5
+func (c *PgDocumentSearchClient) Search(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
+	if opts.TopK <= 0 {
+		opts.TopK = 5
 	}
 
 	// P-KB2-2: if context carries a tenant ID, acquire a tenant-scoped connection so
@@ -100,15 +100,15 @@ func (c *PgDocumentSearchClient) Search(ctx context.Context, query string, kbIDs
 			return nil, fmt.Errorf("knowledge: acquire tenant connection: %w", err)
 		}
 		defer release()
-		return c.searchWithQuerier(ctx, conn, query, kbIDs, topK)
+		return c.searchWithQuerier(ctx, conn, query, opts)
 	}
 
-	return c.searchWithQuerier(ctx, c.pool, query, kbIDs, topK)
+	return c.searchWithQuerier(ctx, c.pool, query, opts)
 }
 
 // searchWithQuerier performs the actual vector search using the given querier.
 // The querier must already have the correct search_path set if per-tenant isolation is required.
-func (c *PgDocumentSearchClient) searchWithQuerier(ctx context.Context, db pgQuerier, query string, kbIDs []uuid.UUID, topK int) ([]SearchResult, error) {
+func (c *PgDocumentSearchClient) searchWithQuerier(ctx context.Context, db pgQuerier, query string, opts SearchOptions) ([]SearchResult, error) {
 	queryVec, err := c.embed(ctx, query)
 	if err != nil {
 		return nil, err
@@ -116,6 +116,13 @@ func (c *PgDocumentSearchClient) searchWithQuerier(ctx context.Context, db pgQue
 
 	// Build a pgvector-compatible string representation: '[f1,f2,...]'
 	vecStr := floatSliceToVector(queryVec)
+	metadataWhere := ""
+	metadataArgs := []any(nil)
+	if opts.MetadataFilter != nil {
+		clause, args := opts.MetadataFilter.SQL(2)
+		metadataWhere = " AND " + clause
+		metadataArgs = args
+	}
 
 	// P-E1-2: search document_chunk_embedding (per-tenant schema) using cosine distance.
 	// Join with document_chunk to get content, document_id, and knowledge_base_id.
@@ -131,10 +138,10 @@ func (c *PgDocumentSearchClient) searchWithQuerier(ctx context.Context, db pgQue
 
 	// knowledge_base_id lives on the document table, not document_chunk.
 	// The join path is: document_chunk_embedding → document_chunk → document.
-	if len(kbIDs) > 0 {
+	if len(opts.KBIDs) > 0 {
 		// Build IN clause manually — pgx doesn't support uuid[] binding for this shape.
 		inClause := "("
-		for i, id := range kbIDs {
+		for i, id := range opts.KBIDs {
 			if i > 0 {
 				inClause += ","
 			}
@@ -157,11 +164,12 @@ FROM document_chunk_embedding dce
 JOIN document_chunk dc ON dc.id = dce.chunk_id
 JOIN document d ON d.id = dc.document_id
 JOIN knowledge_base kb ON kb.id = d.knowledge_base_id
-WHERE d.knowledge_base_id IN %s AND kb.status = 'ACTIVE'
+WHERE d.knowledge_base_id IN %s AND kb.status = 'ACTIVE'%s
 ORDER BY dce.embedding <=> $1::vector
-LIMIT $2`, inClause)
+LIMIT $2`, inClause, metadataWhere)
 
-		dbRows, err := db.Query(ctx, sqlQuery, vecStr, topK)
+		args := append([]any{vecStr, opts.TopK}, metadataArgs...)
+		dbRows, err := db.Query(ctx, sqlQuery, args...)
 		if err != nil {
 			return nil, fmt.Errorf("knowledge: vector search query: %w", err)
 		}
@@ -200,11 +208,13 @@ FROM document_chunk_embedding dce
 JOIN document_chunk dc ON dc.id = dce.chunk_id
 JOIN document d ON d.id = dc.document_id
 JOIN knowledge_base kb ON kb.id = d.knowledge_base_id
-WHERE kb.status = 'ACTIVE'
+WHERE kb.status = 'ACTIVE'%s
 ORDER BY dce.embedding <=> $1::vector
 LIMIT $2`
+		sqlQuery = fmt.Sprintf(sqlQuery, metadataWhere)
 
-		dbRows, err := db.Query(ctx, sqlQuery, vecStr, topK)
+		args := append([]any{vecStr, opts.TopK}, metadataArgs...)
+		dbRows, err := db.Query(ctx, sqlQuery, args...)
 		if err != nil {
 			return nil, fmt.Errorf("knowledge: vector search query (all KBs): %w", err)
 		}

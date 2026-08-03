@@ -301,15 +301,51 @@ func TestExecuteDocumentSearch_PropagatesError(t *testing.T) {
 	assert.Contains(t, err.Error(), "vector db unavailable")
 }
 
-// mockKnowledgeSearchClient is a test double for knowledge.DocumentSearchClient.
-type mockKnowledgeSearchClient struct {
-	results  any
-	err      error
-	lastTopK int
+func TestExecuteDocumentSearch_PropagatesMetadataFilter(t *testing.T) {
+	client := &mockKnowledgeSearchClient{}
+
+	_, err := agentic.ExecuteDocumentSearch(
+		context.Background(),
+		client,
+		nil,
+		json.RawMessage(`{"query":"release notes","metadataFilter":{"all":[{"field":"year","op":"in","value":[2025,2026]},{"field":"customer.tier","op":"gte","value":2}]}}`),
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, client.lastMetadataFilter)
+	sql, args := client.lastMetadataFilter.SQL(0)
+	assert.Contains(t, sql, "d.metadata")
+	assert.Contains(t, sql, "::numeric >=")
+	assert.Equal(t, []any{[]string{"year"}, "2025", "2026", []string{"customer", "tier"}, "2"}, args)
 }
 
-func (m *mockKnowledgeSearchClient) Search(_ context.Context, _ string, _ []uuid.UUID, topK int) ([]knowledge.SearchResult, error) {
-	m.lastTopK = topK
+func TestExecuteDocumentSearch_RejectsInvalidMetadataFilterBeforeSearch(t *testing.T) {
+	client := &mockKnowledgeSearchClient{}
+
+	_, err := agentic.ExecuteDocumentSearch(
+		context.Background(),
+		client,
+		nil,
+		json.RawMessage(`{"query":"release notes","metadataFilter":{"field":"source","field":"owner","op":"exists"}}`),
+	)
+
+	require.Error(t, err)
+	assert.Zero(t, client.calls)
+}
+
+// mockKnowledgeSearchClient is a test double for knowledge.DocumentSearchClient.
+type mockKnowledgeSearchClient struct {
+	results            any
+	err                error
+	lastTopK           int
+	lastMetadataFilter *knowledge.MetadataFilter
+	calls              int
+}
+
+func (m *mockKnowledgeSearchClient) Search(_ context.Context, _ string, opts knowledge.SearchOptions) ([]knowledge.SearchResult, error) {
+	m.calls++
+	m.lastTopK = opts.TopK
+	m.lastMetadataFilter = opts.MetadataFilter
 	if m.err != nil {
 		return nil, m.err
 	}

@@ -922,20 +922,40 @@ func documentSearchTool(kbs []knowledgebase.KnowledgeBase) LLMTool {
 	schema := json.RawMessage(`{
 		"type": "object",
 		"properties": {
-			"query": {
-				"type": "string",
-				"description": "Semantic search query"
+			"query": {"type": "string", "description": "Semantic search query"},
+			"knowledge_base_id": {"type": "string", "description": "Optional UUID of a specific knowledge base to search"},
+			"metadataFilter": {
+				"type": "object",
+				"description": "Optional V1 document metadata filter. Use exactly one expression: a predicate {field,op,value}, {all:[...]}, {any:[...]}, or {not:{...}}. Field accepts one or two metadata levels separated by a dot, for example customer.region. Operators: eq, neq, in, notIn, exists, notExists, gt, gte, lt, lte, like, ilike, containsAny, containsAll. The encoded filter is limited to 16 KiB; the server also enforces depth 8, 64 predicates, 32 expressions per group, and 64 list values.",
+				"$ref": "#/$defs/metadataFilter"
 			},
-			"knowledge_base_id": {
-				"type": "string",
-				"description": "Optional UUID of a specific knowledge base to search"
-			},
-			"limit": {
-				"type": "integer",
-				"description": "Maximum number of results to return (default 5)"
-			}
+			"limit": {"type": "integer", "description": "Maximum number of results to return (default 5)"}
 		},
-		"required": ["query"]
+		"required": ["query"],
+		"$defs": {
+			"metadataFilter": {"type": "object", "oneOf": [
+				{"$ref": "#/$defs/metadataPredicate"},
+				{"$ref": "#/$defs/metadataAllGroup"},
+				{"$ref": "#/$defs/metadataAnyGroup"},
+				{"$ref": "#/$defs/metadataNotGroup"}
+			]},
+			"metadataAllGroup": {"type": "object", "properties": {"all": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/metadataFilter"}}}, "required": ["all"], "additionalProperties": false},
+			"metadataAnyGroup": {"type": "object", "properties": {"any": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/metadataFilter"}}}, "required": ["any"], "additionalProperties": false},
+			"metadataNotGroup": {"type": "object", "properties": {"not": {"$ref": "#/$defs/metadataFilter"}}, "required": ["not"], "additionalProperties": false},
+			"metadataPredicate": {"oneOf": [
+				{"type": "object", "properties": {"field": {"$ref": "#/$defs/metadataField"}, "op": {"enum": ["eq", "neq"]}, "value": {"$ref": "#/$defs/metadataEqValue"}}, "required": ["field", "op", "value"], "additionalProperties": false},
+				{"type": "object", "properties": {"field": {"$ref": "#/$defs/metadataField"}, "op": {"enum": ["in", "notIn"]}, "value": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/metadataScalar"}}}, "required": ["field", "op", "value"], "additionalProperties": false},
+				{"type": "object", "properties": {"field": {"$ref": "#/$defs/metadataField"}, "op": {"enum": ["exists", "notExists"]}}, "required": ["field", "op"], "additionalProperties": false},
+				{"type": "object", "properties": {"field": {"$ref": "#/$defs/metadataField"}, "op": {"enum": ["gt", "gte", "lt", "lte"]}, "value": {"type": "number"}}, "required": ["field", "op", "value"], "additionalProperties": false},
+				{"type": "object", "properties": {"field": {"$ref": "#/$defs/metadataField"}, "op": {"enum": ["like", "ilike"]}, "value": {"type": "string"}}, "required": ["field", "op", "value"], "additionalProperties": false},
+				{"type": "object", "properties": {"field": {"$ref": "#/$defs/metadataField"}, "op": {"enum": ["containsAny", "containsAll"]}, "value": {"type": "array", "maxItems": 64, "items": {"type": "string"}}}, "required": ["field", "op", "value"], "additionalProperties": false}
+			]},
+			"metadataField": {"type": "string", "minLength": 1, "description": "One or two metadata keys separated by a dot, for example customer.region"},
+			"metadataScalar": {"type": ["string", "number", "boolean"]},
+			"metadataEqValue": {"oneOf": [{"$ref": "#/$defs/metadataScalar"}, {"$ref": "#/$defs/metadataStringArray"}, {"$ref": "#/$defs/metadataSecondLevelObject"}]},
+			"metadataSecondLevelObject": {"type": "object", "minProperties": 1, "additionalProperties": {"oneOf": [{"$ref": "#/$defs/metadataScalar"}, {"$ref": "#/$defs/metadataStringArray"}]}},
+			"metadataStringArray": {"type": "array", "maxItems": 64, "items": {"type": "string"}}
+		}
 	}`)
 	return LLMTool{
 		Name:        "document_search",

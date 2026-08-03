@@ -2,6 +2,7 @@ package document
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/metadata"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -112,6 +114,11 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
+	metadataValue, err := parseUploadMetadata(r.FormValue("metadata"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid metadata")
+		return
+	}
 
 	req := UploadRequest{
 		KnowledgeBaseID: kbID,
@@ -119,6 +126,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		ContentType:     contentType,
 		FileSize:        header.Size,
 		Content:         file,
+		Metadata:        metadataValue,
 	}
 
 	resp, err := h.svc.Upload(r.Context(), req)
@@ -131,6 +139,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.JSON(w, http.StatusCreated, resp)
+}
+
+func parseUploadMetadata(raw string) (json.RawMessage, error) {
+	return metadata.ParseDocument([]byte(raw))
 }
 
 func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {

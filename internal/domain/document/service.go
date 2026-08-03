@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/metadata"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
@@ -73,6 +74,11 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentRespon
 		return DocumentResponse{}, fmt.Errorf("document service: file name exceeds 255 chars (got %d)", len(safeName))
 	}
 	req.FileName = safeName
+	parsedMetadata, err := metadata.ParseDocument(req.Metadata)
+	if err != nil {
+		return DocumentResponse{}, fmt.Errorf("document service: invalid metadata: %w", err)
+	}
+	req.Metadata = parsedMetadata
 
 	// Derive a stable storage key before uploading so the DB record and the object share the same path.
 	docID := uuid.New()
@@ -88,6 +94,7 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentRespon
 		FileName:        req.FileName,
 		ContentType:     req.ContentType,
 		FileSize:        req.FileSize,
+		Metadata:        req.Metadata,
 		StoragePath:     storagePath,
 		Status:          StatusPending,
 	}

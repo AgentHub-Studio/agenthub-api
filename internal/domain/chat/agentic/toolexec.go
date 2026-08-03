@@ -771,10 +771,11 @@ func ValidateToolInput(toolName string, input json.RawMessage) string {
 // and returns the results serialised as JSON.
 func executeDocumentSearchInternal(ctx context.Context, client knowledge.DocumentSearchClient, kbIDs []uuid.UUID, rawArgs json.RawMessage) (*ToolExecResult, error) {
 	var args struct {
-		Query           string `json:"query"`
-		TopK            int    `json:"top_k"`
-		Limit           int    `json:"limit"`             // BUG-DOCSEARCH-PARAMS: alias accepted from LLM schema
-		KnowledgeBaseID string `json:"knowledge_base_id"` // BUG-DOCSEARCH-PARAMS: optional KB filter
+		Query           string          `json:"query"`
+		TopK            int             `json:"top_k"`
+		Limit           int             `json:"limit"`             // BUG-DOCSEARCH-PARAMS: alias accepted from LLM schema
+		KnowledgeBaseID string          `json:"knowledge_base_id"` // BUG-DOCSEARCH-PARAMS: optional KB filter
+		MetadataFilter  json.RawMessage `json:"metadataFilter"`
 	}
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
 		return nil, fmt.Errorf("document_search: invalid arguments: %w", err)
@@ -785,6 +786,10 @@ func executeDocumentSearchInternal(ctx context.Context, client knowledge.Documen
 	}
 	if args.TopK <= 0 {
 		args.TopK = 5
+	}
+	metadataFilter, err := knowledge.ParseMetadataFilter(args.MetadataFilter)
+	if err != nil {
+		return nil, fmt.Errorf("document_search: invalid metadataFilter: %w", err)
 	}
 
 	// BUG-DOCSEARCH-PARAMS: when the LLM provides knowledge_base_id, restrict the search
@@ -810,7 +815,11 @@ func executeDocumentSearchInternal(ctx context.Context, client knowledge.Documen
 		}
 	}
 
-	results, err := client.Search(ctx, args.Query, effectiveKBIDs, args.TopK)
+	results, err := client.Search(ctx, args.Query, knowledge.SearchOptions{
+		KBIDs:          effectiveKBIDs,
+		TopK:           args.TopK,
+		MetadataFilter: metadataFilter,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("document_search: search failed: %w", err)
 	}

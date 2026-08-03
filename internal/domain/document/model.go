@@ -2,6 +2,7 @@ package document
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"time"
@@ -26,28 +27,30 @@ const (
 
 // Document is the domain entity.
 type Document struct {
-	ID              uuid.UUID      `db:"id"`
-	KnowledgeBaseID uuid.UUID      `db:"knowledge_base_id"`
-	FileName        string         `db:"file_name"`
-	ContentType     string         `db:"content_type"`
-	Status          DocumentStatus `db:"status"`
-	StoragePath     string         `db:"storage_path"`
-	FileSize        int64          `db:"file_size"`
-	CreatedAt       time.Time      `db:"created_at"`
-	UpdatedAt       time.Time      `db:"updated_at"`
+	ID              uuid.UUID       `db:"id"`
+	KnowledgeBaseID uuid.UUID       `db:"knowledge_base_id"`
+	FileName        string          `db:"file_name"`
+	ContentType     string          `db:"content_type"`
+	Status          DocumentStatus  `db:"status"`
+	StoragePath     string          `db:"storage_path"`
+	FileSize        int64           `db:"file_size"`
+	Metadata        json.RawMessage `db:"metadata"`
+	CreatedAt       time.Time       `db:"created_at"`
+	UpdatedAt       time.Time       `db:"updated_at"`
 }
 
 // DocumentResponse is the DTO returned by the API.
 type DocumentResponse struct {
-	ID              uuid.UUID      `json:"id"`
-	KnowledgeBaseID uuid.UUID      `json:"knowledgeBaseId"`
-	FileName        string         `json:"fileName"`
-	ContentType     string         `json:"contentType"`
-	Status          DocumentStatus `json:"status"`
-	StoragePath     string         `json:"storagePath"`
-	FileSize        int64          `json:"fileSize"`
-	CreatedAt       time.Time      `json:"createdAt"`
-	UpdatedAt       time.Time      `json:"updatedAt"`
+	ID              uuid.UUID       `json:"id"`
+	KnowledgeBaseID uuid.UUID       `json:"knowledgeBaseId"`
+	FileName        string          `json:"fileName"`
+	ContentType     string          `json:"contentType"`
+	Status          DocumentStatus  `json:"status"`
+	StoragePath     string          `json:"storagePath"`
+	FileSize        int64           `json:"fileSize"`
+	Metadata        json.RawMessage `json:"metadata"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
 }
 
 // ResponseFrom maps a Document entity to a DocumentResponse DTO.
@@ -62,6 +65,7 @@ type UploadRequest struct {
 	ContentType     string
 	FileSize        int64
 	Content         io.Reader // file data from multipart form
+	Metadata        json.RawMessage
 }
 
 // DocumentUploadedEvent is published to RabbitMQ after a successful upload so the

@@ -192,8 +192,9 @@ func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
 
 // searchRequest is the body accepted by POST /api/knowledge-bases/{id}/search.
 type searchRequest struct {
-	Query string `json:"query"`
-	Limit int    `json:"limit"`
+	Query          string          `json:"query"`
+	Limit          int             `json:"limit"`
+	MetadataFilter json.RawMessage `json:"metadataFilter"`
 }
 
 // search handles POST /api/knowledge-bases/{id}/search.
@@ -229,8 +230,17 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	if req.Limit > 100 {
 		req.Limit = 100
 	}
+	metadataFilter, err := knowledge.ParseMetadataFilter(req.MetadataFilter)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid metadata filter")
+		return
+	}
 
-	results, err := h.searchClient.Search(r.Context(), req.Query, []uuid.UUID{kbID}, req.Limit)
+	results, err := h.searchClient.Search(r.Context(), req.Query, knowledge.SearchOptions{
+		KBIDs:          []uuid.UUID{kbID},
+		TopK:           req.Limit,
+		MetadataFilter: metadataFilter,
+	})
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "search failed")
 		return
