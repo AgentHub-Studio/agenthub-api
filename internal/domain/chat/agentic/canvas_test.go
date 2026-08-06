@@ -64,7 +64,9 @@ func TestHandleCanvasUpdate_DefaultsToMarkdown(t *testing.T) {
 		t.Fatalf("expected 1 canvas event, got %d", len(canvasEvents))
 	}
 	var data CanvasUpdateData
-	json.Unmarshal(canvasEvents[0].Data, &data)
+	if err := json.Unmarshal(canvasEvents[0].Data, &data); err != nil {
+		t.Fatalf("unmarshal canvas event: %v", err)
+	}
 	if data.Format != CanvasFormatMarkdown {
 		t.Errorf("expected default markdown, got %s", data.Format)
 	}
@@ -93,7 +95,9 @@ func TestHandleCanvasUpdate_PreservesID(t *testing.T) {
 	events := collectCanvasEvents(ch)
 	canvasEvents := filterByType(events, EventCanvasUpdate)
 	var data CanvasUpdateData
-	json.Unmarshal(canvasEvents[0].Data, &data)
+	if err := json.Unmarshal(canvasEvents[0].Data, &data); err != nil {
+		t.Fatalf("unmarshal canvas event: %v", err)
+	}
 	if data.ID != "my-artifact-id" {
 		t.Errorf("expected ID 'my-artifact-id', got %q", data.ID)
 	}
@@ -114,12 +118,16 @@ func TestHandleCanvasFeedback_Thumbs(t *testing.T) {
 		t.Fatalf("expected 1 input_request event, got %d", len(inputEvents))
 	}
 	var data InputRequestData
-	json.Unmarshal(inputEvents[0].Data, &data)
+	if err := json.Unmarshal(inputEvents[0].Data, &data); err != nil {
+		t.Fatalf("unmarshal input request event: %v", err)
+	}
 	if data.RequestID == "" {
 		t.Error("expected non-empty requestId")
 	}
 	var payload UiFormPayloadDto
-	json.Unmarshal(data.Payload, &payload)
+	if err := json.Unmarshal(data.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal input request payload: %v", err)
+	}
 	if len(payload.Elements) == 0 {
 		t.Error("expected form elements")
 	}
@@ -159,7 +167,9 @@ func TestHandleCanvasExportTable(t *testing.T) {
 		t.Fatalf("expected 1 canvas event, got %d", len(canvasEvents))
 	}
 	var data CanvasUpdateData
-	json.Unmarshal(canvasEvents[0].Data, &data)
+	if err := json.Unmarshal(canvasEvents[0].Data, &data); err != nil {
+		t.Fatalf("unmarshal canvas event: %v", err)
+	}
 	if data.Format != CanvasFormatTable {
 		t.Errorf("expected table format, got %s", data.Format)
 	}

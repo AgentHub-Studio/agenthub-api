@@ -1,7 +1,6 @@
 package agentic_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -10,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
-	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
 // --- FallbackTriggeredError ---
@@ -75,43 +73,12 @@ func TestEvaluateModelFallback_ZeroThreshold(t *testing.T) {
 	assert.True(t, decision.ShouldFallback)
 }
 
-// --- streamFallbackMockModel for integration tests ---
-
-type streamFallbackMockModel struct {
-	chatStreamErr error
-	chatResponse  *ai.ChatResponse
-	chatErr       error
-	chatCalls     int
-	streamCalls   int
-}
-
-func (m *streamFallbackMockModel) Chat(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (*ai.ChatResponse, error) {
-	m.chatCalls++
-	if m.chatErr != nil {
-		return nil, m.chatErr
-	}
-	return m.chatResponse, nil
-}
-
-func (m *streamFallbackMockModel) ChatStream(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
-	m.streamCalls++
-	if m.chatStreamErr != nil {
-		return nil, m.chatStreamErr
-	}
-	ch := make(chan ai.StreamChunk, 1)
-	ch <- ai.StreamChunk{Delta: "streamed", FinishReason: "stop"}
-	close(ch)
-	return ch, nil
-}
-
-func (m *streamFallbackMockModel) GetProviderName() string { return "mock" }
-
 // --- StreamFallbackResult field tests ---
 
 func TestStreamFallbackResult_Fields(t *testing.T) {
 	result := agentic.StreamFallbackResult{
 		Model:             "sonnet",
-		UsedNonStreaming:   true,
+		UsedNonStreaming:  true,
 		UsedFallbackModel: true,
 	}
 	assert.Equal(t, "sonnet", result.Model)

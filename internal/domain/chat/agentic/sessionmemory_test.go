@@ -1,6 +1,7 @@
 package agentic_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/uuid"
@@ -164,11 +165,11 @@ func TestDefaultSessionMemoryConfig(t *testing.T) {
 func TestSessionMemoryExtractor_Extract_Nil(t *testing.T) {
 	var e *agentic.SessionMemoryExtractor
 	// Should not panic.
-	e.Extract(nil, uuid.Nil, nil, 0, nil)
+	e.Extract(context.Background(), uuid.Nil, nil, 0, nil)
 }
 
 func TestSessionMemoryExtractor_Extract_NilRunner(t *testing.T) {
 	e := agentic.NewSessionMemoryExtractor(nil, agentic.DefaultSessionMemoryConfig())
 	// Should not panic.
-	e.Extract(nil, uuid.Nil, nil, 0, nil)
+	e.Extract(context.Background(), uuid.Nil, nil, 0, nil)
 }

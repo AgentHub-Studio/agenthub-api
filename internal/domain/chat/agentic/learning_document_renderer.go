@@ -164,8 +164,8 @@ func (r *LearningDocumentRenderer) serialize(sessionID string, sections []Learni
 func (r *LearningDocumentRenderer) serializeMarkdown(sessionID string, sections []LearningDocumentSection) string {
 	var sb strings.Builder
 	sb.WriteString("# Learning Report\n\n")
-	sb.WriteString(fmt.Sprintf("**Session:** `%s`  \n", sessionID))
-	sb.WriteString(fmt.Sprintf("**Audience:** %s\n\n", r.audience))
+	fmt.Fprintf(&sb, "**Session:** `%s`  \n", sessionID)
+	fmt.Fprintf(&sb, "**Audience:** %s\n\n", r.audience)
 
 	if len(sections) == 0 {
 		sb.WriteString("_No learning annotations recorded for this session._\n")
@@ -173,14 +173,14 @@ func (r *LearningDocumentRenderer) serializeMarkdown(sessionID string, sections 
 	}
 
 	for _, sec := range sections {
-		sb.WriteString(fmt.Sprintf("## %s\n\n", sec.Title))
+		fmt.Fprintf(&sb, "## %s\n\n", sec.Title)
 		for _, a := range sec.Annotations {
-			sb.WriteString(fmt.Sprintf("### %s\n\n", a.Title))
+			fmt.Fprintf(&sb, "### %s\n\n", a.Title)
 			sb.WriteString(a.Content)
 			sb.WriteString("\n")
 			if len(a.RelatedFeatureSlugs) > 0 {
-				sb.WriteString(fmt.Sprintf("\n_Related features: %s_\n",
-					strings.Join(a.RelatedFeatureSlugs, ", ")))
+				fmt.Fprintf(&sb, "\n_Related features: %s_\n",
+					strings.Join(a.RelatedFeatureSlugs, ", "))
 			}
 			sb.WriteString("\n")
 		}
@@ -192,8 +192,8 @@ func (r *LearningDocumentRenderer) serializePlain(sessionID string, sections []L
 	var sb strings.Builder
 	sb.WriteString("LEARNING REPORT\n")
 	sb.WriteString(strings.Repeat("=", 40) + "\n")
-	sb.WriteString(fmt.Sprintf("Session: %s\n", sessionID))
-	sb.WriteString(fmt.Sprintf("Audience: %s\n\n", r.audience))
+	fmt.Fprintf(&sb, "Session: %s\n", sessionID)
+	fmt.Fprintf(&sb, "Audience: %s\n\n", r.audience)
 
 	if len(sections) == 0 {
 		sb.WriteString("No learning annotations recorded for this session.\n")
@@ -204,8 +204,8 @@ func (r *LearningDocumentRenderer) serializePlain(sessionID string, sections []L
 		sb.WriteString(strings.ToUpper(sec.Title) + "\n")
 		sb.WriteString(strings.Repeat("-", 30) + "\n")
 		for i, a := range sec.Annotations {
-			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, a.Title))
-			sb.WriteString(fmt.Sprintf("   %s\n\n", a.Content))
+			fmt.Fprintf(&sb, "%d. %s\n", i+1, a.Title)
+			fmt.Fprintf(&sb, "   %s\n\n", a.Content)
 		}
 	}
 	return sb.String()

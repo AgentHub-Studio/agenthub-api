@@ -89,12 +89,13 @@ func (m *mockPkgRepo) Create(_ context.Context, p pkg.Package) (pkg.Package, err
 	m.data[p.ID] = p
 	return p, nil
 }
-func (m *mockPkgRepo) Update(_ context.Context, id uuid.UUID, name, description, visibility string) (pkg.Package, error) {
+func (m *mockPkgRepo) Update(_ context.Context, id uuid.UUID, name, description, visibility string, tags []string) (pkg.Package, error) {
 	p, ok := m.data[id]
 	if !ok {
 		return pkg.Package{}, pkg.ErrNotFound
 	}
 	p.Name = name
+	p.Tags = tags
 	m.data[id] = p
 	return p, nil
 }

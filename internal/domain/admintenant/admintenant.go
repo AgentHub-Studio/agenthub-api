@@ -6,7 +6,6 @@ package admintenant
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -23,11 +22,11 @@ import (
 
 // CreateRequest is the JSON body for POST /api/admin/tenants.
 type CreateRequest struct {
-	TenantID      string `json:"tenantId"`
-	TenantName    string `json:"tenantName"`
-	AdminUsername string `json:"adminUsername"`
-	AdminEmail    string `json:"adminEmail"`
-	AdminPassword string `json:"adminPassword"`
+	TenantID       string `json:"tenantId"`
+	TenantName     string `json:"tenantName"`
+	AdminUsername  string `json:"adminUsername"`
+	AdminEmail     string `json:"adminEmail"`
+	AdminPassword  string `json:"adminPassword"`
 	AdminFirstName string `json:"adminFirstName,omitempty"`
 	AdminLastName  string `json:"adminLastName,omitempty"`
 }
@@ -195,7 +194,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req UpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
 		return
 	}
@@ -225,7 +224,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
 		return
 	}

@@ -19,7 +19,7 @@ const (
 	// TransitionBudgetContinue means the token budget nudge triggered continuation.
 	TransitionBudgetContinue TurnTransition = "budget_continue"
 	// TransitionMaxTokensRecovery means max_output_tokens was hit and recovered.
-	TransitionMaxTokensRecovery TurnTransition = "max_tokens_recovery"
+	TransitionMaxTokensRecovery TurnTransition = "max_tokens_recovery" // #nosec G101 -- Diagnostic transition name, not a token value.
 	// TransitionReactiveCompact means context was too large and compact was triggered.
 	TransitionReactiveCompact TurnTransition = "reactive_compact"
 	// TransitionPromptTooLong means prompt_too_long was hit and messages were dropped.

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic/processors"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
@@ -48,6 +49,7 @@ type RunInput struct {
 	SystemPrompt    string
 	TenantID        string
 	PermissionRules *PermissionRules
+	RequestContext  RequestContext
 
 	// CurrentDepth is the recursion depth of this run. Root agent = 0.
 	CurrentDepth int
@@ -105,10 +107,33 @@ type RunInput struct {
 	// the agent at session creation. Only tools from servers in this list are exposed
 	// to the LLM. P-C253-1: agent-level MCP filtering.
 	MCPServerNamesSnapshot []string
+	// OutputProcessors contains ordered built-in processor names applied to
+	// assistant text before it is persisted or streamed to callers.
+	OutputProcessors []string
+
+	// SearchOrReadTools marks tool results that clients should collapse by default.
+	// It is populated only from the server-side tool schema for this run.
+	SearchOrReadTools map[string]bool
+	// InterruptBehaviors maps a tool name to its server-side interrupt behavior.
+	// Only "block" is present; an absent entry defaults to immediate cancellation.
+	InterruptBehaviors map[string]string
 
 	// PermissionAudit, when set, records each permission decision to the audit log.
 	// When nil, decisions are silently skipped (no-op).
 	PermissionAudit PermissionAuditLogger
+}
+
+const toolResultPersistenceTimeout = 5 * time.Second
+
+// contextForToolResultPersistence keeps a completed tool outcome durable when
+// an interrupt cancelled the run context while a block-on-interrupt tool ran.
+// It is bounded and carries the original context values, but never resumes the
+// agentic loop after persistence.
+func contextForToolResultPersistence(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), toolResultPersistenceTimeout)
 }
 
 // RunMetadata aggregates observability metrics collected during an agentic run.
@@ -129,31 +154,31 @@ type RunMetadata struct {
 
 // Runner orchestrates the agentic loop: LLM → tool_calls → execution → tool_results → LLM.
 type Runner struct {
-	chatModel       ai.ChatModel
-	skillClient     *SkillRuntimeClient
-	prompt          *PromptBuilder
-	promptCache     map[string]string // session-scoped prompt section cache (owned per Runner)
-	tools           *ToolSchemaBuilder
-	mcpClient       MCPClientService
-	ctxManager      *ContextManager
-	memory          *MemoryBridge
-	persister          MessagePersister
-	metadataPersister  RunMetadataPersister // optional — nil for sub-runners
-	history            HistoryLoader
-	toolExec           *StreamingToolExecutor
-	subtaskExec        *SubtaskExecutor
-	agentMailbox       *AgentMailbox
-	managementExec     *ManagementExecutor
-	denialTracker      *DenialTracker
-	turnEndHandlers    []TurnEndHandler
-	runEndHandlers     []RunEndHandler
-	toolSummary        *ToolUseSummaryGenerator
-	memoryExtractor    *SessionMemoryExtractor
-	cacheSafeSnap      *CacheSafeParamsSnapshot
-	progress           *RunProgressTracker
-	commands           *CommandRegistry
-	config             RunConfig
-	runID              uuid.UUID
+	chatModel         ai.ChatModel
+	skillClient       *SkillRuntimeClient
+	prompt            *PromptBuilder
+	promptCache       map[string]string // session-scoped prompt section cache (owned per Runner)
+	tools             *ToolSchemaBuilder
+	mcpClient         MCPClientService
+	ctxManager        *ContextManager
+	memory            *MemoryBridge
+	persister         MessagePersister
+	metadataPersister RunMetadataPersister // optional — nil for sub-runners
+	history           HistoryLoader
+	toolExec          *StreamingToolExecutor
+	subtaskExec       *SubtaskExecutor
+	agentMailbox      *AgentMailbox
+	managementExec    *ManagementExecutor
+	denialTracker     *DenialTracker
+	turnEndHandlers   []TurnEndHandler
+	runEndHandlers    []RunEndHandler
+	toolSummary       *ToolUseSummaryGenerator
+	memoryExtractor   *SessionMemoryExtractor
+	cacheSafeSnap     *CacheSafeParamsSnapshot
+	progress          *RunProgressTracker
+	commands          *CommandRegistry
+	config            RunConfig
+	runID             uuid.UUID
 }
 
 // NewRunner creates a Runner with the given dependencies.
@@ -345,6 +370,20 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 	// P-C325-2: track metrics for run metadata persistence.
 	runStart := time.Now()
+	runTiming := &RunTimingData{}
+	var firstOutputAt time.Time
+	markFirstOutput := func() {
+		if firstOutputAt.IsZero() {
+			firstOutputAt = time.Now()
+		}
+	}
+	runTimingSnapshot := func() *RunTimingData {
+		if !firstOutputAt.IsZero() {
+			runTiming.FirstOutputMS = firstOutputAt.Sub(runStart).Milliseconds()
+		}
+		runTiming.TotalMS = time.Since(runStart).Milliseconds()
+		return runTiming
+	}
 	var runHadToolFailures bool
 	var runToolCallCount int
 	var runFinishReason string
@@ -378,10 +417,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			code = "context_cancelled"
 		}
-		rawMsg := err.Error()
-		lastRunError = &ErrorData{Message: rawMsg, Code: code}
-		slog.Warn("agentic: run error", "code", code, "error", rawMsg)
-		ch <- NewRunEvent(EventError, ErrorData{Message: rawMsg, Code: code})
+		safeMsg := sanitizeSSEMessage(err.Error())
+		lastRunError = &ErrorData{Message: safeMsg, Code: code}
+		slog.Warn("agentic: run error", "code", code, "error", safeMsg)
+		ch <- NewRunEvent(EventError, ErrorData{Message: safeMsg, Code: code})
 	}
 
 	defer func() {
@@ -415,6 +454,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				CumulativeOutputTokens:        totalOutputTokens,
 				CumulativeCacheReadTokens:     cumulativeCacheReadTokens,
 				CumulativeCacheCreationTokens: cumulativeCacheCreationTokens,
+				Timing:                        runTimingSnapshot(),
 			})
 		}
 		// P-C325-2: persist run metadata so observability tooling can query cost,
@@ -494,6 +534,11 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				localEmitError("slash_command", cmdErr)
 				return
 			}
+			output, err := processAssistantOutput(ctx, result.Output, in.OutputProcessors)
+			if err != nil {
+				localEmitError("output_processor", err)
+				return
+			}
 			// Persist user message so history is consistent.
 			userCmdMsg := chat.ChatMessage{
 				SessionID:   in.SessionID,
@@ -513,7 +558,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			assistantCmdMsg := chat.ChatMessage{
 				SessionID:   in.SessionID,
 				Role:        "assistant",
-				Content:     result.Output,
+				Content:     output,
 				MessageType: chat.MessageTypeText,
 				RunID:       &r.runID,
 			}
@@ -525,12 +570,14 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				return
 			}
 			// Emit the command output as a text stream.
-			ch <- NewRunEvent(EventTextDelta, TextDeltaData{Content: result.Output})
+			markFirstOutput()
+			ch <- NewRunEvent(EventTextDelta, TextDeltaData{Content: output})
 			runCompleted = true
 			ch <- NewRunEvent(EventRunComplete, RunCompleteData{
 				TotalTurns:  1,
 				TotalTokens: 0,
 				TotalCost:   0,
+				Timing:      runTimingSnapshot(),
 			})
 			return
 		}
@@ -563,10 +610,11 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	toolBuilder.WithDepthLimits(in.CurrentDepth, r.config.MaxDepth)
-	toolBuilder.WithAdminScope(in.IsAdmin)               // P-C298-1: gate agenthub_manage on admin role
+	toolBuilder.WithAdminScope(in.IsAdmin)                // P-C298-1: gate agenthub_manage on admin role
 	toolBuilder.WithEnableManagement(in.EnableManagement) // P-C184-2: gate on agent opt-in flag
 	toolBuilder.WithDisableAskUser(in.DisableAskUser)
 	toolBuilder.WithDisableAgentDelegation(in.DisableAgentDelegation)
+	toolBuilder.WithRequestRoles(in.RequestContext.UserRoles)
 	// P-C115-1: use skill snapshot IDs when available to ensure consistent tool set.
 	if len(in.SkillIDsSnapshot) > 0 {
 		toolBuilder.WithSkillIDsSnapshot(in.SkillIDsSnapshot)
@@ -581,9 +629,17 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	for _, w := range toolResult.Warnings {
 		emitWarning(ch, "mcp_load_failed", w)
 	}
-	aiTools := convertLLMToolsToAI(toolResult.Loaded)
-	toolNames := make([]string, len(toolResult.Loaded))
-	for i, t := range toolResult.Loaded {
+	// Apply the pool-time permission prefilter before tools are advertised to the
+	// model. Keep toolResult.All intact for the call-time permission gate: a model
+	// that hallucinates a hidden tool still receives an explicit denial instead of
+	// reaching its executor.
+	advertisedLoadedTools := filterLLMToolsByPermission(toolResult.Loaded, in.PermissionRules)
+	advertisedDeferredTools := filterLLMToolsByPermission(toolResult.Deferred, in.PermissionRules)
+	advertisedTools := append(append([]LLMTool(nil), advertisedLoadedTools...), advertisedDeferredTools...)
+
+	aiTools := convertLLMToolsToAI(advertisedLoadedTools)
+	toolNames := make([]string, len(advertisedLoadedTools))
+	for i, t := range advertisedLoadedTools {
 		toolNames[i] = t.Name
 	}
 
@@ -615,11 +671,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 	slog.Info("agentic: tools loaded for LLM", "count", len(aiTools), "tools", toolNames, "agentID", in.AgentID)
 	readOnlyIndex := BuildReadOnlyIndex(toolResult.All)
+	inputSchemaIndex := BuildInputSchemaIndex(toolResult.All)
 	destructiveIndex := BuildDestructiveIndex(toolResult.All)
-	contextModeIndex := BuildContextModeIndex(toolResult.All)
+	contextModeTools := BuildContextModeToolIndex(toolResult.All)
 	interruptBehaviorIndex := BuildInterruptBehaviorIndex(toolResult.All)
 	searchOrReadIndex := BuildSearchOrReadIndex(toolResult.All)
-	deferredTools := toolResult.Deferred
+	deferredTools := advertisedDeferredTools
 
 	// Build allowed-tool index: only tools in toolResult.All (loaded + deferred) may be
 	// executed in this run. This prevents the LLM from calling tools it "remembers" from
@@ -633,9 +690,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	for name := range rs.frontendActionsByName {
 		allowedToolsIndex[name] = true
 	}
-	_ = contextModeIndex       // TODO: use for fork-mode skill execution via SubtaskExecutor
-	_ = interruptBehaviorIndex // TODO: pass to SSE handler for graceful stop
-	_ = searchOrReadIndex      // TODO: pass to SSE handler for result auto-collapse
+	in.InterruptBehaviors = interruptBehaviorIndex
 
 	// Merge per-tool result limits from DB into the config map.
 	dbToolLimits := BuildMaxResultIndex(toolResult.All)
@@ -652,14 +707,18 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 	}
 
 	// 3. Build system prompt (after tools, so deferred tool names can be injected).
-	// BUG-SKILL-EMPTY: derive active skill slug set from toolResult.All so that
+	// BUG-SKILL-EMPTY: derive active skill slug set from the advertised tools so that
 	// formatToolsSection can omit skills with no callable tool binding from the
-	// "## Available Tools" section. P-C62-1 already removed them from the JSON
-	// tools[] array; this closes the remaining hallucination vector in the system prompt.
-	activeSkillSlugs := make(map[string]bool, len(toolResult.All))
-	for _, t := range toolResult.All {
+	// "## Available Tools" section. The permission prefilter must apply to both
+	// the JSON schemas and this prompt section to avoid advertising denied tools.
+	activeSkillSlugs := make(map[string]bool, len(advertisedTools))
+	for _, t := range advertisedTools {
 		if !t.Builtin && !t.DisableModelInvocation {
-			activeSkillSlugs[t.Name] = true
+			skillSlug := t.Name
+			if t.SkillSlug != "" {
+				skillSlug = t.SkillSlug
+			}
+			activeSkillSlugs[skillSlug] = true
 		}
 	}
 	systemPrompt, err := r.prompt.Build(ctx, PromptInput{
@@ -668,9 +727,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		SystemPrompt:      in.SystemPrompt,
 		Memories:          memories,
 		CoordinatorMode:   gates.CoordinatorMode,
-		DeferredToolNames: toolResult.DeferredToolNames(),
+		DeferredToolNames: llmToolNames(advertisedDeferredTools),
 		UserOnlySkills:    toolResult.UserOnlySkills,
 		ActiveSkillSlugs:  activeSkillSlugs,
+		RequestContext:    in.RequestContext,
 	})
 	if err != nil {
 		localEmitError("prompt_build", err)
@@ -683,8 +743,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		systemPrompt += FormatAppStateBlock(in.FrontendActions.GetReadables(in.SessionID))
 	}
 
-	// 4. Load conversation history.
-	messages, lastResponseID, err := r.loadHistory(ctx, in.SessionID)
+	// 4. Load conversation history. The service persists the current user turn
+	// before starting the runner; omit that exact row here and append it once
+	// below after any runtime notes have been injected.
+	messages, lastResponseID, err := r.loadHistory(ctx, in.SessionID, in.UserMessageID)
 	if err != nil {
 		localEmitError("load_history", err)
 		return
@@ -871,14 +933,6 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			Effort:       gates.ResolvedEffort,
 			ToolChoice:   resolveToolChoice(r.config.ToolMode, aiTools, r.chatModel.GetProviderName()),
 		}
-		cacheSafeParams := NewCacheSafeParams(
-			systemPrompt,
-			aiTools,
-			r.chatModel.GetProviderName(),
-			opts.Model,
-			gates.CacheControl,
-		)
-
 		// Determine query source for this turn.
 		turnSource := SourceMainLoop
 		if in.CurrentDepth > 0 {
@@ -895,7 +949,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		// 5a. Call LLM with streaming (with retry + model fallback).
 		// P-C102-1: wrap in a per-call timeout so a stalled provider never blocks forever.
-		callCtx := ctx
+		var callCtx context.Context
 		var cancelCall context.CancelFunc
 		if r.config.LLMCallTimeout > 0 {
 			callCtx, cancelCall = context.WithTimeout(ctx, r.config.LLMCallTimeout)
@@ -953,7 +1007,6 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				// Verify compaction actually reduced tokens; escalate if needed.
 				compactResult, compactErr = r.ctxManager.VerifyCompaction(ctx, compactResult, systemTokens, r.config, nil)
 				if compactErr != nil {
-					compactFailures++
 					localEmitError("llm_call", err)
 					return
 				}
@@ -984,7 +1037,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		// Track which model was actually used for cost estimation.
 		effectiveModel := fallbackResult.ModelUsed
-		cacheSafeParams = NewCacheSafeParams(
+		cacheSafeParams := NewCacheSafeParams(
 			systemPrompt,
 			aiTools,
 			r.chatModel.GetProviderName(),
@@ -995,11 +1048,23 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		// 5b. Consume stream, accumulate response.
 		// callCtx carries the per-call timeout so a stalled mid-stream provider
 		// is also detected and aborted. cancelCall deferred until after consume.
-		assistantContent, toolCalls, finishReason, usage, streamResponseID, streamErr := r.consumeStream(callCtx, ch, fallbackResult.Stream)
+		emitRawTextDeltas := len(in.OutputProcessors) == 0
+		assistantContent, toolCalls, finishReason, usage, streamResponseID, streamErr := r.consumeStream(callCtx, ch, fallbackResult.Stream, emitRawTextDeltas, markFirstOutput)
 		cancelCall() // P-C102-1: release per-call timeout context after streaming completes
 		if streamErr != nil {
 			localEmitError("stream_consume", streamErr)
 			return
+		}
+		runTiming.StreamCompleteMS = time.Since(runStart).Milliseconds()
+		if len(in.OutputProcessors) > 0 && assistantContent != "" {
+			processedContent, err := processAssistantOutput(ctx, assistantContent, in.OutputProcessors)
+			if err != nil {
+				localEmitError("output_processor", err)
+				return
+			}
+			assistantContent = processedContent
+			markFirstOutput()
+			ch <- NewRunEvent(EventTextDelta, TextDeltaData{Content: assistantContent})
 		}
 
 		// Update response chaining state: record the index before appending
@@ -1075,10 +1140,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 
 		// 5c. Build and persist assistant message.
 		assistantMsg := r.buildAssistantMessage(in.SessionID, assistantContent, toolCalls, finishReason, usage, turnIndex, streamResponseID)
+		persistStarted := time.Now()
 		if _, err := r.persister.CreateMessage(ctx, assistantMsg); err != nil {
 			emitError(ch, "persist_assistant_msg", err)
 			return
 		}
+		runTiming.AssistantPersistMS += time.Since(persistStarted).Milliseconds()
 
 		// Append to in-memory history.
 		aiAssistant := ai.Message{
@@ -1133,6 +1200,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			}
 
 			// Turn-end hooks (before emitting turn_complete).
+			postTurnLifecycleStarted := time.Now()
 			// BUG-HOOK-TURNEND-INJECT: surface inject texts from turn-end hooks.
 			if turnEndInjects := r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload()); len(turnEndInjects) > 0 {
 				injectNote := "[SYSTEM NOTE from hook]\n" + strings.Join(turnEndInjects, "\n---\n")
@@ -1171,6 +1239,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			for _, blockingErr := range stopHookResult.BlockingErrors {
 				messages = append(messages, ai.Message{Role: ai.RoleUser, Content: blockingErr})
 			}
+			runTiming.PostTurnLifecycleMS = time.Since(postTurnLifecycleStarted).Milliseconds()
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:   turnIndex,
@@ -1190,6 +1259,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				CumulativeOutputTokens:        totalOutputTokens,
 				CumulativeCacheReadTokens:     cumulativeCacheReadTokens,
 				CumulativeCacheCreationTokens: cumulativeCacheCreationTokens,
+				Timing:                        runTimingSnapshot(),
 			})
 
 			// Run-end hooks (after run_complete).
@@ -1267,12 +1337,12 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				for _, tc := range toolCalls {
 					tcID := tc.ID // capture loop variable
 					nudgeResult := chat.ChatMessage{
-						SessionID:    in.SessionID,
-						Role:         "tool",
-						Content:      nudgeContent,
-						MessageType:  chat.MessageTypeToolResult,
-						ToolCallID:   &tcID,
-						RunID:        &r.runID,
+						SessionID:   in.SessionID,
+						Role:        "tool",
+						Content:     nudgeContent,
+						MessageType: chat.MessageTypeToolResult,
+						ToolCallID:  &tcID,
+						RunID:       &r.runID,
 					}
 					if _, err := r.persister.CreateMessage(ctx, nudgeResult); err != nil {
 						emitError(ch, "persist_loop_nudge", err)
@@ -1290,7 +1360,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				continue
 			}
 
-			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, destructiveIndex, deferredTools, allowedToolsIndex, lastTurnHadToolErrors, rs)
+			toolResults := r.executeWithPermissions(ctx, ch, toolCalls, in, totalCost, readOnlyIndex, inputSchemaIndex, destructiveIndex, deferredTools, allowedToolsIndex, contextModeTools, searchOrReadIndex, lastTurnHadToolErrors, rs)
 			slog.Info("agentic: tool execution completed", "turn", turnIndex, "resultCount", len(toolResults), "ctxErr", ctx.Err())
 
 			// Check if denial tracking indicates a stuck loop.
@@ -1320,6 +1390,8 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			}
 
 			// Persist and append tool results to history.
+			persistCtx, cancelPersist := contextForToolResultPersistence(ctx)
+			defer cancelPersist()
 			turnResultChars := 0
 			for i, result := range toolResults {
 				tcID := toolCalls[i].ID
@@ -1341,9 +1413,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				// SECRET-SCANNER: redact known credential patterns from tool output before
 				// sending to the LLM. Prevents static authToken values from leaking into
 				// the conversation when remote endpoints echo back Authorization headers.
-				if len(sanitizedResult.Output) > 0 {
-					sanitizedResult.Output = json.RawMessage(RedactSecrets(string(sanitizedResult.Output), "[REDACTED]"))
-				}
+				sanitizedResult.Output = redactSensitiveToolResultOutput(sanitizedResult.Output)
 				resultContent := FormatToolResult(sanitizedResult)
 				toolMsg := chat.ChatMessage{
 					SessionID:   in.SessionID,
@@ -1357,7 +1427,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				if r.runID == uuid.Nil {
 					toolMsg.RunID = nil
 				}
-				if _, err := r.persister.CreateMessage(ctx, toolMsg); err != nil {
+				if _, err := r.persister.CreateMessage(persistCtx, toolMsg); err != nil {
 					emitError(ch, "persist_tool_result", err)
 					return
 				}
@@ -1373,7 +1443,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 					ch <- NewRunEvent(EventToolResult, ToolResultData{
 						ID:         tcID,
 						Name:       toolName,
-						Output:     result.Output,
+						Output:     serializableJSONRawMessage(sanitizedResult.Output),
 						DurationMs: result.LatencyMs,
 						Error:      sanitizeToolErrorPtr(result.Error), // P-C65-2: scrub internal infra details
 					})
@@ -1567,9 +1637,10 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 							SystemPrompt:      in.SystemPrompt,
 							Memories:          freshMemories,
 							CoordinatorMode:   gates.CoordinatorMode,
-							DeferredToolNames: toolResult.DeferredToolNames(),
+							DeferredToolNames: llmToolNames(advertisedDeferredTools),
 							UserOnlySkills:    toolResult.UserOnlySkills,
 							ActiveSkillSlugs:  activeSkillSlugs,
+							RequestContext:    in.RequestContext,
 						}); err == nil {
 							systemPrompt = rebuilt
 							// CopilotKit Phase 2: re-append <app_state> after compaction
@@ -1610,6 +1681,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 		default:
 			// Unknown finish reason, treat as stop.
 			// BUG-HOOK-TURNEND-INJECT: surface inject texts.
+			postTurnLifecycleStarted := time.Now()
 			if turnEndInjects := r.executeTurnEndHooks(ctx, ch, buildTurnEndPayload()); len(turnEndInjects) > 0 {
 				injectNote := "[SYSTEM NOTE from hook]\n" + strings.Join(turnEndInjects, "\n---\n")
 				hookNoteMsg := chat.ChatMessage{
@@ -1647,6 +1719,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 			for _, blockingErr := range stopHookResult.BlockingErrors {
 				messages = append(messages, ai.Message{Role: ai.RoleUser, Content: blockingErr})
 			}
+			runTiming.PostTurnLifecycleMS = time.Since(postTurnLifecycleStarted).Milliseconds()
 
 			ch <- NewRunEvent(EventTurnComplete, TurnCompleteData{
 				TurnIndex:   turnIndex,
@@ -1666,6 +1739,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 				CumulativeOutputTokens:        totalOutputTokens,
 				CumulativeCacheReadTokens:     cumulativeCacheReadTokens,
 				CumulativeCacheCreationTokens: cumulativeCacheCreationTokens,
+				Timing:                        runTimingSnapshot(),
 			})
 
 			// Run-end hooks.
@@ -1686,7 +1760,7 @@ func (r *Runner) runLoop(ctx context.Context, ch chan<- RunEvent, in RunInput) {
 }
 
 // consumeStream reads all chunks from the stream channel and accumulates the response.
-func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <-chan ai.StreamChunk) (
+func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <-chan ai.StreamChunk, emitTextDeltas bool, markFirstOutput func()) (
 	content string, toolCalls []ai.ToolCall, finishReason string, usage ai.Usage, responseID string, err error,
 ) {
 	// Track tool calls being built incrementally. Some providers emit
@@ -1730,12 +1804,16 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 		}
 
 		if chunk.ThinkingDelta != "" {
+			markFirstOutput()
 			ch <- NewRunEvent(EventThinkingDelta, ThinkingDeltaData{Content: chunk.ThinkingDelta})
 		}
 
 		if chunk.Delta != "" {
 			content += chunk.Delta
-			ch <- NewRunEvent(EventTextDelta, TextDeltaData{Content: chunk.Delta})
+			if emitTextDeltas {
+				markFirstOutput()
+				ch <- NewRunEvent(EventTextDelta, TextDeltaData{Content: chunk.Delta})
+			}
 			// Guard against models that generate runaway recursive JSON instead
 			// of proper tool calls (observed with some local 20B models).
 			// If the text buffer exceeds 50 KB and contains a deeply nested
@@ -1834,12 +1912,29 @@ func (r *Runner) consumeStream(ctx context.Context, ch chan<- RunEvent, stream <
 	return content, toolCalls, finishReason, usage, responseID, nil
 }
 
+func processAssistantOutput(ctx context.Context, content string, outputProcessors []string) (string, error) {
+	if content == "" || len(outputProcessors) == 0 {
+		return content, nil
+	}
+	pipeline, err := processors.BuildPipeline(nil, outputProcessors)
+	if err != nil {
+		return "", fmt.Errorf("runner: build output processors: %w", err)
+	}
+	processed, err := pipeline.RunOutput(ctx, content)
+	if err != nil {
+		return "", fmt.Errorf("runner: run output processors: %w", err)
+	}
+	return processed, nil
+}
+
 // loadHistory loads messages from the database and converts to ai.Message format.
 // Applies time-based tool result eviction when the session has been idle longer
 // than the cache TTL (inspired by Claude Code's microCompact.ts cold-cache trigger).
 // Returns the messages and the response_id from the last assistant message's metadata
 // (for response chaining with providers that support it).
-func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID) ([]ai.Message, string, error) {
+// omitMessageID may identify the current user row that was pre-persisted by
+// chat.Service. The Runner appends that turn at the correct position itself.
+func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID, omitMessageID ...*uuid.UUID) ([]ai.Message, string, error) {
 	if r.history == nil {
 		return nil, "", nil
 	}
@@ -1880,8 +1975,16 @@ func (r *Runner) loadHistory(ctx context.Context, sessionID uuid.UUID) ([]ai.Mes
 		}
 	}
 
+	var omittedID uuid.UUID
+	if len(omitMessageID) > 0 && omitMessageID[0] != nil {
+		omittedID = *omitMessageID[0]
+	}
+
 	var messages []ai.Message
 	for _, m := range chatMsgs {
+		if omittedID != uuid.Nil && m.ID == omittedID {
+			continue
+		}
 		// Skip system and compact_summary messages — handled by PromptBuilder.
 		if m.MessageType == chat.MessageTypeSystem || m.MessageType == chat.MessageTypeCompactSummary {
 			continue
@@ -2080,14 +2183,14 @@ func (r *Runner) executeAgentHubManage(ctx context.Context, ch chan<- RunEvent, 
 			Payload   json.RawMessage `json:"payload"`
 		}
 		if err := json.Unmarshal(input, &args); err == nil {
-			execResult := r.managementExec.Execute(ctx, args.Operation, args.Resource, args.ID, args.Query, args.Payload)
+			execResult := r.managementExec.Execute(ctx, args.Operation, args.Resource, args.ID, args.Query, args.Payload, in.AgentID)
 			execResult.LatencyMs = time.Since(start).Milliseconds()
 
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
 			ch <- NewRunEvent(EventToolResult, ToolResultData{
 				ID:         tc.ID,
 				Name:       tc.Function.Name,
-				Output:     execResult.Output,
+				Output:     serializableJSONRawMessage(redactSensitiveToolResultOutput(execResult.Output)),
 				DurationMs: execResult.LatencyMs,
 				Error:      execResult.Error,
 			})
@@ -2112,7 +2215,12 @@ func (r *Runner) executeAgentHubManage(ctx context.Context, ch chan<- RunEvent, 
 	execResult.LatencyMs = latency
 	execResult.EmittedToStream = true
 	ch <- NewRunEvent(EventToolProgress, ToolProgressData{ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted})
-	ch <- NewRunEvent(EventToolResult, ToolResultData{ID: tc.ID, Name: tc.Function.Name, Output: execResult.Output, DurationMs: latency})
+	ch <- NewRunEvent(EventToolResult, ToolResultData{
+		ID:         tc.ID,
+		Name:       tc.Function.Name,
+		Output:     serializableJSONRawMessage(redactSensitiveToolResultOutput(execResult.Output)),
+		DurationMs: latency,
+	})
 	return *execResult
 }
 
@@ -2137,6 +2245,42 @@ func convertLLMToolsToAI(tools []LLMTool) []ai.Tool {
 		}
 	}
 	return result
+}
+
+// filterLLMToolsByPermission applies the pool-time permission decision to the
+// schemas exposed to the model. Argument-specific deny rules remain visible:
+// without a concrete tool call, their sample input is intentionally empty and
+// the call-time check remains the authoritative enforcement point.
+func filterLLMToolsByPermission(tools []LLMTool, rules *PermissionRules) []LLMTool {
+	if rules == nil {
+		return tools
+	}
+
+	prefilter, err := NewPermissionPreFilter(PrefilterConfig{Rules: rules}, nil)
+	if err != nil {
+		return nil
+	}
+
+	filtered := make([]LLMTool, 0, len(tools))
+	for _, tool := range tools {
+		source := ToolSourceSkill
+		if tool.Builtin {
+			source = ToolSourceBuiltin
+		}
+		if prefilter.Decide(ToolPoolEntry{Name: tool.Name, Source: source}) == PermissionDeny {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}
+
+func llmToolNames(tools []LLMTool) []string {
+	names := make([]string, len(tools))
+	for i, tool := range tools {
+		names[i] = tool.Name
+	}
+	return names
 }
 
 // FormatToolResult produces a string representation of a tool execution result.
@@ -2210,6 +2354,44 @@ func truncateToolResult(result ToolExecResult, maxChars int) ToolExecResult {
 	return result
 }
 
+func forkModeToolCall(tc ai.ToolCall, tool LLMTool) ai.ToolCall {
+	args, _ := json.Marshal(SubtaskInput{
+		Prompt: buildForkModeSkillPrompt(tc, tool),
+		Tools:  tool.AllowedTools,
+	})
+	return ai.ToolCall{
+		ID:   tc.ID,
+		Type: tc.Type,
+		Function: ai.ToolFunction{
+			Name:      agentToolName,
+			Arguments: string(args),
+		},
+	}
+}
+
+func buildForkModeSkillPrompt(tc ai.ToolCall, tool LLMTool) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Run the fork-mode skill %q in an isolated sub-agent.\n\n", tool.Name)
+	sb.WriteString("Original tool input:\n")
+	input := strings.TrimSpace(tc.Function.Arguments)
+	if input == "" {
+		input = "{}"
+	}
+	sb.WriteString(input)
+	sb.WriteString("\n\n")
+	if tool.Description != "" {
+		sb.WriteString("Skill description:\n")
+		sb.WriteString(tool.Description)
+		sb.WriteString("\n\n")
+	}
+	if len(tool.AllowedTools) > 0 {
+		sb.WriteString("Allowed tools for this skill:\n")
+		sb.WriteString(strings.Join(tool.AllowedTools, ", "))
+		sb.WriteString("\n\n")
+	}
+	return sb.String()
+}
+
 // executeWithPermissions evaluates permission rules for each tool call, executes
 // permitted ones via StreamingToolExecutor, and returns results in the same order
 // as the input toolCalls. Denied/confirm tools get error results without execution.
@@ -2217,7 +2399,7 @@ func truncateToolResult(result ToolExecResult, maxChars int) ToolExecResult {
 // prevTurnHadToolErrors indicates whether the immediately-preceding tool turn
 // returned at least one error. When true, any ask_user call is auto-answered
 // with a synthetic config-error response instead of blocking for user input (P-G1).
-func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput, totalCost float64, readOnlyIndex map[string]bool, destructiveIndex map[string]bool, deferredTools []LLMTool, allowedToolsIndex map[string]bool, prevTurnHadToolErrors bool, rs *runState) []ToolExecResult {
+func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent, toolCalls []ai.ToolCall, in RunInput, totalCost float64, readOnlyIndex map[string]bool, inputSchemaIndex map[string]json.RawMessage, destructiveIndex map[string]bool, deferredTools []LLMTool, allowedToolsIndex map[string]bool, contextModeTools map[string]LLMTool, searchOrReadIndex map[string]bool, prevTurnHadToolErrors bool, rs *runState) []ToolExecResult {
 	results := make([]ToolExecResult, len(toolCalls))
 
 	// Partition tool calls into categories.
@@ -2307,9 +2489,10 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 			if len(output) == 0 {
 				output = json.RawMessage(`null`)
 			}
+			output = redactSensitiveToolResultOutput(output)
 			results[i] = ToolExecResult{Output: output, ToolName: tc.Function.Name}
 			ch <- NewRunEvent(EventToolResult, ToolResultData{
-				ID: tc.ID, Name: tc.Function.Name, Output: output,
+				ID: tc.ID, Name: tc.Function.Name, Output: serializableJSONRawMessage(output),
 			})
 			ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 				ID: tc.ID, Name: tc.Function.Name, State: ToolStateCompleted,
@@ -2408,6 +2591,42 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 				Reason:      "destructive operation requires confirmation",
 				DenialCount: denialCount,
 			})
+			continue
+		}
+
+		if contextTool, ok := contextModeTools[tc.Function.Name]; ok {
+			if contextTool.ContextMode != "fork" {
+				errMsg := fmt.Sprintf("Tool '%s' has unsupported contextMode %q.", tc.Function.Name, contextTool.ContextMode)
+				results[i] = ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
+				ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Input: json.RawMessage(tc.Function.Arguments),
+				})
+				ch <- NewRunEvent(EventToolResult, ToolResultData{
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Error: &errMsg,
+				})
+				continue
+			}
+			if r.subtaskExec == nil {
+				errMsg := fmt.Sprintf("Tool '%s' requires fork context but sub-agent execution is not available.", tc.Function.Name)
+				results[i] = ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name}
+				ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Input: json.RawMessage(tc.Function.Arguments),
+				})
+				ch <- NewRunEvent(EventToolResult, ToolResultData{
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Error: &errMsg,
+				})
+				continue
+			}
+			agentIdx[i] = len(agentTools)
+			agentTools = append(agentTools, forkModeToolCall(tc, contextTool))
 			continue
 		}
 
@@ -2758,7 +2977,9 @@ func (r *Runner) executeWithPermissions(ctx context.Context, ch chan<- RunEvent,
 
 	// Execute regular tools.
 	if len(regularTools) > 0 {
-		execResults := r.toolExec.ExecuteAll(ctx, ch, regularTools, in, readOnlyIndex)
+		executionInput := in
+		executionInput.SearchOrReadTools = searchOrReadIndex
+		execResults := r.toolExec.ExecuteAll(ctx, ch, regularTools, executionInput, readOnlyIndex, inputSchemaIndex)
 		for origIdx, regIdx := range regularIdx {
 			if regIdx < len(execResults) {
 				results[origIdx] = execResults[regIdx]
@@ -2896,14 +3117,14 @@ func emitError(ch chan<- RunEvent, code string, err error) {
 	// disclosure. Apply scrubInternalNetwork as a safety net even when
 	// the caller forgets.
 	ch <- NewRunEvent(EventError, ErrorData{
-		Message: scrubInternalNetwork(err.Error()),
+		Message: sanitizeSSEMessage(err.Error()),
 		Code:    code,
 	})
 }
 
 func emitWarning(ch chan<- RunEvent, code string, message string) {
 	ch <- NewRunEvent(EventWarning, WarningData{
-		Message: scrubInternalNetwork(message),
+		Message: sanitizeSSEMessage(message),
 		Code:    code,
 	})
 }

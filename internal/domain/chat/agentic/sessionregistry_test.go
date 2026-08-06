@@ -64,6 +64,23 @@ func TestSessionRegistry_Update(t *testing.T) {
 	assert.Equal(t, "my-session", sessions[0].Name)
 }
 
+func TestSessionRegistry_Update_UsesRegisteredPIDFile(t *testing.T) {
+	dir := t.TempDir()
+	r := agentic.NewSessionRegistry(dir, nil)
+
+	require.NoError(t, r.Register(agentic.SessionInfo{
+		SessionID: "s1",
+		Kind:      agentic.SessionKindInteractive,
+	}))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "not-a-pid.json"), []byte(`{"status":"busy"}`), 0o600))
+	require.NoError(t, r.Update(map[string]interface{}{"status": string(agentic.SessionStatusWaiting)}))
+
+	sessions := r.List()
+	require.Len(t, sessions, 1)
+	assert.Equal(t, agentic.SessionStatusWaiting, sessions[0].Status)
+}
+
 // --- Unregister ---
 
 func TestSessionRegistry_Unregister(t *testing.T) {
@@ -158,6 +175,19 @@ func TestSessionRegistry_List_IgnoresNonPIDFiles(t *testing.T) {
 
 	sessions := r.List()
 	assert.Len(t, sessions, 1)
+}
+
+func TestSessionRegistry_List_ReadsOnlyPIDNamedFiles(t *testing.T) {
+	dir := t.TempDir()
+	r := agentic.NewSessionRegistry(dir, func(pid int) bool { return true })
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "12345.json"), []byte(`{"pid":12345,"sessionId":"valid"}`), 0o600))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "nested"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "nested", "54321.json"), []byte(`{"pid":54321,"sessionId":"nested"}`), 0o600))
+
+	sessions := r.List()
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "valid", sessions[0].SessionID)
 }
 
 func TestSessionRegistry_List_SkipsInvalidJSON(t *testing.T) {

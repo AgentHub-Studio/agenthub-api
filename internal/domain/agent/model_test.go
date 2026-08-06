@@ -1,7 +1,10 @@
 package agent_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -116,6 +119,78 @@ func TestResponseFrom_DoesNotContainApiKey(t *testing.T) {
 	assert.NotContains(t, string(data), "sk-leak")
 }
 
+func TestResponseFrom_RedactsSensitiveConfig(t *testing.T) {
+	const apiKeySecret = "agent-config-api-key-sentinel"
+	const authorizationSecret = "Bearer agent-config-authorization-sentinel"
+	config := json.RawMessage(`{
+		"maxIterations": 12,
+		"apiKey": "agent-config-api-key-sentinel",
+		"headers": {"Authorization": "Bearer agent-config-authorization-sentinel"},
+		"nested": {"refresh_token": "agent-config-refresh-token-sentinel", "safe": "preserve-this"}
+	}`)
+	ag := agent.Agent{Config: config}
+
+	resp := agent.ResponseFrom(ag)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	body := string(data)
+
+	assert.NotContains(t, body, apiKeySecret)
+	assert.NotContains(t, body, authorizationSecret)
+	assert.NotContains(t, body, "agent-config-refresh-token-sentinel")
+	assert.NotContains(t, body, "apiKey")
+	assert.NotContains(t, body, "Authorization")
+	assert.NotContains(t, body, "refresh_token")
+	assert.Contains(t, body, "preserve-this")
+	assert.Contains(t, body, "maxIterations")
+	assert.Equal(t, string(config), string(ag.Config), "the public DTO must not mutate persisted config")
+}
+
+func FuzzResponseFromRedactsSensitiveConfig(f *testing.F) {
+	f.Add("agent-config-secret", "safe-agent-config-option")
+	f.Add("credential-seed", "max-iterations-option")
+
+	f.Fuzz(func(t *testing.T, secretSeed, safeSeed string) {
+		secretSum := sha256.Sum256([]byte(secretSeed))
+		safeSum := sha256.Sum256([]byte(safeSeed))
+		secret := "agent-config-secret-" + hex.EncodeToString(secretSum[:])
+		safeValue := "safe-config-value-" + hex.EncodeToString(safeSum[:])
+		config, err := json.Marshal(map[string]any{
+			"maxIterations": 12,
+			"api_key":       secret,
+			"headers": map[string]string{
+				"Authorization": "Bearer " + secret,
+			},
+			"nested": map[string]any{
+				"refreshToken": secret,
+				"safe":         safeValue,
+			},
+		})
+		require.NoError(t, err)
+		ag := agent.Agent{Config: config}
+
+		response := agent.ResponseFrom(ag)
+		public := string(response.Config)
+		if !json.Valid(response.Config) {
+			t.Fatalf("redacted config is not valid JSON: %q", public)
+		}
+		if strings.Contains(public, secret) {
+			t.Fatalf("public config leaked secret: %q", public)
+		}
+		for _, sensitiveKey := range []string{"api_key", "Authorization", "refreshToken"} {
+			if strings.Contains(public, sensitiveKey) {
+				t.Fatalf("public config retained sensitive key %q: %q", sensitiveKey, public)
+			}
+		}
+		if !strings.Contains(public, safeValue) {
+			t.Fatalf("public config removed safe value: %q", public)
+		}
+		if string(ag.Config) != string(config) {
+			t.Fatalf("ResponseFrom mutated persisted config")
+		}
+	})
+}
+
 // TestAgentResponse_DoesNotContainApiKey matches the test name expected by TASK-05 spec.
 func TestAgentResponse_DoesNotContainApiKey(t *testing.T) {
 	ag := agent.Agent{
@@ -126,6 +201,62 @@ func TestAgentResponse_DoesNotContainApiKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "sk-secret123")
 	assert.NotContains(t, string(data), "apiKey")
+}
+
+func TestAgentResponse_DoesNotContainNestedModelCredentialKeys(t *testing.T) {
+	ag := agent.Agent{
+		ModelConfig: json.RawMessage(`{
+			"provider":"openai",
+			"model":"gpt-4o",
+			"credentials":{
+				"apiKey":"nested-model-key",
+				"api_secret":"nested-legacy-secret",
+				"safe":"kept"
+			},
+			"fallbacks":[
+				{"model":"backup","clientSecret":"nested-client-secret"}
+			],
+			"voice":{
+				"enabled":true,
+				"ttsVoice":"nova"
+			}
+		}`),
+	}
+
+	resp := agent.ResponseFrom(ag)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	body := string(data)
+
+	assert.NotContains(t, body, "apiKey")
+	assert.NotContains(t, body, "api_secret")
+	assert.NotContains(t, body, "clientSecret")
+	assert.NotContains(t, body, "nested-model-key")
+	assert.NotContains(t, body, "nested-legacy-secret")
+	assert.NotContains(t, body, "nested-client-secret")
+	assert.Contains(t, body, "kept")
+	assert.Contains(t, body, "nova")
+}
+
+func TestAgentVersionResponse_DoesNotContainConfigAPIKey(t *testing.T) {
+	version := agent.AgentVersion{
+		ConfigJSON: json.RawMessage(`{
+			"provider":"openrouter",
+			"model":"openai/gpt-oss-120b",
+			"apiKey":"sk-version-secret",
+			"api_secret":"legacy-version-secret"
+		}`),
+	}
+
+	resp := agent.VersionResponseFrom(version)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(data), "apiKey")
+	assert.NotContains(t, string(data), "api_secret")
+	assert.NotContains(t, string(data), "sk-version-secret")
+	assert.NotContains(t, string(data), "legacy-version-secret")
+	assert.Contains(t, string(data), "openai/gpt-oss-120b")
 }
 
 // TestAgentResponse_AlwaysContainsSystemPromptField verifies systemPrompt key is present even when nil.

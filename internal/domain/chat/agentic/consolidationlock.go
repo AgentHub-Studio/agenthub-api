@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+const (
+	consolidationLockDirMode  = 0o700
+	consolidationLockFileMode = 0o600
+)
+
 // Process-coordination lock for consolidation tasks.
 //
 // Inspired by Claude Code's consolidationLock.ts — implements lock-file-based
@@ -96,11 +101,11 @@ func (l *ConsolidationLock) TryAcquire() (*LockAcquisition, error) {
 
 	// Write our PID to the lock file
 	dir := filepath.Dir(l.config.LockFilePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, consolidationLockDirMode); err != nil {
 		return nil, fmt.Errorf("create lock dir: %w", err)
 	}
 
-	if err := os.WriteFile(l.config.LockFilePath, []byte(strconv.Itoa(pid)), 0o644); err != nil {
+	if err := os.WriteFile(l.config.LockFilePath, []byte(strconv.Itoa(pid)), consolidationLockFileMode); err != nil {
 		return nil, fmt.Errorf("write lock file: %w", err)
 	}
 

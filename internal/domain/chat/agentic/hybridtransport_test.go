@@ -108,8 +108,8 @@ func TestHybridTransport_StreamBuffering(t *testing.T) {
 	})
 
 	// Write stream events
-	ht.Write(makeMsg("stream_event"))
-	ht.Write(makeMsg("text_delta"))
+	require.NoError(t, ht.Write(makeMsg("stream_event")))
+	require.NoError(t, ht.Write(makeMsg("text_delta")))
 
 	// Wait for timer flush
 	time.Sleep(150 * time.Millisecond)
@@ -141,9 +141,9 @@ func TestHybridTransport_NonStreamFlushesBuffer(t *testing.T) {
 	})
 
 	// Buffer a stream event
-	ht.Write(makeMsg("stream_event"))
+	require.NoError(t, ht.Write(makeMsg("stream_event")))
 	// Write non-stream — should flush buffer first
-	ht.Write(makeMsg("tool_result"))
+	require.NoError(t, ht.Write(makeMsg("tool_result")))
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -167,8 +167,8 @@ func TestHybridTransport_Flush(t *testing.T) {
 		return nil
 	})
 
-	ht.Write(makeMsg("stream_event"))
-	ht.Flush()
+	require.NoError(t, ht.Write(makeMsg("stream_event")))
+	require.NoError(t, ht.Flush())
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -197,8 +197,8 @@ func TestHybridTransport_Close(t *testing.T) {
 		return nil
 	})
 
-	ht.Write(makeMsg("stream_event"))
-	ht.Close()
+	require.NoError(t, ht.Write(makeMsg("stream_event")))
+	require.NoError(t, ht.Close())
 
 	assert.True(t, ht.IsClosed())
 
@@ -215,8 +215,8 @@ func TestHybridTransport_Stats(t *testing.T) {
 		return nil
 	})
 
-	ht.Write(makeMsg("tool_result"))
-	ht.Write(makeMsg("tool_result"))
+	require.NoError(t, ht.Write(makeMsg("tool_result")))
+	require.NoError(t, ht.Write(makeMsg("tool_result")))
 
 	assert.Equal(t, 2, ht.TotalWrites())
 	assert.Equal(t, 0, ht.DroppedBatches())
@@ -258,7 +258,7 @@ func TestHybridTransport_WriteAfterClose(t *testing.T) {
 		return nil
 	})
 
-	ht.Close()
+	require.NoError(t, ht.Close())
 	err := ht.Write(makeMsg("x"))
 	assert.NoError(t, err) // silently ignored
 }

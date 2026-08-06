@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/hookconfig"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/database"
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
@@ -45,27 +48,27 @@ const (
 
 // AgentHook is the domain entity for a hook attached to an agent.
 type AgentHook struct {
-	ID             uuid.UUID       `json:"id"`
-	AgentID        uuid.UUID       `json:"agentId"`
-	Event          HookEvent       `json:"event"`
-	Matcher        string          `json:"matcher,omitempty"`
-	HookType       HookType        `json:"hookType"`
-	Config         json.RawMessage `json:"config"`
-	Enabled        bool            `json:"enabled"`
-	Priority       int             `json:"priority"`
+	ID       uuid.UUID       `json:"id"`
+	AgentID  uuid.UUID       `json:"agentId"`
+	Event    HookEvent       `json:"event"`
+	Matcher  string          `json:"matcher,omitempty"`
+	HookType HookType        `json:"hookType"`
+	Config   json.RawMessage `json:"config"`
+	Enabled  bool            `json:"enabled"`
+	Priority int             `json:"priority"`
 	// TimeoutSeconds overrides the global hook timeout for this specific hook.
 	// Inspired by Claude Code's per-hook timeout field.
-	TimeoutSeconds *int            `json:"timeoutSeconds,omitempty"`
+	TimeoutSeconds *int `json:"timeoutSeconds,omitempty"`
 	// IsAsync runs the hook in background without blocking the agentic loop.
 	// Inspired by Claude Code's async hook flag.
-	IsAsync        bool            `json:"isAsync"`
+	IsAsync bool `json:"isAsync"`
 	// RunOnce causes the hook to fire once then auto-disable.
 	// Inspired by Claude Code's once flag for one-shot hooks.
-	RunOnce        bool            `json:"runOnce"`
+	RunOnce bool `json:"runOnce"`
 	// StatusMessage is a custom spinner message shown while the hook runs.
-	StatusMessage  string          `json:"statusMessage,omitempty"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	StatusMessage string    `json:"statusMessage,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 // HTTPHookConfig is the config shape for hook_type = "http".
@@ -77,12 +80,9 @@ type HTTPHookConfig struct {
 }
 
 // PromptHookConfig is the config shape for hook_type = "prompt".
-// Both "template" and "inject" are accepted; "template" takes priority when both are set.
-// "inject" is provided as an intuitive alias for static text that requires no substitution.
-type PromptHookConfig struct {
-	Template string `json:"template"` // Go text/template with {{.ToolName}}, {{.Input}}, {{.Output}}
-	Inject   string `json:"inject"`   // alias for static inject text (no templating)
-}
+// "template" and "inject" remain compatible aliases, but non-empty values
+// must be identical so a persisted config cannot change behavior by precedence.
+type PromptHookConfig = hookconfig.PromptConfig
 
 // HookPayload is the data sent to hook executors and used as the template
 // data object when rendering prompt hooks. All fields are optional — only those
@@ -208,9 +208,19 @@ type HookExecutor struct {
 // NewHookExecutor creates a HookExecutor.
 func NewHookExecutor(repo HookRepository) *HookExecutor {
 	return &HookExecutor{
-		repo: repo,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
+		repo:   repo,
+		client: newHookHTTPClient(),
+	}
+}
+
+func newHookHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(redirect *http.Request, _ []*http.Request) error {
+			if err := ssrf.ValidateURL(redirect.URL.String()); err != nil {
+				return http.ErrUseLastResponse
+			}
+			return nil
 		},
 	}
 }
@@ -313,6 +323,10 @@ func (e *HookExecutor) executeHTTPHook(ctx context.Context, hook AgentHook, payl
 		errMsg := fmt.Sprintf("invalid http hook config: %v", err)
 		return HookResult{Error: &errMsg}
 	}
+	if err := ssrf.ValidateURL(cfg.URL); err != nil {
+		errMsg := "hook URL is not allowed"
+		return HookResult{Error: &errMsg}
+	}
 
 	method := cfg.Method
 	if method == "" {
@@ -347,7 +361,11 @@ func (e *HookExecutor) executeHTTPHook(ctx context.Context, hook AgentHook, payl
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10_000))
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= http.StatusMultipleChoices {
+		if resp.StatusCode < http.StatusBadRequest {
+			errMsg := "hook redirect is not allowed"
+			return HookResult{Error: &errMsg}
+		}
 		errMsg := fmt.Sprintf("hook returned %d: %s", resp.StatusCode, string(respBody))
 		return HookResult{Error: &errMsg}
 	}
@@ -357,16 +375,10 @@ func (e *HookExecutor) executeHTTPHook(ctx context.Context, hook AgentHook, payl
 }
 
 func (e *HookExecutor) executePromptHook(hook AgentHook, payload HookPayload) HookResult {
-	var cfg PromptHookConfig
-	if err := json.Unmarshal(hook.Config, &cfg); err != nil {
-		errMsg := fmt.Sprintf("invalid prompt hook config: %v", err)
+	raw, err := hookconfig.ResolvePromptConfig(hook.Config)
+	if err != nil {
+		errMsg := err.Error()
 		return HookResult{Error: &errMsg}
-	}
-
-	// Prefer template; fall back to inject alias for static text.
-	raw := cfg.Template
-	if raw == "" {
-		raw = cfg.Inject
 	}
 
 	// BUG-HOOK-TEMPLATE: execute Go text/template substitutions so that

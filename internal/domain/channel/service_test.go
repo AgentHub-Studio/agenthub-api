@@ -117,9 +117,11 @@ func (a *stubAdapter) SendReply(_ context.Context, _ channel.Channel, msg channe
 type stubDispatcher struct {
 	reply string
 	err   error
+	calls int
 }
 
 func (d *stubDispatcher) Dispatch(_ context.Context, _ uuid.UUID, _ string, _ string) (string, error) {
+	d.calls++
 	return d.reply, d.err
 }
 
@@ -137,6 +139,40 @@ func buildService(t *testing.T) (*channel.Handler, *memRepo, *channel.Registry, 
 }
 
 // --- tests ---
+
+func TestChannelResponse_MasksNestedSensitiveConfigKeys(t *testing.T) {
+	ch := channel.Channel{
+		ID:      uuid.New(),
+		Name:    "slack",
+		Type:    channel.ChannelTypeSlack,
+		AgentID: uuid.New(),
+		Config: json.RawMessage(`{
+			"workspace":"acme",
+			"oauth":{
+				"clientSecret":"nested-client-secret",
+				"accessToken":"nested-access-token",
+				"safe":"kept"
+			},
+			"events":[
+				{"name":"message","signingSecret":"nested-signing-secret"}
+			]
+		}`),
+	}
+
+	resp := channel.ResponseFrom(ch)
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+	body := string(data)
+
+	assert.NotContains(t, body, "nested-client-secret")
+	assert.NotContains(t, body, "nested-access-token")
+	assert.NotContains(t, body, "nested-signing-secret")
+	assert.Contains(t, body, `"clientSecret":"***"`)
+	assert.Contains(t, body, `"accessToken":"***"`)
+	assert.Contains(t, body, `"signingSecret":"***"`)
+	assert.Contains(t, body, "kept")
+	assert.Contains(t, body, "message")
+}
 
 func TestServiceCreate_success(t *testing.T) {
 	_, repo, _, _, _ := buildService(t)
@@ -289,6 +325,27 @@ func TestServiceHandleInbound_verifyFails(t *testing.T) {
 	_, err := svc.HandleInbound(context.Background(), created.Token, nil, []byte(`{}`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "verify")
+}
+
+func TestServiceHandleInbound_parseFailsBeforeDispatch(t *testing.T) {
+	repo := newMemRepo()
+	reg := channel.NewRegistry()
+	adapter := &stubAdapter{parseErr: errors.New("malformed payload")}
+	reg.Register(channel.ChannelTypeSlack, adapter)
+	dispatcher := &stubDispatcher{}
+	svc := channel.NewService(repo, reg).WithDispatcher(dispatcher)
+	created, err := repo.Create(context.Background(), channel.Channel{
+		Name:    "ch",
+		Type:    channel.ChannelTypeSlack,
+		AgentID: uuid.New(),
+		Enabled: true,
+	})
+	require.NoError(t, err)
+
+	_, err = svc.HandleInbound(context.Background(), created.Token, nil, []byte(`{}`))
+
+	require.ErrorIs(t, err, channel.ErrInvalidInboundPayload)
+	assert.Zero(t, dispatcher.calls)
 }
 
 func TestServiceHandleInbound_urlVerificationChallenge(t *testing.T) {

@@ -17,11 +17,11 @@ func TestDefaultRunConfig(t *testing.T) {
 	assert.Equal(t, 4096, cfg.MaxTokensPerCall)
 	assert.Equal(t, 200000, cfg.ContextWindowSize)
 	assert.Equal(t, 0.75, cfg.CompactThreshold)
-	assert.Equal(t, 30*time.Second, cfg.ToolTimeout)
+	assert.Equal(t, 120*time.Second, cfg.ToolTimeout)
 	// TotalTimeout aligned with async_executor runTimeout (15 min) so slow
 	// providers (Ollama on CPU) don't abort mid-stream — see issue #181.
 	assert.Equal(t, 15*time.Minute, cfg.TotalTimeout)
-	assert.Equal(t, 15*time.Minute, cfg.LLMCallTimeout)
+	assert.Equal(t, 120*time.Second, cfg.LLMCallTimeout)
 	assert.Equal(t, 3, cfg.ConcurrentReadTools)
 	assert.Equal(t, 64, cfg.StreamBufferSize)
 	assert.Equal(t, "anthropic", cfg.Provider)
@@ -49,7 +49,7 @@ func TestRunConfigFromModelConfig_OverridesDefaults(t *testing.T) {
 	assert.Equal(t, 10, cfg.MaxIterations)
 	assert.Equal(t, 0.5, cfg.CompactThreshold)
 	// Non-overridden values should remain default.
-	assert.Equal(t, 30*time.Second, cfg.ToolTimeout)
+	assert.Equal(t, 120*time.Second, cfg.ToolTimeout)
 	assert.Equal(t, 64, cfg.StreamBufferSize)
 }
 
@@ -69,6 +69,14 @@ func TestRunConfigFromModelConfig_PartialOverride(t *testing.T) {
 	assert.Equal(t, "claude-opus-4-20250514", cfg.Model)
 	assert.Equal(t, "anthropic", cfg.Provider) // default kept
 	assert.Equal(t, 0.7, cfg.Temperature)      // default kept
+}
+
+func TestRunConfigFromModelConfig_LLMCallTimeoutSeconds(t *testing.T) {
+	cfg := agentic.RunConfigFromModelConfig(json.RawMessage(`{"llmCallTimeoutSeconds":42}`))
+	assert.Equal(t, 42*time.Second, cfg.LLMCallTimeout)
+
+	disabled := agentic.RunConfigFromModelConfig(json.RawMessage(`{"llmCallTimeoutSeconds":0}`))
+	assert.Equal(t, time.Duration(0), disabled.LLMCallTimeout)
 }
 
 func TestRunConfigFromModelConfig_ZeroTemperature(t *testing.T) {
@@ -103,6 +111,64 @@ func TestRunConfigFromModelConfig_NewFieldsDefaults(t *testing.T) {
 	assert.Equal(t, 0.0, cfg.MaxBudgetUSD, "should keep default")
 	assert.Equal(t, 50000, cfg.MaxToolResultChars, "should keep default")
 	assert.Equal(t, 5, cfg.RetryMaxAttempts, "should keep default")
+}
+
+func TestRunConfigFromModelConfig_FallbackChainSnakeCase(t *testing.T) {
+	raw := json.RawMessage(`{
+		"fallback_chain": [
+			{"provider": "ollama", "model": "always-rate-limit", "max_retries": 2, "trigger_on": ["rate_limit"]},
+			{"provider": "openrouter", "model": "always-ok", "max_retries": 1}
+		]
+	}`)
+	cfg := agentic.RunConfigFromModelConfig(raw)
+	assert.Equal(t, "ollama", cfg.Provider)
+	assert.Equal(t, "always-rate-limit", cfg.Model)
+	assert.Equal(t, 2, cfg.RetryMaxAttempts)
+	assert.Equal(t, []string{"always-ok"}, cfg.ModelFallbacks)
+	assert.Equal(t, []agentic.ModelFallbackStep{{
+		Provider:   "openrouter",
+		Model:      "always-ok",
+		MaxRetries: 1,
+		TriggerOn:  []string{},
+	}}, cfg.ModelFallbackChain)
+	assert.True(t, cfg.IsFallbackOnRateLimit())
+	assert.False(t, cfg.IsFallbackOnOverload())
+	assert.False(t, cfg.IsFallbackOnTimeout())
+}
+
+func TestRunConfigFromModelConfig_FallbackChainCamelCase(t *testing.T) {
+	raw := json.RawMessage(`{
+		"fallbackChain": [
+			{"provider": "ollama", "model": "primary", "maxRetries": 1, "triggerOn": ["timeout"]},
+			{"provider": "ollama", "model": "secondary", "maxRetries": 3}
+		]
+	}`)
+	cfg := agentic.RunConfigFromModelConfig(raw)
+	assert.Equal(t, "ollama", cfg.Provider)
+	assert.Equal(t, "primary", cfg.Model)
+	assert.Equal(t, 1, cfg.RetryMaxAttempts)
+	assert.Equal(t, []string{"secondary"}, cfg.ModelFallbacks)
+	assert.Len(t, cfg.ModelFallbackChain, 1)
+	assert.Equal(t, 3, cfg.ModelFallbackChain[0].MaxRetries)
+	assert.False(t, cfg.IsFallbackOnRateLimit())
+	assert.False(t, cfg.IsFallbackOnOverload())
+	assert.True(t, cfg.IsFallbackOnTimeout())
+}
+
+func TestRunConfigFromModelConfig_ConflictingFallbackAliasesDisableLegacyFallback(t *testing.T) {
+	cfg := agentic.RunConfigFromModelConfig(json.RawMessage(`{
+		"fallback_chain":[{"provider":"openrouter","model":"snake-primary","max_retries":1,"trigger_on":["timeout"]}],
+		"fallbackChain":[{"provider":"ollama","model":"camel-primary","maxRetries":2,"triggerOn":["rate_limit"]}]
+	}`))
+
+	defaults := agentic.DefaultRunConfig()
+	assert.Equal(t, defaults.Provider, cfg.Provider)
+	assert.Equal(t, defaults.Model, cfg.Model)
+	assert.Equal(t, defaults.RetryMaxAttempts, cfg.RetryMaxAttempts)
+	assert.Empty(t, cfg.ModelFallbacks)
+	assert.Empty(t, cfg.ModelFallbackChain)
+	assert.Equal(t, defaults.IsFallbackOnRateLimit(), cfg.IsFallbackOnRateLimit())
+	assert.Equal(t, defaults.IsFallbackOnTimeout(), cfg.IsFallbackOnTimeout())
 }
 
 func TestRunConfigFromModelConfig_EffortOverride(t *testing.T) {

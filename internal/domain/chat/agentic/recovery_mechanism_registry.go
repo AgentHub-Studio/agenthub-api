@@ -164,7 +164,7 @@ var seedRecoveryMechanisms = []RecoveryMechanismProfile{
 		FallsBackToTermination: true,
 		TerminationReason:      "streaming_unavailable",
 		ComposabilityNote:      "Independent of context-management mechanisms; fires before fallback model selection",
-		AgenthubMapping:        "streamfallback.go: retryStreamWithNonStreamingFallback + isStreamingFallbackEligible",
+		AgenthubMapping:        "retry.go: retryStreamWithFallbackSource; streamfallback.go: retryNonStreamingAfterStreamFailure + isStreamingFallbackEligible",
 	},
 	{
 		ID:                     RecoveryFallbackModel,
@@ -178,7 +178,7 @@ var seedRecoveryMechanisms = []RecoveryMechanismProfile{
 		FallsBackToTermination: true,
 		TerminationReason:      "no_fallback_model_available",
 		ComposabilityNote:      "Last-resort mechanism; only activates after streaming fallback has been attempted; requires operators to configure candidate models",
-		AgenthubMapping:        "streamfallback.go: EvaluateModelFallback + FallbackDecision; retry.go: shouldFallback",
+		AgenthubMapping:        "retry.go: retryStreamWithFallbackSource + shouldFallback + effectiveFallbackSteps",
 	},
 }
 

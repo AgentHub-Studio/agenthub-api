@@ -193,8 +193,29 @@ func TestReviewService_Delete_Forbidden(t *testing.T) {
 	resp, err := svc.Create(context.Background(), listingID, "tenant-a", review.CreateRequest{Rating: 4})
 	require.NoError(t, err)
 	err = svc.Delete(context.Background(), listingID, resp.ID, "other-tenant")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "forbidden")
+	require.ErrorIs(t, err, review.ErrForbidden)
+	assert.Contains(t, rr.reviews, resp.ID)
+}
+
+func TestReviewService_Delete_RejectsReviewFromAnotherListing(t *testing.T) {
+	rr := newMockReviewRepo()
+	lr := newMockListingRepo()
+	listingID := uuid.New()
+	otherListingID := uuid.New()
+	lr.listings[listingID] = listing.Listing{ID: listingID}
+	lr.listings[otherListingID] = listing.Listing{ID: otherListingID}
+
+	svc := review.NewService(rr, lr)
+	resp, err := svc.Create(context.Background(), listingID, "tenant-a", review.CreateRequest{Rating: 4})
+	require.NoError(t, err)
+
+	err = svc.Delete(context.Background(), otherListingID, resp.ID, "tenant-a")
+
+	require.ErrorIs(t, err, review.ErrNotFound)
+	assert.Contains(t, rr.reviews, resp.ID)
+	stats, err := rr.GetRatingStats(context.Background(), listingID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.Count)
 }
 
 func TestReviewService_Delete_NotFound(t *testing.T) {

@@ -175,7 +175,7 @@ const SeedRateLimitKeyRequestsPerMinute = "requests_per_minute"
 
 // SeedRateLimitKeyTokensPerMinute is the limit key for max tokens consumed
 // per minute within a 60 s time window.
-const SeedRateLimitKeyTokensPerMinute = "tokens_per_minute"
+const SeedRateLimitKeyTokensPerMinute = "tokens_per_minute" // #nosec G101 -- Public rate-limit key, not an access token.
 
 // SeedRateLimitKeyMaxConcurrentRuns is the limit key for max simultaneous
 // agent runs. window_seconds=0 because concurrency is not time-windowed.

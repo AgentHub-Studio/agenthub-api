@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
+	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -20,6 +21,22 @@ type mockInstallRepo struct {
 
 func newMockInstallRepo() *mockInstallRepo {
 	return &mockInstallRepo{data: make(map[uuid.UUID]installation.Installation)}
+}
+
+type mockPackageReader struct {
+	visibility pkg.PackageVisibility
+	err        error
+}
+
+func (m mockPackageReader) GetByID(_ context.Context, id uuid.UUID) (pkg.Package, error) {
+	if m.err != nil {
+		return pkg.Package{}, m.err
+	}
+	return pkg.Package{ID: id, Visibility: m.visibility}, nil
+}
+
+func newInstallService(repo *mockInstallRepo) *installation.Service {
+	return installation.NewService(repo).WithPackageReader(mockPackageReader{visibility: pkg.PackageVisibilityPublic})
 }
 
 func (m *mockInstallRepo) FindByTenant(_ context.Context, tenantID string, req pagination.PageRequest) ([]installation.Installation, int64, error) {
@@ -69,7 +86,7 @@ func (m *mockInstallRepo) SetHydrated(_ context.Context, id uuid.UUID) error {
 // Tests
 
 func TestInstallService_Install_Success(t *testing.T) {
-	svc := installation.NewService(newMockInstallRepo())
+	svc := newInstallService(newMockInstallRepo())
 	pkgID := uuid.New()
 	resp, err := svc.Install(context.Background(), "tenant-a", installation.InstallRequest{
 		PackageID:      pkgID,
@@ -82,7 +99,7 @@ func TestInstallService_Install_Success(t *testing.T) {
 }
 
 func TestInstallService_Install_MissingPackageID(t *testing.T) {
-	svc := installation.NewService(newMockInstallRepo())
+	svc := newInstallService(newMockInstallRepo())
 	_, err := svc.Install(context.Background(), "tenant-a", installation.InstallRequest{
 		PackageVersion: "1.0.0",
 	})
@@ -90,7 +107,7 @@ func TestInstallService_Install_MissingPackageID(t *testing.T) {
 }
 
 func TestInstallService_Install_MissingVersion(t *testing.T) {
-	svc := installation.NewService(newMockInstallRepo())
+	svc := newInstallService(newMockInstallRepo())
 	_, err := svc.Install(context.Background(), "tenant-a", installation.InstallRequest{
 		PackageID: uuid.New(),
 	})
@@ -98,7 +115,7 @@ func TestInstallService_Install_MissingVersion(t *testing.T) {
 }
 
 func TestInstallService_Uninstall_Success(t *testing.T) {
-	svc := installation.NewService(newMockInstallRepo())
+	svc := newInstallService(newMockInstallRepo())
 	resp, err := svc.Install(context.Background(), "tenant-a", installation.InstallRequest{
 		PackageID:      uuid.New(),
 		PackageVersion: "1.0.0",
@@ -109,13 +126,13 @@ func TestInstallService_Uninstall_Success(t *testing.T) {
 }
 
 func TestInstallService_Uninstall_NotFound(t *testing.T) {
-	svc := installation.NewService(newMockInstallRepo())
+	svc := newInstallService(newMockInstallRepo())
 	err := svc.Uninstall(context.Background(), uuid.New(), "tenant-a")
 	require.ErrorIs(t, err, installation.ErrNotFound)
 }
 
 func TestInstallService_Uninstall_Forbidden(t *testing.T) {
-	svc := installation.NewService(newMockInstallRepo())
+	svc := newInstallService(newMockInstallRepo())
 	resp, err := svc.Install(context.Background(), "owner-tenant", installation.InstallRequest{
 		PackageID:      uuid.New(),
 		PackageVersion: "1.0.0",
@@ -127,7 +144,7 @@ func TestInstallService_Uninstall_Forbidden(t *testing.T) {
 }
 
 func TestInstallService_ListByTenant(t *testing.T) {
-	svc := installation.NewService(newMockInstallRepo())
+	svc := newInstallService(newMockInstallRepo())
 	for i := 0; i < 2; i++ {
 		_, err := svc.Install(context.Background(), "tenant-a", installation.InstallRequest{
 			PackageID:      uuid.New(),
@@ -145,4 +162,30 @@ func TestInstallService_ListByTenant(t *testing.T) {
 	page, err := svc.ListByTenant(context.Background(), "tenant-a", pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), page.TotalElements)
+}
+
+func TestInstallService_Install_RejectsPrivatePackage(t *testing.T) {
+	repo := newMockInstallRepo()
+	svc := installation.NewService(repo).WithPackageReader(mockPackageReader{visibility: pkg.PackageVisibilityPrivate})
+
+	_, err := svc.Install(context.Background(), "tenant-a", installation.InstallRequest{
+		PackageID:      uuid.New(),
+		PackageVersion: "1.0.0",
+	})
+
+	require.ErrorIs(t, err, installation.ErrPackageUnavailable)
+	assert.Empty(t, repo.data)
+}
+
+func TestInstallService_Install_HidesMissingPackage(t *testing.T) {
+	repo := newMockInstallRepo()
+	svc := installation.NewService(repo).WithPackageReader(mockPackageReader{err: pkg.ErrNotFound})
+
+	_, err := svc.Install(context.Background(), "tenant-a", installation.InstallRequest{
+		PackageID:      uuid.New(),
+		PackageVersion: "1.0.0",
+	})
+
+	require.ErrorIs(t, err, installation.ErrPackageUnavailable)
+	assert.Empty(t, repo.data)
 }

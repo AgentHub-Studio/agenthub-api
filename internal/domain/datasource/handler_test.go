@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
@@ -89,18 +90,38 @@ func (m *mockDatasourceSvc) GetCredentials(_ context.Context, _ string, id uuid.
 }
 
 func setupDatasource() (*chi.Mux, *mockDatasourceSvc) {
+	return setupDatasourceWithRoles("admin")
+}
+
+func setupDatasourceWithRoles(roles ...string) (*chi.Mux, *mockDatasourceSvc) {
 	svc := newMockDatasourceSvc()
 	h := datasource.NewHandler(svc)
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := tenant.NewContext(r.Context(), "test-tenant")
+			ctx = middleware.ContextWithRoles(ctx, roles...)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	})
 	r.Mount("/api/datasources", h.Routes())
 	r.Mount("/api/proxy/datasources", h.ProxyRoutes())
 	return r, svc
+}
+
+func setupDatasourceWithRealService() *chi.Mux {
+	svc := datasource.NewService(newMockRepo())
+	h := datasource.NewHandler(svc)
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := tenant.NewContext(r.Context(), "test-tenant")
+			ctx = middleware.ContextWithRoles(ctx, "admin")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	r.Mount("/api/datasources", h.Routes())
+	return r
 }
 
 func TestDatasourceHandler_List_Success(t *testing.T) {
@@ -121,10 +142,12 @@ func TestDatasourceHandler_List_Success(t *testing.T) {
 func TestDatasourceHandler_Create_Success(t *testing.T) {
 	r, _ := setupDatasource()
 	body, _ := json.Marshal(datasource.CreateRequest{
-		Name: "my-db",
-		Type: datasource.DataSourceTypePostgreSQL,
-		Host: "localhost",
-		Port: 5432,
+		Name:     "my-db",
+		Type:     datasource.DataSourceTypePostgreSQL,
+		Host:     "pg.internal",
+		Port:     5432,
+		Database: "appdb",
+		DBUser:   "appuser",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/datasources/", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -137,6 +160,59 @@ func TestDatasourceHandler_Create_Success(t *testing.T) {
 	assert.Equal(t, "my-db", resp.Name)
 }
 
+func TestDatasourceHandler_Create_RejectsInternalHostWithRealService(t *testing.T) {
+	r := setupDatasourceWithRealService()
+	body, _ := json.Marshal(datasource.CreateRequest{
+		Name:     "blocked-db",
+		Type:     datasource.DataSourceTypePostgreSQL,
+		Host:     "169.254.169.254",
+		Port:     5432,
+		Database: "appdb",
+		DBUser:   "appuser",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/datasources/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func TestDatasourceHandler_Update_RejectsInternalHostWithRealService(t *testing.T) {
+	r := setupDatasourceWithRealService()
+	createBody, _ := json.Marshal(datasource.CreateRequest{
+		Name:     "vpn-db",
+		Type:     datasource.DataSourceTypePostgreSQL,
+		Host:     "10.42.0.15",
+		Port:     5432,
+		Database: "appdb",
+		DBUser:   "appuser",
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/datasources/", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRes := httptest.NewRecorder()
+	r.ServeHTTP(createRes, createReq)
+	require.Equal(t, http.StatusCreated, createRes.Code)
+
+	var created datasource.DataSourceResponse
+	require.NoError(t, json.Unmarshal(createRes.Body.Bytes(), &created))
+
+	updateBody, _ := json.Marshal(datasource.CreateRequest{
+		Name:     "vpn-db",
+		Type:     datasource.DataSourceTypePostgreSQL,
+		Host:     "localhost.",
+		Port:     5432,
+		Database: "appdb",
+		DBUser:   "appuser",
+	})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/datasources/"+created.ID.String(), bytes.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRes := httptest.NewRecorder()
+	r.ServeHTTP(updateRes, updateReq)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, updateRes.Code)
+}
+
 func TestDatasourceHandler_Create_InvalidBody(t *testing.T) {
 	r, _ := setupDatasource()
 	req := httptest.NewRequest(http.MethodPost, "/api/datasources/", bytes.NewReader([]byte("not-json")))
@@ -145,6 +221,53 @@ func TestDatasourceHandler_Create_InvalidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestDatasourceHandler_Patch_Success(t *testing.T) {
+	r, svc := setupDatasource()
+	id := uuid.New()
+	svc.data[id] = datasource.DataSource{
+		ID:   id,
+		Name: "before",
+		Type: datasource.DataSourceTypePostgreSQL,
+		Host: "db.example.com",
+		Port: 5432,
+	}
+	req := httptest.NewRequest(http.MethodPatch, "/api/datasources/"+id.String(), bytes.NewBufferString(`{"name":"after"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp datasource.DataSourceResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, id, resp.ID)
+	assert.Equal(t, "after", resp.Name)
+}
+
+func TestDatasourceHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, svc := setupDatasource()
+		req := httptest.NewRequest(http.MethodPost, "/api/datasources/", bytes.NewBufferString(`{"name":"first","type":"POSTGRESQL","host":"db.example.com","port":5432}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.data)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		r, svc := setupDatasource()
+		id := uuid.New()
+		svc.data[id] = datasource.DataSource{ID: id, Name: "original", Type: datasource.DataSourceTypePostgreSQL, Host: "db.example.com", Port: 5432}
+		req := httptest.NewRequest(http.MethodPut, "/api/datasources/"+id.String(), bytes.NewBufferString(`{"name":"changed","type":"POSTGRESQL","host":"db.example.com","port":5432}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, "original", svc.data[id].Name)
+	})
 }
 
 func TestDatasourceHandler_GetByID_NotFound(t *testing.T) {
@@ -175,6 +298,38 @@ func TestDatasourceHandler_Delete_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestDatasourceHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupDatasourceWithRoles("user")
+	id := uuid.NewString()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/datasources/"},
+		{name: "create", method: http.MethodPost, path: "/api/datasources/", body: `{"name":"source","type":"POSTGRESQL","host":"db.example.com","port":5432,"database":"app","dbUser":"app"}`},
+		{name: "get", method: http.MethodGet, path: "/api/datasources/" + id},
+		{name: "put", method: http.MethodPut, path: "/api/datasources/" + id, body: `{}`},
+		{name: "patch", method: http.MethodPatch, path: "/api/datasources/" + id, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/datasources/" + id},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 func TestDatasourceHandler_GetCredentials_Success(t *testing.T) {

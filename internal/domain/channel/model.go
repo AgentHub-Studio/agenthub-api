@@ -25,6 +25,10 @@ var ErrSlugConflict = errors.New("channel: name conflict")
 // erros caíam em 500 no handler genérico — UX terrível.
 var ErrValidation = errors.New("channel: validation failed")
 
+// ErrInvalidInboundPayload is returned when a valid channel request has an
+// unsupported or ambiguous body before it can reach the dispatcher.
+var ErrInvalidInboundPayload = errors.New("channel: invalid inbound payload")
+
 // ChannelType identifies the messaging platform.
 type ChannelType string
 

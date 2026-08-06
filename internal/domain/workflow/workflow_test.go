@@ -30,3 +30,20 @@ func TestWorkflowJSONRoundTrip(t *testing.T) {
 		t.Fatalf("lost data: %+v", back)
 	}
 }
+
+func TestStepJSONAliasesRequireEquivalentTypes(t *testing.T) {
+	for _, payload := range []string{
+		`{"id":"legacy","kind":"tool"}`,
+		`{"id":"matching","type":"agent","kind":"agent"}`,
+	} {
+		var step workflow.Step
+		if err := json.Unmarshal([]byte(payload), &step); err != nil {
+			t.Fatalf("expected accepted aliases for %s: %v", payload, err)
+		}
+	}
+
+	var conflicting workflow.Step
+	if err := json.Unmarshal([]byte(`{"id":"conflict","type":"agent","kind":"tool"}`), &conflicting); err == nil {
+		t.Fatal("expected conflicting aliases to be rejected")
+	}
+}

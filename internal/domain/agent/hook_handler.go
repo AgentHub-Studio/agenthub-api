@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -13,6 +15,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/database"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/hookconfig"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
@@ -80,11 +85,14 @@ func (h *HookHandler) WithAgentService(s Service) *HookHandler {
 
 // RegisterRoutes mounts hook routes under /api/agents/{id}/hooks.
 func (h *HookHandler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/agents/{id}/hooks", h.list)
-	r.Post("/api/agents/{id}/hooks", h.create)
-	r.Get("/api/agents/{id}/hooks/{hookId}", h.get)
-	r.Put("/api/agents/{id}/hooks/{hookId}", h.update)
-	r.Delete("/api/agents/{id}/hooks/{hookId}", h.delete)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/agents/{id}/hooks", h.list)
+		r.Post("/api/agents/{id}/hooks", h.create)
+		r.Get("/api/agents/{id}/hooks/{hookId}", h.get)
+		r.Put("/api/agents/{id}/hooks/{hookId}", h.update)
+		r.Delete("/api/agents/{id}/hooks/{hookId}", h.delete)
+	})
 }
 
 func (h *HookHandler) acquire(ctx context.Context) (*pgxpool.Conn, func(), error) {
@@ -120,7 +128,7 @@ func (h *HookHandler) list(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	respond.JSON(w, http.StatusOK, hooks)
+	respond.JSON(w, http.StatusOK, publicHookResponses(hooks))
 }
 
 func (h *HookHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +150,7 @@ func (h *HookHandler) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var req createHookRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -156,6 +164,10 @@ func (h *HookHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Config) == 0 {
 		req.Config = json.RawMessage("{}")
+	}
+	if err := validatePromptHookConfigAliases(req.HookType, req.Config); err != nil {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
 	}
 	enabled := true
 	if req.Enabled != nil {
@@ -174,7 +186,7 @@ func (h *HookHandler) create(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	respond.JSON(w, http.StatusCreated, hook)
+	respond.JSON(w, http.StatusCreated, publicHookResponseFrom(hook))
 }
 
 func (h *HookHandler) get(w http.ResponseWriter, r *http.Request) {
@@ -204,7 +216,7 @@ func (h *HookHandler) get(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	respond.JSON(w, http.StatusOK, hook)
+	respond.JSON(w, http.StatusOK, publicHookResponseFrom(hook))
 }
 
 func (h *HookHandler) update(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +231,7 @@ func (h *HookHandler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req updateHookRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -236,11 +248,15 @@ func (h *HookHandler) update(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusNotFound, "hook not found")
 		return
 	}
+	if errors.Is(err, hookconfig.ErrConflictingPromptAliases) {
+		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	respond.JSON(w, http.StatusOK, hook)
+	respond.JSON(w, http.StatusOK, publicHookResponseFrom(hook))
 }
 
 func (h *HookHandler) delete(w http.ResponseWriter, r *http.Request) {
@@ -281,6 +297,120 @@ func (h *HookHandler) delete(w http.ResponseWriter, r *http.Request) {
 
 const hookSelectCols = `id, agent_id, event, matcher, hook_type, config, enabled, priority,
 	timeout_seconds, is_async, run_once, status_message, created_at, updated_at`
+
+func publicHookResponses(hooks []agentHook) []agentHook {
+	out := make([]agentHook, len(hooks))
+	for i, hook := range hooks {
+		out[i] = publicHookResponseFrom(hook)
+	}
+	return out
+}
+
+func publicHookResponseFrom(hook agentHook) agentHook {
+	hook.Config = redactPublicHookConfig(hook.Config)
+	return hook
+}
+
+func redactPublicHookConfig(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return json.RawMessage(`{}`)
+	}
+	redacted, err := json.Marshal(redactPublicHookValue(value))
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return redacted
+}
+
+func redactPublicHookValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, child := range typed {
+			if isSensitiveHookConfigKey(key) {
+				continue
+			}
+			if isHookConfigURLKey(key) {
+				if rawURL, ok := child.(string); ok {
+					out[key] = redactPublicHookURL(rawURL)
+					continue
+				}
+			}
+			out[key] = redactPublicHookValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, child := range typed {
+			out[i] = redactPublicHookValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func isSensitiveHookConfigKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+	if normalized == "authorization" || normalized == "proxyauthorization" ||
+		normalized == "cookie" || normalized == "setcookie" || normalized == "xapikey" ||
+		normalized == "xapitoken" || normalized == "xauthtoken" || normalized == "xaccesstoken" ||
+		normalized == "xsecret" {
+		return true
+	}
+	for _, marker := range []string{"apikey", "accesskey", "privatekey", "secretkey"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	for _, suffix := range []string{"secret", "password", "token", "credential", "credentials", "authorization"} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHookConfigURLKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+	return normalized == "url"
+}
+
+func redactPublicHookURL(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return value
+	}
+
+	changed := false
+	if parsed.User != nil {
+		if _, hasPassword := parsed.User.Password(); hasPassword {
+			parsed.User = url.UserPassword(parsed.User.Username(), "***")
+			changed = true
+		}
+	}
+
+	query := parsed.Query()
+	for key, values := range query {
+		if !isSensitiveHookConfigKey(key) {
+			continue
+		}
+		for i := range values {
+			values[i] = "***"
+		}
+		query[key] = values
+		changed = true
+	}
+	if changed {
+		parsed.RawQuery = query.Encode()
+		return parsed.String()
+	}
+	return value
+}
 
 func findHooksByAgent(ctx context.Context, conn *pgxpool.Conn, agentID uuid.UUID) ([]agentHook, error) {
 	rows, err := conn.Query(ctx,
@@ -367,6 +497,9 @@ func updateHook(ctx context.Context, conn *pgxpool.Conn, agentID, hookID uuid.UU
 	if req.StatusMessage != nil {
 		existing.StatusMessage = *req.StatusMessage
 	}
+	if err := validatePromptHookConfigAliases(existing.HookType, existing.Config); err != nil {
+		return agentHook{}, err
+	}
 
 	row := conn.QueryRow(ctx,
 		`UPDATE agent_hook SET
@@ -380,6 +513,13 @@ func updateHook(ctx context.Context, conn *pgxpool.Conn, agentID, hookID uuid.UU
 		hookID, agentID,
 	)
 	return scanAgentHookRow(row)
+}
+
+func validatePromptHookConfigAliases(hookType string, config json.RawMessage) error {
+	if hookType != "prompt" {
+		return nil
+	}
+	return hookconfig.ValidatePromptAliases(config)
 }
 
 func scanAgentHookRow(row pgx.Row) (agentHook, error) {

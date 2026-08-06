@@ -158,9 +158,9 @@ func TestPermHook_PriorityOrdering(t *testing.T) {
 			return PermissionHookContinue, ""
 		}
 	}
-	c.Register(PermissionHook{Name: "c", Phase: PermissionHookBeforeEvaluate, Priority: 30, Enabled: true, Handle: record("c")})
-	c.Register(PermissionHook{Name: "a", Phase: PermissionHookBeforeEvaluate, Priority: 10, Enabled: true, Handle: record("a")})
-	c.Register(PermissionHook{Name: "b", Phase: PermissionHookBeforeEvaluate, Priority: 20, Enabled: true, Handle: record("b")})
+	require.NoError(t, c.Register(PermissionHook{Name: "c", Phase: PermissionHookBeforeEvaluate, Priority: 30, Enabled: true, Handle: record("c")}))
+	require.NoError(t, c.Register(PermissionHook{Name: "a", Phase: PermissionHookBeforeEvaluate, Priority: 10, Enabled: true, Handle: record("a")}))
+	require.NoError(t, c.Register(PermissionHook{Name: "b", Phase: PermissionHookBeforeEvaluate, Priority: 20, Enabled: true, Handle: record("b")}))
 	c.Evaluate(context.Background(), PermissionHookRequest{ToolName: "Read"})
 	assert.Equal(t, []string{"a", "b", "c"}, calls)
 }
@@ -177,22 +177,22 @@ func TestPermHook_TieBrokenByName(t *testing.T) {
 			return PermissionHookContinue, ""
 		}
 	}
-	c.Register(PermissionHook{Name: "zeta", Phase: PermissionHookBeforeEvaluate, Priority: 10, Enabled: true, Handle: record("zeta")})
-	c.Register(PermissionHook{Name: "alpha", Phase: PermissionHookBeforeEvaluate, Priority: 10, Enabled: true, Handle: record("alpha")})
+	require.NoError(t, c.Register(PermissionHook{Name: "zeta", Phase: PermissionHookBeforeEvaluate, Priority: 10, Enabled: true, Handle: record("zeta")}))
+	require.NoError(t, c.Register(PermissionHook{Name: "alpha", Phase: PermissionHookBeforeEvaluate, Priority: 10, Enabled: true, Handle: record("alpha")}))
 	c.Evaluate(context.Background(), PermissionHookRequest{ToolName: "Read"})
 	assert.Equal(t, []string{"alpha", "zeta"}, calls)
 }
 
 func TestPermHook_AuditRecordsAllHookDecisions(t *testing.T) {
 	c := NewPermissionHookChain(nil)
-	c.Register(PermissionHook{
+	require.NoError(t, c.Register(PermissionHook{
 		Name: "before", Phase: PermissionHookBeforeEvaluate,
 		Enabled: true, Handle: continueHandle("before-pass"),
-	})
-	c.Register(PermissionHook{
+	}))
+	require.NoError(t, c.Register(PermissionHook{
 		Name: "after", Phase: PermissionHookAfterEvaluate,
 		Enabled: true, Handle: continueHandle("after-pass"),
-	})
+	}))
 	eval := c.Evaluate(context.Background(), PermissionHookRequest{ToolName: "Read"})
 	require.Equal(t, 2, len(eval.HookDecisions))
 	assert.Equal(t, "before-pass", eval.HookDecisions[0].Reason)
@@ -201,18 +201,18 @@ func TestPermHook_AuditRecordsAllHookDecisions(t *testing.T) {
 
 func TestPermHook_FirstBeforeOverrideStopsChain(t *testing.T) {
 	c := NewPermissionHookChain(nil)
-	c.Register(PermissionHook{
+	require.NoError(t, c.Register(PermissionHook{
 		Name: "a-deny", Phase: PermissionHookBeforeEvaluate, Priority: 10,
 		Enabled: true, Handle: overrideDenyHandle,
-	})
+	}))
 	bCalled := false
-	c.Register(PermissionHook{
+	require.NoError(t, c.Register(PermissionHook{
 		Name: "b-allow", Phase: PermissionHookBeforeEvaluate, Priority: 20,
 		Enabled: true, Handle: func(ctx context.Context, r PermissionHookRequest, e PermissionDecision) (PermissionHookOutcome, string) {
 			bCalled = true
 			return PermissionHookOverrideAllow, ""
 		},
-	})
+	}))
 	eval := c.Evaluate(context.Background(), PermissionHookRequest{ToolName: "Read"})
 	assert.Equal(t, PermissionDeny, eval.FinalDecision)
 	assert.False(t, bCalled, "second Before hook must not run after short-circuit")
@@ -221,14 +221,14 @@ func TestPermHook_FirstBeforeOverrideStopsChain(t *testing.T) {
 func TestPermHook_AfterAllHooksRunEvenAfterOverride(t *testing.T) {
 	// After hooks all run; the LAST override wins.
 	c := NewPermissionHookChain(&PermissionRules{Allow: []string{"Read"}})
-	c.Register(PermissionHook{
+	require.NoError(t, c.Register(PermissionHook{
 		Name: "a-confirm", Phase: PermissionHookAfterEvaluate, Priority: 10,
 		Enabled: true, Handle: overrideConfirmHandle,
-	})
-	c.Register(PermissionHook{
+	}))
+	require.NoError(t, c.Register(PermissionHook{
 		Name: "b-deny", Phase: PermissionHookAfterEvaluate, Priority: 20,
 		Enabled: true, Handle: overrideDenyHandle,
-	})
+	}))
 	eval := c.Evaluate(context.Background(), PermissionHookRequest{ToolName: "Read"})
 	assert.Equal(t, PermissionDeny, eval.FinalDecision)
 	assert.Equal(t, 2, len(eval.HookDecisions))
@@ -237,23 +237,23 @@ func TestPermHook_AfterAllHooksRunEvenAfterOverride(t *testing.T) {
 func TestPermHook_AfterHookSeesEngineDecision(t *testing.T) {
 	seen := PermissionDecision("")
 	c := NewPermissionHookChain(&PermissionRules{Deny: []string{"Bash"}})
-	c.Register(PermissionHook{
+	require.NoError(t, c.Register(PermissionHook{
 		Name: "observer", Phase: PermissionHookAfterEvaluate, Enabled: true,
 		Handle: func(ctx context.Context, r PermissionHookRequest, e PermissionDecision) (PermissionHookOutcome, string) {
 			seen = e
 			return PermissionHookContinue, ""
 		},
-	})
+	}))
 	c.Evaluate(context.Background(), PermissionHookRequest{ToolName: "Bash"})
 	assert.Equal(t, PermissionDeny, seen)
 }
 
 func TestPermHook_ConcurrentEvaluateSafe(t *testing.T) {
 	c := NewPermissionHookChain(&PermissionRules{Deny: []string{"Bash"}})
-	c.Register(PermissionHook{
+	require.NoError(t, c.Register(PermissionHook{
 		Name: "noop", Phase: PermissionHookAfterEvaluate, Enabled: true,
 		Handle: noopHookHandle,
-	})
+	}))
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
@@ -270,10 +270,10 @@ func TestPermHook_ClockInjectableForAuditTimestamps(t *testing.T) {
 	stamp := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	c := NewPermissionHookChain(nil)
 	c.SetClock(func() time.Time { return stamp })
-	c.Register(PermissionHook{
+	require.NoError(t, c.Register(PermissionHook{
 		Name: "x", Phase: PermissionHookBeforeEvaluate, Enabled: true,
 		Handle: noopHookHandle,
-	})
+	}))
 	eval := c.Evaluate(context.Background(), PermissionHookRequest{ToolName: "Read"})
 	assert.Equal(t, stamp, eval.EvaluatedAt)
 	require.Equal(t, 1, len(eval.HookDecisions))

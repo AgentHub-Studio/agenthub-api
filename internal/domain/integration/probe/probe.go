@@ -8,9 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +28,8 @@ const (
 	sampleBodyMax  = 512
 	errorHintLimit = 240
 )
+
+var errRedirectURLNotAllowed = errors.New("redirect URL is not allowed")
 
 // HTTPRequest is the body of POST /api/integrations/http/test.
 type HTTPRequest struct {
@@ -67,8 +72,8 @@ type URLValidator func(string) error
 
 // Service encapsulates probe operations. Stateless, safe to share across requests.
 type Service struct {
-	httpClient   *http.Client
-	validateURL  URLValidator
+	httpClient  *http.Client
+	validateURL URLValidator
 }
 
 // NewService returns a probe Service with default timeouts and SSRF validation.
@@ -96,6 +101,22 @@ func (s *Service) WithURLValidator(v URLValidator) *Service {
 // AllowAnyURL is a URLValidator that permits every URL. Tests only.
 func AllowAnyURL(string) error { return nil }
 
+// validatedHTTPClient revalidates every redirect before another request is sent.
+func (s *Service) validatedHTTPClient() *http.Client {
+	client := *s.httpClient
+	previousCheckRedirect := s.httpClient.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := s.validateURL(req.URL.String()); err != nil {
+			return errRedirectURLNotAllowed
+		}
+		if previousCheckRedirect != nil {
+			return previousCheckRedirect(req, via)
+		}
+		return nil
+	}
+	return &client
+}
+
 // HTTP performs a GET (or specified method) against the URL and reports the outcome.
 // SSRF-validates the URL before firing the request.
 func (s *Service) HTTP(ctx context.Context, req HTTPRequest) Result {
@@ -116,6 +137,7 @@ func (s *Service) HTTP(ctx context.Context, req HTTPRequest) Result {
 	if err != nil {
 		return fail(start, "Não foi possível montar a requisição: "+truncate(err.Error(), errorHintLimit))
 	}
+	redactor := newProbeSecretRedactor(req.AuthType, req.AuthToken, req.Headers)
 
 	// Apply arbitrary headers.
 	if len(req.Headers) > 0 {
@@ -139,15 +161,18 @@ func (s *Service) HTTP(ctx context.Context, req HTTPRequest) Result {
 		}
 	}
 
-	resp, err := s.httpClient.Do(httpReq)
+	resp, err := s.validatedHTTPClient().Do(httpReq)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
-		return Result{OK: false, LatencyMs: latency, ErrorHint: mapHTTPError(err)}
+		if errors.Is(err, errRedirectURLNotAllowed) {
+			return fail(start, "URL não permitida.")
+		}
+		return Result{OK: false, LatencyMs: latency, ErrorHint: redactor.redact(mapHTTPError(err))}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, sampleBodyMax))
-	sample := string(body)
+	sample := redactor.redact(string(body))
 
 	// 2xx = green. 3xx/4xx = reachable but with client error — surface as ok=true
 	// plus status so the UI can color-code. 5xx = server error, still reachable.
@@ -186,19 +211,33 @@ func (s *Service) probePostgres(ctx context.Context, req DatabaseRequest, start 
 	connCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=prefer&connect_timeout=5",
-		req.DBUser, req.DBPassword, req.Host, req.Port, req.Database)
-	conn, err := pgx.Connect(connCtx, dsn)
+	conn, err := pgx.Connect(connCtx, postgresProbeDSN(req))
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		return Result{OK: false, LatencyMs: latency, ErrorHint: mapPostgresError(err)}
 	}
-	defer conn.Close(connCtx)
+	defer func() { _ = conn.Close(connCtx) }()
 
 	if err := conn.Ping(connCtx); err != nil {
 		return Result{OK: false, LatencyMs: time.Since(start).Milliseconds(), ErrorHint: mapPostgresError(err)}
 	}
 	return Result{OK: true, LatencyMs: time.Since(start).Milliseconds()}
+}
+
+func postgresProbeDSN(req DatabaseRequest) string {
+	values := url.Values{}
+	values.Set("sslmode", "prefer")
+	values.Set("connect_timeout", "5")
+
+	dsn := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(req.DBUser, req.DBPassword),
+		Host:     net.JoinHostPort(req.Host, strconv.Itoa(req.Port)),
+		Path:     "/" + req.Database,
+		RawPath:  "/" + url.PathEscape(req.Database),
+		RawQuery: values.Encode(),
+	}
+	return dsn.String()
 }
 
 // MCP sends an MCP initialize JSON-RPC message to the server URL and
@@ -231,6 +270,7 @@ func (s *Service) MCP(ctx context.Context, req MCPRequest) Result {
 	if err != nil {
 		return fail(start, "Não foi possível montar a requisição MCP: "+truncate(err.Error(), errorHintLimit))
 	}
+	redactor := newProbeSecretRedactor("", "", req.Headers)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 
@@ -243,15 +283,18 @@ func (s *Service) MCP(ctx context.Context, req MCPRequest) Result {
 		}
 	}
 
-	resp, err := s.httpClient.Do(httpReq)
+	resp, err := s.validatedHTTPClient().Do(httpReq)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
-		return Result{OK: false, LatencyMs: latency, ErrorHint: mapHTTPError(err)}
+		if errors.Is(err, errRedirectURLNotAllowed) {
+			return fail(start, "URL não permitida.")
+		}
+		return Result{OK: false, LatencyMs: latency, ErrorHint: redactor.redact(mapHTTPError(err))}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, sampleBodyMax))
-	sample := string(respBody)
+	sample := redactor.redact(string(respBody))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Result{
@@ -275,12 +318,82 @@ func (s *Service) MCP(ctx context.Context, req MCPRequest) Result {
 		return Result{OK: false, Status: resp.StatusCode, LatencyMs: latency, SampleBody: sample, ErrorHint: "Resposta MCP não é JSON-RPC válido."}
 	}
 	if rpc.Error != nil {
-		return Result{OK: false, Status: resp.StatusCode, LatencyMs: latency, SampleBody: sample, ErrorHint: "MCP retornou erro: " + rpc.Error.Message}
+		return Result{OK: false, Status: resp.StatusCode, LatencyMs: latency, SampleBody: sample, ErrorHint: "MCP retornou erro: " + redactor.redact(rpc.Error.Message)}
 	}
 	return Result{OK: true, Status: resp.StatusCode, LatencyMs: latency, SampleBody: sample}
 }
 
 // --- helpers ---
+
+type probeSecretRedactor struct {
+	values []string
+}
+
+func newProbeSecretRedactor(authType, authToken string, headers json.RawMessage) probeSecretRedactor {
+	var redactor probeSecretRedactor
+	token := strings.TrimSpace(authToken)
+	if token != "" {
+		switch strings.ToLower(strings.TrimSpace(authType)) {
+		case "bearer":
+			redactor.add("Bearer " + token)
+		case "basic":
+			redactor.add("Basic " + token)
+		}
+		redactor.add(token)
+	}
+
+	if len(headers) > 0 {
+		var hm map[string]string
+		if err := json.Unmarshal(headers, &hm); err == nil {
+			for name, value := range hm {
+				if !isSensitiveProbeHeader(name) {
+					continue
+				}
+				redactor.add(value)
+				if _, token, ok := strings.Cut(strings.TrimSpace(value), " "); ok {
+					redactor.add(token)
+				}
+			}
+		}
+	}
+
+	sort.Slice(redactor.values, func(i, j int) bool {
+		return len(redactor.values[i]) > len(redactor.values[j])
+	})
+	return redactor
+}
+
+func (r *probeSecretRedactor) add(value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	for _, existing := range r.values {
+		if existing == value {
+			return
+		}
+	}
+	r.values = append(r.values, value)
+}
+
+func (r probeSecretRedactor) redact(text string) string {
+	if text == "" {
+		return text
+	}
+	for _, value := range r.values {
+		text = strings.ReplaceAll(text, value, "***")
+	}
+	return text
+}
+
+func isSensitiveProbeHeader(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "authorization", "proxy-authorization", "x-api-key", "x-api-token", "x-auth-token", "x-access-token", "x-secret", "cookie", "set-cookie":
+		return true
+	default:
+		return false
+	}
+}
 
 func fail(start time.Time, hint string) Result {
 	return Result{OK: false, LatencyMs: time.Since(start).Milliseconds(), ErrorHint: hint}

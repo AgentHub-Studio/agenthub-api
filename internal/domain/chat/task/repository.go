@@ -76,12 +76,16 @@ func (r *pgRepository) CreateTask(ctx context.Context, t Task) error {
 		return err
 	}
 	defer release()
+	dependsOn := t.DependsOn
+	if dependsOn == nil {
+		dependsOn = []string{}
+	}
 
 	_, err = conn.Exec(ctx,
 		`INSERT INTO coordinator_task (id, session_id, description, status, phase, depends_on, assigned_to, created_at, completed_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (id) DO NOTHING`,
-		t.ID, t.SessionID, t.Description, t.Status, t.Phase, t.DependsOn,
+		t.ID, t.SessionID, t.Description, t.Status, t.Phase, dependsOn,
 		nullString(t.AssignedTo), t.CreatedAt, t.CompletedAt,
 	)
 	if err != nil {

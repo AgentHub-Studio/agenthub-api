@@ -3,6 +3,7 @@ package device
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +34,8 @@ func responseFrom(d Device) DeviceResponse {
 	meta := d.Metadata
 	if len(meta) == 0 {
 		meta = json.RawMessage("{}")
+	} else {
+		meta = redactPublicMetadata(meta)
 	}
 	return DeviceResponse{
 		ID:                d.ID,
@@ -49,6 +52,57 @@ func responseFrom(d Device) DeviceResponse {
 		CreatedAt:         d.CreatedAt,
 		UpdatedAt:         d.UpdatedAt,
 	}
+}
+
+// redactPublicMetadata creates a public copy of device metadata without credentials.
+func redactPublicMetadata(raw json.RawMessage) json.RawMessage {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return json.RawMessage(`{}`)
+	}
+	redacted, err := json.Marshal(redactPublicMetadataValue(value))
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return redacted
+}
+
+func redactPublicMetadataValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if isSensitiveMetadataKey(key) {
+				continue
+			}
+			out[key] = redactPublicMetadataValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = redactPublicMetadataValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func isSensitiveMetadataKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+	if normalized == "authorization" || normalized == "proxyauthorization" ||
+		normalized == "xapikey" || normalized == "xapitoken" ||
+		normalized == "xauthtoken" || normalized == "xaccesstoken" ||
+		normalized == "xsecret" {
+		return true
+	}
+	for _, suffix := range []string{"apikey", "secret", "password", "token", "credential"} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateDeviceRequest is the body for POST /api/devices.

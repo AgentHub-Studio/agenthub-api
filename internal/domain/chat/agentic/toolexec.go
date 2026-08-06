@@ -1,28 +1,34 @@
 package agentic
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"reflect"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
 // TrackedTool tracks the state of a single tool execution.
 type TrackedTool struct {
-	mu        sync.Mutex
-	ID        string
-	Name      string
-	Input     json.RawMessage
-	State     ToolState
-	Result    *ToolExecResult
-	StartedAt time.Time
-	DoneAt    time.Time
+	mu               sync.Mutex
+	ID               string
+	Name             string
+	Input            json.RawMessage
+	State            ToolState
+	Result           *ToolExecResult
+	StartedAt        time.Time
+	DoneAt           time.Time
+	AutoCollapse     bool
+	BlockOnInterrupt bool
 }
 
 func newTrackedTool(id, name string, input json.RawMessage) *TrackedTool {
@@ -65,12 +71,12 @@ func (t *TrackedTool) abort() {
 
 // StreamingToolExecutor runs tool calls with state tracking and progress events.
 type StreamingToolExecutor struct {
-	skillClient    *SkillRuntimeClient
-	mcpBridge      *MCPToolBridge
-	hookExecutor   *HookExecutor
-	cache          *ToolResultCache
-	stallDetector  *StallDetector
-	config         RunConfig
+	skillClient   *SkillRuntimeClient
+	mcpBridge     *MCPToolBridge
+	hookExecutor  *HookExecutor
+	cache         *ToolResultCache
+	stallDetector *StallDetector
+	config        RunConfig
 	// P-C179-1: document_search is executed locally (not delegated to skill-runtime).
 	docSearch   knowledge.DocumentSearchClient
 	activeKBIDs []uuid.UUID
@@ -103,17 +109,15 @@ func (e *StreamingToolExecutor) emitToolResult(ch chan<- RunEvent, tt *TrackedTo
 
 	// SECRET-SCANNER: redact known credential patterns from tool output before
 	// emitting the SSE tool_result event visible to the frontend.
-	output := result.Output
-	if len(output) > 0 {
-		output = json.RawMessage(RedactSecrets(string(output), "[REDACTED]"))
-	}
+	output := serializableJSONRawMessage(redactSensitiveToolResultOutput(result.Output))
 
 	ch <- NewRunEvent(EventToolResult, ToolResultData{
-		ID:         tt.ID,
-		Name:       tt.Name,
-		Output:     output,
-		DurationMs: duration,
-		Error:      result.Error,
+		ID:           tt.ID,
+		Name:         tt.Name,
+		Output:       output,
+		DurationMs:   duration,
+		Error:        result.Error,
+		AutoCollapse: tt.AutoCollapse,
 	})
 }
 
@@ -248,6 +252,18 @@ func BuildContextModeIndex(tools []LLMTool) map[string]string {
 	return idx
 }
 
+// BuildContextModeToolIndex creates a name→LLMTool map for tools that require
+// non-inline dispatch. The runner uses this to build self-contained fork prompts.
+func BuildContextModeToolIndex(tools []LLMTool) map[string]LLMTool {
+	idx := make(map[string]LLMTool)
+	for _, t := range tools {
+		if t.ContextMode != "" && t.ContextMode != "inline" {
+			idx[t.Name] = t
+		}
+	}
+	return idx
+}
+
 // BuildInterruptBehaviorIndex creates a name→behavior map from LLMTool definitions.
 // Only tools with InterruptBehavior="block" are included; absent/empty means "cancel".
 // Used by the SSE handler to decide whether to wait for tool completion before stopping.
@@ -262,6 +278,32 @@ func BuildInterruptBehaviorIndex(tools []LLMTool) map[string]string {
 	return idx
 }
 
+// toolExecutionContext returns the context used by a single tool invocation.
+// A block-on-interrupt tool ignores explicit parent cancellation after it has
+// started, but still preserves the original deadline and the per-tool timeout.
+func (e *StreamingToolExecutor) toolExecutionContext(parent context.Context, blockOnInterrupt bool) (context.Context, context.CancelFunc) {
+	executionCtx := parent
+	cancels := make([]context.CancelFunc, 0, 2)
+	if blockOnInterrupt {
+		executionCtx = context.WithoutCancel(parent)
+		if deadline, ok := parent.Deadline(); ok {
+			var cancel context.CancelFunc
+			executionCtx, cancel = context.WithDeadline(executionCtx, deadline)
+			cancels = append(cancels, cancel)
+		}
+	}
+	if e.config.ToolTimeout > 0 {
+		var cancel context.CancelFunc
+		executionCtx, cancel = context.WithTimeout(executionCtx, e.config.ToolTimeout)
+		cancels = append(cancels, cancel)
+	}
+	return executionCtx, func() {
+		for i := len(cancels) - 1; i >= 0; i-- {
+			cancels[i]()
+		}
+	}
+}
+
 // BuildSearchOrReadIndex creates a name→bool map from LLMTool definitions.
 // Tools with IsSearchOrRead=true should have their results auto-collapsed in the UI.
 // Inspired by Claude Code's Tool.ts isSearchOrReadCommand().
@@ -271,6 +313,20 @@ func BuildSearchOrReadIndex(tools []LLMTool) map[string]bool {
 		if t.IsSearchOrRead {
 			idx[t.Name] = true
 		}
+	}
+	return idx
+}
+
+// BuildInputSchemaIndex creates a name→JSON Schema map from LLMTool
+// definitions. Empty schemas are omitted so callers can distinguish "no schema"
+// from "schema explicitly says any object".
+func BuildInputSchemaIndex(tools []LLMTool) map[string]json.RawMessage {
+	idx := make(map[string]json.RawMessage)
+	for _, t := range tools {
+		if isEmptyJSONSchema(t.InputSchema) {
+			continue
+		}
+		idx[t.Name] = append(json.RawMessage(nil), t.InputSchema...)
 	}
 	return idx
 }
@@ -291,19 +347,24 @@ func (e *StreamingToolExecutor) ExecuteAll(
 	toolCalls []ai.ToolCall,
 	in RunInput,
 	readOnlyIndex map[string]bool,
+	inputSchemaIndexes ...map[string]json.RawMessage,
 ) []ToolExecResult {
+	inputSchemaIndex := firstInputSchemaIndex(inputSchemaIndexes)
 	// Create tracked tools.
 	tracked := make([]*TrackedTool, len(toolCalls))
 	for i, tc := range toolCalls {
 		tracked[i] = newTrackedTool(tc.ID, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+		tracked[i].AutoCollapse = in.SearchOrReadTools[tc.Function.Name]
+		tracked[i].BlockOnInterrupt = in.InterruptBehaviors[tc.Function.Name] == "block"
 	}
 
 	// Emit queued state for all.
 	for _, t := range tracked {
 		ch <- NewRunEvent(EventToolCallStart, ToolCallStartData{
-			ID:    t.ID,
-			Name:  t.Name,
-			Input: t.Input,
+			ID:           t.ID,
+			Name:         t.Name,
+			Input:        t.Input,
+			AutoCollapse: t.AutoCollapse,
 		})
 		ch <- NewRunEvent(EventToolProgress, ToolProgressData{
 			ID:    t.ID,
@@ -320,7 +381,7 @@ func (e *StreamingToolExecutor) ExecuteAll(
 	for _, batch := range batches {
 		if batch.IsConcurrencySafe && len(batch.Indices) > 1 {
 			// Concurrent batch: run read-only tools in parallel.
-			e.executeParallel(ctx, ch, toolCalls, tracked, results, batch.Indices, in)
+			e.executeParallel(ctx, ch, toolCalls, tracked, results, batch.Indices, in, inputSchemaIndex)
 		} else {
 			// Serial batch: run each tool sequentially.
 			for _, idx := range batch.Indices {
@@ -333,7 +394,7 @@ func (e *StreamingToolExecutor) ExecuteAll(
 					results[idx] = ToolExecResult{Error: &errMsg}
 					continue
 				}
-				e.executeSingle(ctx, ch, toolCalls[idx], tracked[idx], &results[idx], in)
+				e.executeSingle(ctx, ch, toolCalls[idx], tracked[idx], &results[idx], in, inputSchemaIndex)
 			}
 		}
 	}
@@ -350,6 +411,7 @@ func (e *StreamingToolExecutor) executeParallel(
 	results []ToolExecResult,
 	indices []int,
 	in RunInput,
+	inputSchemaIndex map[string]json.RawMessage,
 ) {
 	sem := make(chan struct{}, e.config.ConcurrentReadTools)
 	abortCtx, abortCancel := context.WithCancel(ctx)
@@ -389,9 +451,9 @@ func (e *StreamingToolExecutor) executeParallel(
 				return
 			}
 
-		// Validate tool input before execution.
+			// Validate tool input before execution.
 			toolInput := json.RawMessage(tc.Function.Arguments)
-			if vErr := ValidateToolInput(tc.Function.Name, toolInput); vErr != "" {
+			if vErr := ValidateToolInput(tc.Function.Name, toolInput, inputSchemaIndex[tc.Function.Name]); vErr != "" {
 				errMsg := vErr
 				validationResult := ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name, EmittedToStream: true}
 				tt.complete(validationResult)
@@ -453,12 +515,12 @@ func (e *StreamingToolExecutor) executeParallel(
 			}
 
 			// Execute the tool.
-			toolCtx := abortCtx
-			if e.config.ToolTimeout > 0 {
-				var cancel context.CancelFunc
-				toolCtx, cancel = context.WithTimeout(abortCtx, e.config.ToolTimeout)
-				defer cancel()
+			executionCtx := abortCtx
+			if tt.BlockOnInterrupt {
+				executionCtx = ctx
 			}
+			toolCtx, cancel := e.toolExecutionContext(executionCtx, tt.BlockOnInterrupt)
+			defer cancel()
 
 			var execResult *ToolExecResult
 			var execErr error
@@ -559,8 +621,9 @@ func (e *StreamingToolExecutor) executeSingle(
 	tt *TrackedTool,
 	result *ToolExecResult,
 	in RunInput,
+	inputSchemaIndex map[string]json.RawMessage,
 ) {
-	e.executeToolCall(ctx, ch, tc, tt, result, in)
+	e.executeToolCall(ctx, ch, tc, tt, result, in, inputSchemaIndex)
 }
 
 // executeToolCall handles the execution of a single tool call including hooks.
@@ -572,12 +635,13 @@ func (e *StreamingToolExecutor) executeToolCall(
 	tt *TrackedTool,
 	result *ToolExecResult,
 	in RunInput,
+	inputSchemaIndex map[string]json.RawMessage,
 ) bool {
 	// Phase 1: Validate input before permission checks or execution.
 	// Structural validation catches missing params and invalid types early,
 	// returning LLM-readable errors without showing permission dialogs.
 	// Inspired by Claude Code's Tool.ts two-phase validateInput/checkPermissions.
-	if vErr := ValidateToolInput(tc.Function.Name, json.RawMessage(tc.Function.Arguments)); vErr != "" {
+	if vErr := ValidateToolInput(tc.Function.Name, json.RawMessage(tc.Function.Arguments), inputSchemaIndex[tc.Function.Name]); vErr != "" {
 		errMsg := vErr
 		validationResult := ToolExecResult{Error: &errMsg, ToolName: tc.Function.Name, EmittedToStream: true}
 		tt.complete(validationResult)
@@ -606,12 +670,8 @@ func (e *StreamingToolExecutor) executeToolCall(
 	}
 
 	// Execute the tool.
-	toolCtx := ctx
-	if e.config.ToolTimeout > 0 {
-		var cancel context.CancelFunc
-		toolCtx, cancel = context.WithTimeout(ctx, e.config.ToolTimeout)
-		defer cancel()
-	}
+	toolCtx, cancel := e.toolExecutionContext(ctx, tt.BlockOnInterrupt)
+	defer cancel()
 
 	// Route document_search locally (P-C179-1), then MCP, then skill-runtime.
 	var execResult *ToolExecResult
@@ -707,9 +767,14 @@ func (e *StreamingToolExecutor) executeToolCall(
 // This runs before checkPermissions to avoid showing permission dialogs for
 // structurally invalid inputs (e.g. missing required params, invalid JSON).
 // Inspired by Claude Code's Tool.ts validateInput phase.
-func ValidateToolInput(toolName string, input json.RawMessage) string {
-	// Basic JSON validity check.
-	if len(input) == 0 {
+func ValidateToolInput(toolName string, input json.RawMessage, schemas ...json.RawMessage) string {
+	// Empty arguments are accepted only for tools without an explicit schema.
+	// A schema means the caller has declared a structured contract, so forwarding
+	// an empty string to the runtime would bypass required-property validation.
+	if len(bytes.TrimSpace(input)) == 0 {
+		if len(firstSchema(schemas)) > 0 {
+			return fmt.Sprintf("Invalid JSON input for tool '%s': empty input", toolName)
+		}
 		return ""
 	}
 	var parsed map[string]any
@@ -736,7 +801,153 @@ func ValidateToolInput(toolName string, input json.RawMessage) string {
 		}
 	}
 
+	if schema := firstSchema(schemas); len(schema) > 0 {
+		if errMsg := validateInputJSONSchema(toolName, parsed, schema); errMsg != "" {
+			return errMsg
+		}
+	}
+
 	return ""
+}
+
+func firstInputSchemaIndex(indexes []map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(indexes) == 0 || indexes[0] == nil {
+		return map[string]json.RawMessage{}
+	}
+	return indexes[0]
+}
+
+func firstSchema(schemas []json.RawMessage) json.RawMessage {
+	if len(schemas) == 0 || isEmptyJSONSchema(schemas[0]) {
+		return nil
+	}
+	return schemas[0]
+}
+
+func isEmptyJSONSchema(schema json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(schema)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte(`{}`)) || bytes.Equal(trimmed, []byte(`null`))
+}
+
+func validateInputJSONSchema(toolName string, input map[string]any, rawSchema json.RawMessage) string {
+	var schema map[string]any
+	if err := json.Unmarshal(rawSchema, &schema); err != nil {
+		return fmt.Sprintf("JSON Schema validation failed for tool '%s': invalid schema: %s", toolName, err.Error())
+	}
+	if isEmptySchemaObject(schema) {
+		return ""
+	}
+
+	rootType := schemaType(schema["type"])
+	if rootType != "" && rootType != "object" {
+		return fmt.Sprintf("JSON Schema validation failed for tool '%s': root schema type %q is not supported", toolName, rootType)
+	}
+
+	for _, name := range schemaRequired(schema["required"]) {
+		if _, ok := input[name]; !ok {
+			return fmt.Sprintf("JSON Schema validation failed for tool '%s': required property '%s' is missing", toolName, name)
+		}
+	}
+
+	properties, _ := schema["properties"].(map[string]any)
+	for name, propertySchemaRaw := range properties {
+		value, ok := input[name]
+		if !ok {
+			continue
+		}
+		propertySchema, _ := propertySchemaRaw.(map[string]any)
+		if propertySchema == nil {
+			continue
+		}
+		if errMsg := validateJSONSchemaValue(toolName, name, value, propertySchema); errMsg != "" {
+			return errMsg
+		}
+	}
+
+	return ""
+}
+
+func validateJSONSchemaValue(toolName, name string, value any, schema map[string]any) string {
+	if enumRaw, ok := schema["enum"].([]any); ok && len(enumRaw) > 0 {
+		matched := false
+		for _, candidate := range enumRaw {
+			if reflect.DeepEqual(value, candidate) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Sprintf("JSON Schema validation failed for tool '%s': property '%s' must match one of the allowed enum values", toolName, name)
+		}
+	}
+
+	wantType := schemaType(schema["type"])
+	if wantType == "" {
+		return ""
+	}
+	if !jsonValueMatchesType(value, wantType) {
+		return fmt.Sprintf("JSON Schema validation failed for tool '%s': property '%s' must be %s", toolName, name, wantType)
+	}
+	return ""
+}
+
+func isEmptySchemaObject(schema map[string]any) bool {
+	return len(schema) == 0
+}
+
+func schemaType(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return v
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "null" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func schemaRequired(raw any) []string {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	required := make([]string, 0, len(items))
+	for _, item := range items {
+		if name, ok := item.(string); ok && name != "" {
+			required = append(required, name)
+		}
+	}
+	return required
+}
+
+func jsonValueMatchesType(value any, wantType string) bool {
+	switch wantType {
+	case "string":
+		_, ok := value.(string)
+		return ok
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "number":
+		_, ok := value.(float64)
+		return ok
+	case "integer":
+		f, ok := value.(float64)
+		return ok && math.Trunc(f) == f
+	case "object":
+		_, ok := value.(map[string]any)
+		return ok
+	case "array":
+		_, ok := value.([]any)
+		return ok
+	case "null":
+		return value == nil
+	default:
+		return true
+	}
 }
 
 // executeDocumentSearchInternal routes a document_search tool call to the local
@@ -744,20 +955,26 @@ func ValidateToolInput(toolName string, input json.RawMessage) string {
 // and returns the results serialised as JSON.
 func executeDocumentSearchInternal(ctx context.Context, client knowledge.DocumentSearchClient, kbIDs []uuid.UUID, rawArgs json.RawMessage) (*ToolExecResult, error) {
 	var args struct {
-		Query           string `json:"query"`
-		TopK            int    `json:"top_k"`
-		Limit           int    `json:"limit"` // BUG-DOCSEARCH-PARAMS: alias accepted from LLM schema
-		KnowledgeBaseID string `json:"knowledge_base_id"` // BUG-DOCSEARCH-PARAMS: optional KB filter
+		Query           string          `json:"query"`
+		TopK            *int            `json:"top_k"`
+		Limit           *int            `json:"limit"`             // canonical schema field; top_k remains a legacy alias
+		KnowledgeBaseID string          `json:"knowledge_base_id"` // BUG-DOCSEARCH-PARAMS: optional KB filter
+		MetadataFilter  json.RawMessage `json:"metadataFilter"`
 	}
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
+	validatedArgs, err := httputil.DecodeSingleRawJSON(bytes.NewReader(rawArgs))
+	if err != nil {
 		return nil, fmt.Errorf("document_search: invalid arguments: %w", err)
 	}
-	// Prefer limit over top_k (limit is the schema-visible field name).
-	if args.Limit > 0 && args.TopK <= 0 {
-		args.TopK = args.Limit
+	if err := json.Unmarshal(validatedArgs, &args); err != nil {
+		return nil, fmt.Errorf("document_search: invalid arguments: %w", err)
 	}
-	if args.TopK <= 0 {
-		args.TopK = 5
+	metadataFilter, err := knowledge.ParseMetadataFilter(args.MetadataFilter)
+	if err != nil {
+		return nil, fmt.Errorf("document_search: invalid metadataFilter: %w", err)
+	}
+	topK, err := resolveDocumentSearchLimitAliases(args.TopK, args.Limit)
+	if err != nil {
+		return nil, err
 	}
 
 	// BUG-DOCSEARCH-PARAMS: when the LLM provides knowledge_base_id, restrict the search
@@ -783,7 +1000,11 @@ func executeDocumentSearchInternal(ctx context.Context, client knowledge.Documen
 		}
 	}
 
-	results, err := client.Search(ctx, args.Query, effectiveKBIDs, args.TopK)
+	results, err := client.Search(ctx, args.Query, knowledge.SearchOptions{
+		KBIDs:          effectiveKBIDs,
+		TopK:           topK,
+		MetadataFilter: metadataFilter,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("document_search: search failed: %w", err)
 	}
@@ -813,6 +1034,31 @@ func executeDocumentSearchInternal(ctx context.Context, client knowledge.Documen
 		return nil, fmt.Errorf("document_search: failed to marshal results: %w", err)
 	}
 	return &ToolExecResult{Output: out, ToolName: "document_search"}, nil
+}
+
+// resolveDocumentSearchLimitAliases keeps top_k compatible with older callers
+// without allowing a tool call to change result cardinality by field precedence.
+// Non-positive values retain their historical meaning of "not configured".
+func resolveDocumentSearchLimitAliases(topK, limit *int) (int, error) {
+	positiveValue := func(value *int) (int, bool) {
+		if value == nil || *value <= 0 {
+			return 0, false
+		}
+		return *value, true
+	}
+
+	topKValue, hasTopK := positiveValue(topK)
+	limitValue, hasLimit := positiveValue(limit)
+	if hasTopK && hasLimit && topKValue != limitValue {
+		return 0, fmt.Errorf("document_search: conflicting aliases top_k and limit")
+	}
+	if hasLimit {
+		return limitValue, nil
+	}
+	if hasTopK {
+		return topKValue, nil
+	}
+	return 5, nil
 }
 
 // ExecuteDocumentSearch is the exported entry point for unit tests and wiring.

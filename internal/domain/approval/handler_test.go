@@ -173,6 +173,16 @@ func TestApprovalHandler_Create_BadRequest(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestApprovalHandler_CreateRejectsTrailingJSONWithoutPersisting(t *testing.T) {
+	r, svc := setupApprovalRouter()
+	body := `{"executionId":"` + uuid.NewString() + `","nodeId":"node-1","title":"first"}{"title":"ignored"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/approvals", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Empty(t, svc.data)
+}
+
 func TestApprovalHandler_PendingCount(t *testing.T) {
 	r, svc := setupApprovalRouter()
 	seedApproval(svc)
@@ -234,6 +244,23 @@ func TestApprovalHandler_Respond_Approve(t *testing.T) {
 	var got approval.PendingApproval
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&got))
 	assert.Equal(t, approval.StatusApproved, got.Status)
+}
+
+func TestApprovalHandler_RespondRejectsTrailingJSONWithoutChangingStatus(t *testing.T) {
+	r, svc := setupApprovalRouter()
+	a := seedApproval(svc)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/approvals/"+a.ID.String()+"/respond",
+		bytes.NewBufferString(`{"approved":true}{"approved":false}`),
+	)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	got := svc.data[a.ID]
+	assert.Equal(t, approval.StatusPending, got.Status)
+	assert.Nil(t, got.RespondedAt)
 }
 
 func TestApprovalHandler_Respond_NotFound(t *testing.T) {
@@ -316,5 +343,5 @@ func TestApprovalHandler_Stream_SSEHeaders(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
-	assert.Equal(t, "no-cache", w.Header().Get("Cache-Control"))
+	assert.Equal(t, "no-cache, no-store", w.Header().Get("Cache-Control"))
 }

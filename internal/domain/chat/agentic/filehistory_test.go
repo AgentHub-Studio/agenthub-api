@@ -237,7 +237,7 @@ func TestFileSnapshot_Hash(t *testing.T) {
 
 	snap, _ := fh.GetLatest("main.go")
 	assert.NotEmpty(t, snap.ContentHash)
-	assert.Len(t, snap.ContentHash, 32, "MD5 hex should be 32 chars")
+	assert.Len(t, snap.ContentHash, 64, "SHA-256 hex should be 64 chars")
 }
 
 func TestFileSnapshot_Timestamp(t *testing.T) {

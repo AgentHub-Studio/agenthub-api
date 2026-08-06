@@ -35,7 +35,7 @@ func fetchPostgresSchema(ctx context.Context, dsn string) (DatabaseSchema, error
 	if err != nil {
 		return DatabaseSchema{}, fmt.Errorf("dbschema: connect: %w", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	// Query tables and views from information_schema.
 	tableRows, err := conn.Query(ctx, `

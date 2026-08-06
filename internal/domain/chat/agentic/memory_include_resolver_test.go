@@ -238,7 +238,7 @@ func TestResolve_LargeTextWithManyIncludes(t *testing.T) {
 	}
 	var b strings.Builder
 	for i := 0; i < 100; i++ {
-		b.WriteString(fmt.Sprintf("@include{key%d} ", i))
+		fmt.Fprintf(&b, "@include{key%d} ", i)
 	}
 	r, _ := NewMemoryIncludeResolver(DefaultMemoryIncludeResolverConfig(), lookup)
 	got, _, err := r.Resolve(context.Background(), b.String())

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/dependency"
+	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
 	tenantpkg "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
@@ -67,6 +68,26 @@ func (m *mockDepSvc) Resolve(_ context.Context, packageID uuid.UUID) (dependency
 func setupDepHandler() (*chi.Mux, *mockDepSvc) {
 	svc := newMockDepSvc()
 	h := dependency.NewHandler(svc)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r, svc
+}
+
+type mockPackageReader struct {
+	packages map[uuid.UUID]pkg.PackageResponse
+}
+
+func (m *mockPackageReader) GetAccessibleByID(_ context.Context, id uuid.UUID, tenantID string) (pkg.PackageResponse, error) {
+	p, ok := m.packages[id]
+	if !ok || (p.Visibility != string(pkg.PackageVisibilityPublic) && (tenantID == "" || p.AuthorTenantID != tenantID)) {
+		return pkg.PackageResponse{}, pkg.ErrNotFound
+	}
+	return p, nil
+}
+
+func setupDepHandlerWithPackages(packages map[uuid.UUID]pkg.PackageResponse) (*chi.Mux, *mockDepSvc) {
+	svc := newMockDepSvc()
+	h := dependency.NewHandler(svc).WithPackageReader(&mockPackageReader{packages: packages})
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
 	return r, svc
@@ -147,6 +168,24 @@ func TestDepHandler_Add_BadBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestDepHandler_AddRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	r, svc := setupDepHandler()
+	pkgID := uuid.New()
+	body, err := json.Marshal(dependency.AddDependencyRequest{
+		DependencyID:      uuid.New(),
+		VersionConstraint: ">=1.0.0",
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/packages/"+pkgID.String()+"/dependencies", bytes.NewReader(append(body, []byte(` {"versionConstraint":"ignored"}`)...)))
+	req = withTenantCtx(req, "owner")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, svc.deps)
+}
+
 func TestDepHandler_Remove_NoContent(t *testing.T) {
 	r, svc := setupDepHandler()
 	pkgID := uuid.New()
@@ -183,4 +222,38 @@ func TestDepHandler_Resolve_OK(t *testing.T) {
 	var tree dependency.ResolvedDependency
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &tree))
 	assert.Equal(t, pkgID, tree.PackageID)
+}
+
+func TestDepHandler_PrivatePackageReadHidden(t *testing.T) {
+	pkgID := uuid.New()
+	r, svc := setupDepHandlerWithPackages(map[uuid.UUID]pkg.PackageResponse{
+		pkgID: {
+			ID:             pkgID,
+			Visibility:     string(pkg.PackageVisibilityPrivate),
+			AuthorTenantID: "owner",
+		},
+	})
+	depID := uuid.New()
+	svc.deps[depID] = dependency.PackageDependency{ID: depID, PackageID: pkgID, DependencyID: uuid.New(), VersionConstraint: ">=1.0.0"}
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		tenantID string
+		want     int
+	}{
+		{name: "anonymous list", path: "/api/packages/" + pkgID.String() + "/dependencies", want: http.StatusNotFound},
+		{name: "other resolve", path: "/api/packages/" + pkgID.String() + "/dependencies/resolved", tenantID: "other", want: http.StatusNotFound},
+		{name: "owner list", path: "/api/packages/" + pkgID.String() + "/dependencies", tenantID: "owner", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.tenantID != "" {
+				req = withTenantCtx(req, tc.tenantID)
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			assert.Equal(t, tc.want, w.Code)
+		})
+	}
 }

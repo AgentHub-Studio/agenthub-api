@@ -66,18 +66,21 @@ func (g *ToolUseSummaryGenerator) Generate(ctx context.Context, agentID uuid.UUI
 	// Build concise representation of what tools did.
 	var sb strings.Builder
 	if lastAssistantText != "" {
-		sb.WriteString(fmt.Sprintf("User's intent (from assistant's last message): %s\n\n",
-			truncateToolSummaryString(lastAssistantText, 200)))
+		fmt.Fprintf(&sb, "User's intent (from assistant's last message): %s\n\n",
+			truncateToolSummaryString(sanitizeSSEMessage(lastAssistantText), 200))
 	}
 
 	sb.WriteString("Tools completed:\n\n")
 	for _, t := range tools {
-		sb.WriteString(fmt.Sprintf("Tool: %s\n", t.Name))
-		sb.WriteString(fmt.Sprintf("Input: %s\n", truncateJSON(t.Input, 300)))
+		fmt.Fprintf(&sb, "Tool: %s\n", t.Name)
+		// The summary model is an auxiliary provider boundary. Never forward
+		// credential-bearing tool inputs or results just because the summary is
+		// cosmetic and short-lived.
+		fmt.Fprintf(&sb, "Input: %s\n", truncateJSON(redactSensitiveToolResultOutput(t.Input), 300))
 		if t.Error != nil {
-			sb.WriteString(fmt.Sprintf("Error: %s\n", truncateToolSummaryString(*t.Error, 200)))
+			fmt.Fprintf(&sb, "Error: %s\n", truncateToolSummaryString(sanitizeSSEMessage(*t.Error), 200))
 		} else {
-			sb.WriteString(fmt.Sprintf("Output: %s\n", truncateJSON(t.Output, 300)))
+			fmt.Fprintf(&sb, "Output: %s\n", truncateJSON(redactSensitiveToolResultOutput(t.Output), 300))
 		}
 		sb.WriteString("\n")
 	}
@@ -103,7 +106,7 @@ func (g *ToolUseSummaryGenerator) Generate(ctx context.Context, agentID uuid.UUI
 	summary := strings.TrimSpace(resp.Content)
 	// Strip leading "- " if present (the model sometimes mirrors the example format).
 	summary = strings.TrimPrefix(summary, "- ")
-	return summary
+	return sanitizeSSEMessage(summary)
 }
 
 // truncateJSON truncates a JSON raw message to maxLen characters.

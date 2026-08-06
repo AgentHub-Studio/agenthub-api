@@ -15,11 +15,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/memory"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 )
 
 // mockMemorySvc satisfies the private memoryService interface in memory.Handler.
 type mockMemorySvc struct {
-	entries map[string]memory.AgentMemory // key: agentID+":"+key
+	entries     map[string]memory.AgentMemory // key: agentID+":"+key
+	recallCalls int
 }
 
 func newMockMemorySvc() *mockMemorySvc {
@@ -76,6 +78,7 @@ func (m *mockMemorySvc) ClearByAgent(_ context.Context, agentID uuid.UUID) error
 }
 
 func (m *mockMemorySvc) Recall(_ context.Context, agentID uuid.UUID, req memory.RecallRequest) ([]memory.MemoryRecallResult, error) {
+	m.recallCalls++
 	return []memory.MemoryRecallResult{}, nil
 }
 
@@ -128,11 +131,54 @@ func (m *mockMemorySvc) BulkUpsert(_ context.Context, agentID uuid.UUID, entries
 }
 
 func setupMemory() (*chi.Mux, *mockMemorySvc) {
+	return setupMemoryWithRoles("admin")
+}
+
+func setupMemoryWithRoles(roles ...string) (*chi.Mux, *mockMemorySvc) {
 	svc := newMockMemorySvc()
 	h := memory.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterRoutes(r)
 	return r, svc
+}
+
+func TestMemoryHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupMemoryWithRoles("user")
+	agentID := uuid.NewString()
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/agents/" + agentID + "/memory"},
+		{name: "upsert", method: http.MethodPut, path: "/api/agents/" + agentID + "/memory/key", body: `{}`},
+		{name: "get", method: http.MethodGet, path: "/api/agents/" + agentID + "/memory/key"},
+		{name: "delete by key", method: http.MethodDelete, path: "/api/agents/" + agentID + "/memory/key"},
+		{name: "clear", method: http.MethodDelete, path: "/api/agents/" + agentID + "/memory"},
+		{name: "recall", method: http.MethodPost, path: "/api/agents/" + agentID + "/memory/recall", body: `{}`},
+		{name: "search", method: http.MethodGet, path: "/api/agents/" + agentID + "/memory/search?q=query"},
+		{name: "stats", method: http.MethodGet, path: "/api/agents/" + agentID + "/memory/stats"},
+		{name: "bulk upsert", method: http.MethodPost, path: "/api/agents/" + agentID + "/memory/bulk", body: `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 func TestMemoryHandler_List_Success(t *testing.T) {
@@ -171,6 +217,42 @@ func TestMemoryHandler_Upsert_InvalidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestMemoryHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("upsert", func(t *testing.T) {
+		r, svc := setupMemory()
+		agentID := uuid.New()
+		svc.entries[entryKey(agentID, "profile")] = memory.AgentMemory{ID: uuid.New(), AgentID: agentID, Key: "profile", Value: json.RawMessage(`"original"`)}
+		req := httptest.NewRequest(http.MethodPut, "/api/agents/"+agentID.String()+"/memory/profile", bytes.NewBufferString(`{"value":"changed"}{"value":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, `"original"`, string(svc.entries[entryKey(agentID, "profile")].Value))
+	})
+
+	t.Run("recall", func(t *testing.T) {
+		r, svc := setupMemory()
+		agentID := uuid.New()
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/"+agentID.String()+"/memory/recall", bytes.NewBufferString(`{"embedding":[1],"limit":1}{"limit":10}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Zero(t, svc.recallCalls)
+	})
+
+	t.Run("bulk upsert", func(t *testing.T) {
+		r, svc := setupMemory()
+		agentID := uuid.New()
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/"+agentID.String()+"/memory/bulk", bytes.NewBufferString(`[{"key":"first","value":"value","memoryType":"user"}][{"key":"ignored","value":"value","memoryType":"user"}]`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.entries)
+	})
 }
 
 func TestMemoryHandler_GetByKey_NotFound(t *testing.T) {

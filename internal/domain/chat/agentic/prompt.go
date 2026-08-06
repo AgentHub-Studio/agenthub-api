@@ -5,6 +5,7 @@ package agentic
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -196,10 +197,11 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	// 2. Available Tools (cached — only changes on skill config changes)
 	if b.skills != nil {
 		// BUG-SKILL-EMPTY: snapshot active slugs so the closure uses the value
-		// from this Build() call. The cache is cleared per-agent at run start so
-		// a stale snapshot cannot persist across runs.
+		// from this Build() call. The active slug fingerprint is part of the cache
+		// key because Available Tools and tool-referencing instructions depend on it.
 		activeSlugSnapshot := in.ActiveSkillSlugs
-		toolsSection, err := b.getCachedOrCompute("tools:"+in.AgentID.String(), func() (string, error) {
+		activeSlugCacheKey := activeSkillSlugsCacheKey(activeSlugSnapshot)
+		toolsSection, err := b.getCachedOrCompute("tools:"+activeSlugCacheKey+":"+in.AgentID.String(), func() (string, error) {
 			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
 			if err != nil {
 				return "", fmt.Errorf("prompt: list skills: %w", err)
@@ -222,7 +224,7 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 		// they are handled by FormatSkillInstructionsSection when tool info is available.
 		// Without tool info here, we safely include only behavioral (non-tool-referencing)
 		// instructions so that formatting, tone, and workflow rules always reach the LLM.
-		instrSection, instrErr := b.getCachedOrCompute("skill-instructions:"+in.AgentID.String(), func() (string, error) {
+		instrSection, instrErr := b.getCachedOrCompute("skill-instructions:"+activeSlugCacheKey+":"+in.AgentID.String(), func() (string, error) {
 			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
 			if err != nil {
 				return "", fmt.Errorf("prompt: list skills for instructions: %w", err)
@@ -232,12 +234,18 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 				if s.Instructions == "" || s.DisableModelInvocation {
 					continue
 				}
-				// Only include behavioral instructions — ones that don't reference a
-				// specific tool by name — to prevent LLM from hallucinating tool calls.
-				if !referencesToolByName(s.Instructions) {
-					sb.WriteString(s.Instructions)
-					sb.WriteString("\n")
+				referencesTool := referencesToolByName(s.Instructions)
+				if referencesTool {
+					// RT-02: tool-referencing instructions are safe only when the caller
+					// proved this skill has at least one active callable tool. When the
+					// caller has no active-tool snapshot, keep the conservative legacy
+					// behavior and omit them.
+					if len(activeSlugSnapshot) == 0 || !activeSlugSnapshot[s.Slug] {
+						continue
+					}
 				}
+				sb.WriteString(s.Instructions)
+				sb.WriteString("\n")
 			}
 			return sb.String(), nil
 		})
@@ -344,6 +352,23 @@ func (b *PromptBuilder) resolvePromptSection(
 		}
 		return fallback, nil
 	})
+}
+
+func activeSkillSlugsCacheKey(activeSkillSlugs map[string]bool) string {
+	if len(activeSkillSlugs) == 0 {
+		return "active-slugs=all"
+	}
+	slugs := make([]string, 0, len(activeSkillSlugs))
+	for slug, enabled := range activeSkillSlugs {
+		if enabled {
+			slugs = append(slugs, slug)
+		}
+	}
+	if len(slugs) == 0 {
+		return "active-slugs=none"
+	}
+	sort.Strings(slugs)
+	return "active-slugs=" + strings.Join(slugs, ",")
 }
 
 // formatToolsSection produces a markdown block listing the available skills.

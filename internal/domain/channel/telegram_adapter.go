@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 )
 
 // TelegramAdapter implements the Adapter interface for Telegram Bot API.
@@ -36,11 +38,11 @@ type telegramUpdate struct {
 }
 
 type telegramMessage struct {
-	MessageID int64          `json:"message_id"`
-	From      *telegramUser  `json:"from,omitempty"`
-	Chat      telegramChat   `json:"chat"`
-	Text      string         `json:"text"`
-	Date      int64          `json:"date"`
+	MessageID int64         `json:"message_id"`
+	From      *telegramUser `json:"from,omitempty"`
+	Chat      telegramChat  `json:"chat"`
+	Text      string        `json:"text"`
+	Date      int64         `json:"date"`
 }
 
 type telegramUser struct {
@@ -65,7 +67,7 @@ func (a *TelegramAdapter) VerifyRequest(_ context.Context, _ Channel, _ map[stri
 // ParseMessage extracts text and routing from a Telegram Update.
 func (a *TelegramAdapter) ParseMessage(_ context.Context, ch Channel, body []byte) (InboundMessage, error) {
 	var update telegramUpdate
-	if err := json.Unmarshal(body, &update); err != nil {
+	if err := httputil.DecodeSingleJSON(bytes.NewReader(body), &update); err != nil {
 		return InboundMessage{}, fmt.Errorf("telegram: parse error: %w", err)
 	}
 
@@ -135,7 +137,7 @@ func (a *TelegramAdapter) SendReply(_ context.Context, ch Channel, msg OutboundM
 	if err != nil {
 		return fmt.Errorf("telegram: send reply: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("telegram: send reply: HTTP %d", resp.StatusCode)

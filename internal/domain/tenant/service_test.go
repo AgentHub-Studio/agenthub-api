@@ -10,6 +10,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/workloadidentity"
 )
 
 type mockTenantRepo struct {
@@ -80,13 +81,61 @@ func (m *mockTenantRepo) Delete(_ context.Context, id string) error {
 // noopProvisioner is a successful no-op.
 type noopProvisioner struct{}
 
-func (n *noopProvisioner) ProvisionRealm(_ context.Context, _, _ string) error { return nil }
+func (n *noopProvisioner) ProvisionRealm(_ context.Context, _, _ string) (workloadidentity.Credential, error) {
+	return workloadidentity.Credential{ClientID: "agenthub-api", ClientSecret: "tenant-secret"}, nil
+}
 
 // failProvisioner always returns an error.
 type failProvisioner struct{}
 
-func (f *failProvisioner) ProvisionRealm(_ context.Context, _, _ string) error {
-	return errors.New("keycloak unavailable")
+func (f *failProvisioner) ProvisionRealm(_ context.Context, _, _ string) (workloadidentity.Credential, error) {
+	return workloadidentity.Credential{}, errors.New("keycloak unavailable")
+}
+
+type spyProvisioner struct {
+	called bool
+}
+
+func (s *spyProvisioner) ProvisionRealm(_ context.Context, _, _ string) (workloadidentity.Credential, error) {
+	s.called = true
+	return workloadidentity.Credential{ClientID: "agenthub-api", ClientSecret: "tenant-secret"}, nil
+}
+
+type spyWorkloadCredentialStore struct {
+	tenantID   string
+	credential workloadidentity.Credential
+	err        error
+}
+
+func (s *spyWorkloadCredentialStore) Store(_ context.Context, tenantID string, credential workloadidentity.Credential) error {
+	s.tenantID = tenantID
+	s.credential = credential
+	return s.err
+}
+
+type statusCapturingMigrator struct {
+	repo             *mockTenantRepo
+	statusWhenCalled tenant.Status
+}
+
+func (s *statusCapturingMigrator) MigrateTenant(_ context.Context, tenantID string) error {
+	s.statusWhenCalled = s.repo.data[tenantID].Status
+	return nil
+}
+
+type failMigrator struct{}
+
+func (f *failMigrator) MigrateTenant(_ context.Context, _ string) error {
+	return errors.New("dirty schema")
+}
+
+type spySeeder struct {
+	called bool
+}
+
+func (s *spySeeder) SeedDefaults(_ context.Context, _ string) error {
+	s.called = true
+	return nil
 }
 
 func TestTenantService_Create_Success(t *testing.T) {
@@ -100,6 +149,22 @@ func TestTenantService_Create_Success(t *testing.T) {
 	assert.Equal(t, "ACTIVE", res.Status)
 }
 
+func TestTenantService_Create_DoesNotExposeTenantAsActiveBeforeMigration(t *testing.T) {
+	repo := newMockRepo()
+	migrator := &statusCapturingMigrator{repo: repo}
+	svc := tenant.NewService(repo, &noopProvisioner{}, nil).WithSchemaMigrator(migrator)
+
+	res, err := svc.Create(context.Background(), tenant.CreateTenantRequest{
+		ID:   "my-company",
+		Name: "My Company",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, tenant.StatusProvisioning, migrator.statusWhenCalled)
+	assert.Equal(t, tenant.StatusActive, repo.data["my-company"].Status)
+	assert.Equal(t, "ACTIVE", res.Status)
+}
+
 func TestTenantService_Create_InvalidSlug(t *testing.T) {
 	svc := tenant.NewService(newMockRepo(), nil, nil)
 	_, err := svc.Create(context.Background(), tenant.CreateTenantRequest{
@@ -108,6 +173,28 @@ func TestTenantService_Create_InvalidSlug(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kebab-case")
+}
+
+func TestTenantService_Create_RejectsReservedTenantIDs(t *testing.T) {
+	for _, id := range []string{"core", "master"} {
+		t.Run(id, func(t *testing.T) {
+			repo := newMockRepo()
+			provisioner := &spyProvisioner{}
+			seeder := &spySeeder{}
+			svc := tenant.NewService(repo, provisioner, seeder).WithSchemaMigrator(&statusCapturingMigrator{repo: repo})
+
+			_, err := svc.Create(context.Background(), tenant.CreateTenantRequest{
+				ID:   id,
+				Name: "Reserved Tenant",
+			})
+
+			require.ErrorIs(t, err, tenant.ErrValidation)
+			assert.Contains(t, err.Error(), "reserved")
+			assert.Empty(t, repo.data)
+			assert.False(t, provisioner.called)
+			assert.False(t, seeder.called)
+		})
+	}
 }
 
 func TestTenantService_Create_MissingID(t *testing.T) {
@@ -133,6 +220,51 @@ func TestTenantService_Create_KeycloakFails_SetsProvisioningFailed(t *testing.T)
 	// Even when Keycloak fails, Create returns success (soft failure).
 	require.NoError(t, err)
 	assert.Equal(t, "PROVISIONING_FAILED", res.Status)
+}
+
+func TestTenantService_Create_PersistsWorkloadCredentialBeforeActivation(t *testing.T) {
+	repo := newMockRepo()
+	store := &spyWorkloadCredentialStore{}
+	svc := tenant.NewService(repo, &noopProvisioner{}, nil).WithWorkloadCredentialStore(store)
+
+	res, err := svc.Create(context.Background(), tenant.CreateTenantRequest{ID: "my-company", Name: "My Company"})
+
+	require.NoError(t, err)
+	assert.Equal(t, tenant.StatusActive, repo.data["my-company"].Status)
+	assert.Equal(t, "my-company", store.tenantID)
+	assert.Equal(t, "agenthub-api", store.credential.ClientID)
+	assert.Equal(t, "tenant-secret", store.credential.ClientSecret)
+	assert.Equal(t, tenant.StatusActive, tenant.Status(res.Status))
+}
+
+func TestTenantService_Create_CredentialPersistenceFailure_SetsProvisioningFailed(t *testing.T) {
+	repo := newMockRepo()
+	store := &spyWorkloadCredentialStore{err: errors.New("encryption key is missing")}
+	svc := tenant.NewService(repo, &noopProvisioner{}, nil).WithWorkloadCredentialStore(store)
+
+	res, err := svc.Create(context.Background(), tenant.CreateTenantRequest{ID: "my-company", Name: "My Company"})
+
+	require.NoError(t, err)
+	assert.Equal(t, tenant.StatusProvisioningFailed, repo.data["my-company"].Status)
+	assert.Equal(t, tenant.StatusProvisioningFailed, tenant.Status(res.Status))
+}
+
+func TestTenantService_Create_SchemaMigrationFails_SetsProvisioningFailed(t *testing.T) {
+	repo := newMockRepo()
+	provisioner := &spyProvisioner{}
+	seeder := &spySeeder{}
+	svc := tenant.NewService(repo, provisioner, seeder).WithSchemaMigrator(&failMigrator{})
+
+	res, err := svc.Create(context.Background(), tenant.CreateTenantRequest{
+		ID:   "my-company",
+		Name: "My Company",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "PROVISIONING_FAILED", res.Status)
+	assert.Equal(t, tenant.StatusProvisioningFailed, repo.data["my-company"].Status)
+	assert.False(t, provisioner.called)
+	assert.False(t, seeder.called)
 }
 
 func TestTenantService_GetByID_NotFound(t *testing.T) {

@@ -73,8 +73,10 @@ func TestBDD_CONTEXT001_TurnCounterTracksConversationDepth(t *testing.T) {
 	m, _ := NewContextWindowMonitor("s", "claude-sonnet-4-6", 100)
 	_, _, limit := m.Snapshot()
 
-	m.RecordTurn(100)
-	m.RecordTurn(200)
+	_, err := m.RecordTurn(100)
+	require.NoError(t, err)
+	_, err = m.RecordTurn(200)
+	require.NoError(t, err)
 	alert, _ := m.RecordTurn(limit - CWMonitorWarningBufferTokens + 1)
 
 	require.NotNil(t, alert)

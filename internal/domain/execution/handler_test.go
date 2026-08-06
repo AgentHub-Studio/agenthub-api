@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -74,16 +75,60 @@ func (m *mockExecutionSvc) ListNodes(_ context.Context, _ uuid.UUID) ([]executio
 	return []execution.AgentExecutionNode{}, nil
 }
 
-func (m *mockExecutionSvc) ListToolExecutions(_ context.Context, _ uuid.UUID) ([]execution.ToolExecution, error) {
+func (m *mockExecutionSvc) ListToolExecutions(_ context.Context, executionID uuid.UUID, _ uuid.UUID) ([]execution.ToolExecution, error) {
+	if _, ok := m.executions[executionID]; !ok {
+		return nil, execution.ErrNotFound
+	}
 	return []execution.ToolExecution{}, nil
 }
 
 func setupExecution() (*chi.Mux, *mockExecutionSvc) {
+	return setupExecutionWithRoles("admin")
+}
+
+func setupExecutionWithRoles(roles ...string) (*chi.Mux, *mockExecutionSvc) {
 	svc := newMockExecutionSvc()
 	h := execution.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterRoutes(r)
 	return r, svc
+}
+
+func TestExecutionHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupExecutionWithRoles("user")
+	executionID := uuid.NewString()
+	nodeID := uuid.NewString()
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/executions"},
+		{name: "start", method: http.MethodPost, path: "/api/executions", body: `{}`},
+		{name: "get", method: http.MethodGet, path: "/api/executions/" + executionID},
+		{name: "cancel", method: http.MethodDelete, path: "/api/executions/" + executionID},
+		{name: "list nodes", method: http.MethodGet, path: "/api/executions/" + executionID + "/nodes"},
+		{name: "list tools", method: http.MethodGet, path: "/api/executions/" + executionID + "/nodes/" + nodeID + "/tools"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 func TestExecutionHandler_List_Success(t *testing.T) {
@@ -99,6 +144,54 @@ func TestExecutionHandler_List_Success(t *testing.T) {
 	var page pagination.Page[execution.AgentExecution]
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 	assert.Equal(t, int64(1), page.TotalElements)
+}
+
+func TestExecutionHandler_List_RedactsSensitiveErrorMessage(t *testing.T) {
+	const authorizationSecret = "execution-authorization-secret"
+	const passwordSecret = "execution-password-secret"
+	r, svc := setupExecution()
+	id := uuid.New()
+	errorMessage := "Authorization: Bearer " + authorizationSecret + "\npassword=" + passwordSecret
+	svc.executions[id] = execution.AgentExecution{
+		ID: id, AgentID: uuid.New(), Status: execution.StatusFailed, ErrorMessage: &errorMessage,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/executions", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.NotContains(t, body, authorizationSecret)
+	assert.NotContains(t, body, passwordSecret)
+	assert.NotContains(t, body, "Authorization:")
+	assert.NotContains(t, body, "password")
+	assert.Contains(t, body, "[REDACTED]")
+}
+
+func TestPublicExecutionDetailsFrom_RedactsNestedErrorMessages(t *testing.T) {
+	const authorizationSecret = "execution-details-authorization-secret"
+	const passwordSecret = "execution-details-password-secret"
+	errorMessage := "Authorization: Bearer " + authorizationSecret + "\npassword=" + passwordSecret
+
+	public := execution.PublicExecutionDetailsFrom(execution.ExecutionDetails{
+		AgentExecution: execution.AgentExecution{ErrorMessage: &errorMessage},
+		Nodes: []execution.NodeDetails{{
+			AgentExecutionNode: execution.AgentExecutionNode{ErrorMessage: &errorMessage},
+			Tools:              []execution.ToolExecution{{ErrorMessage: &errorMessage}},
+		}},
+	})
+
+	require.NotNil(t, public.ErrorMessage)
+	require.NotNil(t, public.Nodes[0].ErrorMessage)
+	require.NotNil(t, public.Nodes[0].Tools[0].ErrorMessage)
+	for _, value := range []string{*public.ErrorMessage, *public.Nodes[0].ErrorMessage, *public.Nodes[0].Tools[0].ErrorMessage} {
+		assert.NotContains(t, value, authorizationSecret)
+		assert.NotContains(t, value, passwordSecret)
+		assert.NotContains(t, value, "Authorization:")
+		assert.NotContains(t, value, "password")
+		assert.Contains(t, value, "[REDACTED]")
+	}
 }
 
 func TestExecutionHandler_Start_Success(t *testing.T) {
@@ -126,6 +219,16 @@ func TestExecutionHandler_Start_InvalidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestExecutionHandlerStartRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	r, svc := setupExecution()
+	req := httptest.NewRequest(http.MethodPost, "/api/executions", bytes.NewBufferString(`{"agentId":"`+uuid.NewString()+`","input":{"query":"first"}}{"agentId":"`+uuid.NewString()+`"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Empty(t, svc.executions)
 }
 
 func TestExecutionHandler_GetByID_NotFound(t *testing.T) {
@@ -168,6 +271,27 @@ func TestExecutionHandler_ListNodes_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestExecutionHandler_ListTools_InvalidExecutionID_Returns400(t *testing.T) {
+	r, _ := setupExecution()
+	req := httptest.NewRequest(http.MethodGet, "/api/executions/not-a-uuid/nodes/"+uuid.New().String()+"/tools", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestExecutionHandler_ListTools_WrongExecutionID_Returns404(t *testing.T) {
+	r, svc := setupExecution()
+	id := uuid.New()
+	svc.executions[id] = execution.AgentExecution{ID: id, AgentID: uuid.New(), Status: "RUNNING"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/executions/"+uuid.New().String()+"/nodes/"+uuid.New().String()+"/tools", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
 func TestExecutionHandler_Start_InvalidAgentID_Returns422(t *testing.T) {

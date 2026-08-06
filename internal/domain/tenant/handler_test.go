@@ -110,6 +110,16 @@ func TestTenantHandler_Create_InvalidBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestTenantHandlerCreateRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	r, svc := setupTenant()
+	req := httptest.NewRequest(http.MethodPost, "/public/tenants", bytes.NewBufferString(`{"id":"first-tenant","name":"First tenant"}{"id":"ignored-tenant"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Empty(t, svc.tenants)
+}
+
 func TestTenantHandler_List_Empty(t *testing.T) {
 	r, _ := setupTenant()
 	req := httptest.NewRequest(http.MethodGet, "/public/tenants", nil)

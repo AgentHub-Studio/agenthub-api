@@ -3,6 +3,7 @@ package agentic_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -13,14 +14,16 @@ import (
 )
 
 type capturingSummaryChatModel struct {
-	response string
-	calls    int
-	lastOpts ai.ChatOptions
+	response     string
+	calls        int
+	lastOpts     ai.ChatOptions
+	lastMessages []ai.Message
 }
 
-func (m *capturingSummaryChatModel) Chat(_ context.Context, _ []ai.Message, opts ai.ChatOptions) (*ai.ChatResponse, error) {
+func (m *capturingSummaryChatModel) Chat(_ context.Context, messages []ai.Message, opts ai.ChatOptions) (*ai.ChatResponse, error) {
 	m.calls++
 	m.lastOpts = opts
+	m.lastMessages = append([]ai.Message(nil), messages...)
 	return &ai.ChatResponse{Content: m.response, FinishReason: "stop"}, nil
 }
 
@@ -113,6 +116,119 @@ func TestToolUseSummaryGenerator_WithError(t *testing.T) {
 
 	summary := gen.Generate(context.Background(), uuid.New(), tools, "")
 	assert.Equal(t, "Failed SQL query", summary)
+}
+
+func TestToolUseSummaryGenerator_RedactsToolDataBeforeModelCall(t *testing.T) {
+	model := &capturingSummaryChatModel{response: "Fetched safe metadata"}
+	gen := agentic.NewToolUseSummaryGenerator(model, "test-model")
+	const inputSecret = "sk-ant-abcdefghijklmnopqrstuvwxyz123456"
+	const outputSecret = "output-secret-value"
+	const errorSecret = "error-secret-value"
+	errMsg := "Authorization: Bearer " + errorSecret + "\nprovider=http://agenthub-provider:8080/v1/chat"
+
+	summary := gen.Generate(context.Background(), uuid.New(), []agentic.ToolSummaryInfo{
+		{
+			Name:   "http_request",
+			Input:  json.RawMessage(`{"headers":{"Authorization":"Bearer ` + inputSecret + `"},"request_id":"safe-input"}`),
+			Output: json.RawMessage(`{"headers":{"Cookie":"session=` + outputSecret + `"},"request_id":"safe-output"}`),
+		},
+		{
+			Name:  "retry_request",
+			Error: &errMsg,
+		},
+	}, "Assistant saw api_key="+inputSecret)
+
+	assert.Equal(t, "Fetched safe metadata", summary)
+	if assert.Len(t, model.lastMessages, 1) {
+		prompt := model.lastMessages[0].Content
+		assert.NotContains(t, prompt, inputSecret)
+		assert.NotContains(t, prompt, outputSecret)
+		assert.NotContains(t, prompt, errorSecret)
+		assert.NotContains(t, prompt, "http://agenthub-provider:8080/v1/chat")
+		assert.Contains(t, prompt, "safe-input")
+		assert.Contains(t, prompt, "safe-output")
+	}
+}
+
+func TestToolUseSummaryGenerator_RedactsGeneratedSummary(t *testing.T) {
+	const secret = "sk-ant-abcdefghijklmnopqrstuvwxyz123456"
+	model := &capturingSummaryChatModel{response: "Fetched api_key=" + secret + " from http://agenthub-provider:8080/v1/chat"}
+	gen := agentic.NewToolUseSummaryGenerator(model, "test-model")
+
+	summary := gen.Generate(context.Background(), uuid.New(), []agentic.ToolSummaryInfo{
+		{Name: "document_search", Input: json.RawMessage(`{"query":"safe"}`)},
+	}, "")
+
+	assert.NotContains(t, summary, secret)
+	assert.NotContains(t, summary, "http://agenthub-provider:8080/v1/chat")
+	assert.Contains(t, summary, "[REDACTED]")
+	assert.Contains(t, summary, "<upstream>")
+}
+
+func FuzzToolUseSummaryGeneratorRedactsToolDataBeforeModelCall(f *testing.F) {
+	f.Add("input", "output", "error", "safe")
+	f.Add("Authorization", "Cookie", "X-API-Key", "request-42")
+
+	f.Fuzz(func(t *testing.T, inputSeed, outputSeed, errorSeed, safeSeed string) {
+		secret := "summary-secret-" + summarySafeSuffix(errorSeed)
+		safeInput := "safe-input-" + summarySafeSuffix(inputSeed)
+		safeOutput := "safe-output-" + summarySafeSuffix(outputSeed)
+		errMsg := "Authorization: Bearer " + secret + "\nprovider=http://agenthub-provider:8080/v1/chat"
+		input, err := json.Marshal(map[string]any{
+			"headers":    map[string]string{"Authorization": "Bearer " + secret},
+			"request_id": safeInput,
+		})
+		if err != nil {
+			t.Fatalf("marshal input: %v", err)
+		}
+		output, err := json.Marshal(map[string]any{
+			"headers":    map[string]string{"Cookie": "session=" + secret},
+			"request_id": safeOutput,
+		})
+		if err != nil {
+			t.Fatalf("marshal output: %v", err)
+		}
+
+		model := &capturingSummaryChatModel{response: "safe summary"}
+		gen := agentic.NewToolUseSummaryGenerator(model, "test-model")
+		gen.Generate(context.Background(), uuid.New(), []agentic.ToolSummaryInfo{
+			{Name: "request", Input: input, Output: output},
+			{Name: "retry", Error: &errMsg},
+		}, "")
+
+		if len(model.lastMessages) != 1 {
+			t.Fatalf("expected one summary prompt, got %d", len(model.lastMessages))
+		}
+		prompt := model.lastMessages[0].Content
+		if strings.Contains(prompt, secret) {
+			t.Fatalf("summary prompt leaked secret: %q", prompt)
+		}
+		if strings.Contains(prompt, "http://agenthub-provider:8080/v1/chat") {
+			t.Fatalf("summary prompt leaked internal topology: %q", prompt)
+		}
+		if !strings.Contains(prompt, safeInput) || !strings.Contains(prompt, safeOutput) {
+			t.Fatalf("summary prompt removed safe markers: %q", prompt)
+		}
+	})
+}
+
+func summarySafeSuffix(seed string) string {
+	if seed == "" {
+		return "empty"
+	}
+	var b strings.Builder
+	for _, r := range seed {
+		if ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') || ('0' <= r && r <= '9') {
+			b.WriteRune(r)
+		}
+		if b.Len() == 24 {
+			break
+		}
+	}
+	if b.Len() == 0 {
+		return "safe"
+	}
+	return b.String()
 }
 
 func TestToolUseSummaryGenerator_UsesPromptTemplateOverride(t *testing.T) {

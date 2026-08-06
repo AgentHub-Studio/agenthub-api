@@ -9,8 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 )
 
 // SlackAdapter implements the Adapter interface for Slack.
@@ -73,8 +76,10 @@ func (a *SlackAdapter) VerifyRequest(_ context.Context, ch Channel, headers map[
 	}
 
 	// Reject requests older than 5 minutes to prevent replay attacks.
-	tsInt := int64(0)
-	fmt.Sscanf(ts, "%d", &tsInt)
+	tsInt, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return fmt.Errorf("slack: invalid signature timestamp")
+	}
 	if time.Now().Unix()-tsInt > 300 {
 		return fmt.Errorf("slack: request timestamp too old")
 	}
@@ -94,7 +99,7 @@ func (a *SlackAdapter) VerifyRequest(_ context.Context, ch Channel, headers map[
 // Returns a zero-value InboundMessage with Text="" for non-message events (e.g. url_verification).
 func (a *SlackAdapter) ParseMessage(_ context.Context, _ Channel, body []byte) (InboundMessage, error) {
 	var env slackEvent
-	if err := json.Unmarshal(body, &env); err != nil {
+	if err := httputil.DecodeSingleJSON(bytes.NewReader(body), &env); err != nil {
 		return InboundMessage{}, fmt.Errorf("slack: parse error: %w", err)
 	}
 
@@ -155,7 +160,7 @@ func (a *SlackAdapter) SendReply(_ context.Context, ch Channel, msg OutboundMess
 	if err != nil {
 		return fmt.Errorf("slack: send reply: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("slack: send reply: HTTP %d", resp.StatusCode)

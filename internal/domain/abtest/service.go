@@ -57,6 +57,9 @@ func (s *service) Create(ctx context.Context, req CreateABTestRequest) (ABTestRe
 	if err := req.validate(); err != nil {
 		return ABTestResponse{}, err
 	}
+	if err := s.ensureNoOtherActiveTest(ctx, req.AgentID, uuid.Nil); err != nil {
+		return ABTestResponse{}, err
+	}
 	t := ABTest{
 		AgentID:          req.AgentID,
 		Name:             req.Name,
@@ -100,7 +103,16 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateABTestRequ
 		existing.TrafficPercent = *req.TrafficPercent
 	}
 	if req.Status != nil {
-		existing.Status = TestStatus(*req.Status)
+		status := TestStatus(*req.Status)
+		if !IsValidTestStatus(status) {
+			return ABTestResponse{}, fmt.Errorf("%w: status must be ACTIVE, PAUSED, or CONCLUDED", ErrValidation)
+		}
+		if status == TestStatusActive && existing.Status != TestStatusActive {
+			if err := s.ensureNoOtherActiveTest(ctx, existing.AgentID, existing.ID); err != nil {
+				return ABTestResponse{}, err
+			}
+		}
+		existing.Status = status
 		if existing.Status == TestStatusConcluded && existing.EndedAt == nil {
 			now := time.Now()
 			existing.EndedAt = &now
@@ -112,6 +124,20 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateABTestRequ
 		return ABTestResponse{}, err
 	}
 	return responseFrom(updated), nil
+}
+
+func (s *service) ensureNoOtherActiveTest(ctx context.Context, agentID, excludedID uuid.UUID) error {
+	active, err := s.repo.GetActiveByAgent(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("abtest: get active test: %w", err)
+	}
+	if active.ID != excludedID {
+		return ErrActiveTestConflict
+	}
+	return nil
 }
 
 func (s *service) Delete(ctx context.Context, id uuid.UUID) error {

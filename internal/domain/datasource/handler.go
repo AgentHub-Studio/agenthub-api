@@ -2,7 +2,6 @@ package datasource
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -10,6 +9,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -35,15 +36,18 @@ func NewHandler(svc datasourceService) *Handler {
 	return &Handler{svc: svc}
 }
 
-// Routes mounts the public datasource routes.
+// Routes mounts administrator-only datasource routes.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Post("/", h.create)
-	r.Get("/", h.list)
-	r.Get("/{id}", h.getByID)
-	r.Put("/{id}", h.update)
-	r.Patch("/{id}", h.update)
-	r.Delete("/{id}", h.delete)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Post("/", h.create)
+		r.Get("/", h.list)
+		r.Get("/{id}", h.getByID)
+		r.Put("/{id}", h.update)
+		r.Patch("/{id}", h.update)
+		r.Delete("/{id}", h.delete)
+	})
 	return r
 }
 
@@ -78,7 +82,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.FromContext(r.Context())
 
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -134,7 +138,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

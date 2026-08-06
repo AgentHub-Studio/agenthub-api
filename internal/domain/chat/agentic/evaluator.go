@@ -248,9 +248,12 @@ func (h *HeuristicRunEvaluator) Evaluate(ctx context.Context, out RunOutput) (Qu
 	report.Dimensions["budget"] = budgetScore
 
 	// Overall score = unweighted mean of dimensions.
+	// Keep iteration order fixed; map iteration can differ by process and
+	// produce last-bit float differences in deterministic reports.
 	sum := 0.0
 	count := 0
-	for _, v := range report.Dimensions {
+	for _, dimension := range []string{"length", "tool_failure_rate", "budget"} {
+		v := report.Dimensions[dimension]
 		sum += v
 		count++
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -127,10 +128,20 @@ func (m *mockBindingAgentRepo) CountPublishedWithoutProvider(_ context.Context) 
 }
 
 func setupBindingHandler() (*chi.Mux, *mockBindingAgentRepo, *mockBindingRepo) {
+	return setupBindingHandlerWithRoles("admin")
+}
+
+func setupBindingHandlerWithRoles(roles ...string) (*chi.Mux, *mockBindingAgentRepo, *mockBindingRepo) {
 	agentRepo := newMockAgentRepo()
 	bindingRepo := newMockBindingRepo()
 	h := agent.NewBindingHandler(agentRepo, bindingRepo)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterBindingRoutes(r)
 	return r, agentRepo, bindingRepo
 }
@@ -139,6 +150,41 @@ func seedBindingAgent(repo *mockBindingAgentRepo) uuid.UUID {
 	id := uuid.New()
 	repo.agents[id] = agent.Agent{ID: id, Name: "Test Agent"}
 	return id
+}
+
+func TestBindingHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _, _ := setupBindingHandlerWithRoles("user")
+	id := uuid.NewString()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list skills", method: http.MethodGet, path: "/api/agents/" + id + "/skills"},
+		{name: "sync skills", method: http.MethodPut, path: "/api/agents/" + id + "/skills", body: `{"ids":[]}`},
+		{name: "skills guidance", method: http.MethodPost, path: "/api/agents/" + id + "/skills"},
+		{name: "list knowledge bases", method: http.MethodGet, path: "/api/agents/" + id + "/knowledge-bases"},
+		{name: "sync knowledge bases", method: http.MethodPut, path: "/api/agents/" + id + "/knowledge-bases", body: `{"ids":[]}`},
+		{name: "knowledge bases guidance", method: http.MethodPost, path: "/api/agents/" + id + "/knowledge-bases"},
+		{name: "list mcp servers", method: http.MethodGet, path: "/api/agents/" + id + "/mcp-servers"},
+		{name: "sync mcp servers", method: http.MethodPut, path: "/api/agents/" + id + "/mcp-servers", body: `{"ids":[]}`},
+		{name: "mcp servers guidance", method: http.MethodPost, path: "/api/agents/" + id + "/mcp-servers"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 // --- Skill binding tests ---
@@ -197,6 +243,47 @@ func TestBindingHandler_SyncSkills_InvalidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestBindingHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("skills", func(t *testing.T) {
+		r, agentRepo, bindingRepo := setupBindingHandler()
+		agentID := seedBindingAgent(agentRepo)
+		originalID := uuid.New()
+		bindingRepo.skills[agentID] = []uuid.UUID{originalID}
+		req := httptest.NewRequest(http.MethodPut, "/api/agents/"+agentID.String()+"/skills", bytes.NewBufferString(`{"ids":["`+uuid.NewString()+`"]}{"ids":[]}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, []uuid.UUID{originalID}, bindingRepo.skills[agentID])
+	})
+
+	t.Run("knowledge bases", func(t *testing.T) {
+		r, agentRepo, bindingRepo := setupBindingHandler()
+		agentID := seedBindingAgent(agentRepo)
+		originalID := uuid.New()
+		bindingRepo.kbs[agentID] = []uuid.UUID{originalID}
+		req := httptest.NewRequest(http.MethodPut, "/api/agents/"+agentID.String()+"/knowledge-bases", bytes.NewBufferString(`{"ids":["`+uuid.NewString()+`"]}{"ids":[]}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, []uuid.UUID{originalID}, bindingRepo.kbs[agentID])
+	})
+
+	t.Run("mcp servers", func(t *testing.T) {
+		r, agentRepo, bindingRepo := setupBindingHandler()
+		agentID := seedBindingAgent(agentRepo)
+		originalID := uuid.New()
+		bindingRepo.mcpServers[agentID] = []uuid.UUID{originalID}
+		req := httptest.NewRequest(http.MethodPut, "/api/agents/"+agentID.String()+"/mcp-servers", bytes.NewBufferString(`{"ids":["`+uuid.NewString()+`"]}{"ids":[]}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, []uuid.UUID{originalID}, bindingRepo.mcpServers[agentID])
+	})
 }
 
 func TestBindingHandler_SyncSkills_ClearAll(t *testing.T) {

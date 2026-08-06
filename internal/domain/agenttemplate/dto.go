@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 )
 
 // TemplateResponse is the JSON response for an AgentTemplate.
@@ -22,10 +24,7 @@ type TemplateResponse struct {
 
 // ResponseFrom converts an AgentTemplate to TemplateResponse.
 func ResponseFrom(t AgentTemplate) TemplateResponse {
-	def := t.DefinitionJSON
-	if len(def) == 0 {
-		def = json.RawMessage(`{}`)
-	}
+	def := redactPublicDefinition(t.DefinitionJSON)
 	return TemplateResponse{
 		ID:             t.ID,
 		Name:           t.Name,
@@ -37,6 +36,27 @@ func ResponseFrom(t AgentTemplate) TemplateResponse {
 		CreatedAt:      t.CreatedAt,
 		UpdatedAt:      t.UpdatedAt,
 	}
+}
+
+// redactPublicDefinition copies a template definition for its public DTO and
+// removes credentials only from modelConfig. The original definition remains
+// available when instantiating the template.
+func redactPublicDefinition(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	var definition map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &definition); err != nil || definition == nil {
+		return json.RawMessage(`{}`)
+	}
+	if modelConfig, ok := definition["modelConfig"]; ok {
+		definition["modelConfig"] = agent.SanitizeModelConfig(modelConfig)
+	}
+	redacted, err := json.Marshal(definition)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return redacted
 }
 
 // CreateTemplateRequest is the payload for creating a new tenant-owned template.

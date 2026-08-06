@@ -25,6 +25,20 @@ func TestResolveSystemPrompt_UsesSnapshotWhenSet(t *testing.T) {
 	assert.NotContains(t, result, "ZEUS")
 }
 
+func TestResolveSystemPrompt_RunOverridePrecedesSnapshot(t *testing.T) {
+	in := chat.RunInput{
+		SystemPrompt:         "Preview prompt from Studio.",
+		SystemPromptSnapshot: strPtr("Persisted session snapshot."),
+	}
+	agentCfg := &chat.AgentRunConfig{SystemPrompt: "Current agent prompt"}
+
+	result := resolveSystemPrompt(in, agentCfg)
+
+	assert.Equal(t, "Preview prompt from Studio.", result)
+	assert.NotContains(t, result, "Persisted session snapshot")
+	assert.NotContains(t, result, "Current agent prompt")
+}
+
 func TestResolveSystemPrompt_NilSnapshot_FallsBackToCurrentPrompt(t *testing.T) {
 	in := chat.RunInput{SystemPromptSnapshot: nil}
 	agentCfg := &chat.AgentRunConfig{SystemPrompt: "Current prompt"}

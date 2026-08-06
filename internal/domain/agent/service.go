@@ -6,40 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/evals"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/modelconfig"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
-
-// htmlDangerousPattern matches dangerous HTML elements including their content.
-// These are stripped completely (tag + content) because their inner text is executable.
-var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
-
-// htmlTagPattern matches any remaining HTML tag including attributes.
-var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
-
-// slugPattern enforces kebab-case: lowercase letters, digits and hyphens.
-// Must start with alphanumeric to avoid leading-hyphen collisions.
-var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
-// stripHTML removes all HTML from s.
-// Dangerous elements (script, style, etc.) are removed including their content.
-// Other tags are stripped but their text content is preserved.
-// P-C280-1: prevents stored XSS in name/description fields.
-func stripHTML(s string) string {
-	// Step 1: remove dangerous elements including their inner text.
-	s = htmlDangerousPattern.ReplaceAllString(s, "")
-	// Step 2: strip remaining HTML tags, keeping their text content.
-	s = htmlTagPattern.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
-}
 
 // Service defines business logic operations for Agent.
 type Service interface {
@@ -187,6 +166,9 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if len(req.Name) > 255 {
 		return AgentResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(req.Name))
 	}
+	if sanitize.ContainsHTML(req.Name) {
+		return AgentResponse{}, fmt.Errorf("%w: name must not contain HTML tags", ErrInvalidRequest)
+	}
 	// ACT-F3-05: enforce maximum system prompt size.
 	if req.SystemPrompt != nil && len(*req.SystemPrompt) > maxSystemPromptChars {
 		return AgentResponse{}, fmt.Errorf("%w: systemPrompt exceeds maximum length of %d chars (got %d)", ErrInvalidRequest, maxSystemPromptChars, len(*req.SystemPrompt))
@@ -206,23 +188,22 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if err := validateConfigMaxIterations(req.Config); err != nil {
 		return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
 	}
-	// P-C280-1: strip HTML from user-supplied text fields before persisting.
-	req.Name = stripHTML(req.Name)
-	req.Description = stripHTML(req.Description)
+	evalConfig, err := normalizeEvalConfig(req.EvalConfig)
+	if err != nil {
+		return AgentResponse{}, err
+	}
+	req.Description = sanitize.StripHTML(req.Description)
 	// Bug 158: cap description em 32KB (espelha skill.instructions cap).
 	// Sem isso 200KB+ aceita silenciosamente — DoS storage e perf
 	// hit em listings.
 	if len(req.Description) > 32000 {
 		return AgentResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrInvalidRequest, len(req.Description))
 	}
-	slug := req.Slug
+	slug := strings.TrimSpace(req.Slug)
 	if slug == "" {
 		slug = toSlug(req.Name)
-	} else if !slugPattern.MatchString(slug) {
-		return AgentResponse{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrInvalidRequest, slug)
-	}
-	if len(slug) > 255 {
-		return AgentResponse{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(slug))
+	} else if !sanitize.ValidSlug(slug) {
+		return AgentResponse{}, fmt.Errorf("%w: slug must match %s (got %q)", ErrInvalidRequest, sanitize.CanonicalSlugPattern, slug)
 	}
 	// Bug 169: cap skillIds/kbIds count em 100 cada. Agents reais
 	// bind <20 skills/kbs; 1000+ é abuso e perf hit no SyncSkills loop.
@@ -247,6 +228,9 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 		ModelConfig:      req.ModelConfig,
 		PermissionRules:  req.PermissionRules,
 		Config:           config,
+		EvalConfig:       evalConfig,
+		InputProcessors:  normalizeProcessorNames(req.InputProcessors),
+		OutputProcessors: normalizeProcessorNames(req.OutputProcessors),
 		EnableManagement: req.EnableManagement,
 	}
 	created, err := s.repo.Create(ctx, a)
@@ -298,8 +282,7 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 	}
 	before := ResponseFrom(a)
 	if req.Name != nil {
-		// P-C280-1: strip HTML from user-supplied text fields.
-		trimmed := strings.TrimSpace(stripHTML(*req.Name))
+		trimmed := strings.TrimSpace(*req.Name)
 		if trimmed == "" {
 			// Bug 116: era 500 — wrap em ErrInvalidRequest pra
 			// handler mapear → 422.
@@ -309,23 +292,23 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		if len(trimmed) > 255 {
 			return AgentResponse{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(trimmed))
 		}
+		if sanitize.ContainsHTML(trimmed) {
+			return AgentResponse{}, fmt.Errorf("%w: name must not contain HTML tags", ErrInvalidRequest)
+		}
 		a.Name = trimmed
 	}
 	if req.Slug != nil {
-		// Bug 121: Update precisa do mesmo gate que Create —
-		// pattern [a-z0-9][a-z0-9-]* + length <= 255. Sem isso admin
+		// Bug 121: Update precisa do mesmo gate que Create.
+		// Sem isso admin
 		// podia salvar slug="INVALID!" via PATCH e quebrar lookups.
-		if !slugPattern.MatchString(*req.Slug) {
-			return AgentResponse{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrInvalidRequest, *req.Slug)
+		trimmed := strings.TrimSpace(*req.Slug)
+		if !sanitize.ValidSlug(trimmed) {
+			return AgentResponse{}, fmt.Errorf("%w: slug must match %s (got %q)", ErrInvalidRequest, sanitize.CanonicalSlugPattern, trimmed)
 		}
-		if len(*req.Slug) > 255 {
-			return AgentResponse{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrInvalidRequest, len(*req.Slug))
-		}
-		a.Slug = *req.Slug
+		a.Slug = trimmed
 	}
 	if req.Description != nil {
-		// P-C280-1: strip HTML from user-supplied text fields.
-		desc := stripHTML(*req.Description)
+		desc := sanitize.StripHTML(*req.Description)
 		// Bug 158: mesmo cap 32KB do Create.
 		if len(desc) > 32000 {
 			return AgentResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrInvalidRequest, len(desc))
@@ -353,6 +336,19 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 			return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
 		}
 		a.Config = req.Config
+	}
+	if req.EvalConfig != nil {
+		evalConfig, err := normalizeEvalConfig(req.EvalConfig)
+		if err != nil {
+			return AgentResponse{}, err
+		}
+		a.EvalConfig = evalConfig
+	}
+	if req.InputProcessors != nil {
+		a.InputProcessors = normalizeProcessorNames(req.InputProcessors)
+	}
+	if req.OutputProcessors != nil {
+		a.OutputProcessors = normalizeProcessorNames(req.OutputProcessors)
 	}
 	if req.EnableManagement != nil {
 		a.EnableManagement = *req.EnableManagement
@@ -395,6 +391,39 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		NewValue:   auditJSON(resp),
 	})
 	return resp, nil
+}
+
+func normalizeProcessorNames(names []string) []string {
+	if names == nil {
+		return []string{}
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if normalized == "" {
+			continue
+		}
+		out = append(out, normalized)
+	}
+	return out
+}
+
+func normalizeEvalConfig(input *evals.EvalConfig) (evals.EvalConfig, error) {
+	if input == nil {
+		return evals.EvalConfig{}, nil
+	}
+	cfg := evals.EvalConfig{SampleRate: input.SampleRate}
+	if cfg.SampleRate < 0 || cfg.SampleRate > 1 {
+		return evals.EvalConfig{}, fmt.Errorf("%w: eval_config.sample_rate must be between 0 and 1", ErrInvalidRequest)
+	}
+	for _, scorer := range input.Scorers {
+		trimmed := strings.TrimSpace(scorer)
+		if trimmed == "" {
+			continue
+		}
+		cfg.Scorers = append(cfg.Scorers, trimmed)
+	}
+	return cfg, nil
 }
 
 func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
@@ -578,6 +607,7 @@ func (s *service) Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest
 		ModelConfig:     original.ModelConfig,
 		PermissionRules: original.PermissionRules,
 		Config:          original.Config,
+		EvalConfig:      original.EvalConfig,
 	}
 	created, err := s.repo.Create(ctx, clone)
 	if err != nil {
@@ -657,6 +687,9 @@ func validateModelConfig(raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &mc); err != nil {
 		return fmt.Errorf("must be a valid JSON object")
 	}
+	if err := modelconfig.ValidateFallbackChainAliases(raw); err != nil {
+		return err
+	}
 	// P-C268-1: validate provider against supported enum.
 	if mc.Provider != "" {
 		supported := false
@@ -712,24 +745,7 @@ func validateModelConfig(raw json.RawMessage) error {
 
 // toSlug converts a name to a kebab-case slug.
 func toSlug(name string) string {
-	s := strings.ToLower(name)
-	// Replace non-alphanumeric characters with hyphens.
-	var b strings.Builder
-	prevHyphen := true
-	for _, c := range s {
-		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
-			b.WriteRune(c)
-			prevHyphen = false
-		} else if !prevHyphen {
-			b.WriteRune('-')
-			prevHyphen = true
-		}
-	}
-	result := strings.TrimRight(b.String(), "-")
-	if result == "" {
-		return "agent-" + uuid.New().String()[:8]
-	}
-	return result
+	return sanitize.ToSlug(name, "agent")
 }
 
 // VersionService defines business logic for AgentVersion.
@@ -765,7 +781,8 @@ func NewVersionServiceWithAudit(repo Repository, verRepo VersionRepository, audi
 
 func (s *versionService) CreateDraft(ctx context.Context, agentID uuid.UUID, req CreateAgentVersionRequest) (AgentVersionResponse, error) {
 	// Ensure the agent exists.
-	if _, err := s.repo.FindByID(ctx, agentID); err != nil {
+	current, err := s.repo.FindByID(ctx, agentID)
+	if err != nil {
 		return AgentVersionResponse{}, err
 	}
 	// Ensure no existing draft.
@@ -782,8 +799,8 @@ func (s *versionService) CreateDraft(ctx context.Context, agentID uuid.UUID, req
 		VersionNumber:  num,
 		Status:         VersionStatusDraft,
 		Description:    req.Description,
-		DefinitionJSON: req.DefinitionJSON,
-		ConfigJSON:     req.ConfigJSON,
+		DefinitionJSON: versionDefinitionSnapshot(current, req.DefinitionJSON),
+		ConfigJSON:     versionConfigSnapshot(current, req.ConfigJSON),
 	}
 	created, err := s.verRepo.Create(ctx, v)
 	if err != nil {
@@ -798,6 +815,34 @@ func (s *versionService) CreateDraft(ctx context.Context, agentID uuid.UUID, req
 		Metadata:   fmt.Sprintf(`{"operation":"create_draft","agentId":"%s"}`, agentID),
 	})
 	return resp, nil
+}
+
+func versionDefinitionSnapshot(a Agent, requested json.RawMessage) json.RawMessage {
+	if len(requested) > 0 {
+		return append(json.RawMessage(nil), requested...)
+	}
+	var snapshot struct {
+		SystemPrompt *string `json:"systemPrompt,omitempty"`
+	}
+	if a.SystemPrompt != nil {
+		prompt := *a.SystemPrompt
+		snapshot.SystemPrompt = &prompt
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
+func versionConfigSnapshot(a Agent, requested json.RawMessage) json.RawMessage {
+	if len(requested) > 0 {
+		return append(json.RawMessage(nil), requested...)
+	}
+	if len(a.ModelConfig) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return append(json.RawMessage(nil), a.ModelConfig...)
 }
 
 func (s *versionService) UpdateDraft(ctx context.Context, versionID uuid.UUID, req UpdateAgentVersionRequest) (AgentVersionResponse, error) {
@@ -930,21 +975,28 @@ func (s *versionService) Rollback(ctx context.Context, agentID, versionID uuid.U
 		return AgentVersionResponse{}, fmt.Errorf("rollback: publish version entry: %w", err)
 	}
 
-	// 4. Apply snapshot to the live agent — extract systemPrompt from definitionJson.
+	// 4. Apply snapshot to the live agent.
 	var def struct {
-		SystemPrompt string `json:"systemPrompt"`
+		SystemPrompt *string `json:"systemPrompt"`
 	}
 	if len(target.DefinitionJSON) > 0 {
 		_ = json.Unmarshal(target.DefinitionJSON, &def)
 	}
-	if def.SystemPrompt != "" {
+	shouldUpdateAgent := def.SystemPrompt != nil || len(target.ConfigJSON) > 0
+	if shouldUpdateAgent {
 		current, err := s.repo.FindByID(ctx, agentID)
 		if err != nil {
 			return AgentVersionResponse{}, fmt.Errorf("rollback: load agent: %w", err)
 		}
-		current.SystemPrompt = &def.SystemPrompt
+		if def.SystemPrompt != nil {
+			prompt := *def.SystemPrompt
+			current.SystemPrompt = &prompt
+		}
+		if len(target.ConfigJSON) > 0 {
+			current.ModelConfig = append(json.RawMessage(nil), target.ConfigJSON...)
+		}
 		if _, err := s.repo.Update(ctx, current); err != nil {
-			return AgentVersionResponse{}, fmt.Errorf("rollback: apply system prompt: %w", err)
+			return AgentVersionResponse{}, fmt.Errorf("rollback: apply agent snapshot: %w", err)
 		}
 	}
 

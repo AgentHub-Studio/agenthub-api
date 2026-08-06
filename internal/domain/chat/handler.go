@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,12 +9,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -27,13 +30,14 @@ type chatService interface {
 	DeleteSession(ctx context.Context, id uuid.UUID) error
 	ArchiveSession(ctx context.Context, id uuid.UUID) (ChatSessionResponse, error)
 	RenameSession(ctx context.Context, id uuid.UUID, title string) (ChatSessionResponse, error)
+	CloneSession(ctx context.Context, id uuid.UUID, req CloneSessionRequest) (ChatSessionResponse, error)
 	ListMessages(ctx context.Context, sessionID uuid.UUID, req pagination.PageRequest) (pagination.Page[ChatMessageResponse], error)
 	AddMessage(ctx context.Context, sessionID uuid.UUID, req CreateMessageRequest) (ChatMessageResponse, error)
 	GetActiveRun(ctx context.Context, sessionID uuid.UUID) (ChatRunResponse, bool, error)
 	// RunSession starts an agentic run and returns a channel of events for SSE streaming.
-	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error)
+	RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, opts ...RunSessionOptions) (<-chan RunEvent, error)
 	// RespondElicitation routes a user response to an active elicitation request.
-	RespondElicitation(sessionID, requestID string, result ElicitationResult) bool
+	RespondElicitation(ctx context.Context, sessionID, requestID string, result ElicitationResult) bool
 	// ApplyClientState merges a CopilotKit client-state patch (frontend actions,
 	// readables, action results) into the per-session runner state.
 	ApplyClientState(sessionID uuid.UUID, patch ClientStatePatch)
@@ -49,6 +53,22 @@ type RunLookup interface {
 type PermissionAuditReader interface {
 	ListBySession(ctx context.Context, sessionID uuid.UUID, limit int) ([]PermissionAuditEntryResponse, error)
 }
+
+// EffectivePromptInspector renders the effective prompt for a session without
+// starting an LLM run.
+type EffectivePromptInspector interface {
+	EffectivePrompt(ctx context.Context, sessionID uuid.UUID, identity PromptIdentity) (EffectivePromptResponse, error)
+}
+
+// EffectiveToolsInspector renders the tool schema for a session and request
+// identity without starting an LLM run.
+type EffectiveToolsInspector interface {
+	EffectiveTools(ctx context.Context, sessionID uuid.UUID, identity PromptIdentity) (EffectiveToolsResponse, error)
+}
+
+// PromptIdentityExtractor extracts the authenticated request identity used by
+// dynamic prompt placeholders.
+type PromptIdentityExtractor func(r *http.Request) PromptIdentity
 
 // PermissionAuditEntryResponse is the HTTP response shape for one audit entry.
 type PermissionAuditEntryResponse struct {
@@ -71,6 +91,9 @@ type Handler struct {
 	taskRepo        task.Repository       // nil means task endpoints return 501
 	permAuditReader PermissionAuditReader // nil means endpoint returns 501
 	voiceSvc        VoiceService          // nil means voice endpoint returns 503
+	promptInspector EffectivePromptInspector
+	toolInspector   EffectiveToolsInspector
+	identity        PromptIdentityExtractor
 }
 
 // NewHandler creates a new Handler.
@@ -108,6 +131,22 @@ func (h *Handler) WithVoiceService(svc VoiceService) *Handler {
 	return h
 }
 
+// WithEffectivePromptInspector injects the inspector used by
+// GET /api/chat/sessions/{id}/effective-prompt.
+func (h *Handler) WithEffectivePromptInspector(inspector EffectivePromptInspector, identity PromptIdentityExtractor) *Handler {
+	h.promptInspector = inspector
+	h.identity = identity
+	return h
+}
+
+// WithEffectiveToolsInspector injects the inspector used by
+// GET /api/chat/sessions/{id}/effective-tools.
+func (h *Handler) WithEffectiveToolsInspector(inspector EffectiveToolsInspector, identity PromptIdentityExtractor) *Handler {
+	h.toolInspector = inspector
+	h.identity = identity
+	return h
+}
+
 // WithRunLookup overrides the run lookup used by GET /api/chat/runs/{id}.
 // Intended for use in unit tests where a real AsyncExecutor is not available.
 func (h *Handler) WithRunLookup(rl RunLookup) *Handler {
@@ -120,12 +159,16 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/chat/sessions", h.listSessions)
 	r.Post("/api/chat/sessions", h.createSession)
 	r.Get("/api/chat/sessions/{id}", h.getSession)
+	r.Get("/api/chat/sessions/{id}/effective-prompt", h.effectivePrompt)
+	r.Get("/api/chat/sessions/{id}/effective-tools", h.effectiveTools)
 	r.Patch("/api/chat/sessions/{id}", h.renameSession)
 	r.Delete("/api/chat/sessions/{id}", h.deleteSession)
 	r.Post("/api/chat/sessions/{id}/archive", h.archiveSession)
+	r.Post("/api/chat/sessions/{id}/clone", h.cloneSession)
 	r.Get("/api/chat/sessions/{id}/messages", h.listMessages)
 	r.Post("/api/chat/sessions/{id}/messages", h.addMessage)
 	r.Post("/api/chat/sessions/{id}/run", h.runSession)
+	r.Post("/api/chat/sessions/{id}/resume", h.resumeElicitation)
 	r.Post("/api/chat/sessions/{id}/voice/input", h.voiceInput)
 	r.Post("/api/chat/sessions/{id}/audio", h.voiceInput)
 	r.Get("/api/chat/sessions/{id}/run/{runId}/status", h.runStatus)
@@ -140,6 +183,11 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 }
 
 func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
+	if requestedTenant := strings.TrimSpace(r.URL.Query().Get("tenant")); requestedTenant != "" && requestedTenant != tenant.FromContext(r.Context()) {
+		respond.Error(w, http.StatusForbidden, "cross-tenant chat listing is not allowed")
+		return
+	}
+
 	req := pagination.ParsePageRequest(r)
 	page, err := h.svc.ListSessions(r.Context(), req)
 	if err != nil {
@@ -151,7 +199,7 @@ func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) createSession(w http.ResponseWriter, r *http.Request) {
 	var req CreateSessionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequest(r, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -167,6 +215,11 @@ func (h *Handler) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.JSON(w, http.StatusCreated, resp)
+}
+
+// decodeJSONRequest accepts exactly one JSON value before a chat operation.
+func decodeJSONRequest(r *http.Request, target any) error {
+	return httputil.DecodeSingleJSON(r.Body, target)
 }
 
 func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
@@ -186,18 +239,128 @@ func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for active runs
-	if run, found, _ := h.svc.GetActiveRun(r.Context(), id); found {
-		// Include active run in session metadata or just as a separate field if we update DTO.
-		// For now, we can add it to a map if we want to extend the response without breaking DTO.
-		data, _ := json.Marshal(resp)
-		var m map[string]interface{}
-		json.Unmarshal(data, &m)
-		m["activeRun"] = run
-		respond.JSON(w, http.StatusOK, m)
+	// Check for active legacy SSE runs first. Local/dev stacks without RabbitMQ
+	// use bgRegistry, and Flutter reload recovery depends on activeRun being
+	// visible via GET /api/chat/sessions/{id}.
+	if run := h.bgRegistry.GetBySession(id); run != nil {
+		h.respondSessionWithActiveRun(w, resp, backgroundRunResponse(run))
 		return
 	}
 
+	// Check for active async runs persisted in chat_run.
+	if run, found, _ := h.svc.GetActiveRun(r.Context(), id); found {
+		h.respondSessionWithActiveRun(w, resp, run)
+		return
+	}
+
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) respondSessionWithActiveRun(w http.ResponseWriter, resp ChatSessionResponse, run ChatRunResponse) {
+	data, _ := json.Marshal(resp)
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		respond.Error(w, http.StatusInternalServerError, "failed to encode chat session")
+		return
+	}
+	m["activeRun"] = run
+	respond.JSON(w, http.StatusOK, m)
+}
+
+func backgroundRunResponse(run *BackgroundRun) ChatRunResponse {
+	startedAt := run.StartedAt
+	resp := ChatRunResponse{
+		SessionID: run.SessionID,
+		Status:    ChatRunStatus(run.Status),
+		StartedAt: &startedAt,
+	}
+	if id, err := uuid.Parse(run.RunID); err == nil {
+		resp.ID = id
+	}
+	return resp
+}
+
+func (h *Handler) effectivePrompt(w http.ResponseWriter, r *http.Request) {
+	if h.promptInspector == nil {
+		respond.Error(w, http.StatusNotImplemented, "effective prompt inspector is not configured")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	identity := PromptIdentity{TenantID: tenant.FromContext(r.Context())}
+	if h.identity != nil {
+		identity = h.identity(r)
+	}
+	if identity.TenantID == "" {
+		identity.TenantID = tenant.FromContext(r.Context())
+	}
+	if identity.TenantName == "" {
+		identity.TenantName = identity.TenantID
+	}
+
+	resp, err := h.promptInspector.EffectivePrompt(r.Context(), id, identity)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		if errors.Is(err, ErrAgentNotFound) {
+			respond.Error(w, http.StatusGone, "agent has been deleted; cannot resolve effective prompt")
+			return
+		}
+		if errors.Is(err, ErrNoAgentAvailable) {
+			respond.Error(w, http.StatusConflict, "chat session has no agent")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to resolve effective prompt")
+		return
+	}
+	respond.JSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) effectiveTools(w http.ResponseWriter, r *http.Request) {
+	if h.toolInspector == nil {
+		respond.Error(w, http.StatusNotImplemented, "effective tools inspector is not configured")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	identity := PromptIdentity{TenantID: tenant.FromContext(r.Context())}
+	if h.identity != nil {
+		identity = h.identity(r)
+	}
+	if identity.TenantID == "" {
+		identity.TenantID = tenant.FromContext(r.Context())
+	}
+	if identity.TenantName == "" {
+		identity.TenantName = identity.TenantID
+	}
+
+	resp, err := h.toolInspector.EffectiveTools(r.Context(), id, identity)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		if errors.Is(err, ErrAgentNotFound) {
+			respond.Error(w, http.StatusGone, "agent has been deleted; cannot resolve effective tools")
+			return
+		}
+		if errors.Is(err, ErrNoAgentAvailable) {
+			respond.Error(w, http.StatusConflict, "chat session has no agent")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to resolve effective tools")
+		return
+	}
 	respond.JSON(w, http.StatusOK, resp)
 }
 
@@ -211,7 +374,7 @@ func (h *Handler) renameSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Title string `json:"title"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequest(r, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -272,6 +435,42 @@ func (h *Handler) archiveSession(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, http.StatusOK, resp)
 }
 
+func (h *Handler) cloneSession(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	var req CloneSessionRequest
+	if err := httputil.DecodeOptionalSingleJSON(r.Body, &req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	resp, err := h.svc.CloneSession(r.Context(), id, req)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "chat session not found")
+			return
+		}
+		if errors.Is(err, ErrMessageNotFound) {
+			respond.Error(w, http.StatusNotFound, "clone boundary message not found")
+			return
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "SQLSTATE") || strings.Contains(msg, "ERROR:") || strings.Contains(msg, "clone session:") || strings.Contains(msg, "clone message:") {
+			slog.Error("chat: cloneSession failed", "sessionID", id, "err", err)
+			respond.Error(w, http.StatusInternalServerError, "failed to clone chat session")
+			return
+		}
+		respond.Error(w, http.StatusUnprocessableEntity, msg)
+		return
+	}
+
+	respond.JSON(w, http.StatusCreated, resp)
+}
+
 func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -311,7 +510,7 @@ func (h *Handler) addMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateMessageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequest(r, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -357,12 +556,111 @@ type elicitationRespondRequest struct {
 	Values  map[string]interface{} `json:"values"`  // alias for Content (some clients use "values")
 }
 
-// runSessionRequest is the body for POST /api/chat/sessions/{id}/run.
-type runSessionRequest struct {
-	Message string `json:"message"`
+// UnmarshalJSON accepts content aliases only when they describe the same
+// elicitation response.
+func (r *elicitationRespondRequest) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Action  string                  `json:"action"`
+		Content *map[string]interface{} `json:"content"`
+		Values  *map[string]interface{} `json:"values"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if err := validateElicitationContentAliases(wire.Content, wire.Values); err != nil {
+		return err
+	}
+
+	*r = elicitationRespondRequest{Action: wire.Action}
+	if wire.Content != nil {
+		r.Content = *wire.Content
+	}
+	if wire.Values != nil {
+		r.Values = *wire.Values
+	}
+	return nil
 }
 
-const maxVoiceUploadBytes = 25 << 20
+// resumeElicitationRequest is the canonical body for
+// POST /api/chat/sessions/{id}/resume.
+type resumeElicitationRequest struct {
+	RequestID       string                 `json:"requestId"`
+	ResumeData      map[string]interface{} `json:"resume_data"`
+	ResumeDataCamel map[string]interface{} `json:"resumeData"`
+	Action          string                 `json:"action"`
+	Content         map[string]interface{} `json:"content"`
+	Values          map[string]interface{} `json:"values"`
+}
+
+// UnmarshalJSON preserves the historical content aliases only when all
+// non-empty aliases describe the same elicitation response.
+func (r *resumeElicitationRequest) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		RequestID       string                  `json:"requestId"`
+		ResumeData      *map[string]interface{} `json:"resume_data"`
+		ResumeDataCamel *map[string]interface{} `json:"resumeData"`
+		Action          string                  `json:"action"`
+		Content         *map[string]interface{} `json:"content"`
+		Values          *map[string]interface{} `json:"values"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if err := validateElicitationContentAliases(wire.ResumeData, wire.ResumeDataCamel, wire.Content, wire.Values); err != nil {
+		return err
+	}
+
+	*r = resumeElicitationRequest{
+		RequestID: wire.RequestID,
+		Action:    wire.Action,
+	}
+	if wire.ResumeData != nil {
+		r.ResumeData = *wire.ResumeData
+	}
+	if wire.ResumeDataCamel != nil {
+		r.ResumeDataCamel = *wire.ResumeDataCamel
+	}
+	if wire.Content != nil {
+		r.Content = *wire.Content
+	}
+	if wire.Values != nil {
+		r.Values = *wire.Values
+	}
+	return nil
+}
+
+func validateElicitationContentAliases(aliases ...*map[string]interface{}) error {
+	var canonical map[string]interface{}
+	for _, alias := range aliases {
+		if alias == nil || len(*alias) == 0 {
+			continue
+		}
+		if canonical == nil {
+			canonical = *alias
+			continue
+		}
+		if !reflect.DeepEqual(canonical, *alias) {
+			return fmt.Errorf("chat: conflicting resume content aliases")
+		}
+	}
+	return nil
+}
+
+// runSessionRequest is the body for POST /api/chat/sessions/{id}/run.
+type runSessionRequest struct {
+	Message   string              `json:"message"`
+	Overrides runSessionOverrides `json:"overrides,omitempty"`
+}
+
+type runSessionOverrides struct {
+	SystemPrompt *string `json:"systemPrompt,omitempty"`
+}
+
+const (
+	maxVoiceUploadBytes       = 25 << 20
+	maxVoiceMultipartOverhead = 64 << 10
+	maxVoiceMultipartField    = 8 << 10
+)
 
 // voiceInput handles POST /api/chat/sessions/{id}/voice/input.
 func (h *Handler) voiceInput(w http.ResponseWriter, r *http.Request) {
@@ -391,7 +689,8 @@ func (h *Handler) voiceInput(w http.ResponseWriter, r *http.Request) {
 	}
 	transcription, err := h.voiceSvc.Transcribe(r.Context(), input)
 	if err != nil {
-		respond.Error(w, http.StatusBadGateway, err.Error())
+		slog.Error("chat: voice transcription failed", "sessionID", sessionID, "err", err)
+		respond.Error(w, http.StatusBadGateway, "voice transcription is temporarily unavailable")
 		return
 	}
 	if strings.TrimSpace(transcription.Text) == "" {
@@ -405,6 +704,30 @@ func (h *Handler) voiceInput(w http.ResponseWriter, r *http.Request) {
 		Transcription: transcription,
 	}
 	status := http.StatusOK
+	if r.URL.Query().Get("run") != "false" && h.executor == nil {
+		tenantID := tenant.FromContext(r.Context())
+		runID, audio, err := h.runVoiceSessionSynchronously(r.Context(), sessionID, tenantID, transcription)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				respond.Error(w, http.StatusNotFound, "session not found")
+				return
+			}
+			if errors.Is(err, ErrNoAgentAvailable) {
+				respond.Error(w, http.StatusServiceUnavailable, friendlyStartupError(err.Error()))
+				return
+			}
+			if errors.Is(err, ErrSessionArchived) {
+				respond.Error(w, http.StatusConflict, err.Error())
+				return
+			}
+			slog.Error("chat: synchronous voice run failed", "sessionID", sessionID, "err", err)
+			respond.Error(w, http.StatusBadGateway, "failed to process voice run")
+			return
+		}
+		resp.RunID = &runID
+		resp.Status = "completed"
+		resp.Audio = audio
+	}
 	if r.URL.Query().Get("run") != "false" && h.executor != nil {
 		tenantID := tenant.FromContext(r.Context())
 		runID, err := h.executor.EnqueueRunWithOptions(r.Context(), sessionID, tenantID, transcription.Text, EnqueueRunOptions{
@@ -415,6 +738,10 @@ func (h *Handler) voiceInput(w http.ResponseWriter, r *http.Request) {
 				respond.Error(w, http.StatusConflict, "a run is already in progress for this session")
 				return
 			}
+			if errors.Is(err, ErrQueueUnavailable) {
+				respond.Error(w, http.StatusServiceUnavailable, "chat queue is temporarily unavailable")
+				return
+			}
 			if errors.Is(err, ErrAgentNotFound) {
 				respond.Error(w, http.StatusGone, "agent has been deleted; cannot run on orphaned session")
 				return
@@ -423,59 +750,88 @@ func (h *Handler) voiceInput(w http.ResponseWriter, r *http.Request) {
 				respond.Error(w, http.StatusConflict, err.Error())
 				return
 			}
-			respond.Error(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue voice run: %v", err))
+			respond.Error(w, http.StatusInternalServerError, "failed to enqueue voice run")
 			return
 		}
 		runIDText := runID.String()
 		resp.RunID = &runIDText
 		resp.Status = "accepted"
-		h.appendVoiceTranscriptionEvent(runIDText, transcription)
+		h.appendVoiceTranscriptionEvent(runIDText, sessionID, transcription)
 		status = http.StatusAccepted
 	}
 	respond.JSON(w, status, resp)
 }
 
-func (h *Handler) appendVoiceTranscriptionEvent(runID string, transcription VoiceTranscription) {
+func (h *Handler) runVoiceSessionSynchronously(ctx context.Context, sessionID uuid.UUID, tenantID string, transcription VoiceTranscription) (string, *VoiceAudio, error) {
+	runID, runCtx := h.bgRegistry.Register(sessionID)
+	rawToken := tenant.TokenFromContext(ctx)
+	runCtx = tenant.NewContextWithToken(runCtx, tenantID, rawToken)
+
+	ch, err := h.svc.RunSession(runCtx, sessionID, transcription.Text, tenantID)
+	if err != nil {
+		h.bgRegistry.Cancel(runID)
+		return "", nil, err
+	}
+
+	h.bgRegistry.AttachEvents(runID, ch)
+	buf := h.bufferRegistry.GetOrCreateForSession(runID, sessionID, DefaultEventBufferSize)
+	var assistantText strings.Builder
+	for ev := range ch {
+		buf.Append(ev)
+		if ev.Type == "text_delta" {
+			assistantText.WriteString(extractTextDelta(ev.Data))
+		}
+	}
+
+	h.bgRegistry.MarkCompleted(runID)
+	var audio *VoiceAudio
+	if text := strings.TrimSpace(assistantText.String()); text != "" {
+		synthesized, err := h.voiceSvc.Synthesize(ctx, VoiceSynthesisInput{Text: text})
+		if err != nil {
+			buf.MarkDone()
+			return runID, nil, fmt.Errorf("voice: synthesize assistant answer: %w", err)
+		}
+		audio = &synthesized
+		if data, err := json.Marshal(VoiceAudioDelta{Chunk: synthesized.Base64, Format: synthesized.Format}); err == nil {
+			buf.Append(RunEvent{Type: EventAudioDelta, Data: data})
+		}
+	}
+	buf.MarkDone()
+	return runID, audio, nil
+}
+
+func (h *Handler) appendVoiceTranscriptionEvent(runID string, sessionID uuid.UUID, transcription VoiceTranscription) {
 	data, err := json.Marshal(transcription)
 	if err != nil {
 		return
 	}
-	h.bufferRegistry.GetOrCreate(runID, DefaultEventBufferSize).Append(RunEvent{
+	h.bufferRegistry.GetOrCreateForSession(runID, sessionID, DefaultEventBufferSize).Append(RunEvent{
 		Type: EventTranscription,
 		Data: data,
 	})
 }
 
 func readVoiceInput(w http.ResponseWriter, r *http.Request) (VoiceTranscriptionInput, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxVoiceUploadBytes)
 	contentType := r.Header.Get("Content-Type")
 	if strings.HasPrefix(contentType, "multipart/form-data") {
-		if err := r.ParseMultipartForm(maxVoiceUploadBytes); err != nil {
+		file, fields, err := httputil.ReadLimitedMultipartFile(w, r, httputil.LimitedMultipartOptions{
+			FileFields:    []string{"audio", "file"},
+			MaxFileBytes:  maxVoiceUploadBytes,
+			MaxBodyBytes:  maxVoiceUploadBytes + maxVoiceMultipartOverhead,
+			MaxFieldBytes: maxVoiceMultipartField,
+		})
+		if err != nil {
 			return VoiceTranscriptionInput{}, fmt.Errorf("invalid multipart audio upload")
 		}
-		file, header, err := r.FormFile("audio")
-		if err != nil {
-			file, header, err = r.FormFile("file")
-		}
-		if err != nil {
-			return VoiceTranscriptionInput{}, fmt.Errorf("audio file is required")
-		}
-		defer file.Close()
-		audio, err := io.ReadAll(io.LimitReader(file, maxVoiceUploadBytes+1))
-		if err != nil {
-			return VoiceTranscriptionInput{}, fmt.Errorf("failed to read audio")
-		}
-		if len(audio) > maxVoiceUploadBytes {
-			return VoiceTranscriptionInput{}, fmt.Errorf("audio file exceeds 25MB")
-		}
 		return VoiceTranscriptionInput{
-			Filename:    header.Filename,
-			ContentType: header.Header.Get("Content-Type"),
-			Audio:       audio,
-			Language:    r.FormValue("language"),
+			Filename:    file.Filename,
+			ContentType: file.ContentType,
+			Audio:       file.Content,
+			Language:    fields["language"],
 		}, nil
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxVoiceUploadBytes)
 	audio, err := io.ReadAll(io.LimitReader(r.Body, maxVoiceUploadBytes+1))
 	if err != nil {
 		return VoiceTranscriptionInput{}, fmt.Errorf("failed to read audio")
@@ -507,13 +863,17 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req runSessionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequest(r, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Message == "" {
 		respond.Error(w, http.StatusBadRequest, "message is required")
 		return
+	}
+	runOpts := RunSessionOptions{}
+	if req.Overrides.SystemPrompt != nil {
+		runOpts.SystemPromptOverride = req.Overrides.SystemPrompt
 	}
 
 	flusher, ok := w.(http.Flusher)
@@ -526,7 +886,9 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 
 	// If AsyncExecutor is available, use it to start the run in background.
 	if h.executor != nil {
-		runID, err := h.executor.EnqueueRun(r.Context(), sessionID, tenantID, req.Message)
+		runID, err := h.executor.EnqueueRunWithOptions(r.Context(), sessionID, tenantID, req.Message, EnqueueRunOptions{
+			SystemPromptOverride: runOpts.SystemPromptOverride,
+		})
 		if err != nil {
 			if errors.Is(err, ErrRunAlreadyActive) {
 				respond.Error(w, http.StatusConflict, "a run is already in progress for this session")
@@ -534,6 +896,10 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 			}
 			if errors.Is(err, ErrNotFound) {
 				respond.Error(w, http.StatusNotFound, "chat session not found")
+				return
+			}
+			if errors.Is(err, ErrQueueUnavailable) {
+				respond.Error(w, http.StatusServiceUnavailable, "chat queue is temporarily unavailable")
 				return
 			}
 			// Bug 244: session existe mas agent foi deletado → 410 Gone.
@@ -547,7 +913,7 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 				respond.Error(w, http.StatusConflict, err.Error())
 				return
 			}
-			respond.Error(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue run: %v", err))
+			respond.Error(w, http.StatusInternalServerError, "failed to enqueue run")
 			return
 		}
 		respond.JSON(w, http.StatusAccepted, map[string]interface{}{
@@ -568,7 +934,7 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	rawToken := tenant.TokenFromContext(r.Context())
 	runCtx = tenant.NewContextWithToken(runCtx, tenantID, rawToken)
 
-	ch, err := h.svc.RunSession(runCtx, sessionID, req.Message, tenantID)
+	ch, err := h.svc.RunSession(runCtx, sessionID, req.Message, tenantID, runOpts)
 	if err != nil {
 		h.bgRegistry.Cancel(runID)
 		if errors.Is(err, ErrNotFound) {
@@ -582,12 +948,13 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusServiceUnavailable, friendlyStartupError(err.Error()))
 			return
 		}
-		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		slog.Error("chat: synchronous run failed", "sessionID", sessionID, "err", err)
+		respond.Error(w, http.StatusUnprocessableEntity, "failed to start chat run")
 		return
 	}
 
 	h.bgRegistry.AttachEvents(runID, ch)
-	buf := h.bufferRegistry.GetOrCreate(runID, DefaultEventBufferSize)
+	buf := h.bufferRegistry.GetOrCreateForSession(runID, sessionID, DefaultEventBufferSize)
 
 	// Set SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -599,22 +966,26 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	// Stream events to client. The goroutine is the sole consumer of the Runner's
-	// channel. It forwards events to sseCh for the HTTP handler. When the client
-	// disconnects, events are discarded (but the Runner continues in background).
-	sseCh := make(chan RunEvent, 64)
+	// channel and appends every event to the resume buffer before optional live
+	// delivery. When the client disconnects, live delivery is discarded while the
+	// buffer keeps receiving events for /resume.
+	sseCh := make(chan BufferedEvent, 64)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer close(sseCh)
 		for ev := range ch {
+			seq := buf.Append(ev)
+			buffered := BufferedEvent{ID: seq, Event: ev}
 			select {
-			case sseCh <- ev:
+			case sseCh <- buffered:
 			default:
 				// SSE writer can't keep up or disconnected -- discard event.
 				// The Runner persists everything, so no data is lost.
 			}
 		}
 		h.bgRegistry.MarkCompleted(runID)
+		buf.MarkDone()
 	}()
 
 	ctx := r.Context()
@@ -626,11 +997,11 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 		case ev, ok := <-sseCh:
 			if !ok {
 				// Channel closed -- run complete.
-				buf.MarkDone()
 				return
 			}
-			seq := buf.Append(ev)
-			fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data)
+			if err := writeSSEBufferedEvent(w, runID, ev); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-done:
 			// Run goroutine is done; drain any remaining buffered events.
@@ -638,21 +1009,21 @@ func (h *Handler) runSession(w http.ResponseWriter, r *http.Request) {
 				select {
 				case ev, ok := <-sseCh:
 					if !ok {
-						buf.MarkDone()
 						return
 					}
-					seq := buf.Append(ev)
-					fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data)
+					if err := writeSSEBufferedEvent(w, runID, ev); err != nil {
+						return
+					}
 					flusher.Flush()
 				default:
 					// No more events pending; done signal may have raced with close(sseCh).
 					// Wait for sseCh to be closed to ensure MarkDone is called.
 					for ev := range sseCh {
-						seq := buf.Append(ev)
-						fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, seq, ev.Type, ev.Data)
+						if err := writeSSEBufferedEvent(w, runID, ev); err != nil {
+							return
+						}
 						flusher.Flush()
 					}
-					buf.MarkDone()
 					return
 				}
 			}
@@ -812,6 +1183,11 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ownerSessionID, ok := h.bufferRegistry.Owner(runID); ok && ownerSessionID.String() != urlSessionID {
+		respond.Error(w, http.StatusNotFound, "run not found")
+		return
+	}
+
 	if runUUID, err := uuid.Parse(runID); err == nil && h.executor != nil {
 		if persisted, perr := h.executor.GetRunByID(r.Context(), runUUID); perr == nil {
 			if persisted.SessionID.String() != urlSessionID {
@@ -840,10 +1216,12 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 		lastEventID = r.URL.Query().Get("lastEventId")
 	}
 	if lastEventID != "" {
-		_, seq, ok := ParseSSEID(lastEventID)
-		if ok {
-			afterSeq = seq
+		parsedRunID, seq, ok := ParseSSEID(lastEventID)
+		if !ok || parsedRunID != runID {
+			respond.Error(w, http.StatusBadRequest, "invalid last event id")
+			return
 		}
+		afterSeq = seq
 	}
 
 	// Set SSE headers.
@@ -856,6 +1234,7 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	// Replay buffered events.
+	lastSent := afterSeq
 	events, ok := buf.EventsSince(afterSeq)
 	if !ok {
 		// Overflow -- client missed events that were evicted from the buffer.
@@ -863,15 +1242,21 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 			Message:     "events lost: buffer overflow since last event id",
 			LastEventID: lastEventID,
 		})
-		fmt.Fprintf(w, "event: reconnect_overflow\ndata: %s\n\n", overflowData)
+		if err := writeSSEFrame(w, "", "reconnect_overflow", overflowData); err != nil {
+			return
+		}
 		flusher.Flush()
+		lastSent = buf.NewestSeq()
 	}
 	events = filterReplayableEvents(events)
 
 	// Send replayed events.
 	for _, ev := range events {
-		fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, ev.ID, ev.Event.Type, ev.Event.Data)
+		if err := writeSSEBufferedEvent(w, runID, ev); err != nil {
+			return
+		}
 		flusher.Flush()
+		lastSent = ev.ID
 	}
 
 	// If the run is done, no need to wait for more events.
@@ -882,7 +1267,6 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 	// Continue streaming new events by polling the buffer.
 	// We poll at a short interval to avoid busy-waiting.
 	ctx := r.Context()
-	lastSent := buf.NewestSeq()
 	ticker := newTicker(50 * millisecondsUnit)
 	defer ticker.Stop()
 
@@ -893,7 +1277,9 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C():
 			newEvents, _ := buf.EventsSince(lastSent)
 			for _, ev := range newEvents {
-				fmt.Fprintf(w, "id: %s:%d\nevent: %s\ndata: %s\n\n", runID, ev.ID, ev.Event.Type, ev.Event.Data)
+				if err := writeSSEBufferedEvent(w, runID, ev); err != nil {
+					return
+				}
 				flusher.Flush()
 				lastSent = ev.ID
 			}
@@ -902,6 +1288,59 @@ func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func writeSSEBufferedEvent(w io.Writer, runID string, ev BufferedEvent) error {
+	return writeSSEFrame(w, ev.FormatSSEID(runID), ev.Event.Type, ev.Event.Data)
+}
+
+func writeSSEFrame(w io.Writer, id, eventType string, data json.RawMessage) error {
+	id = safeSSELineField(id, "")
+	eventType = safeSSELineField(eventType, "message")
+	payload := safeSSEPayload(data)
+
+	if id != "" {
+		// #nosec G705 -- SSE id is restricted to a single line before writing to a text/event-stream response.
+		if _, err := fmt.Fprintf(w, "id: %s\n", id); err != nil {
+			return err
+		}
+	}
+	// #nosec G705 -- SSE event type is restricted to a single line before writing to a text/event-stream response.
+	if _, err := fmt.Fprintf(w, "event: %s\n", eventType); err != nil {
+		return err
+	}
+	for _, line := range strings.Split(payload, "\n") {
+		// #nosec G705 -- SSE data is compacted or JSON-encoded, then each line is emitted with a data prefix.
+		if _, err := fmt.Fprintf(w, "data: %s\n", line); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, "\n")
+	return err
+}
+
+func safeSSEPayload(data json.RawMessage) string {
+	if len(data) == 0 {
+		return "null"
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, data); err == nil {
+		return compact.String()
+	}
+	encoded, err := json.Marshal(string(data))
+	if err != nil {
+		return "null"
+	}
+	return string(encoded)
+}
+
+func safeSSELineField(value, fallback string) string {
+	if value == "" || strings.IndexFunc(value, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return fallback
+	}
+	return value
 }
 
 // respondElicitation handles POST /api/chat/sessions/{id}/elicitation/{requestId}/respond.
@@ -920,7 +1359,7 @@ func (h *Handler) respondElicitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req elicitationRespondRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequest(r, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -938,7 +1377,53 @@ func (h *Handler) respondElicitation(w http.ResponseWriter, r *http.Request) {
 		Content: req.Content,
 	}
 
-	if ok := h.svc.RespondElicitation(sessionID, requestID, result); !ok {
+	if ok := h.svc.RespondElicitation(r.Context(), sessionID, requestID, result); !ok {
+		respond.Error(w, http.StatusNotFound, "elicitation request not found or already resolved")
+		return
+	}
+
+	respond.NoContent(w)
+}
+
+// resumeElicitation handles POST /api/chat/sessions/{id}/resume.
+// It is the canonical suspend/resume endpoint; the legacy elicitation route
+// remains accepted for older clients.
+func (h *Handler) resumeElicitation(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(sessionID); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+
+	var req resumeElicitationRequest
+	if err := decodeJSONRequest(r, &req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.RequestID) == "" {
+		respond.Error(w, http.StatusBadRequest, "requestId is required")
+		return
+	}
+	if req.Action == "" {
+		req.Action = "accept"
+	}
+	content := req.ResumeData
+	if len(content) == 0 {
+		content = req.ResumeDataCamel
+	}
+	if len(content) == 0 {
+		content = req.Content
+	}
+	if len(content) == 0 {
+		content = req.Values
+	}
+
+	result := ElicitationResult{
+		Action:  req.Action,
+		Content: content,
+	}
+
+	if ok := h.svc.RespondElicitation(r.Context(), sessionID, req.RequestID, result); !ok {
 		respond.Error(w, http.StatusNotFound, "elicitation request not found or already resolved")
 		return
 	}
@@ -964,11 +1449,9 @@ func (h *Handler) clientState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var patch ClientStatePatch
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-			respond.Error(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
+	if err := httputil.DecodeOptionalSingleJSON(r.Body, &patch); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
 	}
 
 	h.svc.ApplyClientState(sessionID, patch)
@@ -1038,7 +1521,29 @@ func (h *Handler) listTaskNotifications(w http.ResponseWriter, r *http.Request) 
 		respond.Error(w, http.StatusInternalServerError, "failed to list notifications")
 		return
 	}
-	respond.JSON(w, http.StatusOK, notifications)
+	publicNotifications := make([]task.Notification, len(notifications))
+	for index, notification := range notifications {
+		publicNotifications[index] = publicTaskNotificationFrom(notification)
+	}
+	respond.JSON(w, http.StatusOK, publicNotifications)
+}
+
+func publicTaskNotificationFrom(notification task.Notification) task.Notification {
+	public := notification
+	if notification.Error != nil {
+		redacted := redactAsyncExternalDiagnosticText(*notification.Error)
+		public.Error = &redacted
+	}
+	if len(notification.Findings) > 0 {
+		redacted := redactAsyncExternalDiagnosticText(string(notification.Findings))
+		if json.Valid([]byte(redacted)) {
+			public.Findings = json.RawMessage(redacted)
+		} else {
+			encoded, _ := json.Marshal(redacted)
+			public.Findings = encoded
+		}
+	}
+	return public
 }
 
 // listPermissionAudit handles GET /api/chat/sessions/{id}/permission-audit.

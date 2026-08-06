@@ -141,7 +141,7 @@ func (ps *ProgressSummarizer) generateSummary(ctx context.Context) string {
 		return ""
 	}
 
-	summary := resp.Content
+	summary := sanitizeSSEMessage(resp.Content)
 	if summary == "" {
 		return ""
 	}

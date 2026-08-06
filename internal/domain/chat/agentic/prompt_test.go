@@ -468,6 +468,48 @@ func TestPromptBuild_ToolRefSkillInstructions_OmittedFromPrompt(t *testing.T) {
 	assert.NotContains(t, prompt, "document_search tool", "tool-referencing instruction must be omitted to prevent hallucination")
 }
 
+// TestPromptBuild_ToolRefSkillInstructions_IncludedWhenSkillHasActiveTools verifies
+// the production PromptBuilder path preserves instructions for active skills.
+func TestPromptBuild_ToolRefSkillInstructions_IncludedWhenSkillHasActiveTools(t *testing.T) {
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{skills: []skill.Skill{
+			{Name: "Search", Slug: "search", Instructions: "Use the document_search tool to find answers."},
+		}},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	)
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:          uuid.New(),
+		SessionID:        uuid.New(),
+		ActiveSkillSlugs: map[string]bool{"search": true},
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "document_search tool", "tool-referencing instruction must be included when the skill has active tools")
+}
+
+func TestPromptBuild_ToolRefSkillInstructions_OmittedWhenSkillHasNoActiveTools(t *testing.T) {
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{skills: []skill.Skill{
+			{Name: "Search", Slug: "search", Instructions: "Use the document_search tool to find answers."},
+		}},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	)
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:          uuid.New(),
+		SessionID:        uuid.New(),
+		ActiveSkillSlugs: map[string]bool{"other-skill": true},
+	})
+
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, "document_search tool", "tool-referencing instruction must be omitted when the skill has no active tools")
+}
+
 // TestPromptBuilder_ClearCacheForAgent_InvalidatesSkillInstructions verifies that
 // ClearCacheForAgent causes fresh skill data to be fetched on the next Build call.
 // P-C343-1: cache must not serve stale skill instructions after an edit.
@@ -528,6 +570,63 @@ func TestPromptBuild_ActiveSkillSlugs_ExcludesEmptyToolSkill(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "active-tool", "skill with active binding must appear in Available Tools")
 	assert.NotContains(t, prompt, "empty-tool", "skill without active binding must be omitted from Available Tools")
+}
+
+func TestPromptBuild_ActiveSkillSlugs_CacheIsolatedBySnapshot(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+
+	lister := &mockSkillLister{skills: []skill.Skill{
+		{Name: "Active Tool", Slug: "active-tool", Description: "Has bound tools"},
+		{Name: "Empty Tool", Slug: "empty-tool", Description: "No bound tools"},
+	}}
+	builder := agentic.NewPromptBuilder(lister, &mockKBLister{}, &mockSummaryFinder{}, agentic.DefaultPromptConfig())
+
+	unfiltered, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:   agentID,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, unfiltered, "empty-tool")
+
+	filtered, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:          agentID,
+		SessionID:        sessionID,
+		ActiveSkillSlugs: map[string]bool{"active-tool": true},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, filtered, "active-tool")
+	assert.NotContains(t, filtered, "empty-tool", "cached Available Tools must be keyed by active skill snapshot")
+}
+
+func TestPromptBuild_ToolRefSkillInstructions_CacheIsolatedBySnapshot(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{skills: []skill.Skill{
+			{Name: "Search", Slug: "search", Instructions: "Use the document_search tool to find answers."},
+		}},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	)
+
+	activePrompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:          agentID,
+		SessionID:        sessionID,
+		ActiveSkillSlugs: map[string]bool{"search": true},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, activePrompt, "document_search tool")
+
+	inactivePrompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:          agentID,
+		SessionID:        sessionID,
+		ActiveSkillSlugs: map[string]bool{"other-skill": true},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, inactivePrompt, "document_search tool", "cached skill instructions must be keyed by active skill snapshot")
 }
 
 // TestPromptBuild_ActiveSkillSlugs_EmptySetShowsAll verifies that when

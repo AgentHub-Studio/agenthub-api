@@ -27,6 +27,10 @@ var ErrDuplicateName = errors.New("tool: a tool with this name already exists")
 // ErrValidation is returned when a tool request fails business validation.
 var ErrValidation = errors.New("tool: validation failed")
 
+// ErrUpstream is returned when a configured tool reaches an unavailable upstream.
+// Handlers must convert it to a generic Bad Gateway response.
+var ErrUpstream = errors.New("tool: upstream unavailable")
+
 // ErrInvalidDataSourceID is returned when the dataSourceId query param is malformed.
 var ErrInvalidDataSourceID = errors.New("tool: invalid dataSourceId")
 
@@ -49,10 +53,25 @@ type ToolRepository interface {
 	ListBySkill(ctx context.Context, skillID uuid.UUID) ([]SkillTool, []Tool, error)
 }
 
+// SkillInstructionReference contains the skill fields needed to warn about
+// orphaned instructions when a referenced tool is deleted.
+type SkillInstructionReference struct {
+	SkillID      uuid.UUID
+	SkillName    string
+	Instructions string
+}
+
 // Repository handles persistence for tools and skill-tool bindings.
 type Repository struct {
 	pool *pgxpool.Pool
 }
+
+const updateToolSQL = `UPDATE tool SET name=$1, slug=$2, type=COALESCE(NULLIF($3, ''), type), config=$4, input_schema=$5, description=$6, labels=$7, read_only=$8, updated_at=NOW()
+ WHERE id=$9
+ RETURNING id, name, slug, type, config, input_schema, description, labels, read_only,
+           should_defer, is_destructive, search_hint, always_load, concurrency_safe,
+           max_result_chars, interrupt_behavior, is_search_or_read,
+           created_at, updated_at`
 
 // NewRepository creates a new Repository.
 func NewRepository(pool *pgxpool.Pool) *Repository {
@@ -220,12 +239,7 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, t Tool) (Tool, er
 		slug = ToSlug(t.Name)
 	}
 	row := conn.QueryRow(ctx,
-		`UPDATE tool SET name=$1, slug=$2, type=$3, config=$4, input_schema=$5, description=$6, labels=$7, read_only=$8, updated_at=NOW()
-		 WHERE id=$9
-		 RETURNING id, name, slug, type, config, input_schema, description, labels, read_only,
-		           should_defer, is_destructive, search_hint, always_load, concurrency_safe,
-		           max_result_chars, interrupt_behavior, is_search_or_read,
-		           created_at, updated_at`,
+		updateToolSQL,
 		t.Name, slug, t.Type, cfg, inputSchema, t.Description, labels, t.ReadOnly, id,
 	)
 	updated, err := scanTool(row)
@@ -259,6 +273,40 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ListSkillInstructionReferencesByTool returns active skill bindings with
+// non-empty instructions before a tool deletion can cascade away the binding.
+func (r *Repository) ListSkillInstructionReferencesByTool(ctx context.Context, toolID uuid.UUID) ([]SkillInstructionReference, error) {
+	tenantID := tenant.FromContext(ctx)
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx, `
+		SELECT s.id, s.name, COALESCE(s.instructions, '')
+		FROM skill_tool st
+		JOIN skill s ON s.id = st.skill_id
+		WHERE st.tool_id = $1
+		  AND st.is_active = TRUE
+		  AND COALESCE(s.instructions, '') <> ''
+		ORDER BY s.name`, toolID)
+	if err != nil {
+		return nil, fmt.Errorf("tool: list skill instruction references: %w", err)
+	}
+	defer rows.Close()
+
+	refs := []SkillInstructionReference{}
+	for rows.Next() {
+		var ref SkillInstructionReference
+		if err := rows.Scan(&ref.SkillID, &ref.SkillName, &ref.Instructions); err != nil {
+			return nil, fmt.Errorf("tool: scan skill instruction reference: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
 }
 
 // BindToSkill creates a skill_tool binding.

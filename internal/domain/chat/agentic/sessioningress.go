@@ -50,24 +50,24 @@ func RemoteSessionIngressConfig() SessionIngressConfig {
 //
 // Inspired by Claude Code's TranscriptMessage type.
 type TranscriptEntry struct {
-	UUID             string          `json:"uuid"`
-	ParentUUID       *string         `json:"parentUuid"`
-	Type             string          `json:"type"` // "user", "assistant", "tool_use", "tool_result", "system"
-	Message          json.RawMessage `json:"message"`
-	IsSidechain      bool            `json:"isSidechain,omitempty"`
-	AgentID          string          `json:"agentId,omitempty"`
-	AgentName        string          `json:"agentName,omitempty"`
-	Timestamp        int64           `json:"timestamp"`
+	UUID        string          `json:"uuid"`
+	ParentUUID  *string         `json:"parentUuid"`
+	Type        string          `json:"type"` // "user", "assistant", "tool_use", "tool_result", "system"
+	Message     json.RawMessage `json:"message"`
+	IsSidechain bool            `json:"isSidechain,omitempty"`
+	AgentID     string          `json:"agentId,omitempty"`
+	AgentName   string          `json:"agentName,omitempty"`
+	Timestamp   int64           `json:"timestamp"`
 }
 
 // NewTranscriptEntry creates a new entry with a fresh UUID and current timestamp.
 func NewTranscriptEntry(entryType string, message json.RawMessage, parentUUID *string) TranscriptEntry {
 	return TranscriptEntry{
-		UUID:      uuid.New().String(),
+		UUID:       uuid.New().String(),
 		ParentUUID: parentUUID,
-		Type:      entryType,
-		Message:   message,
-		Timestamp: time.Now().UnixMilli(),
+		Type:       entryType,
+		Message:    message,
+		Timestamp:  time.Now().UnixMilli(),
 	}
 }
 
@@ -137,10 +137,10 @@ func (q *sequentialQueue) process() {
 //
 // Inspired by Claude Code's sessionIngress.ts.
 type SessionIngress struct {
-	config  SessionIngressConfig
-	client  *http.Client
-	mu      sync.Mutex
-	queues  map[string]*sequentialQueue
+	config   SessionIngressConfig
+	client   *http.Client
+	mu       sync.Mutex
+	queues   map[string]*sequentialQueue
 	lastUUID map[string]string // sessionID → last successful UUID
 }
 
@@ -259,7 +259,7 @@ func (si *SessionIngress) appendImpl(ctx context.Context, sessionID string, entr
 
 		case resp.StatusCode == 401:
 			// Auth failure — non-retryable.
-			return false, fmt.Errorf("session ingress: auth failed (401): %s", string(respBody))
+			return false, fmt.Errorf("session ingress: auth failed (401): %s", redactSensitiveDiagnosticString(string(respBody)))
 
 		case resp.StatusCode == 429 || resp.StatusCode >= 500:
 			// Retryable server error.
@@ -268,7 +268,7 @@ func (si *SessionIngress) appendImpl(ctx context.Context, sessionID string, entr
 			continue
 
 		default:
-			slog.Warn("session ingress: unexpected status", "status", resp.StatusCode, "body", string(respBody))
+			slog.Warn("session ingress: unexpected status", "status", resp.StatusCode, "body", redactSensitiveDiagnosticString(string(respBody)))
 			si.backoff(ctx, attempt)
 			continue
 		}

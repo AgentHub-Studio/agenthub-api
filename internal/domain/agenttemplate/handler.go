@@ -1,13 +1,14 @@
 package agenttemplate
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -23,10 +24,13 @@ func NewHandler(svc *Service) *Handler {
 
 // RegisterRoutes mounts agent template routes on the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/agent-templates", h.list)
-	r.Post("/api/agent-templates", h.create)
-	r.Get("/api/agent-templates/{slug}", h.getBySlug)
-	r.Post("/api/agent-templates/{slug}/instantiate", h.instantiate)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/agent-templates", h.list)
+		r.Post("/api/agent-templates", h.create)
+		r.Get("/api/agent-templates/{slug}", h.getBySlug)
+		r.Post("/api/agent-templates/{slug}/instantiate", h.instantiate)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +45,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateTemplateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -79,8 +83,10 @@ func (h *Handler) getBySlug(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) instantiate(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	var req InstantiateRequest
-	// Body is optional — ignore decode errors on empty body.
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := httputil.DecodeOptionalSingleJSON(r.Body, &req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
 
 	resp, err := h.svc.Instantiate(r.Context(), slug, req)
 	if err != nil {

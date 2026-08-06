@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,8 +24,10 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/approval"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/auth"
+	authacl "github.com/AgentHub-Studio/agenthub-api/internal/domain/auth/acl"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/channel"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/a2a"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/suggest"
 	chatTask "github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
@@ -34,11 +37,14 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/device"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/embedding"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/evals"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/execution"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration/probe"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase"
+	knowledgegraph "github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase/graph"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
 	mkplInstallation "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/installation"
 	mkplListing "github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
@@ -65,10 +71,12 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/user"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/vpnresource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/workflow"
 	apikc "github.com/AgentHub-Studio/agenthub-api/internal/keycloak"
 	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/workloadidentity"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/anthropic"
@@ -80,8 +88,39 @@ import (
 
 // Server is the HTTP server for agenthub-api.
 type Server struct {
-	router http.Handler
-	pool   *pgxpool.Pool
+	router        http.Handler
+	pool          *pgxpool.Pool
+	shutdownFuncs []func(context.Context) error
+}
+
+type triggerRunCompletionRepository interface {
+	CompleteRunBySession(ctx context.Context, sessionID uuid.UUID, status trigger.RunStatus, turns, tokens *int, errMsg *string) error
+}
+
+func completeTriggerRunForChatCompletion(ctx context.Context, repo triggerRunCompletionRepository, sessionID uuid.UUID, status chat.ChatRunStatus, turns, tokens int, errMsg string) {
+	triggerStatus := trigger.RunStatusFailed
+	switch status {
+	case chat.ChatRunStatusCompleted:
+		triggerStatus = trigger.RunStatusCompleted
+	case chat.ChatRunStatusCancelled:
+		triggerStatus = trigger.RunStatusFailed // no Cancelled enum on trigger run; surface as failed
+	}
+	var errPtr *string
+	if errMsg != "" {
+		errPtr = &errMsg
+	}
+	var turnsPtr, tokensPtr *int
+	if turns > 0 {
+		turnsPtr = &turns
+	}
+	if tokens > 0 {
+		tokensPtr = &tokens
+	}
+	if err := repo.CompleteRunBySession(ctx, sessionID, triggerStatus, turnsPtr, tokensPtr, errPtr); err != nil {
+		// Most chat runs aren't from triggers — UPDATE simply matches 0 rows.
+		// Only log when it's an actual DB error.
+		slog.Debug("trigger.completion: skipped (not a trigger run or no rows)", "sessionId", sessionID)
+	}
 }
 
 // New creates a new Server with all routes mounted.
@@ -102,17 +141,24 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build Keycloak realm provisioner for tenant creation.
 	provisioner := apikc.NewProvisioner(apikc.Config{
-		BaseURL:        cfg.KeycloakBaseURL,
-		AdminUsername:  cfg.KeycloakAdmin.AdminUsername,
-		AdminPassword:  cfg.KeycloakAdmin.AdminPassword,
-		AdminClientID:  cfg.KeycloakAdmin.AdminClientID,
-		AdminRealm:     cfg.KeycloakAdmin.AdminRealm,
-		FrontendClient: cfg.KeycloakAdmin.FrontendClient,
+		BaseURL:          cfg.KeycloakBaseURL,
+		AdminUsername:    cfg.KeycloakAdmin.AdminUsername,
+		AdminPassword:    cfg.KeycloakAdmin.AdminPassword,
+		AdminClientID:    cfg.KeycloakAdmin.AdminClientID,
+		AdminRealm:       cfg.KeycloakAdmin.AdminRealm,
+		FrontendClient:   cfg.KeycloakAdmin.FrontendClient,
+		WorkloadClientID: cfg.MCPRuntimeClientID,
+		WorkloadAudience: cfg.MCPRuntimeAudience,
 	})
 
 	// Instantiate domain handlers.
 	presetSeeder := llmpreset.NewSeeder(pool)
-	tenantSvc := tenant.NewService(tenant.NewRepository(pool), provisioner, presetSeeder)
+	workloadCredentials := workloadidentity.NewService(
+		workloadidentity.NewRepository(pool),
+		cfg.MCPRuntimeCredentialEncryptionKey,
+	)
+	tenantSvc := tenant.NewService(tenant.NewRepository(pool), provisioner, presetSeeder).
+		WithWorkloadCredentialStore(workloadCredentials)
 
 	// Wire the schema migrator so that new tenants get their PostgreSQL schema
 	// created and migrated immediately upon provisioning (same path used on startup).
@@ -132,12 +178,16 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	agentRepo := agent.NewRepository(pool)
 	skillRepo := skill.NewRepository(pool)
 	agentBindingRepo := agent.NewBindingRepository(pool)
+	aclProvider := authacl.NewPostgresProvider(pool)
 	auditSvc := audit.NewService(audit.NewRepository(pool))
 	agentSvc := agent.NewServiceWithAudit(agentRepo, agentBindingRepo, skillRepo, auditSvc)
 	promptTemplateRepo := prompttemplate.NewRepository(pool)
 	agentHandler := agent.NewHandler(agentSvc).
 		WithTemplateGetter(&promptTemplateAdapter{repo: promptTemplateRepo}).
-		WithPortableBindings(agentBindingRepo)
+		WithReadAccess(aclProvider, func(req *http.Request) agent.RequestIdentity {
+			subjectID, roles := requestACLSubject(req)
+			return agent.RequestIdentity{SubjectID: subjectID, Roles: roles}
+		})
 	agentVersionHandler := agent.NewVersionHandler(agent.NewVersionServiceWithAudit(agentRepo, agent.NewVersionRepository(pool), auditSvc)).
 		WithAgentService(agentSvc)
 	agentBindingHandler := agent.NewBindingHandler(agentRepo, agentBindingRepo)
@@ -156,13 +206,14 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	toolSvc := tool.NewService(toolRepo).
 		WithSettings(&toolSettingsAdapter{repo: settingsRepo}).
 		WithDatasource(&toolDatasourceAdapter{svc: datasourceSvc}, tenantctx.FromContext).
-		WithKBExister(&kbExisterAdapter{repo: kbRepo})
+		WithKBExister(&kbExisterAdapter{repo: kbRepo}).
+		WithHTTPBackendBaseURL(cfg.BackendBaseURL)
 	toolHandler := tool.NewHandler(toolSvc).
 		WithSkillExister(&skillExisterAdapter{repo: skillRepo})
 	agentBundleHandler := agent.NewBundleHandler(
 		agent.NewExporter(agentSvc, skillRepo, agentBindingRepo).WithToolRepo(toolRepo),
 		agent.NewImporter(agentSvc, skillSvc, agentBindingRepo).WithToolSvc(toolSvc),
-	)
+	).WithPortableYAML(agentSvc, skillRepo)
 	memoryHandler := memory.NewHandler(memory.NewService(memory.NewRepository(pool))).
 		WithAgentExister(&agentExisterAdapter{svc: agentSvc})
 	promptTemplateHandler := prompttemplate.NewHandler(prompttemplate.NewService(prompttemplate.NewRepository(pool)))
@@ -195,6 +246,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	searchHandler := search.NewHandler(search.NewServiceWithPool(pool))
 	mcpSvc := mcp.NewService(mcp.NewRepository(pool))
 	mcpSvc.WithOAuthService(oauthSvc)
+	mcpSvc.WithAllowedRedirectOrigins(cfg.CORSOrigins)
 	if cfg.MCPRuntimeURL != "" {
 		mcpSvc.WithRuntimeURL(cfg.MCPRuntimeURL)
 	}
@@ -207,7 +259,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	integrationHandler := integration.NewHandler(integrationSvc)
 	suggestHandler := suggest.NewHandler(suggest.NewService(integrationSvc))
 	pipelineHandler := pipeline.NewHandler(pipeline.NewRepository(pool))
-
+	workflowHandler := workflow.NewHandler(workflow.NewService(workflow.NewRepository(pool)))
+	embeddingHandler := embedding.NewHandler(embedding.NewService(embedding.Config{
+		DefaultProvider: cfg.EmbeddingProvider,
+		PythonURL:       cfg.EmbeddingURL,
+	}))
 	// CopilotKit Phase 5 — completions endpoint (autocompletion ghost-text).
 	// Reuses the same per-tenant settings-driven model factory as the agentic
 	// runner, but without any session/SSE state.
@@ -219,7 +275,29 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
-	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo)
+	evalRepo := evals.NewRepository(pool)
+	evalRecorder := evals.NewRecorder(evalRepo, evals.RandomSampler{})
+	evalHandler := evals.NewHandler(evalRepo)
+	sessionRunner := buildAgenticRunner(
+		cfg,
+		pool,
+		chatRepo,
+		agentRepo,
+		skillRepo,
+		kbRepo,
+		toolRepo,
+		settingsRepo,
+		mcpSvc.Repository(),
+		integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc),
+		coreToolLoader,
+		agentBindingRepo,
+		agentSvc,
+		skillSvc,
+		toolSvc,
+		mcpSvc,
+		auditSvc,
+		workloadCredentials,
+	)
 	voiceSvc := chat.NewOpenAIVoiceServiceFromEnv()
 
 	var chatExecutor *chat.AsyncExecutor
@@ -243,50 +321,71 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		// Bug 291: close trigger_run rows when their chat run terminates so
 		// status reflects the actual outcome (completed/failed/cancelled)
 		// instead of forever stuck at "running".
+		chatExecutor = chatExecutor.WithCompletionHook(func(ctx context.Context, sessionID, _ uuid.UUID, status chat.ChatRunStatus, turns, tokens int, errMsg string) {
+			completeTriggerRunForChatCompletion(ctx, triggerRepo, sessionID, status, turns, tokens, errMsg)
+		})
 		chatExecutor = chatExecutor.WithCompletionHook(func(ctx context.Context, sessionID, runID uuid.UUID, status chat.ChatRunStatus, turns, tokens int, errMsg string) {
-			triggerStatus := trigger.RunStatusFailed
-			switch status {
-			case chat.ChatRunStatusCompleted:
-				triggerStatus = trigger.RunStatusCompleted
-			case chat.ChatRunStatusCancelled:
-				triggerStatus = trigger.RunStatusFailed // no Cancelled enum on trigger run; surface as failed
+			if status != chat.ChatRunStatusCompleted {
+				return
 			}
-			var errPtr *string
-			if errMsg != "" {
-				errPtr = &errMsg
+			session, err := chatRepo.GetSessionByID(ctx, sessionID)
+			if err != nil || session.AgentID == nil {
+				if err != nil {
+					slog.Debug("evals: skipped async run sampling, session not found", "sessionID", sessionID, "runID", runID, "error", err)
+				}
+				return
 			}
-			var turnsPtr, tokensPtr *int
-			if turns > 0 {
-				turnsPtr = &turns
+			ag, err := agentRepo.FindByID(ctx, *session.AgentID)
+			if err != nil {
+				slog.Debug("evals: skipped async run sampling, agent not found", "sessionID", sessionID, "agentID", *session.AgentID, "runID", runID, "error", err)
+				return
 			}
-			if tokens > 0 {
-				tokensPtr = &tokens
-			}
-			if err := triggerRepo.CompleteRunBySession(ctx, sessionID, triggerStatus, turnsPtr, tokensPtr, errPtr); err != nil {
-				// Most chat runs aren't from triggers — UPDATE simply matches 0 rows.
-				// Only log when it's an actual DB error.
-				slog.Debug("trigger.completion: skipped (not a trigger run or no rows)", "sessionId", sessionID)
+			chatRunID := runID
+			if _, _, err := evalRecorder.RecordRunComplete(ctx, evals.RecordRequest{
+				ChatRunID: &chatRunID,
+				SessionID: sessionID,
+				AgentID:   *session.AgentID,
+				Config:    ag.EvalConfig,
+			}); err != nil {
+				slog.Warn("evals: failed to record async run sample", "sessionID", sessionID, "agentID", *session.AgentID, "runID", runID, "error", err)
 			}
 		})
+		workerCtx, workerCancel := context.WithCancel(context.Background())
+		s.shutdownFuncs = append(s.shutdownFuncs, func(ctx context.Context) error {
+			workerCancel()
+			return chatExecutor.Shutdown(ctx)
+		})
 		go func() {
-			if err := chatExecutor.StartWorker(context.Background()); err != nil {
+			if err := chatExecutor.StartWorker(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("rabbitmq: chat worker failed", "err", err)
 			}
 		}()
 	}
 
-	chatSvc := chat.NewService(chatRepo, sessionRunner)
+	chatSvc := chat.NewService(chatRepo, sessionRunner).WithEvalRecorder(evalRecorder)
+	var chatAgentLoader *agentConfigAdapter
 	if agentRepo != nil {
-		chatSvc = chatSvc.WithAgentLoader(&agentConfigAdapter{
+		chatAgentLoader = &agentConfigAdapter{
 			repo:        agentRepo,
 			bindingRepo: agent.NewBindingRepository(pool),
-		})
+		}
+		chatSvc = chatSvc.WithAgentLoader(chatAgentLoader)
 	}
+	a2aHandler := a2a.NewHandler(
+		a2a.NewService(a2a.NewRepository(pool), &a2aAgentReaderAdapter{loader: chatAgentLoader}, chatSvc).
+			WithAuditRecorder(auditSvc),
+	)
 	permAuditRepo := agentic.NewPermissionAuditRepository(pool)
 	chatHandler := chat.NewHandler(chatSvc, chatExecutor).
 		WithTaskRepository(chatTask.NewRepository(pool)).
 		WithPermissionAuditReader(&permissionAuditReaderAdapter{repo: permAuditRepo}).
 		WithVoiceService(voiceSvc)
+	if promptInspector, ok := sessionRunner.(chat.EffectivePromptInspector); ok {
+		chatHandler.WithEffectivePromptInspector(promptInspector, requestPromptIdentity)
+	}
+	if toolInspector, ok := sessionRunner.(chat.EffectiveToolsInspector); ok {
+		chatHandler.WithEffectiveToolsInspector(toolInspector, requestPromptIdentity)
+	}
 
 	// Bug 237 fase 2: wire trigger Firer agora que chatSvc + chatExecutor
 	// existem, e starta o scheduler.
@@ -303,6 +402,21 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		memory.DefaultPrunerConfig(),
 	)
 	memoryPruner.Start(context.Background())
+
+	auditRetentionScheduler := audit.NewRetentionScheduler(
+		&triggerTenantListerAdapter{repo: tenant.NewRepository(pool)},
+		auditSvc,
+		audit.RetentionSchedulerConfig{
+			Interval:      auditRetentionIntervalFromConfig(cfg),
+			RetentionDays: resolveAuditRetentionDays(context.Background(), pool),
+		},
+	)
+	auditRetentionCtx, auditRetentionCancel := context.WithCancel(context.Background())
+	s.shutdownFuncs = append(s.shutdownFuncs, func(context.Context) error {
+		auditRetentionCancel()
+		return nil
+	})
+	auditRetentionScheduler.Start(auditRetentionCtx)
 
 	// Channel adapter registry — adapters registered here handle inbound platform events.
 	channelRegistry := channel.NewRegistry()
@@ -323,7 +437,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	abtestHandler := abtest.NewHandler(abtest.NewService(abtest.NewRepository(pool)))
 
 	// Device Node Network — MCP-discoverable devices and agent bindings.
-	deviceHandler := device.NewHandler(device.NewService(device.NewRepository(pool)))
+	deviceHandler := device.NewHandler(device.NewService(device.NewRepository(pool))).
+		WithAgentExister(&agentExisterAdapter{svc: agentSvc})
 
 	// Skill Evaluation Framework — runner wired with a no-op evaluator by default.
 	// Production callers can inject a concrete Evaluator via the skilleval.Runner.
@@ -367,7 +482,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	}
 	documentHandler := document.NewHandler(document.NewService(document.NewRepository(pool), docStorage, docPublisher, cfg.MinIO.DocumentsBucket)).
 		WithKBExister(&kbExisterAdapter{repo: kbRepo})
-	kbHandler := knowledgebase.NewHandler(knowledgebase.NewService(kbRepo))
+	kbHandler := knowledgebase.NewHandler(knowledgebase.NewService(kbRepo)).
+		WithGraphRepository(knowledgegraph.NewRepository(pool))
 	if cfg.EmbeddingURL != "" {
 		kbHandler.WithSearchClient(knowledge.NewPgDocumentSearchClient(pool, cfg.EmbeddingURL))
 	}
@@ -382,10 +498,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	coreHandler := core.NewHandler(coreAgentLoader, coreOnboardingService)
 
 	// Marketplace handlers.
-	mkplListingHandler := mkplListing.NewHandler(mkplListing.NewService(mkplListing.NewRepository(pool)))
 	mkplListingRepo := mkplListing.NewRepository(pool)
-	mkplReviewHandler := mkplReview.NewHandler(mkplReview.NewService(mkplReview.NewRepository(pool), mkplListingRepo)).
-		WithListingExister(&listingExisterAdapter{repo: mkplListingRepo})
 
 	// Registry handlers — storage backend selected based on MinIO config.
 	var regStorage regInstallation.StorageBackend
@@ -410,18 +523,25 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		regStorage = &regInstallation.NoopStorage{}
 	}
 	pkgRepo := regPackage.NewRepository(pool)
-	pkgExister := &packageExisterAdapter{repo: pkgRepo}
-	regPackageHandler := regPackage.NewHandler(regPackage.NewService(pkgRepo))
+	if cfg.EmbeddingURL != "" {
+		pkgRepo.WithQueryEmbedder(regPackage.NewHTTPQueryEmbedder(cfg.EmbeddingURL))
+	}
+	mkplListingSvc := mkplListing.NewService(mkplListingRepo, pkgRepo)
+	mkplListingHandler := mkplListing.NewHandler(mkplListingSvc)
+	mkplReviewHandler := mkplReview.NewHandler(mkplReview.NewService(mkplReview.NewRepository(pool), mkplListingRepo)).
+		WithListingExister(&listingServiceReaderAdapter{svc: mkplListingSvc})
+	regPackageSvc := regPackage.NewService(pkgRepo)
+	regPackageHandler := regPackage.NewHandler(regPackageSvc)
 	regVersionHandler := regVersion.NewHandler(regVersion.NewService(regVersion.NewRepository(pool), pkgRepo)).
-		WithPackageExister(pkgExister)
+		WithPackageReader(regPackageSvc)
 	regDependencyHandler := regDependency.NewHandler(regDependency.NewService(regDependency.NewRepository(pool), pkgRepo)).
-		WithPackageExister(pkgExister)
+		WithPackageReader(regPackageSvc)
 	regInstallationHandler := regInstallation.NewHandler(regInstallation.NewService(regInstallation.NewRepository(pool), regStorage)).
-		WithPackageExister(pkgExister)
-	// Bug 238: marketplace installation valida package existence (após pkgExister wireado).
+		WithPackageReader(regPackageSvc)
+	// Marketplace installation is restricted to registry packages published as PUBLIC.
 	mkplInstallationHandler := mkplInstallation.NewHandler(
 		mkplInstallation.NewService(mkplInstallation.NewRepository(pool)).
-			WithPackageExister(pkgExister))
+			WithPackageReader(pkgRepo))
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RealIP)
@@ -483,8 +603,19 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		tenantSignupHandler.RegisterPublicRoutes(r)
 		webhookHandler.RegisterPublicRoutes(r)
 		regPackageHandler.RegisterPublicRoutes(r)
-		regInstallationHandler.RegisterPublicRoutes(r)
 		channelHandler.RegisterPublicRoutes(r)
+	})
+	registerMarketplaceReadRoutes(r, chain, mkplListingHandler, mkplReviewHandler)
+
+	// Package details are public only for PUBLIC packages. When an authenticated
+	// owner requests the same URL, the optional chain exposes their PRIVATE
+	// package without making authentication mandatory for public registry links.
+	r.Group(func(r chi.Router) {
+		for _, m := range chain.OptionalAuth() {
+			r.Use(m)
+		}
+		regPackageHandler.RegisterReadRoutes(r)
+		regInstallationHandler.RegisterReadRoutes(r)
 	})
 
 	// Protected routes — JWT required.
@@ -501,14 +632,23 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		// populated by the auth middleware so the frontend's capabilities endpoint
 		// reflects the real session (was hard-coded to zeros).
 		auth.NewHandler(
-			func(req *http.Request) (string, string, []string) {
+			func(req *http.Request) (auth.AuthenticatedUser, string, []string) {
 				ctx := req.Context()
-				return middleware.SubjectFromContext(ctx),
+				id, email, username := middleware.UserIdentityFromContext(ctx)
+				return auth.AuthenticatedUser{
+						ID:       id,
+						Email:    email,
+						Username: username,
+					},
 					tenantctx.FromContext(ctx),
 					middleware.RolesFromContext(ctx)
 			},
-			auth.FeatureFlags{RBAC: true},
+			auth.FeatureFlags{RBAC: true, ACL: true},
 		).RegisterRoutes(r)
+		authacl.NewHandler(aclProvider, func(req *http.Request) authacl.Identity {
+			subjectID, roles := requestACLSubject(req)
+			return authacl.Identity{SubjectID: subjectID, Roles: roles}
+		}).RegisterRoutes(r)
 		agent.NewHookHandler(pool).WithAgentService(agentSvc).RegisterRoutes(r)
 		agentVersionHandler.RegisterVersionRoutes(r)
 		agentBindingHandler.RegisterBindingRoutes(r)
@@ -519,11 +659,11 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		promptTemplateHandler.RegisterRoutes(r)
 		agentTemplateHandler.RegisterRoutes(r)
 		providerHandler.RegisterRoutes(r)
-		probeHandler.RegisterRoutes(r)
 		channelHandler.RegisterRoutes(r)
 		abtestHandler.RegisterRoutes(r)
 		deviceHandler.RegisterRoutes(r)
 		skillevalHandler.RegisterRoutes(r)
+		evalHandler.RegisterRoutes(r)
 		analyticsHandler.RegisterRoutes(r)
 		executionHandler.RegisterRoutes(r)
 		webhookHandler.RegisterRoutes(r)
@@ -539,27 +679,27 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 		// Once agenthub-go-commons/auth is wired (PR #12), it enforces the role.
 		r.With(middleware.ProxyServiceRequired).Mount("/api/proxy/datasources", datasourceHandler.ProxyRoutes())
 		r.Mount("/api/search", searchHandler.Routes())
+		r.Mount("/api/a2a", a2aHandler.Routes())
+		embeddingHandler.RegisterRoutes(r)
 		chatHandler.RegisterRoutes(r)
 		documentHandler.RegisterRoutes(r)
 		knowledgebaseHandler.RegisterRoutes(r)
-		integrationHandler.RegisterRoutes(r)
+		registerAdminIntegrationRoutes(r, probeHandler, integrationHandler)
 		suggestHandler.RegisterRoutes(r)
 		copilotHandler.RegisterRoutes(r)
 		mcpHandler.RegisterRoutes(r)
 		approvalHandler.RegisterRoutes(r)
 		coreHandler.RegisterRoutes(r)
+		workflowHandler.RegisterRoutes(r)
 		// BUG-DEPR1: read-only deprecated pipeline endpoints (Sunset: 2026-07-01).
 		pipelineHandler.RegisterRoutes(r)
-		// Marketplace
-		mkplListingHandler.RegisterRoutes(r)
-		mkplReviewHandler.RegisterRoutes(r)
-		mkplInstallationHandler.RegisterRoutes(r)
 		// Registry
 		regPackageHandler.RegisterProtectedRoutes(r)
 		regVersionHandler.RegisterRoutes(r)
 		regDependencyHandler.RegisterRoutes(r)
 		regInstallationHandler.RegisterProtectedRoutes(r)
 	})
+	registerMarketplaceWriteRoutes(r, chain, mkplListingHandler, mkplReviewHandler, mkplInstallationHandler)
 
 	// Core-tenant admin routes — only callable from the `core` tenant by an
 	// authenticated user holding the `admin` realm role.
@@ -579,6 +719,64 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
+}
+
+type routeRegistrar interface {
+	RegisterRoutes(chi.Router)
+}
+
+type marketplaceReadRouteRegistrar interface {
+	RegisterReadRoutes(chi.Router)
+}
+
+type marketplaceWriteRouteRegistrar interface {
+	RegisterWriteRoutes(chi.Router)
+}
+
+func registerMarketplaceReadRoutes(r chi.Router, chain *middleware.Chain, registrars ...marketplaceReadRouteRegistrar) {
+	r.Group(func(r chi.Router) {
+		for _, m := range chain.Public() {
+			r.Use(m)
+		}
+		// A listing can become PRIVATE after it was published. Do not let an
+		// intermediary serve an obsolete public representation after that change.
+		r.Use(middleware.NoStoreCache)
+		for _, registrar := range registrars {
+			registrar.RegisterReadRoutes(r)
+		}
+	})
+}
+
+func registerMarketplaceWriteRoutes(r chi.Router, chain *middleware.Chain, registrars ...marketplaceWriteRouteRegistrar) {
+	r.Group(func(r chi.Router) {
+		for _, m := range chain.Protected() {
+			r.Use(m)
+		}
+		for _, registrar := range registrars {
+			registrar.RegisterWriteRoutes(r)
+		}
+	})
+}
+
+func registerAdminIntegrationRoutes(r chi.Router, registrars ...routeRegistrar) {
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		for _, registrar := range registrars {
+			registrar.RegisterRoutes(r)
+		}
+	})
+}
+
+// Shutdown stops server-owned background workers and waits for in-flight work
+// until ctx is cancelled. HTTP listener shutdown is handled by cmd/api.
+func (s *Server) Shutdown(ctx context.Context) error {
+	var errs []error
+	for _, shutdown := range s.shutdownFuncs {
+		if err := shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -689,17 +887,7 @@ type triggerTenantListerAdapter struct {
 }
 
 func (a *triggerTenantListerAdapter) ListAllIDs(ctx context.Context) ([]string, error) {
-	// Page grande o suficiente p/ ambientes desenvolvimento; tenant count
-	// real em produção provavelmente exigirá paginação.
-	tenants, _, err := a.repo.FindAll(ctx, pagination.PageRequest{Page: 0, Size: 500})
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, len(tenants))
-	for i, t := range tenants {
-		ids[i] = t.ID
-	}
-	return ids, nil
+	return activeTenantIDs(ctx, a.repo)
 }
 
 // webhookTenantListerAdapter expõe ListAllIDs para o webhook.Service
@@ -710,15 +898,69 @@ type webhookTenantListerAdapter struct {
 }
 
 func (a *webhookTenantListerAdapter) ListAllIDs(ctx context.Context) ([]string, error) {
-	tenants, _, err := a.repo.FindAll(ctx, pagination.PageRequest{Page: 0, Size: 500})
+	return activeTenantIDs(ctx, a.repo)
+}
+
+func activeTenantIDs(ctx context.Context, repo tenant.Repository) ([]string, error) {
+	// Page grande o suficiente p/ ambientes desenvolvimento; tenant count
+	// real em produção provavelmente exigirá paginação.
+	tenants, _, err := repo.FindAll(ctx, pagination.PageRequest{Page: 0, Size: 500})
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, len(tenants))
-	for i, t := range tenants {
-		ids[i] = t.ID
+	ids := make([]string, 0, len(tenants))
+	for _, t := range tenants {
+		if t.Status != tenant.StatusActive {
+			continue
+		}
+		ids = append(ids, t.ID)
 	}
 	return ids, nil
+}
+
+func resolveAuditRetentionDays(ctx context.Context, pool *pgxpool.Pool) int {
+	setting, ok, err := core.NewCorePlatformSettingLoader(pool).FindByKey(ctx, audit.AuditRetentionSettingKey)
+	if err != nil {
+		slog.Warn("audit.retention: failed to load platform setting; using default",
+			"key", audit.AuditRetentionSettingKey,
+			"retentionDays", audit.DefaultAuditRetentionDays,
+			"err", err,
+		)
+		return audit.DefaultAuditRetentionDays
+	}
+	if !ok {
+		slog.Warn("audit.retention: platform setting missing; using default",
+			"key", audit.AuditRetentionSettingKey,
+			"retentionDays", audit.DefaultAuditRetentionDays,
+		)
+		return audit.DefaultAuditRetentionDays
+	}
+	retentionDays, err := setting.AsInt()
+	if err != nil {
+		slog.Warn("audit.retention: invalid platform setting; using default",
+			"key", audit.AuditRetentionSettingKey,
+			"value", setting.Value,
+			"retentionDays", audit.DefaultAuditRetentionDays,
+			"err", err,
+		)
+		return audit.DefaultAuditRetentionDays
+	}
+	if retentionDays < audit.MinAuditRetentionDays {
+		slog.Warn("audit.retention: platform setting below floor; clamping",
+			"key", audit.AuditRetentionSettingKey,
+			"value", retentionDays,
+			"retentionDays", audit.MinAuditRetentionDays,
+		)
+		return audit.MinAuditRetentionDays
+	}
+	return retentionDays
+}
+
+func auditRetentionIntervalFromConfig(cfg *config.Config) time.Duration {
+	if cfg == nil || cfg.AuditRetentionIntervalSecs <= 0 {
+		return audit.DefaultAuditRetentionInterval
+	}
+	return time.Duration(cfg.AuditRetentionIntervalSecs) * time.Second
 }
 
 // triggerFirerAdapter implementa trigger.Firer agregando chat.Service e
@@ -747,25 +989,14 @@ func (a *triggerFirerAdapter) EnqueueRun(ctx context.Context, sessionID uuid.UUI
 	return a.chatExecutor.EnqueueRun(ctx, sessionID, tenantID, message)
 }
 
-// packageExisterAdapter wraps regPackage.Repository so version/dependency/
-// installation handlers can validate parent package existence (bug 210).
-type packageExisterAdapter struct {
-	repo *regPackage.Repository
+// listingServiceReaderAdapter lets public marketplace reviews share the
+// listing visibility boundary instead of querying raw listing rows.
+type listingServiceReaderAdapter struct {
+	svc *mkplListing.Service
 }
 
-func (a *packageExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
-	_, err := a.repo.GetByID(ctx, id)
-	return err
-}
-
-// listingExisterAdapter wraps mkplListing.Repository so review.Handler can
-// validate parent marketplace listing existence (bug 211).
-type listingExisterAdapter struct {
-	repo *mkplListing.Repository
-}
-
-func (a *listingExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
-	_, err := a.repo.FindByID(ctx, id)
+func (a *listingServiceReaderAdapter) GetByID(ctx context.Context, id uuid.UUID) error {
+	_, err := a.svc.GetByID(ctx, id)
 	return err
 }
 
@@ -802,6 +1033,12 @@ func buildAgenticRunner(
 	integSvc *integration.Service,
 	coreToolLoader *core.CoreToolLoader,
 	bindingRepo agent.BindingRepository,
+	agentSvc agent.Service,
+	skillSvc *skill.Service,
+	toolSvc *tool.Service,
+	mcpSvc *mcp.Service,
+	managementAudit agentic.ManagementAuditRecorder,
+	workloadCredentials workloadidentity.Resolver,
 ) chat.SessionRunner {
 	// Build an env-based fallback for agents that have no provider configured.
 	// This keeps backward-compatibility with existing deployments that set env vars.
@@ -850,6 +1087,10 @@ func buildAgenticRunner(
 		integSvc,
 		mcpRepo,
 	)
+	adapter = adapter.WithAgentService(agentSvc)
+	adapter = adapter.WithManagementServices(skillSvc, toolSvc, mcpSvc)
+	adapter = adapter.WithManagementAuditRecorder(managementAudit)
+	adapter = adapter.WithTaskRepository(chatTask.NewRepository(pool))
 
 	// P-C102-1: apply server-level LLM call timeout from LLM_CALL_TIMEOUT_SECS.
 	if cfg.LLMCallTimeoutSecs > 0 {
@@ -863,10 +1104,13 @@ func buildAgenticRunner(
 	// HTTPMCPClient calls the agenthub-mcp-client-runtime service which proxies
 	// external MCP servers and exposes their tools over HTTP.
 	if cfg.MCPRuntimeURL != "" {
-		mcpHTTPClient := agentic.NewHTTPMCPClient(cfg.MCPRuntimeURL)
-		cachedMCPClient := agentic.NewCachedMCPClient(mcpHTTPClient, 30*time.Second)
-		adapter.WithMCPClient(cachedMCPClient)
-		slog.Info("agentic: MCP client wired", "url", cfg.MCPRuntimeURL)
+		mcpClient, err := newMCPClient(cfg, workloadCredentials)
+		if err != nil {
+			slog.Warn("agentic: MCP client disabled because workload authentication is incomplete", "error", err)
+		} else {
+			adapter.WithMCPClient(mcpClient)
+			slog.Info("agentic: MCP client wired with Keycloak workload identity", "url", cfg.MCPRuntimeURL)
+		}
 	}
 
 	// P-E1-2: wire the document search client so the document_search builtin tool
@@ -896,6 +1140,24 @@ func buildAgenticRunner(
 	}
 
 	return adapter
+}
+
+// newMCPClient composes discovery caching with the per-tenant failure breaker.
+// Tool calls remain uncached; after three consecutive tool-call failures, only
+// the affected tenant/server is withheld from future discovery and execution.
+func newMCPClient(cfg *config.Config, workloadCredentials workloadidentity.Resolver) (agentic.MCPClientService, error) {
+	tokenProvider, err := agentic.NewKeycloakServiceTokenProvider(
+		cfg.KeycloakBaseURL,
+		cfg.MCPRuntimeClientID,
+		workloadCredentials,
+		cfg.MCPRuntimeScopes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	httpClient := agentic.NewAuthenticatedHTTPMCPClient(cfg.MCPRuntimeURL, tokenProvider)
+	cachedClient := agentic.NewCachedMCPClient(httpClient, 30*time.Second)
+	return agentic.NewCircuitBreakerMCPClient(cachedClient, 3), nil
 }
 
 // buildDefaultChatModel creates a ChatModel from environment variables as a fallback.
@@ -957,6 +1219,24 @@ func (a *chatAgentExisterAdapter) GetByID(ctx context.Context, id uuid.UUID) err
 	return err
 }
 
+type a2aAgentReaderAdapter struct {
+	loader chat.AgentLoader
+}
+
+func (a *a2aAgentReaderAdapter) GetA2AAgent(ctx context.Context, id uuid.UUID) (a2a.AgentRef, error) {
+	if a.loader == nil {
+		return a2a.AgentRef{}, a2a.ErrNotFound
+	}
+	config, err := a.loader.GetAgentForRun(ctx, id)
+	if err != nil {
+		if errors.Is(err, agent.ErrNotFound) {
+			return a2a.AgentRef{}, a2a.ErrNotFound
+		}
+		return a2a.AgentRef{}, err
+	}
+	return a2a.AgentRef{ID: config.ID, Name: config.Name, RunConfig: config}, nil
+}
+
 func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (*chat.AgentRunConfig, error) {
 	ag, err := a.repo.FindByID(ctx, id)
 	if err != nil {
@@ -971,9 +1251,13 @@ func (a *agentConfigAdapter) GetAgentForRun(ctx context.Context, id uuid.UUID) (
 	disableAskUser, disableAgentDelegation := parseAgentToolFlags(ag.Config)
 	cfg := &chat.AgentRunConfig{
 		ID:                     ag.ID,
+		Name:                   ag.Name,
 		SystemPrompt:           systemPrompt,
 		ModelConfig:            ag.ModelConfig,
 		PermissionRules:        ag.PermissionRules,
+		EvalConfig:             ag.EvalConfig,
+		InputProcessors:        append([]string(nil), ag.InputProcessors...),
+		OutputProcessors:       append([]string(nil), ag.OutputProcessors...),
 		EnableManagement:       ag.EnableManagement,
 		DisableAskUser:         disableAskUser,
 		DisableAgentDelegation: disableAgentDelegation,
@@ -1124,6 +1408,29 @@ type tenantSchemaMigratorFunc func(ctx context.Context, tenantID string) error
 
 func (f tenantSchemaMigratorFunc) MigrateTenant(ctx context.Context, tenantID string) error {
 	return f(ctx, tenantID)
+}
+
+func requestACLSubject(req *http.Request) (string, []string) {
+	ctx := req.Context()
+	id, _, username := middleware.UserIdentityFromContext(ctx)
+	if username != "" {
+		return username, middleware.RolesFromContext(ctx)
+	}
+	return id, middleware.RolesFromContext(ctx)
+}
+
+func requestPromptIdentity(req *http.Request) chat.PromptIdentity {
+	ctx := req.Context()
+	id, email, username := middleware.UserIdentityFromContext(ctx)
+	tenantID := tenantctx.FromContext(ctx)
+	return chat.PromptIdentity{
+		UserID:     id,
+		UserEmail:  email,
+		Username:   username,
+		Roles:      middleware.RolesFromContext(ctx),
+		TenantID:   tenantID,
+		TenantName: tenantID,
+	}
 }
 
 // parseAgentToolFlags extracts per-agent builtin tool opt-outs from agent.Config JSONB.

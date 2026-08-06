@@ -63,6 +63,19 @@ func (m *mockAuditRepo) Record(_ context.Context, _ string, l audit.AuditLog) (a
 	return l, nil
 }
 
+func (m *mockAuditRepo) ApplyRetention(_ context.Context, _ string, cutoff time.Time, dryRun bool) (int, error) {
+	deleted := 0
+	for id, l := range m.data {
+		if l.CreatedAt.Before(cutoff) {
+			deleted++
+			if !dryRun {
+				delete(m.data, id)
+			}
+		}
+	}
+	return deleted, nil
+}
+
 const tenantID = "test-tenant"
 
 func TestAuditService_Record_Success(t *testing.T) {
@@ -162,6 +175,59 @@ func TestAuditService_ListAll_FilterByDateRange(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, total)
 	assert.Len(t, items, 1)
+}
+
+func TestAuditService_ApplyRetention_DeletesOnlyExpiredRows(t *testing.T) {
+	repo := newMockRepo()
+	svc := audit.NewService(repo)
+	now := time.Date(2026, 6, 23, 8, 0, 0, 0, time.UTC)
+	oldID := uuid.New()
+	recentID := uuid.New()
+	repo.data[oldID] = audit.AuditLog{
+		ID: oldID, EntityType: "a2a_invoke", Action: audit.AuditActionExecute,
+		CreatedAt: now.AddDate(-2, 0, 0),
+	}
+	repo.data[recentID] = audit.AuditLog{
+		ID: recentID, EntityType: "a2a_invoke", Action: audit.AuditActionExecute,
+		CreatedAt: now.AddDate(0, 0, -30),
+	}
+
+	resp, err := svc.ApplyRetention(context.Background(), tenantID, audit.AuditRetentionRequest{RetentionDays: 365}, now)
+
+	require.NoError(t, err)
+	assert.Equal(t, tenantID, resp.TenantID)
+	assert.Equal(t, 365, resp.RetentionDays)
+	assert.Equal(t, now.AddDate(0, 0, -365), resp.Cutoff)
+	assert.Equal(t, 1, resp.Deleted)
+	assert.NotContains(t, repo.data, oldID)
+	assert.Contains(t, repo.data, recentID)
+}
+
+func TestAuditService_ApplyRetention_DefaultsToPlatformFloorAndSupportsDryRun(t *testing.T) {
+	repo := newMockRepo()
+	svc := audit.NewService(repo)
+	now := time.Date(2026, 6, 23, 8, 0, 0, 0, time.UTC)
+	oldID := uuid.New()
+	repo.data[oldID] = audit.AuditLog{
+		ID: oldID, EntityType: "a2a_invoke", Action: audit.AuditActionExecute,
+		CreatedAt: now.AddDate(-2, 0, 0),
+	}
+
+	resp, err := svc.ApplyRetention(context.Background(), tenantID, audit.AuditRetentionRequest{DryRun: true}, now)
+
+	require.NoError(t, err)
+	assert.Equal(t, audit.DefaultAuditRetentionDays, resp.RetentionDays)
+	assert.True(t, resp.DryRun)
+	assert.Equal(t, 1, resp.Deleted)
+	assert.Contains(t, repo.data, oldID)
+}
+
+func TestAuditService_ApplyRetention_RejectsTenantLoweringPlatformFloor(t *testing.T) {
+	svc := audit.NewService(newMockRepo())
+	_, err := svc.ApplyRetention(context.Background(), tenantID, audit.AuditRetentionRequest{RetentionDays: 30}, time.Now())
+
+	require.ErrorIs(t, err, audit.ErrValidation)
+	assert.Contains(t, err.Error(), "retentionDays cannot be lower than 365")
 }
 
 // ---- ExtractIP tests ----

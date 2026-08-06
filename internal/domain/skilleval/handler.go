@@ -7,6 +7,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 )
 
 // Handler exposes the skill evaluation API.
@@ -22,6 +25,7 @@ func NewHandler(svc *Service) *Handler {
 // RegisterRoutes mounts all skill-eval endpoints under /api/skill-evals.
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Route("/api/skill-evals", func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
 		// Suite CRUD
 		r.Get("/suites", h.listSuites)
 		r.Post("/suites", h.createSuite)
@@ -62,7 +66,7 @@ func (h *Handler) listSuites(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) createSuite(w http.ResponseWriter, r *http.Request) {
 	var req CreateSuiteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		writeEvalError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -127,7 +131,7 @@ func (h *Handler) addCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CreateCaseRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		writeEvalError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -230,7 +234,7 @@ func (h *Handler) getRun(w http.ResponseWriter, r *http.Request) {
 func writeEvalJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeEvalError(w http.ResponseWriter, status int, msg string) {

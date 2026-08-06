@@ -2,7 +2,11 @@ package agentic
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/openai"
 )
 
 // stubChatModel is a minimal ChatModel for retry tests (internal package).
@@ -41,9 +46,9 @@ func (s *stubChatModel) GetProviderName() string { return "stub" }
 
 // modelTrackingChatModel tracks which models were requested.
 type modelTrackingChatModel struct {
-	calls       int
-	modelsUsed  []string
-	results     []stubResult
+	calls      int
+	modelsUsed []string
+	results    []stubResult
 }
 
 func (s *modelTrackingChatModel) Chat(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (*ai.ChatResponse, error) {
@@ -85,6 +90,54 @@ func TestRetryStream_TransientThenSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, stream)
 	assert.Equal(t, 2, model.calls)
+}
+
+func TestRetryStream_OpenAICompatibleRateLimitThenSSESuccess(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/chat/completions", r.URL.Path)
+		assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
+
+		var request struct {
+			Stream bool `json:"stream"`
+		}
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		assert.True(t, request.Stream)
+
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"rate limit"}}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	stream, err := retryStream(
+		context.Background(),
+		openai.New("test-key", server.URL),
+		[]ai.Message{{Role: ai.RoleUser, Content: "hello"}},
+		ai.ChatOptions{Model: "test-model"},
+		2,
+		SourceMainLoop,
+	)
+	require.NoError(t, err)
+
+	var output string
+	for chunk := range stream {
+		require.NoError(t, chunk.Error)
+		output += chunk.Delta
+	}
+
+	assert.Equal(t, "recovered", output)
+	assert.Equal(t, int32(2), calls.Load(), "the runner retry must issue a second streaming provider request")
 }
 
 func TestRetryStream_NonTransientError(t *testing.T) {
@@ -255,7 +308,7 @@ func TestRetryStreamWithFallback_FallbackOnRateLimit(t *testing.T) {
 	model := &stubChatModel{
 		results: []stubResult{
 			{err: fmt.Errorf("429 rate limit exceeded")}, // primary fails with rate limit
-			{err: nil},                                    // fallback1 succeeds
+			{err: nil}, // fallback1 succeeds
 		},
 	}
 	cfg := RunConfig{ModelFallbacks: []string{"fallback1"}, RetryMaxAttempts: 1}
@@ -290,6 +343,42 @@ func TestRetryStreamWithFallback_NoFallbackModels(t *testing.T) {
 	_, err := retryStreamWithFallbackSource(context.Background(), model, nil, ai.ChatOptions{}, cfg, SourceMainLoop, nil)
 	require.Error(t, err)
 	assert.Equal(t, 1, model.calls)
+}
+
+func TestRetryStreamWithFallbackSource_RecoversWithNonStreamingAndKeepsStream(t *testing.T) {
+	model := &streamFallbackInternalMockModel{
+		chatStreamErr: fmt.Errorf("provider returned HTTP 404 for streaming endpoint"),
+		chatResponse: &ai.ChatResponse{
+			Content:      "recovered without changing the public stream",
+			FinishReason: "stop",
+			Model:        "primary",
+			Usage:        ai.Usage{TotalTokens: 11},
+		},
+	}
+
+	result, err := retryStreamWithFallbackSource(
+		context.Background(),
+		model,
+		[]ai.Message{{Role: ai.RoleUser, Content: "hello"}},
+		ai.ChatOptions{Model: "primary"},
+		RunConfig{RetryMaxAttempts: 1},
+		SourceMainLoop,
+		nil,
+	)
+
+	require.NoError(t, err)
+	require.True(t, result.UsedNonStreaming)
+	require.False(t, result.WasFallback)
+	require.Equal(t, "primary", result.ModelUsed)
+	require.Equal(t, 1, model.streamCalls)
+	require.Equal(t, 1, model.chatCalls)
+
+	chunk := <-result.Stream
+	require.Equal(t, "recovered without changing the public stream", chunk.Delta)
+	final := <-result.Stream
+	require.Equal(t, "stop", final.FinishReason)
+	require.NotNil(t, final.Usage)
+	require.Equal(t, 11, final.Usage.TotalTokens)
 }
 
 func TestRetryStreamWithFallback_AllFallbacksFail(t *testing.T) {
@@ -718,7 +807,7 @@ func TestRetryStreamWithFallback_FallbackAfterRateLimit(t *testing.T) {
 	model := &modelTrackingChatModel{
 		results: []stubResult{
 			{err: fmt.Errorf("429 rate limit exceeded")}, // primary fails
-			{err: nil},                                    // fallback succeeds
+			{err: nil}, // fallback succeeds
 		},
 	}
 	config := DefaultRunConfig()
@@ -745,7 +834,7 @@ func TestRetryStreamWithFallback_FallbackAfterRateLimit(t *testing.T) {
 func TestRetryStreamWithFallback_FallbackChain(t *testing.T) {
 	model := &modelTrackingChatModel{
 		results: []stubResult{
-			{err: fmt.Errorf("429 rate limit")},     // primary fails
+			{err: fmt.Errorf("429 rate limit")},      // primary fails
 			{err: fmt.Errorf("503 service unavail")}, // first fallback fails
 			{err: nil},                               // second fallback succeeds
 		},
@@ -861,7 +950,7 @@ func TestRetryStreamWithFallback_PrimaryRetriesThenFallback(t *testing.T) {
 		results: []stubResult{
 			{err: fmt.Errorf("429 rate limit")}, // primary attempt 1
 			{err: fmt.Errorf("429 rate limit")}, // primary attempt 2
-			{err: nil},                           // fallback succeeds
+			{err: nil},                          // fallback succeeds
 		},
 	}
 	config := DefaultRunConfig()
@@ -876,6 +965,27 @@ func TestRetryStreamWithFallback_PrimaryRetriesThenFallback(t *testing.T) {
 	assert.True(t, result.WasFallback)
 	// 2 retries on primary + 1 on fallback = 3 calls
 	assert.Equal(t, 3, model.calls)
+}
+
+func TestRetryStreamWithFallback_FallbackChainRespectsStepAttempts(t *testing.T) {
+	model := &modelTrackingChatModel{
+		results: []stubResult{
+			{err: fmt.Errorf("429 rate limit")},          // primary
+			{err: fmt.Errorf("503 service unavailable")}, // fallback attempt 1
+			{err: nil}, // fallback attempt 2
+		},
+	}
+	config := DefaultRunConfig()
+	config.RetryMaxAttempts = 1
+	config.ModelFallbackChain = []ModelFallbackStep{{Model: "always-ok", MaxRetries: 2}}
+	config.ModelFallbacks = []string{"legacy-ignored"}
+
+	result, err := retryStreamWithFallback(context.Background(), model, nil,
+		ai.ChatOptions{Model: "always-rate-limit"}, config, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, "always-ok", result.ModelUsed)
+	assert.Equal(t, []string{"always-rate-limit", "always-ok", "always-ok"}, model.modelsUsed)
 }
 
 // --- classifyTransientError tests ---

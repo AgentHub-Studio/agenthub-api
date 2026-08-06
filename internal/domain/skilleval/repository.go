@@ -9,6 +9,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/database"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // Repository defines persistence for the skill evaluation framework.
@@ -44,19 +47,37 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &repository{pool: pool}
 }
 
+func (r *repository) acquire(ctx context.Context) (*pgxpool.Conn, func(), error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, nil, fmt.Errorf("skilleval: acquire tenant connection: %w", err)
+	}
+	return conn, release, nil
+}
+
 // --- suites ---
 
 func (r *repository) CreateSuite(ctx context.Context, s EvalSuite) (EvalSuite, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return EvalSuite{}, err
+	}
+	defer release()
 	q := `INSERT INTO skill_eval_suite (skill_id, name, description)
 	      VALUES ($1, $2, $3)
 	      RETURNING id, skill_id, name, description, created_at, updated_at`
-	row := r.pool.QueryRow(ctx, q, s.SkillID, s.Name, s.Description)
+	row := conn.QueryRow(ctx, q, s.SkillID, s.Name, s.Description)
 	return scanSuite(row)
 }
 
 func (r *repository) SuiteExistsByName(ctx context.Context, skillID uuid.UUID, name string) (bool, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	var exists bool
-	err := r.pool.QueryRow(ctx,
+	err = conn.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM skill_eval_suite WHERE skill_id = $1 AND name = $2)`,
 		skillID, name,
 	).Scan(&exists)
@@ -64,14 +85,18 @@ func (r *repository) SuiteExistsByName(ctx context.Context, skillID uuid.UUID, n
 }
 
 func (r *repository) ListSuites(ctx context.Context, skillID *uuid.UUID) ([]EvalSuite, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	var rows pgx.Rows
-	var err error
 	if skillID != nil {
-		rows, err = r.pool.Query(ctx,
+		rows, err = conn.Query(ctx,
 			`SELECT id, skill_id, name, description, created_at, updated_at
 			 FROM skill_eval_suite WHERE skill_id = $1 ORDER BY name ASC`, *skillID)
 	} else {
-		rows, err = r.pool.Query(ctx,
+		rows, err = conn.Query(ctx,
 			`SELECT id, skill_id, name, description, created_at, updated_at
 			 FROM skill_eval_suite ORDER BY name ASC`)
 	}
@@ -91,9 +116,14 @@ func (r *repository) ListSuites(ctx context.Context, skillID *uuid.UUID) ([]Eval
 }
 
 func (r *repository) GetSuiteByID(ctx context.Context, id uuid.UUID) (EvalSuite, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return EvalSuite{}, err
+	}
+	defer release()
 	q := `SELECT id, skill_id, name, description, created_at, updated_at
 	      FROM skill_eval_suite WHERE id = $1`
-	row := r.pool.QueryRow(ctx, q, id)
+	row := conn.QueryRow(ctx, q, id)
 	s, err := scanSuite(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -105,7 +135,12 @@ func (r *repository) GetSuiteByID(ctx context.Context, id uuid.UUID) (EvalSuite,
 }
 
 func (r *repository) DeleteSuite(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM skill_eval_suite WHERE id = $1`, id)
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	tag, err := conn.Exec(ctx, `DELETE FROM skill_eval_suite WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("skilleval: delete suite: %w", err)
 	}
@@ -123,6 +158,11 @@ func scanSuite(row pgx.Row) (EvalSuite, error) {
 // --- cases ---
 
 func (r *repository) CreateCase(ctx context.Context, ec EvalCase) (EvalCase, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return EvalCase{}, err
+	}
+	defer release()
 	cfg := ec.GraderConfig
 	if len(cfg) == 0 {
 		cfg = json.RawMessage(`{}`)
@@ -131,14 +171,19 @@ func (r *repository) CreateCase(ctx context.Context, ec EvalCase) (EvalCase, err
 	        (suite_id, description, input_text, expected_tool, expected_output, grader_type, grader_config, should_trigger)
 	      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	      RETURNING id, suite_id, description, input_text, expected_tool, expected_output, grader_type, grader_config, should_trigger, created_at`
-	row := r.pool.QueryRow(ctx, q,
+	row := conn.QueryRow(ctx, q,
 		ec.SuiteID, ec.Description, ec.InputText, ec.ExpectedTool,
 		ec.ExpectedOutput, string(ec.GraderType), []byte(cfg), ec.ShouldTrigger)
 	return scanCase(row)
 }
 
 func (r *repository) ListCases(ctx context.Context, suiteID uuid.UUID) ([]EvalCase, error) {
-	rows, err := r.pool.Query(ctx,
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	rows, err := conn.Query(ctx,
 		`SELECT id, suite_id, description, input_text, expected_tool, expected_output,
 		        grader_type, grader_config, should_trigger, created_at
 		 FROM skill_eval_case WHERE suite_id = $1 ORDER BY created_at ASC`, suiteID)
@@ -158,10 +203,15 @@ func (r *repository) ListCases(ctx context.Context, suiteID uuid.UUID) ([]EvalCa
 }
 
 func (r *repository) GetCaseByID(ctx context.Context, id uuid.UUID) (EvalCase, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return EvalCase{}, err
+	}
+	defer release()
 	q := `SELECT id, suite_id, description, input_text, expected_tool, expected_output,
 	             grader_type, grader_config, should_trigger, created_at
 	      FROM skill_eval_case WHERE id = $1`
-	row := r.pool.QueryRow(ctx, q, id)
+	row := conn.QueryRow(ctx, q, id)
 	ec, err := scanCase(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -173,7 +223,12 @@ func (r *repository) GetCaseByID(ctx context.Context, id uuid.UUID) (EvalCase, e
 }
 
 func (r *repository) DeleteCase(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM skill_eval_case WHERE id = $1`, id)
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	tag, err := conn.Exec(ctx, `DELETE FROM skill_eval_case WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("skilleval: delete case: %w", err)
 	}
@@ -203,20 +258,30 @@ func scanCase(row pgx.Row) (EvalCase, error) {
 // --- runs ---
 
 func (r *repository) CreateRun(ctx context.Context, run EvalRun) (EvalRun, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return EvalRun{}, err
+	}
+	defer release()
 	q := `INSERT INTO skill_eval_run (suite_id, status, total_cases, passed_cases, failed_cases)
 	      VALUES ($1, $2, $3, $4, $5)
 	      RETURNING id, suite_id, status, total_cases, passed_cases, failed_cases, started_at, finished_at`
-	row := r.pool.QueryRow(ctx, q,
+	row := conn.QueryRow(ctx, q,
 		run.SuiteID, string(run.Status), run.TotalCases, run.PassedCases, run.FailedCases)
 	return scanRun(row)
 }
 
 func (r *repository) UpdateRun(ctx context.Context, run EvalRun) (EvalRun, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return EvalRun{}, err
+	}
+	defer release()
 	q := `UPDATE skill_eval_run
 	      SET status = $1, passed_cases = $2, failed_cases = $3, finished_at = $4
 	      WHERE id = $5
 	      RETURNING id, suite_id, status, total_cases, passed_cases, failed_cases, started_at, finished_at`
-	row := r.pool.QueryRow(ctx, q,
+	row := conn.QueryRow(ctx, q,
 		string(run.Status), run.PassedCases, run.FailedCases, run.FinishedAt, run.ID)
 	updated, err := scanRun(row)
 	if err != nil {
@@ -229,9 +294,14 @@ func (r *repository) UpdateRun(ctx context.Context, run EvalRun) (EvalRun, error
 }
 
 func (r *repository) GetRunByID(ctx context.Context, id uuid.UUID) (EvalRun, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return EvalRun{}, err
+	}
+	defer release()
 	q := `SELECT id, suite_id, status, total_cases, passed_cases, failed_cases, started_at, finished_at
 	      FROM skill_eval_run WHERE id = $1`
-	row := r.pool.QueryRow(ctx, q, id)
+	row := conn.QueryRow(ctx, q, id)
 	run, err := scanRun(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -243,7 +313,12 @@ func (r *repository) GetRunByID(ctx context.Context, id uuid.UUID) (EvalRun, err
 }
 
 func (r *repository) ListRuns(ctx context.Context, suiteID uuid.UUID) ([]EvalRun, error) {
-	rows, err := r.pool.Query(ctx,
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	rows, err := conn.Query(ctx,
 		`SELECT id, suite_id, status, total_cases, passed_cases, failed_cases, started_at, finished_at
 		 FROM skill_eval_run WHERE suite_id = $1 ORDER BY started_at DESC`, suiteID)
 	if err != nil {
@@ -273,16 +348,26 @@ func scanRun(row pgx.Row) (EvalRun, error) {
 // --- case results ---
 
 func (r *repository) CreateCaseResult(ctx context.Context, res CaseResult) (CaseResult, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return CaseResult{}, err
+	}
+	defer release()
 	q := `INSERT INTO skill_eval_case_result (run_id, case_id, passed, actual_output, score, error_msg, duration_ms)
 	      VALUES ($1, $2, $3, $4, $5, $6, $7)
 	      RETURNING id, run_id, case_id, passed, actual_output, score, error_msg, duration_ms, created_at`
-	row := r.pool.QueryRow(ctx, q,
+	row := conn.QueryRow(ctx, q,
 		res.RunID, res.CaseID, res.Passed, res.ActualOutput, res.Score, res.ErrorMsg, res.DurationMs)
 	return scanResult(row)
 }
 
 func (r *repository) ListCaseResults(ctx context.Context, runID uuid.UUID) ([]CaseResult, error) {
-	rows, err := r.pool.Query(ctx,
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	rows, err := conn.Query(ctx,
 		`SELECT id, run_id, case_id, passed, actual_output, score, error_msg, duration_ms, created_at
 		 FROM skill_eval_case_result WHERE run_id = $1 ORDER BY created_at ASC`, runID)
 	if err != nil {

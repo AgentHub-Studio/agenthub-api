@@ -31,7 +31,7 @@ func NewRabbitMQEventPublisher(url string) (*RabbitMQEventPublisher, error) {
 
 	ch, err := conn.Channel()
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("document publisher: open channel: %w", err)
 	}
 
@@ -50,8 +50,8 @@ func NewRabbitMQEventPublisher(url string) (*RabbitMQEventPublisher, error) {
 		},
 	)
 	if err != nil {
-		ch.Close()
-		conn.Close()
+		_ = ch.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("document publisher: declare queue: %w", err)
 	}
 
@@ -82,9 +82,9 @@ func (p *RabbitMQEventPublisher) PublishUploaded(ctx context.Context, event Docu
 // Close releases the AMQP channel and connection.
 func (p *RabbitMQEventPublisher) Close() {
 	if p.ch != nil {
-		p.ch.Close()
+		_ = p.ch.Close()
 	}
 	if p.conn != nil {
-		p.conn.Close()
+		_ = p.conn.Close()
 	}
 }

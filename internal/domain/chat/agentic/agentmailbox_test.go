@@ -1,8 +1,8 @@
 package agentic_test
 
 import (
-	"encoding/json"
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -190,6 +190,32 @@ func TestHandleSendMessage_EmptyMessage(t *testing.T) {
 	result := agentic.HandleSendMessage(mb, uuid.New(), "agent-a", input, ch)
 	assert.NotNil(t, result.Error)
 	assert.Contains(t, *result.Error, "requires a 'message'")
+}
+
+func TestHandleSendMessage_RedactsPublicEventButPreservesMailboxContent(t *testing.T) {
+	mb := agentic.NewAgentMailbox()
+	sessionID := uuid.New()
+	ch := make(chan agentic.RunEvent, 1)
+	const secret = "mailbox-public-event-secret"
+	const internalURL = "http://agenthub-skill-runtime:8080/v1/execute"
+	message := "Authorization: Bearer " + secret + "\nupstream=" + internalURL
+	input, err := json.Marshal(map[string]string{"to": "agent-b", "message": message})
+	require.NoError(t, err)
+
+	result := agentic.HandleSendMessage(mb, sessionID, "agent-a", input, ch)
+	require.Nil(t, result.Error)
+
+	event := <-ch
+	var public agentic.AgentMessageData
+	require.NoError(t, json.Unmarshal(event.Data, &public))
+	assert.NotContains(t, public.Content, secret)
+	assert.NotContains(t, public.Content, internalURL)
+	assert.Contains(t, public.Content, "[REDACTED]")
+	assert.Contains(t, public.Content, "<upstream>")
+
+	mail := mb.ReadUnread(sessionID, "agent-b")
+	require.Len(t, mail, 1)
+	assert.Equal(t, message, mail[0].Content)
 }
 
 func TestHandleSendMessage_EmptyTo(t *testing.T) {

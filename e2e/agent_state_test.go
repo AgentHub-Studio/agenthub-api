@@ -27,6 +27,11 @@ func TestE2E_AgentPublishArchiveClone(t *testing.T) {
 	status := c.Post("/api/agents", map[string]any{
 		"name":        "E2E State Agent",
 		"description": "For state transition tests",
+		"systemPrompt": "You are an E2E state-transition test agent.",
+		"modelConfig": map[string]any{
+			"provider": "openai",
+			"model":    "gpt-4o",
+		},
 	}, &agent)
 	require.Equal(t, http.StatusCreated, status)
 	agentID := agent["id"].(string)
@@ -53,7 +58,9 @@ func TestE2E_AgentPublishArchiveClone(t *testing.T) {
 	// --- Clone from archived agent ---
 	t.Run("clone agent creates new DRAFT", func(t *testing.T) {
 		var cloned map[string]any
-		s := c.Post("/api/agents/"+agentID+"/clone", nil, &cloned)
+		s := c.Post("/api/agents/"+agentID+"/clone", map[string]any{
+			"name": "E2E State Agent Clone",
+		}, &cloned)
 		assert.Equal(t, http.StatusCreated, s)
 		clonedID, _ := cloned["id"].(string)
 		assert.NotEmpty(t, clonedID)

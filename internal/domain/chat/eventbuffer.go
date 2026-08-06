@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -32,7 +34,16 @@ func ParseSSEID(sseID string) (runID string, seq uint64, ok bool) {
 		return "", 0, false
 	}
 	runID = sseID[:idx]
-	n, err := strconv.ParseUint(sseID[idx+1:], 10, 64)
+	seqText := sseID[idx+1:]
+	if len(seqText) > 1 && seqText[0] == '0' {
+		return "", 0, false
+	}
+	for _, ch := range seqText {
+		if ch < '0' || ch > '9' {
+			return "", 0, false
+		}
+	}
+	n, err := strconv.ParseUint(seqText, 10, 64)
 	if err != nil {
 		return "", 0, false
 	}
@@ -177,25 +188,39 @@ func (b *EventBuffer) NewestSeq() uint64 {
 type RunEventBufferRegistry struct {
 	mu      sync.RWMutex
 	buffers map[string]*EventBuffer
+	owners  map[string]uuid.UUID
 }
 
 // NewRunEventBufferRegistry creates a new registry.
 func NewRunEventBufferRegistry() *RunEventBufferRegistry {
 	return &RunEventBufferRegistry{
 		buffers: make(map[string]*EventBuffer),
+		owners:  make(map[string]uuid.UUID),
 	}
 }
 
 // GetOrCreate returns the buffer for the given runID, creating one if absent.
 func (r *RunEventBufferRegistry) GetOrCreate(runID string, capacity int) *EventBuffer {
+	return r.GetOrCreateForSession(runID, uuid.Nil, capacity)
+}
+
+// GetOrCreateForSession returns the buffer for a run and records the owning
+// session so SSE resume cannot replay another session's buffered events.
+func (r *RunEventBufferRegistry) GetOrCreateForSession(runID string, sessionID uuid.UUID, capacity int) *EventBuffer {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if buf, ok := r.buffers[runID]; ok {
+		if sessionID != uuid.Nil {
+			r.owners[runID] = sessionID
+		}
 		return buf
 	}
 	buf := NewEventBuffer(capacity)
 	r.buffers[runID] = buf
+	if sessionID != uuid.Nil {
+		r.owners[runID] = sessionID
+	}
 	return buf
 }
 
@@ -206,11 +231,20 @@ func (r *RunEventBufferRegistry) Get(runID string) *EventBuffer {
 	return r.buffers[runID]
 }
 
+// Owner returns the session that owns the run buffer.
+func (r *RunEventBufferRegistry) Owner(runID string) (uuid.UUID, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	sessionID, ok := r.owners[runID]
+	return sessionID, ok
+}
+
 // Remove deletes the buffer for the given runID.
 func (r *RunEventBufferRegistry) Remove(runID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.buffers, runID)
+	delete(r.owners, runID)
 }
 
 // Len returns the number of active buffers.

@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -43,10 +45,7 @@ type keycloakClient struct {
 	adminPassword  string
 	adminClientID  string
 	adminRealm     string
-	frontendClient string
 	httpClient     *http.Client
-	clientUUIDMu   sync.RWMutex
-	clientUUIDs    map[string]string
 	tokenMu        sync.Mutex
 	cachedToken    string
 	tokenExpiresAt time.Time
@@ -69,7 +68,7 @@ type KeycloakClientConfig struct {
 	AdminPassword  string
 	AdminClientID  string // defaults to admin-cli
 	AdminRealm     string // defaults to master
-	FrontendClient string // defaults to agenthub-frontend
+	FrontendClient string // deprecated: user roles are tenant realm roles
 }
 
 // NewKeycloakUserClient creates a new Keycloak Admin API user client.
@@ -80,24 +79,19 @@ func NewKeycloakUserClient(cfg KeycloakClientConfig) KeycloakUserClient {
 	if cfg.AdminRealm == "" {
 		cfg.AdminRealm = "master"
 	}
-	if cfg.FrontendClient == "" {
-		cfg.FrontendClient = "agenthub-frontend"
-	}
 	return &keycloakClient{
-		baseURL:        cfg.BaseURL,
-		adminUsername:  cfg.AdminUsername,
-		adminPassword:  cfg.AdminPassword,
-		adminClientID:  cfg.AdminClientID,
-		adminRealm:     cfg.AdminRealm,
-		frontendClient: cfg.FrontendClient,
+		baseURL:       cfg.BaseURL,
+		adminUsername: cfg.AdminUsername,
+		adminPassword: cfg.AdminPassword,
+		adminClientID: cfg.AdminClientID,
+		adminRealm:    cfg.AdminRealm,
 		// Bug 269: Keycloak admin API às vezes leva >15s para responder
 		// (observado em GET /admin/realms/X/users em cluster k3s). 60s
 		// dá margem para Keycloak pod sob carga sem aborta requests
 		// legítimos. Logs mostravam: context deadline exceeded em 15s
 		// para chamadas que de fato respondem em 25-30s.
-		httpClient:     &http.Client{Timeout: 60 * time.Second},
-		clientUUIDs:    make(map[string]string),
-		rolesCache:     make(map[string]rolesCacheEntry),
+		httpClient: &http.Client{Timeout: 60 * time.Second},
+		rolesCache: make(map[string]rolesCacheEntry),
 	}
 }
 
@@ -113,24 +107,29 @@ func (c *keycloakClient) getAdminToken(ctx context.Context) (string, error) {
 		return c.cachedToken, nil
 	}
 
-	tokenURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token", c.baseURL, c.adminRealm)
+	tokenURL, err := buildKeycloakURL(c.baseURL, "realms", c.adminRealm, "protocol", "openid-connect", "token")
+	if err != nil {
+		return "", err
+	}
 	data := url.Values{}
 	data.Set("grant_type", "password")
 	data.Set("client_id", c.adminClientID)
 	data.Set("username", c.adminUsername)
 	data.Set("password", c.adminPassword)
 
+	// #nosec G704 -- tokenURL is built from a trusted Keycloak base URL and escaped path segments.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewBufferString(data.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("keycloak: build token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
+	// #nosec G704 -- req URL is built by buildKeycloakURL from a trusted base URL and escaped path segments.
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("keycloak: token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("keycloak: token response %d: %s", resp.StatusCode, string(body))
@@ -151,7 +150,7 @@ func (c *keycloakClient) getAdminToken(ctx context.Context) (string, error) {
 	return c.cachedToken, nil
 }
 
-func (c *keycloakClient) adminRequest(ctx context.Context, method, path string, bodyV any) (*http.Response, error) {
+func (c *keycloakClient) adminRequest(ctx context.Context, method, tenantID string, bodyV any, segments ...string) (*http.Response, error) {
 	token, err := c.getAdminToken(ctx)
 	if err != nil {
 		return nil, err
@@ -164,7 +163,11 @@ func (c *keycloakClient) adminRequest(ctx context.Context, method, path string, 
 		}
 		bodyReader = bytes.NewReader(b)
 	}
-	fullURL := c.baseURL + path
+	fullURL, err := buildKeycloakURL(c.baseURL, append([]string{"admin", "realms", tenantID}, segments...)...)
+	if err != nil {
+		return nil, err
+	}
+	// #nosec G704 -- fullURL is built from a trusted Keycloak base URL and escaped path segments.
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("keycloak: build request: %w", err)
@@ -173,7 +176,63 @@ func (c *keycloakClient) adminRequest(ctx context.Context, method, path string, 
 	if bodyV != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// #nosec G704 -- req URL is built by buildKeycloakURL from a trusted base URL and escaped path segments.
 	return c.httpClient.Do(req)
+}
+
+func buildKeycloakURL(rawBase string, segments ...string) (string, error) {
+	parsed, err := parseKeycloakBaseURL(rawBase)
+	if err != nil {
+		return "", err
+	}
+	escapedPath := strings.TrimSuffix(parsed.EscapedPath(), "/")
+	for _, segment := range segments {
+		if segment == "" || containsKeycloakURLControlChar(segment) {
+			return "", fmt.Errorf("keycloak: invalid URL path segment")
+		}
+		escapedPath += "/" + url.PathEscape(segment)
+	}
+	if escapedPath == "" {
+		escapedPath = "/"
+	}
+	unescapedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return "", err
+	}
+	next := *parsed
+	next.Path = unescapedPath
+	next.RawPath = escapedPath
+	return next.String(), nil
+}
+
+func parseKeycloakBaseURL(rawBase string) (*url.URL, error) {
+	if rawBase == "" || containsKeycloakURLControlChar(rawBase) {
+		return nil, fmt.Errorf("keycloak: invalid base URL: empty or unsafe")
+	}
+	parsed, err := url.Parse(strings.TrimRight(rawBase, "/"))
+	if err != nil {
+		return nil, fmt.Errorf("keycloak: invalid base URL: %w", err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("keycloak: invalid base URL: unsupported scheme %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("keycloak: invalid base URL: missing host")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("keycloak: invalid base URL: userinfo, query and fragment are not allowed")
+	}
+	return parsed, nil
+}
+
+func containsKeycloakURLControlChar(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // kcUser is the Keycloak representation of a user (subset).
@@ -198,38 +257,6 @@ func kcUserToUser(k kcUser, roles []string) User {
 	}
 }
 
-func (c *keycloakClient) getClientUUID(ctx context.Context, tenantID string) (string, error) {
-	// Cache: clientUUID is stable for the lifetime of agenthub-frontend client.
-	c.clientUUIDMu.RLock()
-	if cached, ok := c.clientUUIDs[tenantID]; ok {
-		c.clientUUIDMu.RUnlock()
-		return cached, nil
-	}
-	c.clientUUIDMu.RUnlock()
-
-	path := fmt.Sprintf("/admin/realms/%s/clients?clientId=%s", tenantID, c.frontendClient)
-	resp, err := c.adminRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("keycloak: get clients %d: %s", resp.StatusCode, string(body))
-	}
-	var clients []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(body, &clients); err != nil || len(clients) == 0 {
-		return "", fmt.Errorf("keycloak: client %q not found in realm %s", c.frontendClient, tenantID)
-	}
-	uuid := clients[0].ID
-	c.clientUUIDMu.Lock()
-	c.clientUUIDs[tenantID] = uuid
-	c.clientUUIDMu.Unlock()
-	return uuid, nil
-}
-
 // rolesCacheTTL is how long a roles entry stays cached. Bug 271: roles
 // mudam raramente; 60s reduz drasticamente o N+1 em GET /api/users.
 const rolesCacheTTL = 60 * time.Second
@@ -247,7 +274,7 @@ func (c *keycloakClient) rolesFromCache(tenantID, userID string) ([]string, bool
 	if !ok || time.Now().After(entry.expiresAt) {
 		return nil, false
 	}
-	return entry.roles, true
+	return append([]string(nil), entry.roles...), true
 }
 
 // rolesCacheMaxEntries é o threshold a partir do qual rolesCacheStore faz
@@ -289,16 +316,11 @@ func (c *keycloakClient) getUserRoles(ctx context.Context, tenantID, userID stri
 	if cached, ok := c.rolesFromCache(tenantID, userID); ok {
 		return cached, nil
 	}
-	clientUUID, err := c.getClientUUID(ctx, tenantID)
+	resp, err := c.adminRequest(ctx, http.MethodGet, tenantID, nil, "users", userID, "role-mappings", "realm")
 	if err != nil {
 		return nil, err
 	}
-	path := fmt.Sprintf("/admin/realms/%s/users/%s/role-mappings/clients/%s", tenantID, userID, clientUUID)
-	resp, err := c.adminRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		c.rolesCacheStore(tenantID, userID, []string{})
@@ -313,21 +335,22 @@ func (c *keycloakClient) getUserRoles(ctx context.Context, tenantID, userID stri
 	if err := json.Unmarshal(body, &roles); err != nil {
 		return nil, fmt.Errorf("keycloak: parse roles: %w", err)
 	}
-	names := make([]string, len(roles))
-	for i, role := range roles {
-		names[i] = role.Name
+	names := make([]string, 0, len(roles))
+	for _, role := range roles {
+		if role.Name != "" {
+			names = append(names, role.Name)
+		}
 	}
 	c.rolesCacheStore(tenantID, userID, names)
 	return names, nil
 }
 
 func (c *keycloakClient) ListUsers(ctx context.Context, tenantID string) ([]User, error) {
-	path := fmt.Sprintf("/admin/realms/%s/users", tenantID)
-	resp, err := c.adminRequest(ctx, http.MethodGet, path, nil)
+	resp, err := c.adminRequest(ctx, http.MethodGet, tenantID, nil, "users")
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("keycloak: list users %d: %s", resp.StatusCode, string(body))
@@ -336,31 +359,41 @@ func (c *keycloakClient) ListUsers(ctx context.Context, tenantID string) ([]User
 	if err := json.Unmarshal(body, &kcUsers); err != nil {
 		return nil, fmt.Errorf("keycloak: parse users: %w", err)
 	}
-	// Pre-warm getClientUUID to avoid each goroutine racing to fetch it.
-	if _, err := c.getClientUUID(ctx, tenantID); err != nil {
-		return nil, err
-	}
 	users := make([]User, len(kcUsers))
-	var wg sync.WaitGroup
+	var (
+		wg        sync.WaitGroup
+		roleErr   error
+		roleErrMu sync.Mutex
+	)
 	for i, ku := range kcUsers {
 		wg.Add(1)
 		go func(i int, ku kcUser) {
 			defer wg.Done()
-			roles, _ := c.getUserRoles(ctx, tenantID, ku.ID)
+			roles, err := c.getUserRoles(ctx, tenantID, ku.ID)
+			if err != nil {
+				roleErrMu.Lock()
+				if roleErr == nil {
+					roleErr = fmt.Errorf("keycloak: list user roles for %q: %w", ku.ID, err)
+				}
+				roleErrMu.Unlock()
+				return
+			}
 			users[i] = kcUserToUser(ku, roles)
 		}(i, ku)
 	}
 	wg.Wait()
+	if roleErr != nil {
+		return nil, roleErr
+	}
 	return users, nil
 }
 
 func (c *keycloakClient) GetUser(ctx context.Context, tenantID string, userID string) (User, error) {
-	path := fmt.Sprintf("/admin/realms/%s/users/%s", tenantID, userID)
-	resp, err := c.adminRequest(ctx, http.MethodGet, path, nil)
+	resp, err := c.adminRequest(ctx, http.MethodGet, tenantID, nil, "users", userID)
 	if err != nil {
 		return User{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		return User{}, ErrNotFound
@@ -372,29 +405,44 @@ func (c *keycloakClient) GetUser(ctx context.Context, tenantID string, userID st
 	if err := json.Unmarshal(body, &ku); err != nil {
 		return User{}, fmt.Errorf("keycloak: parse user: %w", err)
 	}
-	roles, _ := c.getUserRoles(ctx, tenantID, ku.ID)
+	roles, err := c.getUserRoles(ctx, tenantID, ku.ID)
+	if err != nil {
+		return User{}, err
+	}
 	return kcUserToUser(ku, roles), nil
 }
 
 func (c *keycloakClient) CreateUser(ctx context.Context, tenantID string, req CreateUserRequest) (User, error) {
 	type kcCreateReq struct {
-		Username  string `json:"username"`
-		Email     string `json:"email"`
-		FirstName string `json:"firstName"`
-		LastName  string `json:"lastName"`
-		Enabled   bool   `json:"enabled"`
-		Credentials []struct {
+		Username        string   `json:"username"`
+		Email           string   `json:"email"`
+		FirstName       string   `json:"firstName"`
+		LastName        string   `json:"lastName"`
+		Enabled         bool     `json:"enabled"`
+		EmailVerified   bool     `json:"emailVerified"`
+		RequiredActions []string `json:"requiredActions"`
+		Credentials     []struct {
 			Type      string `json:"type"`
 			Value     string `json:"value"`
 			Temporary bool   `json:"temporary"`
 		} `json:"credentials"`
 	}
+	firstName := strings.TrimSpace(req.FirstName)
+	if firstName == "" {
+		firstName = strings.TrimSpace(req.Username)
+	}
+	lastName := strings.TrimSpace(req.LastName)
+	if lastName == "" {
+		lastName = strings.TrimSpace(req.Username)
+	}
 	body := kcCreateReq{
-		Username:  req.Username,
-		Email:     req.Email,
-		FirstName: req.FirstName,
-		LastName:  req.LastName,
-		Enabled:   true,
+		Username:        req.Username,
+		Email:           req.Email,
+		FirstName:       firstName,
+		LastName:        lastName,
+		Enabled:         true,
+		EmailVerified:   true,
+		RequiredActions: []string{},
 	}
 	if req.Password != "" {
 		body.Credentials = append(body.Credentials, struct {
@@ -404,12 +452,11 @@ func (c *keycloakClient) CreateUser(ctx context.Context, tenantID string, req Cr
 		}{Type: "password", Value: req.Password, Temporary: false})
 	}
 
-	path := fmt.Sprintf("/admin/realms/%s/users", tenantID)
-	resp, err := c.adminRequest(ctx, http.MethodPost, path, body)
+	resp, err := c.adminRequest(ctx, http.MethodPost, tenantID, body, "users")
 	if err != nil {
 		return User{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusConflict {
 		return User{}, ErrAlreadyExists
@@ -464,12 +511,11 @@ func (c *keycloakClient) UpdateUser(ctx context.Context, tenantID string, userID
 		patch["enabled"] = *req.Enabled
 	}
 
-	path := fmt.Sprintf("/admin/realms/%s/users/%s", tenantID, userID)
-	resp, err := c.adminRequest(ctx, http.MethodPut, path, patch)
+	resp, err := c.adminRequest(ctx, http.MethodPut, tenantID, patch, "users", userID)
 	if err != nil {
 		return User{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return User{}, ErrNotFound
 	}
@@ -482,12 +528,11 @@ func (c *keycloakClient) UpdateUser(ctx context.Context, tenantID string, userID
 }
 
 func (c *keycloakClient) DeleteUser(ctx context.Context, tenantID string, userID string) error {
-	path := fmt.Sprintf("/admin/realms/%s/users/%s", tenantID, userID)
-	resp, err := c.adminRequest(ctx, http.MethodDelete, path, nil)
+	resp, err := c.adminRequest(ctx, http.MethodDelete, tenantID, nil, "users", userID)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
@@ -516,17 +561,12 @@ func (c *keycloakClient) RemoveRole(ctx context.Context, tenantID string, userID
 }
 
 func (c *keycloakClient) manageRole(ctx context.Context, tenantID, userID, role, method string) error {
-	clientUUID, err := c.getClientUUID(ctx, tenantID)
-	if err != nil {
-		return err
-	}
 	// First, resolve the role representation from Keycloak.
-	rolePath := fmt.Sprintf("/admin/realms/%s/clients/%s/roles/%s", tenantID, clientUUID, role)
-	roleResp, err := c.adminRequest(ctx, http.MethodGet, rolePath, nil)
+	roleResp, err := c.adminRequest(ctx, http.MethodGet, tenantID, nil, "roles", role)
 	if err != nil {
 		return err
 	}
-	defer roleResp.Body.Close()
+	defer func() { _ = roleResp.Body.Close() }()
 	roleBody, _ := io.ReadAll(roleResp.Body)
 	if roleResp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("keycloak: role %q not found", role)
@@ -539,12 +579,11 @@ func (c *keycloakClient) manageRole(ctx context.Context, tenantID, userID, role,
 		return fmt.Errorf("keycloak: parse role: %w", err)
 	}
 
-	path := fmt.Sprintf("/admin/realms/%s/users/%s/role-mappings/clients/%s", tenantID, userID, clientUUID)
-	resp, err := c.adminRequest(ctx, method, path, []map[string]any{roleRep})
+	resp, err := c.adminRequest(ctx, method, tenantID, []map[string]any{roleRep}, "users", userID, "role-mappings", "realm")
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
@@ -557,12 +596,11 @@ func (c *keycloakClient) manageRole(ctx context.Context, tenantID, userID, role,
 
 // ResetPassword triggers a Keycloak "UPDATE_PASSWORD" required action, sending a reset email.
 func (c *keycloakClient) ResetPassword(ctx context.Context, tenantID string, userID string) error {
-	path := fmt.Sprintf("/admin/realms/%s/users/%s/execute-actions-email", tenantID, userID)
-	resp, err := c.adminRequest(ctx, http.MethodPut, path, []string{"UPDATE_PASSWORD"})
+	resp, err := c.adminRequest(ctx, http.MethodPut, tenantID, []string{"UPDATE_PASSWORD"}, "users", userID, "execute-actions-email")
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
 	}
@@ -573,18 +611,13 @@ func (c *keycloakClient) ResetPassword(ctx context.Context, tenantID string, use
 	return nil
 }
 
-// ListRoles returns all client roles defined in the agenthub-frontend client for a realm.
+// ListRoles returns tenant realm roles managed by AgentHub.
 func (c *keycloakClient) ListRoles(ctx context.Context, tenantID string) ([]string, error) {
-	clientUUID, err := c.getClientUUID(ctx, tenantID)
+	resp, err := c.adminRequest(ctx, http.MethodGet, tenantID, nil, "roles")
 	if err != nil {
 		return nil, err
 	}
-	path := fmt.Sprintf("/admin/realms/%s/clients/%s/roles", tenantID, clientUUID)
-	resp, err := c.adminRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("keycloak: list roles %d: %s", resp.StatusCode, string(body))
@@ -595,11 +628,21 @@ func (c *keycloakClient) ListRoles(ctx context.Context, tenantID string) ([]stri
 	if err := json.Unmarshal(body, &roles); err != nil {
 		return nil, fmt.Errorf("keycloak: parse roles: %w", err)
 	}
-	names := make([]string, len(roles))
-	for i, r := range roles {
-		names[i] = r.Name
+	names := make([]string, 0, len(roles))
+	for _, r := range roles {
+		if r.Name == "" || isKeycloakDefaultRealmRole(tenantID, r.Name) {
+			continue
+		}
+		names = append(names, r.Name)
 	}
+	sort.Strings(names)
 	return names, nil
+}
+
+func isKeycloakDefaultRealmRole(tenantID, role string) bool {
+	return role == "offline_access" ||
+		role == "uma_authorization" ||
+		role == "default-roles-"+tenantID
 }
 
 func splitPath(p string) []string {

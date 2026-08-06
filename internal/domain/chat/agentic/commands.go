@@ -131,7 +131,7 @@ func (r *CommandRegistry) helpHandler(_ context.Context, _ string, _ CommandCont
 	var sb strings.Builder
 	sb.WriteString("**Available Commands:**\n\n")
 	for _, cmd := range r.List() {
-		sb.WriteString(fmt.Sprintf("- `/%s` — %s\n", cmd.Name, cmd.Description))
+		fmt.Fprintf(&sb, "- `/%s` — %s\n", cmd.Name, cmd.Description)
 	}
 	return CommandResult{Output: sb.String()}, nil
 }

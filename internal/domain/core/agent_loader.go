@@ -224,23 +224,13 @@ const SeedAssistantSlug = "core-assistant"
 // in catalog as read-only — ADR-012 deprecated pipelines 2026-04-02).
 const SeedDeprecatedAgentSlug = "core-pipeline-specialist"
 
-// SeedExpectedAgentSkillBindingsCount documents the ACTUAL row count
-// observed in DB after migrations 000003 + 000006 are applied.
-//
-// Only the core-assistant binding INSERT is a CROSS JOIN with no AND
-// clause (`SELECT a.id, s.id FROM ah_core.agent a, ah_core.skill s
-// WHERE a.slug = 'core-assistant'`) — it produces 7 rows (1 agent ×
-// 7 skills).
-//
-// The other 10 binding INSERTs reference skill slugs that DO NOT EXIST
-// in ah_core.skill (they use `agent-management`, `skill-management`,
-// `tool-management`, `knowledge-base-management`, `mcp-management`,
-// `settings-management`, `execute-sql` — but the seeded skills use
-// `core-agents-management`, `core-skills-management`, etc.). These
-// produce ZERO rows each.
-//
-// Result: 7 bindings actually persist in DB. This is a KNOWN
-// discrepancy in the migration; the integration test asserts the
-// observed count so any future fix to the slug mismatch will trip
-// the test (forcing the constant + ledger to update together).
-const SeedExpectedAgentSkillBindingsCount = 7
+// SeedExpectedAssistantSkillBindingsCount is the universal skill coverage for
+// core-assistant. Migration 000006 binds it to each of the seven seeded skills.
+const SeedExpectedAssistantSkillBindingsCount = 7
+
+// SeedExpectedAgentSkillBindingsCount is the canonical management-catalog
+// count after the specialist-binding repair in migration 000126: seven
+// assistant bindings plus seventeen bindings across the ten active management
+// specialists. The legacy core-pipeline-specialist remains deliberately
+// unbound and read-only. Capability-agent bindings belong to later migrations.
+const SeedExpectedAgentSkillBindingsCount = 24

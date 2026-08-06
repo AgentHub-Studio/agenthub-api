@@ -4,28 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
-	"unicode"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
-
-// slugPattern enforces kebab-case (skill canonical format).
-var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
-// Bug 179: stripHTML cross-cutting com agent/service.go (P-C280-1).
-// Previne stored XSS quando description é renderizada na UI.
-var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
-var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
-
-func stripHTML(s string) string {
-	s = htmlDangerousPattern.ReplaceAllString(s, "")
-	s = htmlTagPattern.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
-}
 
 // ErrSkillBoundToAgents is returned when a skill cannot be deleted because one or
 // more agents still reference it. P-C185-1: management executor must not bypass this check.
@@ -52,8 +37,8 @@ type ToolBinder interface {
 
 // Service holds business logic for skills.
 type Service struct {
-	repo        SkillRepository
-	toolBinder  ToolBinder // optional: enables toolId auto-bind on Create
+	repo       SkillRepository
+	toolBinder ToolBinder // optional: enables toolId auto-bind on Create
 }
 
 // NewService creates a new Service.
@@ -83,8 +68,10 @@ func (s *Service) List(ctx context.Context, category *string, req pagination.Pag
 
 // Create creates a new skill, auto-generating the slug if not provided.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, error) {
-	// Bug 181: strip HTML do name (XSS prevention cross-cutting com agent).
-	req.Name = stripHTML(req.Name)
+	req.Name = strings.TrimSpace(req.Name)
+	if sanitize.ContainsHTML(req.Name) {
+		return Response{}, fmt.Errorf("%w: name must not contain HTML tags", ErrValidation)
+	}
 	// Bug 130: name varchar(255) — gate length antes do INSERT
 	// (sem este gate Create vazava SQL 22001 com 500).
 	if len(req.Name) > 255 {
@@ -104,7 +91,28 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
 	// Bug 179: strip HTML do description (XSS prevention cross-cutting).
-	req.Description = stripHTML(req.Description)
+	req.Description = sanitize.StripHTML(req.Description)
+	var err error
+	req.RequiredRoles, err = normalizeRequiredRoles(req.RequiredRoles)
+	if err != nil {
+		return Response{}, err
+	}
+	req.ModelOverrides, err = normalizeModelOverrides(req.ModelOverrides)
+	if err != nil {
+		return Response{}, err
+	}
+	req.EffortLevel, err = normalizeEffortLevel(req.EffortLevel)
+	if err != nil {
+		return Response{}, err
+	}
+	req.AssociatedAgents, err = normalizeSkillSlugs(req.AssociatedAgents, "associatedAgents")
+	if err != nil {
+		return Response{}, err
+	}
+	req.DynamicHooks, err = normalizeHookEvents(req.DynamicHooks)
+	if err != nil {
+		return Response{}, err
+	}
 
 	// DX-01-J (ACT-F3-04): reject skills that are completely inert — no instructions
 	// AND no tool restrictions means binding this skill to an agent has no effect.
@@ -132,13 +140,11 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	slug := req.Slug
 	if slug == "" {
 		slug = toSlug(req.Name)
-	} else if !slugPattern.MatchString(slug) {
-		return Response{}, fmt.Errorf("%w: slug must match [a-z0-9][a-z0-9-]* (got %q)", ErrValidation, slug)
-	}
-	// Bug 133: slug varchar(255) — gate length antes do INSERT
-	// (slugPattern aceita qualquer tamanho desde que match os chars).
-	if len(slug) > 255 {
-		return Response{}, fmt.Errorf("%w: slug exceeds maximum length of 255 chars (got %d)", ErrValidation, len(slug))
+	} else {
+		slug = strings.TrimSpace(slug)
+		if !sanitize.ValidSlug(slug) {
+			return Response{}, fmt.Errorf("%w: slug must match %s (got %q)", ErrValidation, sanitize.CanonicalSlugPattern, slug)
+		}
 	}
 
 	// ensure slug uniqueness within tenant
@@ -151,7 +157,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		if !exists {
 			break
 		}
-		slug = fmt.Sprintf("%s_%d", base, i)
+		slug = sanitize.SlugWithNumericSuffix(base, i)
 	}
 
 	sk := Skill{
@@ -161,11 +167,16 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		Instructions:           req.Instructions,
 		Category:               req.Category,
 		AllowedTools:           req.AllowedTools,
+		RequiredRoles:          req.RequiredRoles,
 		DisableModelInvocation: req.DisableModelInvocation,
 		ContextMode:            req.ContextMode,
 		WhenToUse:              req.WhenToUse,
 		ArgumentHint:           req.ArgumentHint,
 		ShouldDefer:            req.ShouldDefer,
+		ModelOverrides:         req.ModelOverrides,
+		EffortLevel:            req.EffortLevel,
+		AssociatedAgents:       req.AssociatedAgents,
+		DynamicHooks:           req.DynamicHooks,
 	}
 	created, err := s.repo.Create(ctx, sk)
 	if err != nil {
@@ -207,12 +218,13 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 	if req.Name == "" {
 		req.Name = existing.Name
-	} else if len(req.Name) > 255 {
+	} else if sanitize.ContainsHTML(req.Name) {
+		return Response{}, fmt.Errorf("%w: name must not contain HTML tags", ErrValidation)
+	} else if len(strings.TrimSpace(req.Name)) > 255 {
 		// Bug 137: name varchar(255) — gate length em Update.
-		return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(req.Name))
+		return Response{}, fmt.Errorf("%w: name exceeds maximum length of 255 chars (got %d)", ErrValidation, len(strings.TrimSpace(req.Name)))
 	} else {
-		// Bug 181: strip HTML do name (XSS prevention).
-		req.Name = stripHTML(req.Name)
+		req.Name = strings.TrimSpace(req.Name)
 	}
 	if req.Description == "" {
 		req.Description = existing.Description
@@ -221,7 +233,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		return Response{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	} else {
 		// Bug 179: strip HTML do description (XSS prevention).
-		req.Description = stripHTML(req.Description)
+		req.Description = sanitize.StripHTML(req.Description)
 	}
 	if req.Category == "" {
 		req.Category = existing.Category
@@ -247,6 +259,51 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	} else if len(req.AllowedTools) > 100 {
 		// Bug 171: cap em Update (cross-cutting com Create — bug 169).
 		return Response{}, fmt.Errorf("%w: allowedTools exceeds maximum of 100 entries (got %d)", ErrValidation, len(req.AllowedTools))
+	}
+	if len(req.RequiredRoles) == 0 {
+		req.RequiredRoles = existing.RequiredRoles
+	} else {
+		normalized, err := normalizeRequiredRoles(req.RequiredRoles)
+		if err != nil {
+			return Response{}, err
+		}
+		req.RequiredRoles = normalized
+	}
+	if len(req.ModelOverrides) == 0 {
+		req.ModelOverrides = existing.ModelOverrides
+	} else {
+		normalized, err := normalizeModelOverrides(req.ModelOverrides)
+		if err != nil {
+			return Response{}, err
+		}
+		req.ModelOverrides = normalized
+	}
+	if req.EffortLevel == "" {
+		req.EffortLevel = existing.EffortLevel
+	} else {
+		normalized, err := normalizeEffortLevel(req.EffortLevel)
+		if err != nil {
+			return Response{}, err
+		}
+		req.EffortLevel = normalized
+	}
+	if len(req.AssociatedAgents) == 0 {
+		req.AssociatedAgents = existing.AssociatedAgents
+	} else {
+		normalized, err := normalizeSkillSlugs(req.AssociatedAgents, "associatedAgents")
+		if err != nil {
+			return Response{}, err
+		}
+		req.AssociatedAgents = normalized
+	}
+	if len(req.DynamicHooks) == 0 {
+		req.DynamicHooks = existing.DynamicHooks
+	} else {
+		normalized, err := normalizeHookEvents(req.DynamicHooks)
+		if err != nil {
+			return Response{}, err
+		}
+		req.DynamicHooks = normalized
 	}
 
 	// DX-01-H: normalize whitespace-only instructions.
@@ -295,19 +352,111 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 // toSlug converts a name to a kebab-case slug.
 // "Document Search" → "document-search", "My  Tool!" → "my-tool"
 func toSlug(name string) string {
-	name = strings.ToLower(name)
-	var b strings.Builder
-	for _, r := range name {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('-')
+	return sanitize.ToSlug(name, "skill")
+}
+
+func normalizeRequiredRoles(roles []string) ([]string, error) {
+	if len(roles) == 0 {
+		return []string{}, nil
+	}
+	if len(roles) > 100 {
+		return nil, fmt.Errorf("%w: requiredRoles exceeds maximum of 100 entries (got %d)", ErrValidation, len(roles))
+	}
+	seen := make(map[string]struct{}, len(roles))
+	out := make([]string, 0, len(roles))
+	for _, role := range roles {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			return nil, fmt.Errorf("%w: requiredRoles must not contain empty values", ErrValidation)
 		}
+		if len(role) > 128 {
+			return nil, fmt.Errorf("%w: requiredRoles entry exceeds maximum length of 128 chars (got %d)", ErrValidation, len(role))
+		}
+		if _, ok := seen[role]; ok {
+			continue
+		}
+		seen[role] = struct{}{}
+		out = append(out, role)
 	}
-	// collapse consecutive hyphens
-	result := b.String()
-	for strings.Contains(result, "--") {
-		result = strings.ReplaceAll(result, "--", "-")
+	return out, nil
+}
+
+func normalizeModelOverrides(overrides map[string]string) (map[string]string, error) {
+	if len(overrides) == 0 {
+		return map[string]string{}, nil
 	}
-	return strings.Trim(result, "-")
+	if len(overrides) > 20 {
+		return nil, fmt.Errorf("%w: modelOverrides exceeds maximum of 20 entries", ErrValidation)
+	}
+	normalized := make(map[string]string, len(overrides))
+	for contextName, model := range overrides {
+		contextName = strings.TrimSpace(contextName)
+		model = strings.TrimSpace(model)
+		if contextName == "" || model == "" || len(contextName) > 64 || len(model) > 255 {
+			return nil, fmt.Errorf("%w: modelOverrides contains an invalid entry", ErrValidation)
+		}
+		normalized[contextName] = model
+	}
+	return normalized, nil
+}
+
+func normalizeEffortLevel(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "lowest", "low", "medium", "high", "highest":
+		return value, nil
+	default:
+		return "", fmt.Errorf("%w: effortLevel must be lowest|low|medium|high|highest", ErrValidation)
+	}
+}
+
+func normalizeSkillSlugs(values []string, field string) ([]string, error) {
+	if len(values) == 0 {
+		return []string{}, nil
+	}
+	if len(values) > 100 {
+		return nil, fmt.Errorf("%w: %s exceeds maximum of 100 entries", ErrValidation, field)
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if !sanitize.ValidSlug(value) {
+			return nil, fmt.Errorf("%w: %s must contain canonical slugs", ErrValidation, field)
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
+}
+
+func normalizeHookEvents(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return []string{}, nil
+	}
+	if len(values) > 100 {
+		return nil, fmt.Errorf("%w: dynamicHooks exceeds maximum of 100 entries", ErrValidation)
+	}
+	allowed := map[string]struct{}{
+		"pre_tool_use": {}, "post_tool_use": {}, "post_tool_failure": {},
+		"session_start": {}, "session_end": {}, "notification": {},
+		"turn_end": {}, "run_end": {},
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if _, ok := allowed[value]; !ok {
+			return nil, fmt.Errorf("%w: dynamicHooks contains unsupported hook event %q", ErrValidation, value)
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
 }

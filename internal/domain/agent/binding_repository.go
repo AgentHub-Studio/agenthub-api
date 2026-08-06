@@ -81,7 +81,7 @@ func (r *pgBindingRepository) SyncSkills(ctx context.Context, agentID uuid.UUID,
 	if err != nil {
 		return fmt.Errorf("agent.SyncSkills: begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `DELETE FROM agent_skill WHERE agent_id = $1`, agentID); err != nil {
 		return fmt.Errorf("agent.SyncSkills: delete: %w", err)
@@ -142,7 +142,7 @@ func (r *pgBindingRepository) SyncKnowledgeBases(ctx context.Context, agentID uu
 	if err != nil {
 		return fmt.Errorf("agent.SyncKnowledgeBases: begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `DELETE FROM agent_knowledge_base WHERE agent_id = $1`, agentID); err != nil {
 		return fmt.Errorf("agent.SyncKnowledgeBases: delete: %w", err)
@@ -261,7 +261,7 @@ func (r *pgBindingRepository) SyncMCPServers(ctx context.Context, agentID uuid.U
 	if err != nil {
 		return fmt.Errorf("agent.SyncMCPServers: begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `DELETE FROM agent_mcp_server WHERE agent_id = $1`, agentID); err != nil {
 		return fmt.Errorf("agent.SyncMCPServers: delete: %w", err)

@@ -1,13 +1,14 @@
 package agent
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -27,22 +28,26 @@ func NewBindingHandler(agentRepo Repository, bindingRepo BindingRepository) *Bin
 	return &BindingHandler{agentRepo: agentRepo, bindingRepo: bindingRepo}
 }
 
-// RegisterBindingRoutes mounts binding routes under /api/agents/{id}/skills,
-// /api/agents/{id}/knowledge-bases, and /api/agents/{id}/mcp-servers.
+// RegisterBindingRoutes mounts administrator-only binding routes under
+// /api/agents/{id}/skills, /api/agents/{id}/knowledge-bases, and
+// /api/agents/{id}/mcp-servers.
 func (h *BindingHandler) RegisterBindingRoutes(r chi.Router) {
-	r.Get("/api/agents/{id}/skills", h.listSkills)
-	r.Put("/api/agents/{id}/skills", h.syncSkills)
-	// BUG-G1: explicit POST handler so callers get a clear 405 with guidance instead of a bare chi 405.
-	r.Post("/api/agents/{id}/skills", methodNotAllowed("GET, PUT", `use PUT /api/agents/{id}/skills with body {"ids":["<uuid>",...]}`))
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/agents/{id}/skills", h.listSkills)
+		r.Put("/api/agents/{id}/skills", h.syncSkills)
+		// BUG-G1: explicit POST handler so callers get a clear 405 with guidance instead of a bare chi 405.
+		r.Post("/api/agents/{id}/skills", methodNotAllowed("GET, PUT", `use PUT /api/agents/{id}/skills with body {"ids":["<uuid>",...]}`))
 
-	r.Get("/api/agents/{id}/knowledge-bases", h.listKnowledgeBases)
-	r.Put("/api/agents/{id}/knowledge-bases", h.syncKnowledgeBases)
-	r.Post("/api/agents/{id}/knowledge-bases", methodNotAllowed("GET, PUT", `use PUT /api/agents/{id}/knowledge-bases with body {"ids":["<uuid>",...]}`))
+		r.Get("/api/agents/{id}/knowledge-bases", h.listKnowledgeBases)
+		r.Put("/api/agents/{id}/knowledge-bases", h.syncKnowledgeBases)
+		r.Post("/api/agents/{id}/knowledge-bases", methodNotAllowed("GET, PUT", `use PUT /api/agents/{id}/knowledge-bases with body {"ids":["<uuid>",...]}`))
 
-	// P-C253-1: per-agent MCP server bindings
-	r.Get("/api/agents/{id}/mcp-servers", h.listMCPServers)
-	r.Put("/api/agents/{id}/mcp-servers", h.syncMCPServers)
-	r.Post("/api/agents/{id}/mcp-servers", methodNotAllowed("GET, PUT", `use PUT /api/agents/{id}/mcp-servers with body {"ids":["<uuid>",...]}`))
+		// P-C253-1: per-agent MCP server bindings
+		r.Get("/api/agents/{id}/mcp-servers", h.listMCPServers)
+		r.Put("/api/agents/{id}/mcp-servers", h.syncMCPServers)
+		r.Post("/api/agents/{id}/mcp-servers", methodNotAllowed("GET, PUT", `use PUT /api/agents/{id}/mcp-servers with body {"ids":["<uuid>",...]}`))
+	})
 }
 
 // methodNotAllowed returns a handler that sets the Allow header and responds with a
@@ -91,7 +96,7 @@ func (h *BindingHandler) syncSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req syncIDsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, `invalid request body — expected {"ids":["<uuid>",...]}`)
 		return
 	}
@@ -134,7 +139,7 @@ func (h *BindingHandler) syncKnowledgeBases(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var req syncIDsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, `invalid request body — expected {"ids":["<uuid>",...]}`)
 		return
 	}
@@ -176,7 +181,7 @@ func (h *BindingHandler) syncMCPServers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req syncIDsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, `invalid request body — expected {"ids":["<uuid>",...]}`)
 		return
 	}

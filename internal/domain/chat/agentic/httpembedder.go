@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
 // HTTPEmbedder implements Embedder using the AgentHub embedding service REST API.
@@ -22,6 +25,8 @@ type HTTPEmbedder struct {
 // the slightest load. 60s gives headroom without making the caller wait
 // forever if the service is genuinely stuck.
 const defaultEmbedTimeout = 60 * time.Second
+
+var errHTTPEmbedderRedirectNotAllowed = errors.New("httpembedder: redirect target is not allowed")
 
 // NewHTTPEmbedder creates an HTTPEmbedder that sends requests to baseURL/embed.
 func NewHTTPEmbedder(baseURL string) *HTTPEmbedder {
@@ -58,11 +63,12 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, text string) ([]float32, error
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := e.httpClient.Do(req)
+	// #nosec G704 -- the configured embedding service is infrastructure-owned and every redirect is checked against the SSRF policy.
+	resp, err := e.validatedHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("httpembedder: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("httpembedder: embedding service returned HTTP %d", resp.StatusCode)
@@ -76,4 +82,24 @@ func (e *HTTPEmbedder) Embed(ctx context.Context, text string) ([]float32, error
 		return nil, fmt.Errorf("httpembedder: service returned empty vector")
 	}
 	return result.Embedding, nil
+}
+
+func (e *HTTPEmbedder) validatedHTTPClient() *http.Client {
+	client := e.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: defaultEmbedTimeout}
+	}
+
+	protected := *client
+	previousCheckRedirect := client.CheckRedirect
+	protected.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := ssrf.ValidateURL(req.URL.String()); err != nil {
+			return errHTTPEmbedderRedirectNotAllowed
+		}
+		if previousCheckRedirect != nil {
+			return previousCheckRedirect(req, via)
+		}
+		return nil
+	}
+	return &protected
 }

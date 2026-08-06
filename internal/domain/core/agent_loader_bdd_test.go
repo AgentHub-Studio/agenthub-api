@@ -90,8 +90,7 @@ func TestBDD_AhCoreAgentSeed(t *testing.T) {
 		// When the binding policy is inspected,
 		// Then assistant cross-joins ALL ah_core.skills (no slug filter)
 		//      — produces N bindings where N = #(skills) = 7.
-		// This is the OBSERVED count from migration 000006.
-		assert.Equal(t, 7, SeedExpectedAgentSkillBindingsCount,
+		assert.Equal(t, 7, SeedExpectedAssistantSkillBindingsCount,
 			"assistant gets all 7 skills via cross-join — universal capability contract")
 	})
 

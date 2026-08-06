@@ -1,7 +1,6 @@
 package tenant
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -31,7 +30,7 @@ func (h *Handler) RegisterPublicRoutes(r chi.Router) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateTenantRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
 		return
 	}

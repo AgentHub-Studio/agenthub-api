@@ -133,7 +133,7 @@ func TestMemoizeAsyncWithTTL_InFlightDedup(t *testing.T) {
 	}
 
 	time.Sleep(50 * time.Millisecond) // let all goroutines reach Get
-	close(barrier)                     // release
+	close(barrier)                    // release
 	wg.Wait()
 
 	assert.Equal(t, int64(1), atomic.LoadInt64(&calls), "should only compute once")
@@ -157,7 +157,8 @@ func TestMemoizeAsyncWithTTL_Clear(t *testing.T) {
 		return 42, nil
 	}, time.Minute)
 
-	m.Get("x")
+	_, err := m.Get("x")
+	require.NoError(t, err)
 	assert.Equal(t, 1, m.Size())
 	m.Clear()
 	assert.Equal(t, 0, m.Size())

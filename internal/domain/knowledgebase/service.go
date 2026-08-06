@@ -3,23 +3,13 @@ package knowledgebase
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
-
-// Bug 179: stripHTML cross-cutting com agent/service.go (P-C280-1).
-var htmlDangerousPattern = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|noscript)[^>]*>.*?</(script|style|iframe|object|embed|noscript)>`)
-var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
-
-func stripHTML(s string) string {
-	s = htmlDangerousPattern.ReplaceAllString(s, "")
-	s = htmlTagPattern.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
-}
 
 // Service provides business logic for KnowledgeBase operations.
 type Service struct {
@@ -31,9 +21,47 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
+func createRerankStrategy(req CreateRequest) string {
+	if req.RerankStrategy != "" {
+		return req.RerankStrategy
+	}
+	return req.RerankStrategySnake
+}
+
+func updateRerankStrategy(req UpdateRequest) *string {
+	if req.RerankStrategy != nil {
+		return req.RerankStrategy
+	}
+	return req.RerankStrategySnake
+}
+
+func createGraphEnabled(req CreateRequest) bool {
+	return req.GraphEnabled || req.GraphEnabledSnake
+}
+
+func updateGraphEnabled(req UpdateRequest) *bool {
+	if req.GraphEnabled != nil {
+		return req.GraphEnabled
+	}
+	return req.GraphEnabledSnake
+}
+
+func normalizeRerankStrategy(raw string) (RerankStrategy, error) {
+	strategy := RerankStrategy(strings.TrimSpace(raw))
+	if strategy == "" {
+		return RerankStrategyNone, nil
+	}
+	switch strategy {
+	case RerankStrategyNone, RerankStrategyLLM, RerankStrategyCrossEncoder, RerankStrategyRRF, RerankStrategyBrokenReranker:
+		return strategy, nil
+	default:
+		return "", fmt.Errorf("%w: rerankStrategy must be one of none, llm, cross_encoder, rrf, broken_reranker (got %q)", ErrValidation, raw)
+	}
+}
+
 // List returns a paginated list of knowledge bases.
-func (s *Service) List(ctx context.Context, req pagination.PageRequest) (pagination.Page[KnowledgeBaseResponse], error) {
-	items, total, err := s.repo.List(ctx, req)
+func (s *Service) List(ctx context.Context, req pagination.PageRequest, filters ListFilters) (pagination.Page[KnowledgeBaseResponse], error) {
+	items, total, err := s.repo.ListFiltered(ctx, req, filters)
 	if err != nil {
 		return pagination.Page[KnowledgeBaseResponse]{}, fmt.Errorf("knowledgebase service: list: %w", err)
 	}
@@ -57,11 +85,12 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (KnowledgeBaseRespo
 
 // Create creates a new knowledge base.
 func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseResponse, error) {
-	// Bug 181: strip HTML do name (XSS prevention cross-cutting).
-	req.Name = stripHTML(req.Name)
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name is required")
+	}
+	if sanitize.ContainsHTML(req.Name) {
+		return KnowledgeBaseResponse{}, fmt.Errorf("%w: name must not contain HTML tags", ErrValidation)
 	}
 	if len(req.Name) > 255 {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name exceeds maximum length of 255 chars (got %d)", len(req.Name))
@@ -84,13 +113,17 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 	if req.ContextWindow < 0 {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: contextWindow must be >= 0 (got %d)", req.ContextWindow)
 	}
+	rerankStrategy, err := normalizeRerankStrategy(createRerankStrategy(req))
+	if err != nil {
+		return KnowledgeBaseResponse{}, err
+	}
 
 	// Bug 159: cap description em 32KB.
 	if len(req.Description) > 32000 {
 		return KnowledgeBaseResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
 	}
 	// Bug 179: strip HTML do description (XSS prevention cross-cutting).
-	req.Description = stripHTML(req.Description)
+	req.Description = sanitize.StripHTML(req.Description)
 	exists, err := s.repo.ExistsByName(ctx, req.Name)
 	if err != nil {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: check duplicate: %w", err)
@@ -106,6 +139,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 		EmbeddingModel: req.EmbeddingModel,
 		SearchMode:     req.SearchMode,
 		ContextWindow:  req.ContextWindow,
+		RerankStrategy: rerankStrategy,
+		GraphEnabled:   createGraphEnabled(req),
 	}
 
 	created, err := s.repo.Create(ctx, kb)
@@ -124,10 +159,12 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 
 	if req.Name != nil {
-		// Bug 181: strip HTML do name (XSS prevention).
-		trimmed := strings.TrimSpace(stripHTML(*req.Name))
+		trimmed := strings.TrimSpace(*req.Name)
 		if trimmed == "" {
 			return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: name cannot be empty")
+		}
+		if sanitize.ContainsHTML(trimmed) {
+			return KnowledgeBaseResponse{}, fmt.Errorf("%w: name must not contain HTML tags", ErrValidation)
 		}
 		// Bug 136: name varchar(255) — gate length em Update.
 		if len(trimmed) > 255 {
@@ -141,7 +178,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 			return KnowledgeBaseResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(*req.Description))
 		}
 		// Bug 179: strip HTML do description (XSS prevention).
-		existing.Description = stripHTML(*req.Description)
+		existing.Description = sanitize.StripHTML(*req.Description)
 	}
 	if req.EmbeddingModel != nil {
 		// Bug 149: embeddingModel aceita só lista pré-aprovada (Create
@@ -175,6 +212,16 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 			return KnowledgeBaseResponse{}, fmt.Errorf("%w: contextWindow must be >= 0 (got %d)", ErrValidation, *req.ContextWindow)
 		}
 		existing.ContextWindow = *req.ContextWindow
+	}
+	if rawStrategy := updateRerankStrategy(req); rawStrategy != nil {
+		strategy, err := normalizeRerankStrategy(*rawStrategy)
+		if err != nil {
+			return KnowledgeBaseResponse{}, err
+		}
+		existing.RerankStrategy = strategy
+	}
+	if graphEnabled := updateGraphEnabled(req); graphEnabled != nil {
+		existing.GraphEnabled = *graphEnabled
 	}
 
 	updated, err := s.repo.Update(ctx, existing)

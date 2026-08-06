@@ -61,3 +61,52 @@ func TestFriendlyRunErrorMessage_UnknownCode(t *testing.T) {
 	msg := friendlyRunErrorMessage("some_other_code", "unknown error")
 	assert.True(t, strings.Contains(msg, "some_other_code"), "should include error code")
 }
+
+func TestSanitizeSSEMessageRedactsSecretsAndInternalTopology(t *testing.T) {
+	message := "Authorization: Basic dXNlcjphLWZha2Utc2VjcmV0\nCookie: session=very-sensitive-session-value\nprovider=http://agenthub-provider:8080/v1/chat\nkey=sk-ant-abcdefghijklmnopqrstuvwxyz123456"
+
+	got := sanitizeSSEMessage(message)
+
+	assert.NotContains(t, got, "dXNlcjphLWZha2Utc2VjcmV0")
+	assert.NotContains(t, got, "very-sensitive-session-value")
+	assert.NotContains(t, got, "http://agenthub-provider:8080/v1/chat")
+	assert.NotContains(t, got, "sk-ant-abcdefghijklmnopqrstuvwxyz123456")
+	assert.Contains(t, got, "[REDACTED]")
+	assert.Contains(t, got, "<upstream>")
+}
+
+func TestSanitizeSSEMessageRedactsEmbeddedHeaderSecrets(t *testing.T) {
+	message := "Started: Authorization: Bearer embedded-header-secret\nupstream=http://agenthub-provider:8080/v1/chat"
+
+	got := sanitizeSSEMessage(message)
+
+	assert.NotContains(t, got, "embedded-header-secret")
+	assert.NotContains(t, got, "http://agenthub-provider:8080/v1/chat")
+	assert.Contains(t, got, "Started: [REDACTED]")
+	assert.Contains(t, got, "<upstream>")
+}
+
+func FuzzSanitizeSSEMessageRedactsHeaders(f *testing.F) {
+	f.Add("Authorization", "header-secret")
+	f.Add("Proxy-Authorization", "proxy-secret")
+	f.Add("Cookie", "session-secret")
+	f.Add("Set-Cookie", "set-cookie-secret")
+	f.Add("X-API-Key", "api-secret")
+
+	f.Fuzz(func(t *testing.T, headerSeed, secretSeed string) {
+		header := redactionPlainHeaderName(headerSeed)
+		secret := "secret-" + redactionSafeSuffix(secretSeed)
+		message := "Started: " + header + ": " + secret + "\nupstream=http://agenthub-provider:8080/v1/chat"
+
+		got := sanitizeSSEMessage(message)
+		if strings.Contains(got, secret) {
+			t.Fatalf("SSE error leaked %q through %q: %q", secret, header, got)
+		}
+		if strings.Contains(got, "http://agenthub-provider:8080/v1/chat") {
+			t.Fatalf("SSE error leaked internal URL: %q", got)
+		}
+		if !strings.Contains(got, "<upstream>") {
+			t.Fatalf("SSE error removed safe topology marker: %q", got)
+		}
+	})
+}

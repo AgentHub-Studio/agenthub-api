@@ -6,10 +6,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
 // ImpactAssessor counts agents that inherit the default provider and would be
@@ -32,6 +35,8 @@ type Handler struct {
 	assessor ImpactAssessor // optional — nil disables the provider-impact endpoint
 }
 
+const onboardingCompletedSettingKey = "onboarding.completed"
+
 // NewHandler creates a new settings Handler.
 func NewHandler(svc Service) *Handler {
 	return &Handler{svc: svc}
@@ -46,22 +51,30 @@ func (h *Handler) WithImpactAssessor(a ImpactAssessor) *Handler {
 
 // RegisterProtectedRoutes mounts authenticated settings routes onto r.
 func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
-	r.Get("/api/settings", h.list)
-	r.Get("/api/settings/{key}", h.get)
-	r.Put("/api/settings/{key}", h.upsert)
-	r.Delete("/api/settings/{key}", h.delete)
+	// Onboarding is reachable by every authenticated tenant user. It may only
+	// mark the tenant-level checklist as completed; all other settings remain
+	// an administrative capability.
+	r.Put("/api/settings/onboarding.completed", h.completeOnboarding)
 
-	// Provider model listing endpoints.
-	r.Get("/api/settings/providers", h.listProviders)
-	r.Get("/api/settings/openai/models", h.listOpenAIModels)
-	r.Get("/api/settings/anthropic/models", h.listAnthropicModels)
-	r.Get("/api/settings/ollama/models", h.listOllamaModels)
-	r.Get("/api/settings/openrouter/models", h.listOpenRouterModels)
-	r.Get("/api/settings/openrouter/embedding-models", h.listOpenRouterEmbeddingModels)
-	r.Post("/api/settings/smtp/test", h.testSmtp)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/settings", h.list)
+		r.Get("/api/settings/{key}", h.get)
+		r.Put("/api/settings/{key}", h.upsert)
+		r.Delete("/api/settings/{key}", h.delete)
 
-	// Provider-impact preview (ACT-F3-14 / P-C337-1).
-	r.Get("/api/settings/provider-impact", h.providerImpact)
+		// Provider model listing endpoints.
+		r.Get("/api/settings/providers", h.listProviders)
+		r.Get("/api/settings/openai/models", h.listOpenAIModels)
+		r.Get("/api/settings/anthropic/models", h.listAnthropicModels)
+		r.Get("/api/settings/ollama/models", h.listOllamaModels)
+		r.Get("/api/settings/openrouter/models", h.listOpenRouterModels)
+		r.Get("/api/settings/openrouter/embedding-models", h.listOpenRouterEmbeddingModels)
+		r.Post("/api/settings/smtp/test", h.testSmtp)
+
+		// Provider-impact preview (ACT-F3-14 / P-C337-1).
+		r.Get("/api/settings/provider-impact", h.providerImpact)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -93,7 +106,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) upsert(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
 	var req UpdateSettingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
 		return
 	}
@@ -106,6 +119,34 @@ func (h *Handler) upsert(w http.ResponseWriter, r *http.Request) {
 		// Bug 257: fallback após ErrValidation só vê repo SQL errors.
 		// Não vazar SQLSTATE/pgx detail para o cliente.
 		slog.Error("settings: upsert failed", "key", key, "err", err)
+		httputil.InternalServerError(w, "upsert failed")
+		return
+	}
+	httputil.JSON(w, http.StatusOK, s)
+}
+
+func (h *Handler) completeOnboarding(w http.ResponseWriter, r *http.Request) {
+	var req UpdateSettingRequest
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
+		httputil.BadRequest(w, "invalid request body")
+		return
+	}
+
+	var completed bool
+	if err := json.Unmarshal(req.Value, &completed); err != nil || !completed {
+		httputil.UnprocessableEntity(w, "onboarding.completed must be true")
+		return
+	}
+
+	req.Value = json.RawMessage("true")
+	req.Description = nil
+	s, err := h.svc.Upsert(r.Context(), onboardingCompletedSettingKey, req)
+	if err != nil {
+		if errors.Is(err, ErrValidation) {
+			httputil.UnprocessableEntity(w, err.Error())
+			return
+		}
+		slog.Error("settings: complete onboarding failed", "err", err)
 		httputil.InternalServerError(w, "upsert failed")
 		return
 	}
@@ -155,6 +196,11 @@ func (h *Handler) listOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	}
 	models, err := ListOpenAIModels(r.Context(), apiKey)
 	if err != nil {
+		if errors.Is(err, ErrUpstream) {
+			slog.Warn("settings: openai upstream failed", "err", err)
+			writeProviderUpstreamError(w, "openai")
+			return
+		}
 		slog.Error("settings: list openai models failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
@@ -174,7 +220,13 @@ func (h *Handler) listAnthropicModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listOllamaModels(w http.ResponseWriter, r *http.Request) {
-	baseURL := r.URL.Query().Get("baseUrl")
+	baseURL := strings.TrimSpace(r.URL.Query().Get("baseUrl"))
+	if baseURL != "" {
+		if err := ssrf.ValidateURL(baseURL); err != nil {
+			httputil.UnprocessableEntity(w, "ollama baseUrl is not allowed")
+			return
+		}
+	}
 	models, err := ListOllamaModels(r.Context(), baseURL)
 	if err != nil {
 		if errors.Is(err, ErrUpstream) {
@@ -183,7 +235,7 @@ func (h *Handler) listOllamaModels(w http.ResponseWriter, r *http.Request) {
 			// HTTP body) that disclose internal infrastructure. Log the full
 			// detail and surface a stable, generic message to the client.
 			slog.Warn("settings: ollama upstream failed", "baseURL", baseURL, "err", err)
-			httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": "ollama: upstream unavailable"})
+			writeProviderUpstreamError(w, "ollama")
 			return
 		}
 		slog.Error("settings: list ollama models failed", "baseURL", baseURL, "err", err)
@@ -197,6 +249,11 @@ func (h *Handler) listOpenRouterModels(w http.ResponseWriter, r *http.Request) {
 	apiKey := r.Header.Get("X-OpenRouter-API-Key")
 	models, err := ListOpenRouterModels(r.Context(), apiKey)
 	if err != nil {
+		if errors.Is(err, ErrUpstream) {
+			slog.Warn("settings: openrouter upstream failed", "err", err)
+			writeProviderUpstreamError(w, "openrouter")
+			return
+		}
 		slog.Error("settings: list openrouter models failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
@@ -208,11 +265,20 @@ func (h *Handler) listOpenRouterEmbeddingModels(w http.ResponseWriter, r *http.R
 	apiKey := r.Header.Get("X-OpenRouter-API-Key")
 	models, err := ListOpenRouterEmbeddingModels(r.Context(), apiKey)
 	if err != nil {
+		if errors.Is(err, ErrUpstream) {
+			slog.Warn("settings: openrouter embedding upstream failed", "err", err)
+			writeProviderUpstreamError(w, "openrouter")
+			return
+		}
 		slog.Error("settings: list openrouter embedding models failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
 	}
 	httputil.JSON(w, http.StatusOK, models)
+}
+
+func writeProviderUpstreamError(w http.ResponseWriter, provider string) {
+	httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": provider + ": upstream unavailable"})
 }
 
 func (h *Handler) testSmtp(w http.ResponseWriter, r *http.Request) {
@@ -222,7 +288,7 @@ func (h *Handler) testSmtp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req SmtpTestRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
 		return
 	}

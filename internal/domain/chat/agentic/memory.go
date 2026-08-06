@@ -43,26 +43,30 @@ type MemoryEvaluator interface {
 
 // ExtractedMemory represents a single memory item extracted by the LLM evaluator.
 // Supports both the new four-type taxonomy format (type/key/value) and the
-// legacy format (memoryType/key/value). When both are set, Type takes precedence.
+// legacy format (memoryType/key/value). When both are set, they must agree.
 // Inspired by Claude Code's four-type taxonomy: user|feedback|project|reference.
 type ExtractedMemory struct {
-	Key        string `json:"key"`
-	Value      string `json:"value"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
 	// Type is the canonical field name matching the memory_eval_prompt template output.
 	Type string `json:"type,omitempty"` // user|feedback|project|reference
 	// MemoryType is the legacy field name kept for backwards compatibility.
 	MemoryType string `json:"memoryType,omitempty"` // deprecated: use Type
 }
 
-// resolvedType returns the effective memory type, preferring Type over MemoryType.
-func (e ExtractedMemory) resolvedType() string {
+// resolvedType returns the effective memory type. A conflicting pair is
+// invalid so the bridge can skip it before embedding or persisting it.
+func (e ExtractedMemory) resolvedType() (string, bool) {
+	if e.Type != "" && e.MemoryType != "" && e.Type != e.MemoryType {
+		return "", false
+	}
 	if e.Type != "" {
-		return e.Type
+		return e.Type, true
 	}
 	if e.MemoryType != "" {
-		return e.MemoryType
+		return e.MemoryType, true
 	}
-	return "general"
+	return "general", true
 }
 
 // --- MemoryBridge ---
@@ -102,7 +106,7 @@ type MemoryDistiller interface {
 type MemoryBridge struct {
 	embedder    Embedder
 	recaller    MemoryRecaller
-	lister      MemoryLister  // optional: used for recent-memory fallback (BUG-MEM7)
+	lister      MemoryLister // optional: used for recent-memory fallback (BUG-MEM7)
 	upserter    MemoryUpserter
 	evaluator   MemoryEvaluator
 	distiller   MemoryDistiller
@@ -327,6 +331,11 @@ func (mb *MemoryBridge) MaybeStore(ctx context.Context, agentID uuid.UUID, turnI
 
 	stored := 0
 	for _, m := range memories {
+		memType, valid := m.resolvedType()
+		if !valid {
+			continue
+		}
+
 		embedding, err := mb.embedder.Embed(ctx, m.Value)
 		if err != nil {
 			continue // skip this memory, don't fail the whole batch
@@ -336,8 +345,6 @@ func (mb *MemoryBridge) MaybeStore(ctx context.Context, agentID uuid.UUID, turnI
 		if err != nil {
 			continue
 		}
-
-		memType := m.resolvedType()
 
 		scope := "agent"
 		if mb.executionID != nil {

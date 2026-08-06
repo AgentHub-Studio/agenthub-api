@@ -22,6 +22,24 @@ func TestFileReadCache_ReadFile(t *testing.T) {
 	assert.Equal(t, "hello", content)
 }
 
+func TestFileReadCache_ReadFileRelativePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "relative.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello relative"), 0644))
+
+	previousWorkingDir, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(dir))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chdir(previousWorkingDir))
+	})
+
+	cache := agentic.NewFileReadCache(100)
+	content, err := cache.ReadFile("relative.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "hello relative", content)
+}
+
 func TestFileReadCache_CacheHit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")

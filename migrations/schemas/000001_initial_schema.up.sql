@@ -1,6 +1,6 @@
 -- Extensions (idempotent)
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
 -- Settings
 CREATE TABLE IF NOT EXISTS settings (
@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS document_chunk (
 
 CREATE TABLE IF NOT EXISTS document_chunk_embedding (
     chunk_id  UUID                    PRIMARY KEY REFERENCES document_chunk (id) ON DELETE CASCADE,
-    embedding vector(1024)
+    embedding public.vector(1024)
 );
 
 -- MCP Server Config

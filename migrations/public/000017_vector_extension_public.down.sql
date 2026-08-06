@@ -1,0 +1,2 @@
+-- Keep pgvector installed. Older tenant schemas may have vector columns that
+-- depend on this extension, so rollback must not drop or move it.

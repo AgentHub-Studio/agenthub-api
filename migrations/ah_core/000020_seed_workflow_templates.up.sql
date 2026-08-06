@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS ah_core.workflow_template (
     -- workflow_kind classifies the use case.
     workflow_kind   VARCHAR(32)  NOT NULL,
     -- target_agent_slug references the agent persona that drives this workflow.
-    -- App-level FK to ah_core.agent.slug or ah_core.prompt_template.slug.
+    -- App-level FK to ah_core.agent.slug or ah_core.core_prompt_template.slug.
     target_agent_slug VARCHAR(64) NOT NULL,
     -- requires_skills is the comma-separated list of skill slugs required.
     requires_skills VARCHAR(512) NOT NULL DEFAULT '',

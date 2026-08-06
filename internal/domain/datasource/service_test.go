@@ -132,6 +132,46 @@ func TestDataSourceService_Create_ValidationError_UnsupportedType(t *testing.T) 
 	assert.Contains(t, err.Error(), "unsupported type")
 }
 
+func TestDataSourceService_Create_RejectsInternalHosts(t *testing.T) {
+	svc := datasource.NewService(newMockRepo())
+
+	for _, host := range []string{
+		"localhost",
+		"127.0.0.1",
+		"169.254.169.254",
+		"::1",
+		"postgres.default.svc.cluster.local",
+		"postgres.default.svc.cluster.local.",
+	} {
+		t.Run(host, func(t *testing.T) {
+			_, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
+				Name:     "blocked-" + host,
+				Type:     datasource.DataSourceTypePostgreSQL,
+				Host:     host,
+				Database: "appdb",
+				DBUser:   "appuser",
+			})
+
+			require.ErrorIs(t, err, datasource.ErrValidation)
+		})
+	}
+}
+
+func TestDataSourceService_Create_AllowsPrivateNetworkHost(t *testing.T) {
+	svc := datasource.NewService(newMockRepo())
+
+	created, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
+		Name:     "vpn-postgres",
+		Type:     datasource.DataSourceTypePostgreSQL,
+		Host:     "10.42.0.15",
+		Database: "appdb",
+		DBUser:   "appuser",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "10.42.0.15", created.Host)
+}
+
 func TestDataSourceService_GetByID_NotFound(t *testing.T) {
 	svc := datasource.NewService(newMockRepo())
 	_, err := svc.GetByID(context.Background(), tenantID, uuid.New())
@@ -206,6 +246,73 @@ func TestDataSourceService_Update_PreservesPasswordWhenEmpty(t *testing.T) {
 	creds, err := svc.GetCredentials(context.Background(), tenantID, created.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "original-password", creds.Password, "password must be preserved when update sends empty string")
+}
+
+func TestDataSourceService_Update_RejectsInternalHost(t *testing.T) {
+	svc := datasource.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
+		Name:     "vpn-postgres",
+		Type:     datasource.DataSourceTypePostgreSQL,
+		Host:     "10.42.0.15",
+		Database: "appdb",
+		DBUser:   "appuser",
+	})
+	require.NoError(t, err)
+
+	_, err = svc.Update(context.Background(), tenantID, created.ID, datasource.CreateRequest{
+		Host: "localhost.",
+	})
+
+	require.ErrorIs(t, err, datasource.ErrValidation)
+}
+
+func TestDataSourceService_Update_PreservesVPNResourceWhenNil(t *testing.T) {
+	svc := datasource.NewService(newMockRepo())
+	vpnID := uuid.New()
+	created, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
+		Name:          "DB",
+		Type:          datasource.DataSourceTypePostgreSQL,
+		Host:          "pg.internal",
+		Database:      "appdb",
+		DBUser:        "appuser",
+		VpnResourceID: &vpnID,
+	})
+	require.NoError(t, err)
+
+	updated, err := svc.Update(context.Background(), tenantID, created.ID, datasource.CreateRequest{
+		Name:     "DB Updated",
+		Type:     datasource.DataSourceTypePostgreSQL,
+		Host:     "pg.internal",
+		Database: "appdb",
+		DBUser:   "appuser",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, updated.VpnResourceID)
+	assert.Equal(t, vpnID, *updated.VpnResourceID)
+}
+
+func TestDataSourceService_UpdateReplacingVPNResource_ClearsVPNResourceWhenNil(t *testing.T) {
+	svc := datasource.NewService(newMockRepo())
+	vpnID := uuid.New()
+	created, err := svc.Create(context.Background(), tenantID, datasource.CreateRequest{
+		Name:          "DB",
+		Type:          datasource.DataSourceTypePostgreSQL,
+		Host:          "pg.internal",
+		Database:      "appdb",
+		DBUser:        "appuser",
+		VpnResourceID: &vpnID,
+	})
+	require.NoError(t, err)
+
+	updated, err := svc.UpdateReplacingVPNResource(context.Background(), tenantID, created.ID, datasource.CreateRequest{
+		Name:     "DB Updated",
+		Type:     datasource.DataSourceTypePostgreSQL,
+		Host:     "pg.internal",
+		Database: "appdb",
+		DBUser:   "appuser",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, updated.VpnResourceID)
 }
 
 func TestDataSourceService_Update_ChangesPasswordWhenProvided(t *testing.T) {

@@ -27,7 +27,9 @@ func DJB2Hash(s string) int32 {
 // Better distribution than DJB2 for hash table use.
 func FNV1aHash(s string) uint64 {
 	h := fnv.New64a()
-	h.Write([]byte(s))
+	if _, err := h.Write([]byte(s)); err != nil {
+		panic("fnv64a hash write failed: " + err.Error())
+	}
 	return h.Sum64()
 }
 

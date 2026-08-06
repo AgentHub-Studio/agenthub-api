@@ -19,6 +19,7 @@ import (
 // Repository defines the persistence interface for KnowledgeBase.
 type Repository interface {
 	List(ctx context.Context, req pagination.PageRequest) ([]KnowledgeBase, int64, error)
+	ListFiltered(ctx context.Context, req pagination.PageRequest, filters ListFilters) ([]KnowledgeBase, int64, error)
 	GetByID(ctx context.Context, id uuid.UUID) (KnowledgeBase, error)
 	Create(ctx context.Context, k KnowledgeBase) (KnowledgeBase, error)
 	ExistsByName(ctx context.Context, name string) (bool, error)
@@ -38,12 +39,12 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &postgresRepository{pool: pool}
 }
 
-const selectColumns = `id, name, description, status, embedding_model, search_mode, context_window, created_at, updated_at`
+const selectColumns = `id, name, description, status, embedding_model, search_mode, context_window, rerank_strategy, graph_enabled, created_at, updated_at`
 
 // selectColumnsWithPrefix returns selectColumns with each column prefixed by alias.
 // Used in JOIN queries where column names would otherwise be ambiguous.
 func selectColumnsWithPrefix(alias string) string {
-	cols := []string{"id", "name", "description", "status", "embedding_model", "search_mode", "context_window", "created_at", "updated_at"}
+	cols := []string{"id", "name", "description", "status", "embedding_model", "search_mode", "context_window", "rerank_strategy", "graph_enabled", "created_at", "updated_at"}
 	result := make([]string, len(cols))
 	for i, c := range cols {
 		result[i] = alias + "." + c
@@ -51,26 +52,40 @@ func selectColumnsWithPrefix(alias string) string {
 	return strings.Join(result, ", ")
 }
 
-
 func (r *postgresRepository) List(ctx context.Context, req pagination.PageRequest) ([]KnowledgeBase, int64, error) {
+	return r.ListFiltered(ctx, req, ListFilters{})
+}
+
+func (r *postgresRepository) ListFiltered(ctx context.Context, req pagination.PageRequest, filters ListFilters) ([]KnowledgeBase, int64, error) {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
 	if err != nil {
 		return nil, 0, err
 	}
 	defer release()
 
+	whereClause := ""
+	args := []any{}
+	if filters.Status != nil {
+		whereClause = " WHERE status = $1"
+		args = append(args, *filters.Status)
+	}
+
 	var total int64
-	if err := conn.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge_base`).Scan(&total); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT COUNT(*) FROM knowledge_base`+whereClause, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("knowledgebase: count: %w", err)
 	}
 
+	args = append(args, req.Size, req.Offset())
+	limitArg := len(args) - 1
+	offsetArg := len(args)
 	rows, err := conn.Query(ctx,
 		`SELECT kb.`+selectColumns+`,
 		        (SELECT COUNT(*) FROM document d WHERE d.knowledge_base_id = kb.id) AS document_count
 		 FROM knowledge_base kb
+		 `+strings.Replace(whereClause, "status", "kb.status", 1)+`
 		 ORDER BY kb.name
-		 LIMIT $1 OFFSET $2`,
-		req.Size, req.Offset(),
+		 LIMIT $`+fmt.Sprint(limitArg)+` OFFSET $`+fmt.Sprint(offsetArg),
+		args...,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("knowledgebase: list: %w", err)
@@ -83,6 +98,7 @@ func (r *postgresRepository) List(ctx context.Context, req pagination.PageReques
 		if err := rows.Scan(
 			&kb.ID, &kb.Name, &kb.Description, &kb.Status,
 			&kb.EmbeddingModel, &kb.SearchMode, &kb.ContextWindow,
+			&kb.RerankStrategy, &kb.GraphEnabled,
 			&kb.CreatedAt, &kb.UpdatedAt, &kb.DocumentCount,
 		); err != nil {
 			return nil, 0, fmt.Errorf("knowledgebase: scan: %w", err)
@@ -110,6 +126,7 @@ func (r *postgresRepository) GetByID(ctx context.Context, id uuid.UUID) (Knowled
 	).Scan(
 		&kb.ID, &kb.Name, &kb.Description, &kb.Status,
 		&kb.EmbeddingModel, &kb.SearchMode, &kb.ContextWindow,
+		&kb.RerankStrategy, &kb.GraphEnabled,
 		&kb.CreatedAt, &kb.UpdatedAt,
 	)
 	if err != nil {
@@ -154,17 +171,21 @@ func (r *postgresRepository) Create(ctx context.Context, k KnowledgeBase) (Knowl
 	if k.SearchMode == "" {
 		k.SearchMode = "HYBRID"
 	}
+	if k.RerankStrategy == "" {
+		k.RerankStrategy = RerankStrategyNone
+	}
 
 	err = conn.QueryRow(ctx,
-		`INSERT INTO knowledge_base (id, name, description, status, embedding_model, search_mode, context_window, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO knowledge_base (id, name, description, status, embedding_model, search_mode, context_window, rerank_strategy, graph_enabled, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING `+selectColumns,
 		k.ID, k.Name, k.Description, k.Status,
-		k.EmbeddingModel, k.SearchMode, k.ContextWindow,
+		k.EmbeddingModel, k.SearchMode, k.ContextWindow, k.RerankStrategy, k.GraphEnabled,
 		k.CreatedAt, k.UpdatedAt,
 	).Scan(
 		&k.ID, &k.Name, &k.Description, &k.Status,
 		&k.EmbeddingModel, &k.SearchMode, &k.ContextWindow,
+		&k.RerankStrategy, &k.GraphEnabled,
 		&k.CreatedAt, &k.UpdatedAt,
 	)
 	if err != nil {
@@ -184,13 +205,14 @@ func (r *postgresRepository) Update(ctx context.Context, k KnowledgeBase) (Knowl
 	k.UpdatedAt = time.Now().UTC()
 	err = conn.QueryRow(ctx,
 		`UPDATE knowledge_base
-		 SET name = $1, description = $2, embedding_model = $3, search_mode = $4, context_window = $5, updated_at = $6
-		 WHERE id = $7
+		 SET name = $1, description = $2, embedding_model = $3, search_mode = $4, context_window = $5, rerank_strategy = $6, graph_enabled = $7, updated_at = $8
+		 WHERE id = $9
 		 RETURNING `+selectColumns,
-		k.Name, k.Description, k.EmbeddingModel, k.SearchMode, k.ContextWindow, k.UpdatedAt, k.ID,
+		k.Name, k.Description, k.EmbeddingModel, k.SearchMode, k.ContextWindow, k.RerankStrategy, k.GraphEnabled, k.UpdatedAt, k.ID,
 	).Scan(
 		&k.ID, &k.Name, &k.Description, &k.Status,
 		&k.EmbeddingModel, &k.SearchMode, &k.ContextWindow,
+		&k.RerankStrategy, &k.GraphEnabled,
 		&k.CreatedAt, &k.UpdatedAt,
 	)
 	if err != nil {
@@ -249,6 +271,7 @@ func (r *postgresRepository) ListByAgentID(ctx context.Context, agentID uuid.UUI
 		if err := rows.Scan(
 			&kb.ID, &kb.Name, &kb.Description, &kb.Status,
 			&kb.EmbeddingModel, &kb.SearchMode, &kb.ContextWindow,
+			&kb.RerankStrategy, &kb.GraphEnabled,
 			&kb.CreatedAt, &kb.UpdatedAt, &kb.DocumentCount,
 		); err != nil {
 			return nil, fmt.Errorf("knowledgebase: scan: %w", err)
@@ -279,6 +302,7 @@ func (r *postgresRepository) UpdateStatus(ctx context.Context, id uuid.UUID, sta
 	).Scan(
 		&kb.ID, &kb.Name, &kb.Description, &kb.Status,
 		&kb.EmbeddingModel, &kb.SearchMode, &kb.ContextWindow,
+		&kb.RerankStrategy, &kb.GraphEnabled,
 		&kb.CreatedAt, &kb.UpdatedAt,
 	)
 	if err != nil {

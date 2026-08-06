@@ -6,5 +6,6 @@ ALTER TABLE ah_core.tool
 
 ALTER TABLE ah_core.agent
     DROP COLUMN IF EXISTS agent_type,
+    DROP COLUMN IF EXISTS current_version,
     DROP COLUMN IF EXISTS enable_management,
     DROP COLUMN IF EXISTS is_active;

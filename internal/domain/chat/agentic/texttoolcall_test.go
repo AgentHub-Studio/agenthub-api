@@ -2,6 +2,7 @@ package agentic
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -111,6 +112,22 @@ func TestParseTextToolCalls_Array(t *testing.T) {
 	}
 	if calls[0].ID == calls[1].ID {
 		t.Errorf("synthetic IDs must be unique, both are %q", calls[0].ID)
+	}
+}
+
+func TestParseTextToolCalls_SyntheticIDFitsPersistentColumn(t *testing.T) {
+	name := "agent-loop-success-chat-sse-matrix-full-mqk5mt5k-abcde"
+	content := fmt.Sprintf(`{"tool":%q,"call":{"phase":"recovery"}}`, name)
+
+	calls, consumed := parseTextToolCalls(content)
+	if !consumed || len(calls) != 1 {
+		t.Fatalf("expected one parsed text tool call, got consumed=%v calls=%d", consumed, len(calls))
+	}
+	if len(calls[0].ID) > 64 {
+		t.Fatalf("synthetic tool call id length=%d, want <=64: %q", len(calls[0].ID), calls[0].ID)
+	}
+	if calls[0].Function.Name != name {
+		t.Fatalf("tool name must remain intact, got %q want %q", calls[0].Function.Name, name)
 	}
 }
 

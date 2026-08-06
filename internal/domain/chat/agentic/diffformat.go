@@ -63,8 +63,8 @@ func FormatUnifiedDiff(filePath string, hunks []DiffHunk) string {
 	sb.WriteByte('\n')
 
 	for _, hunk := range hunks {
-		sb.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n",
-			hunk.OldStart, hunk.OldLines, hunk.NewStart, hunk.NewLines))
+		fmt.Fprintf(&sb, "@@ -%d,%d +%d,%d @@\n",
+			hunk.OldStart, hunk.OldLines, hunk.NewStart, hunk.NewLines)
 		for _, line := range hunk.Lines {
 			sb.WriteString(line)
 			sb.WriteByte('\n')

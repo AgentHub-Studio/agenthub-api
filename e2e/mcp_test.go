@@ -48,7 +48,7 @@ func TestE2E_MCPServerConfigLifecycle(t *testing.T) {
 	var page testutil.Page[map[string]any]
 	status = c.Get("/api/mcp-server-configs?page=0&size=20", &page)
 	assert.Equal(t, http.StatusOK, status)
-	assert.GreaterOrEqual(t, page.TotalElements, int64(1))
+	assert.GreaterOrEqual(t, page.TotalElements, 1)
 
 	found := false
 	for _, item := range page.Content {
@@ -100,6 +100,82 @@ func TestE2E_MCPServerConfigHTTPTransport(t *testing.T) {
 
 	id := created["id"].(string)
 	c.Delete("/api/mcp-server-configs/" + id)
+}
+
+// TestE2E_MCPServerConfigEnvSecretsAreRedacted verifies that credentials in an
+// MCP config never cross the public HTTP boundary.
+func TestE2E_MCPServerConfigEnvSecretsAreRedacted(t *testing.T) {
+	cfg := e2eConfig()
+	tenant := testutil.NewTenantFixture(t,
+		cfg.backendURL, cfg.keycloakURL,
+		cfg.keycloakAdmin, cfg.keycloakAdminPass,
+		cfg.e2eUserPassword,
+	)
+	c := tenant.Client(t, cfg.backendURL)
+
+	const (
+		initialToken = "e2e-mcp-initial-token"
+		updatedKey   = "e2e-mcp-updated-api-key"
+	)
+
+	assertRedactedEnv := func(t *testing.T, response map[string]any, sensitiveName, sensitiveValue, safeValue string) {
+		t.Helper()
+		env, ok := response["env"].(map[string]any)
+		require.True(t, ok, "MCP response must contain an env object")
+		assert.Equal(t, "***", env[sensitiveName])
+		assert.NotEqual(t, sensitiveValue, env[sensitiveName])
+		assert.Equal(t, safeValue, env["SAFE_FLAG"])
+	}
+
+	var created map[string]any
+	require.Equal(t, http.StatusCreated, c.Post("/api/mcp-server-configs", map[string]any{
+		"name":          "redacted-env-mcp",
+		"transportType": "stdio",
+		"command":       "/bin/true",
+		"env": map[string]any{
+			"MCP_TOKEN": initialToken,
+			"SAFE_FLAG": "initial-safe-value",
+		},
+		"autoStart": false,
+		"enabled":   true,
+	}, &created))
+	id, ok := created["id"].(string)
+	require.True(t, ok, "created MCP config must have a string id")
+	t.Cleanup(func() { c.Delete("/api/mcp-server-configs/" + id) })
+	assertRedactedEnv(t, created, "MCP_TOKEN", initialToken, "initial-safe-value")
+
+	var fetched map[string]any
+	require.Equal(t, http.StatusOK, c.Get("/api/mcp-server-configs/"+id, &fetched))
+	assertRedactedEnv(t, fetched, "MCP_TOKEN", initialToken, "initial-safe-value")
+
+	var listed testutil.Page[map[string]any]
+	require.Equal(t, http.StatusOK, c.Get("/api/mcp-server-configs?size=50", &listed))
+	found := false
+	for _, config := range listed.Content {
+		if config["id"] == id {
+			found = true
+			assertRedactedEnv(t, config, "MCP_TOKEN", initialToken, "initial-safe-value")
+			break
+		}
+	}
+	require.True(t, found, "created MCP config must be listed")
+
+	var updated map[string]any
+	require.Equal(t, http.StatusOK, c.Put("/api/mcp-server-configs/"+id, map[string]any{
+		"env": map[string]any{
+			"API_KEY":   updatedKey,
+			"SAFE_FLAG": "updated-safe-value",
+		},
+	}, &updated))
+	assertRedactedEnv(t, updated, "API_KEY", updatedKey, "updated-safe-value")
+
+	var fetchedUpdated map[string]any
+	require.Equal(t, http.StatusOK, c.Get("/api/mcp-server-configs/"+id, &fetchedUpdated))
+	assertRedactedEnv(t, fetchedUpdated, "API_KEY", updatedKey, "updated-safe-value")
+
+	require.Equal(t, http.StatusNoContent, c.Delete("/api/mcp-server-configs/"+id))
+	var notFound testutil.ErrorResponse
+	assert.Equal(t, http.StatusNotFound, c.Get("/api/mcp-server-configs/"+id, &notFound))
 }
 
 // TestE2E_MCPServerConfigTenantIsolation validates that tenant B cannot see tenant A's configs.

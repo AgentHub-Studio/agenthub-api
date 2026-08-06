@@ -2,7 +2,6 @@ package oauth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -11,31 +10,27 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // safeRedirectTarget returns the value to redirect to or empty string if rejected.
-// Bug 203: o callback OAuth aceitava qualquer URL em ?redirect_ui — vetor de
-// open redirect (atacante envia link legítimo do callback que redirige para
-// site de phishing após auth). Aceita apenas:
-//   - paths relativos ("/agents/123") sem schema
-//   - URLs absolute apontando para o frontend known (cezar.dev domains)
+// OAuth callbacks only accept local UI paths or known cezar.dev frontend hosts.
 func safeRedirectTarget(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	// Reject control chars and protocol relative ("//evil.com").
-	if strings.ContainsAny(raw, "\r\n\t") || strings.HasPrefix(raw, "//") {
+	if strings.ContainsAny(raw, "\r\n\t\\") || strings.HasPrefix(raw, "//") {
 		return ""
 	}
-	// Relative path: safe.
 	if strings.HasPrefix(raw, "/") {
 		return raw
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname())
@@ -43,6 +38,11 @@ func safeRedirectTarget(raw string) string {
 		return raw
 	}
 	return ""
+}
+
+func redirectToSafeTarget(w http.ResponseWriter, target string) {
+	w.Header().Set("Location", target)
+	w.WriteHeader(http.StatusTemporaryRedirect)
 }
 
 // service is the interface required by the Handler.
@@ -67,17 +67,20 @@ func NewHandler(svc service) *Handler {
 	return &Handler{svc: svc}
 }
 
-// Routes mounts the handler routes and returns the router.
+// Routes mounts administrator-only OAuth credential routes and returns the router.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Get("/", h.list)
-	r.Post("/", h.create)
-	r.Get("/{id}", h.getByID)
-	r.Put("/{id}", h.update)
-	r.Patch("/{id}", h.update)
-	r.Delete("/{id}", h.delete)
-	r.Get("/{id}/resolve", h.resolve)
-	r.Get("/callback", h.callback)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/", h.list)
+		r.Post("/", h.create)
+		r.Get("/{id}", h.getByID)
+		r.Put("/{id}", h.update)
+		r.Patch("/{id}", h.update)
+		r.Delete("/{id}", h.delete)
+		r.Get("/{id}/resolve", h.resolve)
+		r.Get("/callback", h.callback)
+	})
 	return r
 }
 
@@ -102,7 +105,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.FromContext(r.Context())
 
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -155,7 +158,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -215,7 +218,15 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	res = redactResolveResponse(res)
 	respond.JSON(w, http.StatusOK, res)
+}
+
+func redactResolveResponse(res ResolveResponse) ResolveResponse {
+	if res.Value != "" {
+		res.Value = "***"
+	}
+	return res
 }
 
 func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
@@ -258,9 +269,9 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		// scripts, styles inline ou iframes — só texto estático seguro.
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
-		w.Write([]byte("<h1>Authentication Successful!</h1><p>You can close this window now.</p>"))
+		_, _ = w.Write([]byte("<h1>Authentication Successful!</h1><p>You can close this window now.</p>"))
 		return
 	}
 
-	http.Redirect(w, r, redirectUI, http.StatusTemporaryRedirect)
+	redirectToSafeTarget(w, redirectUI)
 }

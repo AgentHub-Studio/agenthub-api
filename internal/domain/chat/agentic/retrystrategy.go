@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/randutil"
 )
 
 // Comprehensive retry with fast mode fallback and persistent wait.
@@ -32,13 +33,13 @@ const (
 type RetryErrorKind string
 
 const (
-	RetryErrorRateLimit      RetryErrorKind = "rate_limit"      // 429
-	RetryErrorOverloaded     RetryErrorKind = "overloaded"      // 529
-	RetryErrorAuth           RetryErrorKind = "auth"            // 401/403
+	RetryErrorRateLimit       RetryErrorKind = "rate_limit"       // 429
+	RetryErrorOverloaded      RetryErrorKind = "overloaded"       // 529
+	RetryErrorAuth            RetryErrorKind = "auth"             // 401/403
 	RetryErrorContextOverflow RetryErrorKind = "context_overflow" // context too large
-	RetryErrorConnection     RetryErrorKind = "connection"      // ECONNRESET, etc.
-	RetryErrorServer         RetryErrorKind = "server"          // 5xx
-	RetryErrorUnknown        RetryErrorKind = "unknown"
+	RetryErrorConnection      RetryErrorKind = "connection"       // ECONNRESET, etc.
+	RetryErrorServer          RetryErrorKind = "server"           // 5xx
+	RetryErrorUnknown         RetryErrorKind = "unknown"
 )
 
 // RetryableError wraps an error with retry metadata.
@@ -74,23 +75,23 @@ func (e *CannotRetryError) Unwrap() error {
 
 // RetryStrategyConfig configures retry behavior.
 type RetryStrategyConfig struct {
-	MaxRetries        int
-	BaseDelay         time.Duration
-	MaxDelay          time.Duration
-	Category          RetryCategory
-	EnableFastFallback bool // if true, switch model on sustained rate limits
-	HeartbeatInterval time.Duration // for persistent mode
+	MaxRetries         int
+	BaseDelay          time.Duration
+	MaxDelay           time.Duration
+	Category           RetryCategory
+	EnableFastFallback bool          // if true, switch model on sustained rate limits
+	HeartbeatInterval  time.Duration // for persistent mode
 }
 
 // DefaultRetryStrategyConfig returns defaults for foreground queries.
 func DefaultRetryStrategyConfig() RetryStrategyConfig {
 	return RetryStrategyConfig{
-		MaxRetries:        5,
-		BaseDelay:         time.Second,
-		MaxDelay:          60 * time.Second,
-		Category:          RetryCategoryForeground,
+		MaxRetries:         5,
+		BaseDelay:          time.Second,
+		MaxDelay:           60 * time.Second,
+		Category:           RetryCategoryForeground,
 		EnableFastFallback: false,
-		HeartbeatInterval: 30 * time.Second,
+		HeartbeatInterval:  30 * time.Second,
 	}
 }
 
@@ -296,7 +297,7 @@ func (r *RetryStrategy) shouldRetry(err *RetryableError) bool {
 // calculateDelay returns the backoff delay with jitter, respecting server hints.
 func (r *RetryStrategy) calculateDelay(attempt int, serverHint time.Duration) time.Duration {
 	base := float64(r.config.BaseDelay) * math.Pow(2, float64(attempt))
-	jitter := base * 0.2 * rand.Float64()
+	jitter := base * 0.2 * randutil.Float64()
 	delay := time.Duration(base + jitter)
 
 	if delay > r.config.MaxDelay {

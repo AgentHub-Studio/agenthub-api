@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -124,11 +125,57 @@ func (m *mockVersionSvc) GetVersionByID(_ context.Context, versionID uuid.UUID) 
 }
 
 func setupVersionRouter() (*chi.Mux, *mockVersionSvc) {
+	return setupVersionRouterWithRoles("admin")
+}
+
+func setupVersionRouterWithRoles(roles ...string) (*chi.Mux, *mockVersionSvc) {
 	svc := newMockVersionSvc()
 	h := agent.NewVersionHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterVersionRoutes(r)
 	return r, svc
+}
+
+func TestVersionHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupVersionRouterWithRoles("user")
+	agentID := uuid.NewString()
+	versionID := uuid.NewString()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/agents/" + agentID + "/versions"},
+		{name: "create draft", method: http.MethodPost, path: "/api/agents/" + agentID + "/versions", body: `{}`},
+		{name: "get draft", method: http.MethodGet, path: "/api/agents/" + agentID + "/versions/draft"},
+		{name: "get latest published", method: http.MethodGet, path: "/api/agents/" + agentID + "/versions/latest-published"},
+		{name: "get by id", method: http.MethodGet, path: "/api/agents/" + agentID + "/versions/by-id/" + versionID},
+		{name: "put draft", method: http.MethodPut, path: "/api/agents/" + agentID + "/versions/by-id/" + versionID, body: `{}`},
+		{name: "patch draft", method: http.MethodPatch, path: "/api/agents/" + agentID + "/versions/by-id/" + versionID, body: `{}`},
+		{name: "publish", method: http.MethodPost, path: "/api/agents/" + agentID + "/versions/" + versionID + "/publish"},
+		{name: "rollback", method: http.MethodPost, path: "/api/agents/" + agentID + "/versions/" + versionID + "/rollback"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 func TestVersionHandler_List_Empty(t *testing.T) {
@@ -210,6 +257,34 @@ func TestVersionHandler_CreateDraft_Conflict(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, w2.Code)
 }
 
+func TestVersionHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create draft", func(t *testing.T) {
+		r, svc := setupVersionRouter()
+		agentID := uuid.New()
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/"+agentID.String()+"/versions", bytes.NewBufferString(`{"description":"first"}{"description":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.versions)
+		assert.Empty(t, svc.drafts)
+	})
+
+	t.Run("update draft", func(t *testing.T) {
+		r, svc := setupVersionRouter()
+		agentID := uuid.New()
+		versionID := uuid.New()
+		svc.versions[versionID] = agent.AgentVersionResponse{ID: versionID, AgentID: agentID, Status: "DRAFT", Description: "original"}
+		svc.drafts[agentID] = svc.versions[versionID]
+		req := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agentID.String()+"/versions/by-id/"+versionID.String(), bytes.NewBufferString(`{"description":"changed"}{"description":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, "original", svc.versions[versionID].Description)
+	})
+}
+
 func TestVersionHandler_GetDraft_Success(t *testing.T) {
 	r, svc := setupVersionRouter()
 	agentID := uuid.New()
@@ -265,6 +340,20 @@ func TestVersionHandler_GetLatestPublished_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+func TestVersionHandler_GetByID_WrongAgentIDReturnsNotFound(t *testing.T) {
+	r, svc := setupVersionRouter()
+	ownerAgentID := uuid.New()
+	otherAgentID := uuid.New()
+	vID := uuid.New()
+	svc.versions[vID] = agent.AgentVersionResponse{ID: vID, AgentID: ownerAgentID, Status: "DRAFT"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+otherAgentID.String()+"/versions/by-id/"+vID.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
 func TestVersionHandler_UpdateDraft_Success(t *testing.T) {
 	r, svc := setupVersionRouter()
 	agentID := uuid.New()
@@ -285,6 +374,27 @@ func TestVersionHandler_UpdateDraft_Success(t *testing.T) {
 	assert.Equal(t, newDesc, resp.Description)
 }
 
+func TestVersionHandler_PatchDraft_Success(t *testing.T) {
+	r, svc := setupVersionRouter()
+	agentID := uuid.New()
+	vID := uuid.New()
+	svc.versions[vID] = agent.AgentVersionResponse{ID: vID, AgentID: agentID, Status: "DRAFT"}
+	svc.drafts[agentID] = svc.versions[vID]
+
+	newDesc := "patched description"
+	body, _ := json.Marshal(map[string]any{"description": newDesc})
+	req := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agentID.String()+"/versions/by-id/"+vID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp agent.AgentVersionResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, vID, resp.ID)
+	assert.Equal(t, newDesc, resp.Description)
+}
+
 func TestVersionHandler_UpdateDraft_NotFound(t *testing.T) {
 	r, _ := setupVersionRouter()
 	agentID := uuid.New()
@@ -297,6 +407,26 @@ func TestVersionHandler_UpdateDraft_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestVersionHandler_UpdateDraft_WrongAgentIDReturnsNotFoundWithoutMutation(t *testing.T) {
+	r, svc := setupVersionRouter()
+	ownerAgentID := uuid.New()
+	otherAgentID := uuid.New()
+	vID := uuid.New()
+	originalDescription := "owned draft"
+	svc.versions[vID] = agent.AgentVersionResponse{ID: vID, AgentID: ownerAgentID, Status: "DRAFT", Description: originalDescription}
+	svc.drafts[ownerAgentID] = svc.versions[vID]
+
+	newDesc := "cross-agent mutation"
+	body, _ := json.Marshal(map[string]any{"description": newDesc})
+	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+otherAgentID.String()+"/versions/by-id/"+vID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, originalDescription, svc.versions[vID].Description)
 }
 
 func TestVersionHandler_UpdateDraft_ImmutablePublished(t *testing.T) {
@@ -329,6 +459,24 @@ func TestVersionHandler_Publish_Success(t *testing.T) {
 	var resp agent.AgentVersionResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "PUBLISHED", resp.Status)
+}
+
+func TestVersionHandler_Publish_WrongAgentIDReturnsNotFoundWithoutMutation(t *testing.T) {
+	r, svc := setupVersionRouter()
+	ownerAgentID := uuid.New()
+	otherAgentID := uuid.New()
+	vID := uuid.New()
+	svc.versions[vID] = agent.AgentVersionResponse{ID: vID, AgentID: ownerAgentID, Status: "DRAFT"}
+	svc.drafts[ownerAgentID] = svc.versions[vID]
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/"+otherAgentID.String()+"/versions/"+vID.String()+"/publish", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, "DRAFT", svc.versions[vID].Status)
+	_, draftStillExists := svc.drafts[ownerAgentID]
+	assert.True(t, draftStillExists)
 }
 
 func TestVersionHandler_Publish_AlreadyPublished(t *testing.T) {

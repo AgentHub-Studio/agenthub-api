@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/version"
 	tenantpkg "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
@@ -79,6 +80,26 @@ func setupVersionHandler() (*chi.Mux, *mockVersionSvc) {
 	return r, svc
 }
 
+type mockPackageReader struct {
+	packages map[uuid.UUID]pkg.PackageResponse
+}
+
+func (m *mockPackageReader) GetAccessibleByID(_ context.Context, id uuid.UUID, tenantID string) (pkg.PackageResponse, error) {
+	p, ok := m.packages[id]
+	if !ok || (p.Visibility != string(pkg.PackageVisibilityPublic) && (tenantID == "" || p.AuthorTenantID != tenantID)) {
+		return pkg.PackageResponse{}, pkg.ErrNotFound
+	}
+	return p, nil
+}
+
+func setupVersionHandlerWithPackages(packages map[uuid.UUID]pkg.PackageResponse) (*chi.Mux, *mockVersionSvc) {
+	svc := newMockVersionSvc()
+	h := version.NewHandler(svc).WithPackageReader(&mockPackageReader{packages: packages})
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r, svc
+}
+
 func withTenantCtx(req *http.Request, tenantID string) *http.Request {
 	ctx := tenantpkg.NewContext(req.Context(), tenantID)
 	return req.WithContext(ctx)
@@ -135,6 +156,39 @@ func TestVersionHandler_GetByVersion_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+func TestVersionHandler_PrivatePackageReadHidden(t *testing.T) {
+	pkgID := uuid.New()
+	r, svc := setupVersionHandlerWithPackages(map[uuid.UUID]pkg.PackageResponse{
+		pkgID: {
+			ID:             pkgID,
+			Visibility:     string(pkg.PackageVisibilityPrivate),
+			AuthorTenantID: "owner",
+		},
+	})
+	svc.data[svcKey(pkgID, "1.0.0")] = version.PackageVersion{ID: uuid.New(), PackageID: pkgID, Version: "1.0.0"}
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		tenantID string
+		want     int
+	}{
+		{name: "anonymous list", path: "/api/packages/" + pkgID.String() + "/versions", want: http.StatusNotFound},
+		{name: "other tenant version", path: "/api/packages/" + pkgID.String() + "/versions/1.0.0", tenantID: "other", want: http.StatusNotFound},
+		{name: "owner version", path: "/api/packages/" + pkgID.String() + "/versions/1.0.0", tenantID: "owner", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.tenantID != "" {
+				req = withTenantCtx(req, tc.tenantID)
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			assert.Equal(t, tc.want, w.Code)
+		})
+	}
+}
+
 func TestVersionHandler_Publish_Success(t *testing.T) {
 	r, _ := setupVersionHandler()
 	pkgID := uuid.New()
@@ -174,6 +228,19 @@ func TestVersionHandler_Publish_BadBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestVersionHandler_PublishRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	r, svc := setupVersionHandler()
+	pkgID := uuid.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/packages/"+pkgID.String()+"/versions", bytes.NewBufferString(`{"version":"1.0.0","changelog":"first release"} {"version":"ignored"}`))
+	req = withTenantCtx(req, "owner")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, svc.data)
 }
 
 func TestVersionHandler_Delete_NoContent(t *testing.T) {

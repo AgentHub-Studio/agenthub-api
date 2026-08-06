@@ -31,12 +31,11 @@ func TestE2E_SkillToolCrud(t *testing.T) {
 	// --- Create Skill ---
 	var skill map[string]any
 	status := c.Post("/api/skills", map[string]any{
-		"name":        "E2E Test Skill",
-		"slug":        skillSlug,
-		"description": "Created by e2e test",
-		"type":        "DATA",
-		"category":    "DATA",
-		"version":     "1.0.0",
+		"name":         "E2E Test Skill",
+		"slug":         skillSlug,
+		"description":  "Created by e2e test",
+		"category":     "DATA",
+		"instructions": "Use the associated tool to retrieve data for the user.",
 	}, &skill)
 	require.Equal(t, http.StatusCreated, status, "create skill")
 	skillID := skill["id"].(string)
@@ -44,7 +43,8 @@ func TestE2E_SkillToolCrud(t *testing.T) {
 
 	t.Run("skill has correct fields after creation", func(t *testing.T) {
 		assert.Equal(t, skillSlug, skill["slug"])
-		assert.Equal(t, "ACTIVE", skill["status"])
+		assert.Equal(t, "DATA", skill["category"])
+		assert.Equal(t, "Use the associated tool to retrieve data for the user.", skill["instructions"])
 	})
 
 	// --- Create Tool ---
@@ -102,8 +102,8 @@ func TestE2E_SkillToolCrud(t *testing.T) {
 		status := c.Get("/api/skills/"+skillID, &fetched)
 		assert.Equal(t, http.StatusOK, status)
 		assert.Equal(t, skillID, fetched["id"])
-		assert.Equal(t, "1.0.0", fetched["version"])
 		assert.Equal(t, "DATA", fetched["category"])
+		assert.Equal(t, "Use the associated tool to retrieve data for the user.", fetched["instructions"])
 	})
 
 	// --- Get Tool by ID ---
@@ -138,7 +138,7 @@ func TestE2E_SkillToolCrud(t *testing.T) {
 		var s map[string]any
 		require.Equal(t, http.StatusCreated, c.Post("/api/skills", map[string]any{
 			"name": "To Delete", "slug": ephemeralSlug,
-			"version": "1.0.0", "type": "DATA", "category": "DATA",
+			"category": "DATA", "instructions": "Temporary deletion test skill.",
 		}, &s))
 		sid := s["id"].(string)
 

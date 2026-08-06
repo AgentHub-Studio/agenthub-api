@@ -48,7 +48,7 @@ func (r *postgresRepository) List(ctx context.Context, req pagination.PageReques
 	}
 	defer rows.Close()
 
-	var pipelines []PipelineResponse
+	pipelines := make([]PipelineResponse, 0)
 	for rows.Next() {
 		p, scanErr := scanPipeline(rows)
 		if scanErr != nil {

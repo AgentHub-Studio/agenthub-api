@@ -64,7 +64,7 @@ func (m *mockPkgRepo) Create(_ context.Context, p pkg.Package) (pkg.Package, err
 	return p, nil
 }
 
-func (m *mockPkgRepo) Update(_ context.Context, id uuid.UUID, name, description, visibility string) (pkg.Package, error) {
+func (m *mockPkgRepo) Update(_ context.Context, id uuid.UUID, name, description, visibility string, tags []string) (pkg.Package, error) {
 	p, ok := m.data[id]
 	if !ok {
 		return pkg.Package{}, pkg.ErrNotFound
@@ -72,6 +72,7 @@ func (m *mockPkgRepo) Update(_ context.Context, id uuid.UUID, name, description,
 	p.Name = name
 	p.Description = description
 	p.Visibility = pkg.PackageVisibility(visibility)
+	p.Tags = tags
 	m.data[id] = p
 	return p, nil
 }
@@ -182,6 +183,56 @@ func TestPkgService_GetBySlug_NotFound(t *testing.T) {
 	svc := pkg.NewService(newMockPkgRepo())
 	_, err := svc.GetBySlug(context.Background(), "nonexistent")
 	require.ErrorIs(t, err, pkg.ErrNotFound)
+}
+
+func TestPkgService_GetAccessible_EnforcesPrivateVisibility(t *testing.T) {
+	repo := newMockPkgRepo()
+	svc := pkg.NewService(repo)
+	private := pkg.Package{
+		ID:             uuid.New(),
+		Slug:           "private-package",
+		Visibility:     pkg.PackageVisibilityPrivate,
+		AuthorTenantID: "owner",
+	}
+	public := pkg.Package{
+		ID:             uuid.New(),
+		Slug:           "public-package",
+		Visibility:     pkg.PackageVisibilityPublic,
+		AuthorTenantID: "owner",
+	}
+	repo.data[private.ID] = private
+	repo.data[public.ID] = public
+
+	for _, tc := range []struct {
+		name     string
+		id       uuid.UUID
+		slug     string
+		tenantID string
+		wantErr  error
+	}{
+		{name: "anonymous private", id: private.ID, slug: private.Slug, wantErr: pkg.ErrNotFound},
+		{name: "other tenant private", id: private.ID, slug: private.Slug, tenantID: "other", wantErr: pkg.ErrNotFound},
+		{name: "owner private", id: private.ID, slug: private.Slug, tenantID: "owner"},
+		{name: "anonymous public", id: public.ID, slug: public.Slug},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			byID, err := svc.GetAccessibleByID(context.Background(), tc.id, tc.tenantID)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.id, byID.ID)
+			}
+
+			bySlug, err := svc.GetAccessibleBySlug(context.Background(), tc.slug, tc.tenantID)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.id, bySlug.ID)
+			}
+		})
+	}
 }
 
 func TestPkgService_ListPublic(t *testing.T) {

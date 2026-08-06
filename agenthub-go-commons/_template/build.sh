@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SERVICE_NAME="${SERVICE_NAME:-$(basename "$(pwd)")}"
-GO_IMAGE="golang:1.24-alpine"
+GO_IMAGE="golang:1.25.12-alpine"
 CACHE_VOL="$HOME/go/pkg/mod"
 
 CMD="${1:-help}"

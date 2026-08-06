@@ -201,6 +201,11 @@ func (s *service) lookupChannelByToken(ctx context.Context, token string) (Chann
 		if ch, err := s.repo.GetByToken(ctx, token); err == nil {
 			return ch, tid, nil
 		}
+	} else if ch, err := s.repo.GetByToken(ctx, token); err == nil {
+		// Preserve unit/in-memory repositories that do not require tenant
+		// promotion while still allowing production repos to fall through to
+		// tenant enumeration when the public schema has no channel rows.
+		return ch, "", nil
 	}
 	// 2) Iterate all tenants. Public inbound endpoint has no tenant context.
 	if s.tenantLister == nil {
@@ -248,7 +253,7 @@ func (s *service) HandleInbound(ctx context.Context, token string, headers map[s
 
 	msg, err := adapter.ParseMessage(ctx, ch, body)
 	if err != nil {
-		return InboundMessage{}, fmt.Errorf("channel: parse: %w", err)
+		return InboundMessage{}, fmt.Errorf("%w: %w", ErrInvalidInboundPayload, err)
 	}
 
 	// URL-verification challenge or empty/bot message — return without dispatching.

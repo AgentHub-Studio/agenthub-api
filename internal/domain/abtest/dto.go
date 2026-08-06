@@ -52,6 +52,9 @@ type CreateABTestRequest struct {
 }
 
 func (r CreateABTestRequest) validate() error {
+	if r.AgentID == uuid.Nil {
+		return fmt.Errorf("%w: agentId is required", ErrValidation)
+	}
 	if r.Name == "" {
 		return fmt.Errorf("%w: name is required", ErrValidation)
 	}

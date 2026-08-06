@@ -247,6 +247,16 @@ func TestSkillDescHandler_Validate_BadRequest(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestSkillDescHandler_ValidateRejectsTrailingJSON(t *testing.T) {
+	handler := agentic.NewSkillDescHandler()
+	req := httptest.NewRequest(http.MethodPost, "/api/skill-descriptions/validate", strings.NewReader(`{"description":"Searches documents. Use when user asks. The 'query' parameter is text. Returns results."} {"description":"ignored"}`))
+	w := httptest.NewRecorder()
+
+	handler.ValidateHandler(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
 // --- SkillDescription JSON roundtrip ---
 
 func TestSkillDescription_JSONRoundtrip(t *testing.T) {

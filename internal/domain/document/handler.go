@@ -2,6 +2,7 @@ package document
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/metadata"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -44,13 +48,16 @@ func (h *Handler) WithKBExister(kb kbExister) *Handler {
 	return h
 }
 
-// RegisterRoutes mounts document routes onto the given router.
+// RegisterRoutes mounts administrator-only document routes onto the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/knowledge-bases/{kbId}/documents", h.list)
-	r.Post("/api/knowledge-bases/{kbId}/documents", h.upload)
-	r.Get("/api/knowledge-bases/{kbId}/documents/{id}", h.getByID)
-	r.Delete("/api/knowledge-bases/{kbId}/documents/{id}", h.delete)
-	r.Post("/api/knowledge-bases/{kbId}/documents/{id}/reprocess", h.reprocess)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/knowledge-bases/{kbId}/documents", h.list)
+		r.Post("/api/knowledge-bases/{kbId}/documents", h.upload)
+		r.Get("/api/knowledge-bases/{kbId}/documents/{id}", h.getByID)
+		r.Delete("/api/knowledge-bases/{kbId}/documents/{id}", h.delete)
+		r.Post("/api/knowledge-bases/{kbId}/documents/{id}/reprocess", h.reprocess)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -94,31 +101,40 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Accept multipart/form-data with a "file" field.
-	const maxUploadSize = 100 << 20 // 100 MB
-	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+	const (
+		maxUploadSize      = 100 << 20 // 100 MB
+		maxUploadBodyBytes = maxUploadSize + (1 << 20)
+		maxUploadFieldSize = 16 << 10
+	)
+	file, fields, err := httputil.ReadLimitedMultipartFile(w, r, httputil.LimitedMultipartOptions{
+		FileFields:    []string{"file"},
+		MaxFileBytes:  maxUploadSize,
+		MaxBodyBytes:  maxUploadBodyBytes,
+		MaxFieldBytes: maxUploadFieldSize,
+	})
+	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "multipart form required")
 		return
 	}
 
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "file field is required")
-		return
-	}
-	defer file.Close() //nolint:errcheck
-
-	contentType := header.Header.Get("Content-Type")
+	contentType := file.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
+	metadata, err := parseUploadMetadata(fields["metadata"])
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid metadata")
+		return
+	}
+
 	req := UploadRequest{
 		KnowledgeBaseID: kbID,
-		FileName:        header.Filename,
+		FileName:        file.Filename,
 		ContentType:     contentType,
-		FileSize:        header.Size,
-		Content:         file,
+		FileSize:        file.Size,
+		Content:         file.Reader(),
+		Metadata:        metadata,
 	}
 
 	resp, err := h.svc.Upload(r.Context(), req)
@@ -131,6 +147,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond.JSON(w, http.StatusCreated, resp)
+}
+
+func parseUploadMetadata(raw string) (json.RawMessage, error) {
+	return metadata.ParseDocument([]byte(raw))
 }
 
 func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {

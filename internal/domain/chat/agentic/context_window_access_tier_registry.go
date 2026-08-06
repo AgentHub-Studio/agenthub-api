@@ -71,17 +71,6 @@ const (
 	ContextAccessTierLazyLoad ContextWindowAccessTierID = "lazy_load"
 )
 
-// contextWindowAccessTierOrder is the canonical mutability-ascending order
-// matching Figure 6's ACCESS axis annotation (top → bottom = least → most mutable).
-var contextWindowAccessTierOrder = []ContextWindowAccessTierID{
-	ContextAccessTierReadOnly,
-	ContextAccessTierHotReload,
-	ContextAccessTierSysWrite,
-	ContextAccessTierAppend,
-	ContextAccessTierModelTrigger,
-	ContextAccessTierLazyLoad,
-}
-
 // ContextWindowAccessTierProfile holds the immutable Figure 6 metadata for
 // one access/mutability tier.
 type ContextWindowAccessTierProfile struct {

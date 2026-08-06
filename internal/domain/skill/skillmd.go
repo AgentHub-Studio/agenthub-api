@@ -18,17 +18,17 @@ const SkillMDVersion = "1"
 // associated_agents, dynamic_hooks added below.
 // shell_config is NOT_APPLICABLE_WEB — AgentHub is a web platform.
 type skillMDFrontmatter struct {
-	Version                string            `yaml:"version"`
-	Name                   string            `yaml:"name"`
-	Slug                   string            `yaml:"slug,omitempty"`
-	Description            string            `yaml:"description,omitempty"`
-	Category               string            `yaml:"category,omitempty"`
-	WhenToUse              string            `yaml:"when_to_use,omitempty"`
-	ContextMode            string            `yaml:"context_mode,omitempty"`
-	AllowedTools           []string          `yaml:"allowed_tools,omitempty"`
-	DisableModelInvocation bool              `yaml:"disable_model_invocation,omitempty"`
-	ArgumentHint           string            `yaml:"argument_hint,omitempty"`
-	ShouldDefer            bool              `yaml:"should_defer,omitempty"`
+	Version                string   `yaml:"version"`
+	Name                   string   `yaml:"name"`
+	Slug                   string   `yaml:"slug,omitempty"`
+	Description            string   `yaml:"description,omitempty"`
+	Category               string   `yaml:"category,omitempty"`
+	WhenToUse              string   `yaml:"when_to_use,omitempty"`
+	ContextMode            string   `yaml:"context_mode,omitempty"`
+	AllowedTools           []string `yaml:"allowed_tools,omitempty"`
+	DisableModelInvocation bool     `yaml:"disable_model_invocation,omitempty"`
+	ArgumentHint           string   `yaml:"argument_hint,omitempty"`
+	ShouldDefer            bool     `yaml:"should_defer,omitempty"`
 	// ModelOverrides lets a skill request a different model than the agent default.
 	// Keys are usage contexts ("default", "vision"); values are model IDs.
 	// Inspired by Claude Code BundledSkillDefinition.modelOverrides.
@@ -117,6 +117,10 @@ func SerializeSkillMD(s Skill) string {
 		AllowedTools:           s.AllowedTools,
 		DisableModelInvocation: s.DisableModelInvocation,
 		ShouldDefer:            s.ShouldDefer,
+		ModelOverrides:         s.ModelOverrides,
+		EffortLevel:            s.EffortLevel,
+		AssociatedAgents:       s.AssociatedAgents,
+		DynamicHooks:           s.DynamicHooks,
 	}
 	if s.WhenToUse != nil {
 		fm.WhenToUse = *s.WhenToUse

@@ -82,8 +82,11 @@ func (s *Service) Delete(ctx context.Context, listingID uuid.UUID, reviewID uuid
 	if err != nil {
 		return err
 	}
+	if rev.ListingID != listingID {
+		return ErrNotFound
+	}
 	if rev.TenantID != tenantID {
-		return fmt.Errorf("review: forbidden")
+		return ErrForbidden
 	}
 	if err := s.reviews.Delete(ctx, reviewID); err != nil {
 		return err

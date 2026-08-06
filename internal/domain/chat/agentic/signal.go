@@ -101,12 +101,12 @@ type BufferedWriterConfig struct {
 //
 // Inspired by Claude Code's createBufferedWriter in utils/bufferedWriter.ts.
 type BufferedWriter struct {
-	config     BufferedWriterConfig
-	mu         sync.Mutex
-	buffer     []string
+	config      BufferedWriterConfig
+	mu          sync.Mutex
+	buffer      []string
 	bufferBytes int
-	timer      *time.Timer
-	disposed   bool
+	timer       *time.Timer
+	disposed    bool
 }
 
 // NewBufferedWriter creates a new buffered writer.
@@ -141,10 +141,7 @@ func (w *BufferedWriter) Write(content string) {
 	w.bufferBytes += len(content)
 
 	// Check if buffer exceeds limits.
-	shouldFlush := false
-	if w.config.MaxBufferSize > 0 && len(w.buffer) >= w.config.MaxBufferSize {
-		shouldFlush = true
-	}
+	shouldFlush := w.config.MaxBufferSize > 0 && len(w.buffer) >= w.config.MaxBufferSize
 	if w.config.MaxBufferBytes > 0 && w.bufferBytes >= w.config.MaxBufferBytes {
 		shouldFlush = true
 	}

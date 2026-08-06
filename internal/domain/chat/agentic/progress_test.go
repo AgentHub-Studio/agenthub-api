@@ -84,6 +84,39 @@ done:
 	assert.Equal(t, "Analyzing main.go", data.Summary)
 }
 
+func TestProgressSummarizer_RedactsSecretsInGeneratedSummary(t *testing.T) {
+	const secret = "progress-summary-secret-value"
+	const internalURL = "http://agenthub-skill-runtime:8080/v1/execute"
+	model := &simpleSummaryChatModel{
+		response: "Authorization: Bearer " + secret + "\nupstream=" + internalURL,
+	}
+	ps := agentic.NewProgressSummarizer(agentic.ProgressSummarizerConfig{
+		ChatModel: model,
+		Model:     "test-model",
+		Interval:  20 * time.Millisecond,
+	})
+	ps.UpdateMessages([]ai.Message{{Role: ai.RoleUser, Content: "investigate the error"}})
+
+	ch := make(chan agentic.RunEvent, 10)
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	go ps.Run(ctx, ch, "subtask-redaction")
+	<-ctx.Done()
+	time.Sleep(20 * time.Millisecond)
+
+	select {
+	case event := <-ch:
+		var data agentic.SubtaskProgressData
+		require.NoError(t, json.Unmarshal(event.Data, &data))
+		assert.NotContains(t, data.Summary, secret)
+		assert.NotContains(t, data.Summary, internalURL)
+		assert.Contains(t, data.Summary, "[REDACTED]")
+		assert.Contains(t, data.Summary, "<upstream>")
+	default:
+		t.Fatal("expected a progress event")
+	}
+}
+
 func TestProgressSummarizer_SkipsWhenNoMessages(t *testing.T) {
 	model := &simpleSummaryChatModel{response: "Something"}
 

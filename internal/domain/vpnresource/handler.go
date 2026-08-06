@@ -2,7 +2,6 @@ package vpnresource
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -11,6 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -38,18 +39,21 @@ func NewHandler(svc vpnService) *Handler {
 	return &Handler{svc: svc}
 }
 
-// Routes mounts the handler routes.
+// Routes mounts administrator-only VPN resource routes.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Post("/", h.create)
-	r.Get("/", h.list)
-	r.Get("/{id}", h.getByID)
-	r.Put("/{id}", h.update)
-	r.Patch("/{id}", h.update)
-	r.Delete("/{id}", h.delete)
-	r.Post("/{id}/test", h.testConnection)
-	r.Post("/{id}/upload-config", h.uploadConfig)
-	r.Post("/{id}/upload-auth", h.uploadAuth)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Post("/", h.create)
+		r.Get("/", h.list)
+		r.Get("/{id}", h.getByID)
+		r.Put("/{id}", h.update)
+		r.Patch("/{id}", h.update)
+		r.Delete("/{id}", h.delete)
+		r.Post("/{id}/test", h.testConnection)
+		r.Post("/{id}/upload-config", h.uploadConfig)
+		r.Post("/{id}/upload-auth", h.uploadAuth)
+	})
 	return r
 }
 
@@ -74,7 +78,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.FromContext(r.Context())
 
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -127,7 +131,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -199,19 +203,18 @@ func (h *Handler) uploadConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	const maxSize = 1 << 20 // 1 MB
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
-	if err := r.ParseMultipartForm(maxSize); err != nil {
+	file, _, err := httputil.ReadLimitedMultipartFile(w, r, httputil.LimitedMultipartOptions{
+		FileFields:    []string{"file"},
+		MaxFileBytes:  maxSize,
+		MaxBodyBytes:  maxSize + (64 << 10),
+		MaxFieldBytes: 4 << 10,
+	})
+	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "request too large or not multipart")
 		return
 	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "field 'file' is required")
-		return
-	}
-	defer file.Close()
 
-	updated, err := h.svc.UploadOvpnConfig(r.Context(), tenantID, id, file, header.Size)
+	updated, err := h.svc.UploadOvpnConfig(r.Context(), tenantID, id, file.Reader(), file.Size)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, err.Error())
@@ -241,19 +244,18 @@ func (h *Handler) uploadAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	const maxSize = 4096
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
-	if err := r.ParseMultipartForm(maxSize); err != nil {
+	file, _, err := httputil.ReadLimitedMultipartFile(w, r, httputil.LimitedMultipartOptions{
+		FileFields:    []string{"file"},
+		MaxFileBytes:  maxSize,
+		MaxBodyBytes:  maxSize + (4 << 10),
+		MaxFieldBytes: 1024,
+	})
+	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "request too large or not multipart")
 		return
 	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "field 'file' is required")
-		return
-	}
-	defer file.Close()
 
-	updated, err := h.svc.UploadAuthFile(r.Context(), tenantID, id, io.Reader(file), header.Size)
+	updated, err := h.svc.UploadAuthFile(r.Context(), tenantID, id, file.Reader(), file.Size)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, err.Error())

@@ -22,6 +22,10 @@ import (
 
 const ChatRunQueue = "chat.run.queue"
 
+// ErrQueueUnavailable means the run was persisted but could not be delivered
+// to the asynchronous worker. Callers must not treat the run as accepted.
+var ErrQueueUnavailable = errors.New("chat: async queue unavailable")
+
 // ChatRunTask is the message payload for RabbitMQ.
 type ChatRunTask struct {
 	RunID     uuid.UUID `json:"runId"`
@@ -31,11 +35,16 @@ type ChatRunTask struct {
 	// VoiceOutput tells the worker to synthesize the assistant answer and emit
 	// an audio_delta event before run_complete.
 	VoiceOutput bool `json:"voiceOutput,omitempty"`
+	// VoiceOutputConfig resolves per-session voice settings for this run.
+	VoiceOutputConfig VoiceSynthesisConfig `json:"voiceOutputConfig"`
 	// RawToken is the caller's Bearer JWT forwarded so that background workers
 	// can authenticate outbound calls to the skill-runtime. Without this, all
 	// tool executions fail with 401 because the async context has no token.
 	// Note: tokens are short-lived; runs that start near expiry may still fail.
 	RawToken string `json:"rawToken,omitempty"`
+	// SystemPromptOverride is a request-scoped Studio preview prompt. It is
+	// copied into the session snapshot for this chat session, never the Agent.
+	SystemPromptOverride *string `json:"systemPromptOverride,omitempty"`
 }
 
 // defaultRunTimeout is the maximum time a single background run may take.
@@ -86,7 +95,8 @@ type MetricsRecord struct {
 }
 
 type EnqueueRunOptions struct {
-	VoiceOutput bool
+	VoiceOutput          bool
+	SystemPromptOverride *string
 }
 
 // AsyncExecutor handles asynchronous execution of chat runs via RabbitMQ.
@@ -121,6 +131,7 @@ type AsyncExecutor struct {
 	// cancelled records runIDs explicitly cancelled by Cancel() so processTask
 	// can distinguish a deliberate cancel from a timeout when ctx.Err() fires.
 	cancelled sync.Map
+	taskWG    sync.WaitGroup
 }
 
 // WithMetricsRecorder wires the metrics service so each completed async
@@ -150,6 +161,17 @@ func NewAsyncExecutor(repo Repository, runner SessionRunner, connURL string) *As
 		connURL:    connURL,
 		runTimeout: defaultRunTimeout,
 	}
+}
+
+func (e *AsyncExecutor) failEnqueuedRun(ctx context.Context, runID uuid.UUID, operation string) error {
+	const reason = "chat queue is temporarily unavailable"
+	if err := e.repo.MarkRunFailed(ctx, runID, reason); err != nil {
+		slog.Error("chat: failed to mark undelivered queued run", "runId", runID, "operation", operation)
+	}
+	if e.bufferRegistry != nil {
+		e.bufferRegistry.Remove(runID.String())
+	}
+	return fmt.Errorf("%w during %s", ErrQueueUnavailable, operation)
 }
 
 // WithEventBufferRegistry wires the shared SSE replay buffer registry used by
@@ -203,6 +225,33 @@ func (e *AsyncExecutor) Cancel(runID uuid.UUID) bool {
 		return true
 	}
 	return false
+}
+
+// Shutdown cancels all in-flight tasks owned by this process and waits for
+// their buffers, status updates, and completion hooks to settle until ctx ends.
+func (e *AsyncExecutor) Shutdown(ctx context.Context) error {
+	e.cancellers.Range(func(key, value any) bool {
+		if runID, ok := key.(uuid.UUID); ok {
+			e.cancelled.Store(runID, true)
+		}
+		if cancelFn, ok := value.(context.CancelFunc); ok {
+			cancelFn()
+		}
+		return true
+	})
+
+	done := make(chan struct{})
+	go func() {
+		e.taskWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
 }
 
 // wasCancelled reports whether Cancel was invoked for this runID since
@@ -298,7 +347,7 @@ func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uui
 	// Pre-create the replay buffer before the worker starts so resume requests
 	// can attach immediately after the 202 Accepted response.
 	if e.bufferRegistry != nil {
-		e.bufferRegistry.GetOrCreate(run.ID.String(), DefaultEventBufferSize)
+		e.bufferRegistry.GetOrCreateForSession(run.ID.String(), sessionID, DefaultEventBufferSize)
 	}
 
 	// 2. Publish to RabbitMQ
@@ -309,28 +358,29 @@ func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uui
 
 	conn, err := amqp.Dial(e.connURL)
 	if err != nil {
-		return run.ID, fmt.Errorf("rabbitmq: dial: %w", err)
+		return run.ID, e.failEnqueuedRun(ctx, run.ID, "dial")
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ch, err := conn.Channel()
 	if err != nil {
-		return run.ID, fmt.Errorf("rabbitmq: channel: %w", err)
+		return run.ID, e.failEnqueuedRun(ctx, run.ID, "channel setup")
 	}
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 
 	q, err := ch.QueueDeclare(ChatRunQueue, true, false, false, false, nil)
 	if err != nil {
-		return run.ID, fmt.Errorf("rabbitmq: queue declare: %w", err)
+		return run.ID, e.failEnqueuedRun(ctx, run.ID, "queue declaration")
 	}
 
 	body, _ := json.Marshal(ChatRunTask{
-		RunID:       run.ID,
-		SessionID:   sessionID,
-		TenantID:    tenantID,
-		Message:     message,
-		VoiceOutput: opts.VoiceOutput,
-		RawToken:    tenant.TokenFromContext(ctx),
+		RunID:                run.ID,
+		SessionID:            sessionID,
+		TenantID:             tenantID,
+		Message:              message,
+		VoiceOutput:          opts.VoiceOutput,
+		RawToken:             tenant.TokenFromContext(ctx),
+		SystemPromptOverride: opts.SystemPromptOverride,
 	})
 
 	err = ch.PublishWithContext(ctx, "", q.Name, false, false, amqp.Publishing{
@@ -338,29 +388,67 @@ func (e *AsyncExecutor) EnqueueRunWithOptions(ctx context.Context, sessionID uui
 		Body:        body,
 	})
 	if err != nil {
-		return run.ID, fmt.Errorf("rabbitmq: publish: %w", err)
+		return run.ID, e.failEnqueuedRun(ctx, run.ID, "publish")
 	}
 
 	return run.ID, nil
 }
 
-// StartWorker starts a blocking consumer for chat run tasks.
+const (
+	workerReconnectInitialDelay = 250 * time.Millisecond
+	workerReconnectMaxDelay     = 5 * time.Second
+)
+
+// StartWorker starts a blocking consumer for chat run tasks and reconnects
+// after a broker or channel interruption until the worker context is cancelled.
 func (e *AsyncExecutor) StartWorker(ctx context.Context) error {
 	if e.connURL == "" {
 		return fmt.Errorf("rabbitmq: no URL configured")
 	}
 
+	delay := workerReconnectInitialDelay
+	for {
+		err := e.consumeWorker(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil {
+			err = errors.New("rabbitmq: worker stopped without cancellation")
+		}
+
+		slog.Warn("rabbitmq: chat worker disconnected; retrying", "err", err, "retryDelay", delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if delay < workerReconnectMaxDelay {
+			delay *= 2
+			if delay > workerReconnectMaxDelay {
+				delay = workerReconnectMaxDelay
+			}
+		}
+	}
+}
+
+// consumeWorker owns one RabbitMQ connection and returns when that connection
+// cannot consume anymore. StartWorker is responsible for reconnecting it.
+func (e *AsyncExecutor) consumeWorker(ctx context.Context) error {
 	conn, err := amqp.Dial(e.connURL)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ch, err := conn.Channel()
 	if err != nil {
 		return err
 	}
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 
 	q, err := ch.QueueDeclare(ChatRunQueue, true, false, false, false, nil)
 	if err != nil {
@@ -386,22 +474,34 @@ func (e *AsyncExecutor) StartWorker(ctx context.Context) error {
 			var task ChatRunTask
 			if err := json.Unmarshal(d.Body, &task); err != nil {
 				slog.Error("rabbitmq: unmarshal task", "err", err)
-				d.Nack(false, false)
+				if nackErr := d.Nack(false, false); nackErr != nil {
+					slog.Error("rabbitmq: nack malformed task", "err", nackErr)
+				}
 				continue
 			}
 
-			// Execute the run
-			go e.processTask(task)
-			d.Ack(false)
+			// Execute the run.
+			e.startTask(task)
+			if ackErr := d.Ack(false); ackErr != nil {
+				slog.Error("rabbitmq: ack task", "err", ackErr)
+			}
 		}
 	}
 }
 
-func (e *AsyncExecutor) getOrCreateBuffer(runID uuid.UUID) *EventBuffer {
+func (e *AsyncExecutor) startTask(task ChatRunTask) {
+	e.taskWG.Add(1)
+	go func() {
+		defer e.taskWG.Done()
+		e.processTask(task)
+	}()
+}
+
+func (e *AsyncExecutor) getOrCreateBuffer(runID, sessionID uuid.UUID) *EventBuffer {
 	if e.bufferRegistry == nil {
 		return nil
 	}
-	return e.bufferRegistry.GetOrCreate(runID.String(), DefaultEventBufferSize)
+	return e.bufferRegistry.GetOrCreateForSession(runID.String(), sessionID, DefaultEventBufferSize)
 }
 
 func appendBufferedError(buf *EventBuffer, message, code string) {
@@ -415,6 +515,86 @@ func appendBufferedError(buf *EventBuffer, message, code string) {
 	buf.Append(RunEvent{Type: "error", Data: data})
 }
 
+var asyncLogSensitiveLinePattern = regexp.MustCompile(`(?im)(^|:[\t ]+)[\t ]*(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|password|api[_-]?key|secret|client[_-]?secret)[\t ]*[:=][^\r\n]*`)
+
+// redactAsyncLogEventData returns event diagnostics safe for structured logs.
+// Error events can be produced by external providers and must be treated as
+// untrusted input: their payloads may contain credentials or HTTP headers.
+func redactAsyncLogEventData(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return redactAsyncLogText(string(raw))
+	}
+
+	redacted, err := json.Marshal(redactAsyncLogValue(value))
+	if err != nil {
+		return redactAsyncLogText(string(raw))
+	}
+	return redactAsyncLogText(string(redacted))
+}
+
+func redactAsyncLogValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if isAsyncLogSensitiveKey(key) {
+				continue
+			}
+			out[key] = redactAsyncLogValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = redactAsyncLogValue(child)
+		}
+		return out
+	case string:
+		return redactAsyncLogText(v)
+	default:
+		return value
+	}
+}
+
+func isAsyncLogSensitiveKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+	switch normalized {
+	case "authorization",
+		"proxyauthorization",
+		"cookie",
+		"setcookie",
+		"authtoken",
+		"xauthtoken",
+		"accesstoken",
+		"refreshtoken",
+		"apikey",
+		"xapikey",
+		"password",
+		"secret",
+		"clientsecret",
+		"bearertoken":
+		return true
+	default:
+		return false
+	}
+}
+
+func redactAsyncLogText(value string) string {
+	return asyncLogSensitiveLinePattern.ReplaceAllString(value, "$1[REDACTED]")
+}
+
+// redactAsyncExternalDiagnosticText sanitizes an untrusted error before it
+// crosses an API or event boundary. Structured JSON loses sensitive keys;
+// plain-text diagnostics use the same header redaction as executor logs.
+func redactAsyncExternalDiagnosticText(value string) string {
+	return redactAsyncLogEventData(json.RawMessage(value))
+}
+
 func extractTextDelta(data json.RawMessage) string {
 	var payload struct {
 		Content string `json:"content"`
@@ -425,11 +605,16 @@ func extractTextDelta(data json.RawMessage) string {
 	return payload.Content
 }
 
-func (e *AsyncExecutor) appendVoiceAudioDelta(ctx context.Context, buf *EventBuffer, runID uuid.UUID, text string) bool {
-	if buf == nil || e.voiceSvc == nil || strings.TrimSpace(text) == "" {
+func (e *AsyncExecutor) appendVoiceAudioDelta(ctx context.Context, buf *EventBuffer, runID uuid.UUID, text string, cfg VoiceSynthesisConfig) bool {
+	if buf == nil || e.voiceSvc == nil || strings.TrimSpace(text) == "" || !cfg.Enabled {
 		return false
 	}
-	audio, err := e.voiceSvc.Synthesize(ctx, VoiceSynthesisInput{Text: text})
+	audio, err := e.voiceSvc.Synthesize(ctx, VoiceSynthesisInput{
+		Text:     text,
+		Voice:    cfg.Voice,
+		Model:    cfg.Model,
+		Language: cfg.Language,
+	})
 	if err != nil {
 		slog.Warn("voice: failed to synthesize assistant answer", "runId", runID, "err", err)
 		return false
@@ -472,9 +657,27 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 
 	// cleanupCtx: used for DB writes after ctx is cancelled — has tenant but no deadline.
 	cleanupCtx := baseCtx
-	buf := e.getOrCreateBuffer(task.RunID)
+	buf := e.getOrCreateBuffer(task.RunID, task.SessionID)
 	if buf != nil {
 		defer buf.MarkDone()
+	}
+
+	// A cancellation can arrive after a task is queued but before this worker
+	// begins processing it. In the same process, Cancel records the intent in
+	// e.cancelled; from another API pod it persists CANCELLED in the repository.
+	// Both cases must be honored before transitioning the run to ACTIVE or
+	// invoking the runner, otherwise a cancelled task can be resurrected when
+	// RabbitMQ eventually delivers it.
+	if e.wasCancelled(task.RunID) {
+		_ = e.repo.UpdateRunStatus(cleanupCtx, task.RunID, ChatRunStatusCancelled, "")
+		appendBufferedError(buf, "run cancelled by user", "cancelled")
+		e.fireCompletionHooks(cleanupCtx, task, ChatRunStatusCancelled, 0, 0, "cancelled by user")
+		return
+	}
+	if persisted, err := e.repo.GetRunByID(cleanupCtx, task.RunID); err == nil && persisted.Status == ChatRunStatusCancelled {
+		appendBufferedError(buf, "run cancelled by user", "cancelled")
+		e.fireCompletionHooks(cleanupCtx, task, ChatRunStatusCancelled, 0, 0, "cancelled by user")
+		return
 	}
 
 	slog.Info("chat: background run starting", "runId", task.RunID, "sessionId", task.SessionID, "tenant", task.TenantID)
@@ -533,9 +736,24 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 			if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *routed); err == nil {
 				snapshotAgent(agentCfg, &session)
 				if err := e.repo.UpdateSessionSnapshots(ctx, task.SessionID,
-					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot); err != nil {
+					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot,
+					session.AgentSnapshot, session.AgentSnapshotHash); err != nil {
 					slog.Warn("chat: failed to persist routed-agent snapshot", "runId", task.RunID, "err", err)
 				}
+			}
+		}
+	}
+
+	var systemPromptOverride string
+	if task.SystemPromptOverride != nil {
+		systemPromptOverride = strings.TrimSpace(*task.SystemPromptOverride)
+		if systemPromptOverride != "" {
+			session.SystemPromptSnapshot = &systemPromptOverride
+			refreshCanonicalAgentSnapshot(&session)
+			if err := e.repo.UpdateSessionSnapshots(ctx, task.SessionID,
+				session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot,
+				session.AgentSnapshot, session.AgentSnapshotHash); err != nil {
+				slog.Warn("chat: failed to persist request system-prompt override", "runId", task.RunID, "err", err)
 			}
 		}
 	}
@@ -544,9 +762,11 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// from servers explicitly bound to this agent. Without this, all MCP tools
 	// from all running servers would be included regardless of agent binding.
 	var mcpServerNames []string
+	var outputProcessors []string
 	if e.agentLoader != nil {
 		if agentCfg, err := e.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
 			mcpServerNames = agentCfg.MCPServerNames
+			outputProcessors = append([]string(nil), agentCfg.OutputProcessors...)
 		}
 	}
 
@@ -561,6 +781,8 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		}
 	}
 
+	voiceCfg := resolveVoiceConfigFromModelConfig(session.ModelConfigSnapshot)
+
 	// 2. Execute the run
 	runEvents, err := e.runner.RunSession(ctx, RunInput{
 		RunID:                  task.RunID,
@@ -568,16 +790,18 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		AgentID:                *session.AgentID,
 		TenantID:               task.TenantID,
 		UserMessage:            task.Message,
+		SystemPrompt:           systemPromptOverride,
 		SystemPromptSnapshot:   session.SystemPromptSnapshot,
 		ModelConfigSnapshot:    session.ModelConfigSnapshot,
 		SkillIDsSnapshot:       skillIDsSnapshot,
 		MCPServerNamesSnapshot: mcpServerNames,
+		OutputProcessors:       outputProcessors,
 	})
 
 	if err != nil {
-		slog.Error("chat: background run failed to start", "runId", task.RunID, "err", err)
+		slog.Error("chat: background run failed to start", "runId", task.RunID, "err", redactAsyncLogText(err.Error()))
 		_ = e.repo.MarkRunFailed(ctx, task.RunID, err.Error())
-		appendBufferedError(buf, err.Error(), "startup")
+		appendBufferedError(buf, redactAsyncLogText(err.Error()), "startup")
 		// Persist a user-facing error message so the chat history is not left empty.
 		// This covers failures that happen before the runner starts (e.g. unknown provider,
 		// missing API key settings) which the runner's own error-persistence path cannot handle.
@@ -608,13 +832,13 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 			assistantText.WriteString(extractTextDelta(event.Data))
 		}
 		if task.VoiceOutput && event.Type == "run_complete" {
-			voiceAudioEmitted = e.appendVoiceAudioDelta(ctx, buf, task.RunID, assistantText.String())
+			voiceAudioEmitted = e.appendVoiceAudioDelta(ctx, buf, task.RunID, assistantText.String(), voiceCfg)
 		}
 		if buf != nil {
 			buf.Append(event)
 		}
 		if event.Type == "error" {
-			slog.Error("chat: background run error event", "runId", task.RunID, "data", string(event.Data))
+			slog.Error("chat: background run error event", "runId", task.RunID, "data", redactAsyncLogEventData(event.Data))
 			var errData struct {
 				Code    string `json:"code"`
 				Message string `json:"message"`
@@ -630,7 +854,7 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 		}
 	}
 	if task.VoiceOutput && !voiceAudioEmitted {
-		e.appendVoiceAudioDelta(ctx, buf, task.RunID, assistantText.String())
+		e.appendVoiceAudioDelta(ctx, buf, task.RunID, assistantText.String(), voiceCfg)
 	}
 
 	// P-C102-1: if the context expired (timeout), mark run failed and surface error to user.
@@ -668,12 +892,20 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	// misleading "completed" with an error buried in metadata.
 	if lastLLMErrorMsg != "" {
 		_ = e.repo.MarkRunFailed(cleanupCtx, task.RunID, lastLLMErrorMsg)
-		slog.Warn("chat: background run failed due to LLM error", "runId", task.RunID, "err", lastLLMErrorMsg)
+		slog.Warn("chat: background run failed due to LLM error", "runId", task.RunID, "err", redactAsyncLogText(lastLLMErrorMsg))
 		e.fireCompletionHooks(cleanupCtx, task, ChatRunStatusFailed, 0, 0, lastLLMErrorMsg)
 		return
 	}
 
-	_ = e.repo.MarkRunCompleted(ctx, task.RunID)
+	// A database connection can be lost while the runner is streaming. A terminal
+	// transition is idempotent, so retry it before reporting completion; otherwise
+	// the run remains permanently active even though the work finished.
+	if err := retryAsyncTerminalPersistence(cleanupCtx, "mark run completed", func() error {
+		return e.repo.MarkRunCompleted(cleanupCtx, task.RunID)
+	}); err != nil {
+		slog.Error("chat: background run completion was not persisted", "runId", task.RunID, "err", err)
+		return
+	}
 	slog.Info("chat: background run completed", "runId", task.RunID)
 	e.fireCompletionHooks(cleanupCtx, task, ChatRunStatusCompleted, 0, 0, "")
 
@@ -684,6 +916,42 @@ func (e *AsyncExecutor) processTask(task ChatRunTask) {
 	if e.metricsRecorder != nil && session.AgentID != nil {
 		e.recordMetricsFromRun(cleanupCtx, task, *session.AgentID)
 	}
+}
+
+const (
+	asyncTerminalPersistenceAttempts = 3
+	asyncTerminalPersistenceDelay    = 50 * time.Millisecond
+)
+
+// retryAsyncTerminalPersistence retries idempotent terminal writes after a
+// transient database disconnect. It deliberately runs with cleanupCtx, which
+// remains valid after the runner deadline has elapsed.
+func retryAsyncTerminalPersistence(ctx context.Context, operation string, persist func() error) error {
+	var lastErr error
+	for attempt := 1; attempt <= asyncTerminalPersistenceAttempts; attempt++ {
+		if err := persist(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		if attempt == asyncTerminalPersistenceAttempts || ctx.Err() != nil {
+			break
+		}
+
+		slog.Warn("chat: retrying terminal persistence after database error", "operation", operation, "attempt", attempt, "err", lastErr)
+		timer := time.NewTimer(asyncTerminalPersistenceDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return lastErr
 }
 
 // fireCompletionHooks invokes registered hooks. Each hook runs in its own

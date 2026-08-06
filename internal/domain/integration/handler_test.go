@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -32,16 +33,23 @@ type mockIntegrationSvc struct {
 	dbReq    integration.DatabaseCreateRequest
 	mcp      mcp.McpServerConfigResponse
 	mcpReq   mcp.CreateRequest
+	err      error
 }
 
 func (m *mockIntegrationSvc) List(_ context.Context, _ pagination.PageRequest, filters integration.ListFilters) (pagination.Page[integration.Response], error) {
 	m.called = true
 	m.filters = filters
+	if m.err != nil {
+		return pagination.Page[integration.Response]{}, m.err
+	}
 	return m.page, nil
 }
 
 func (m *mockIntegrationSvc) CreateHTTP(_ context.Context, req integration.HTTPCreateRequest) (integration.HTTPResponse, error) {
 	m.lastReq = req
+	if m.err != nil {
+		return integration.HTTPResponse{}, m.err
+	}
 	if m.http.ID == uuid.Nil {
 		m.http = integration.HTTPResponse{ID: uuid.New(), Name: req.Name, URL: req.URL, Method: req.Method}
 	}
@@ -49,6 +57,9 @@ func (m *mockIntegrationSvc) CreateHTTP(_ context.Context, req integration.HTTPC
 }
 
 func (m *mockIntegrationSvc) GetHTTP(_ context.Context, id uuid.UUID) (integration.HTTPResponse, error) {
+	if m.err != nil {
+		return integration.HTTPResponse{}, m.err
+	}
 	if m.http.ID == uuid.Nil || m.http.ID != id {
 		return integration.HTTPResponse{}, tool.ErrNotFound
 	}
@@ -57,6 +68,9 @@ func (m *mockIntegrationSvc) GetHTTP(_ context.Context, id uuid.UUID) (integrati
 
 func (m *mockIntegrationSvc) UpdateHTTP(_ context.Context, id uuid.UUID, req integration.HTTPCreateRequest) (integration.HTTPResponse, error) {
 	m.lastReq = req
+	if m.err != nil {
+		return integration.HTTPResponse{}, m.err
+	}
 	if m.http.ID == uuid.Nil || m.http.ID != id {
 		return integration.HTTPResponse{}, tool.ErrNotFound
 	}
@@ -67,6 +81,9 @@ func (m *mockIntegrationSvc) UpdateHTTP(_ context.Context, id uuid.UUID, req int
 }
 
 func (m *mockIntegrationSvc) DeleteHTTP(_ context.Context, id uuid.UUID) error {
+	if m.err != nil {
+		return m.err
+	}
 	if m.http.ID == uuid.Nil || m.http.ID != id {
 		return tool.ErrNotFound
 	}
@@ -76,6 +93,9 @@ func (m *mockIntegrationSvc) DeleteHTTP(_ context.Context, id uuid.UUID) error {
 
 func (m *mockIntegrationSvc) CreateDatabase(_ context.Context, req integration.DatabaseCreateRequest) (integration.DatabaseResponse, error) {
 	m.dbReq = req
+	if m.err != nil {
+		return integration.DatabaseResponse{}, m.err
+	}
 	if m.database.ID == uuid.Nil {
 		m.database = integration.DatabaseResponse{ID: uuid.New(), Name: req.Name, Type: req.Type, Host: req.Host, Query: req.Query}
 	}
@@ -83,6 +103,9 @@ func (m *mockIntegrationSvc) CreateDatabase(_ context.Context, req integration.D
 }
 
 func (m *mockIntegrationSvc) GetDatabase(_ context.Context, id uuid.UUID) (integration.DatabaseResponse, error) {
+	if m.err != nil {
+		return integration.DatabaseResponse{}, m.err
+	}
 	if m.database.ID == uuid.Nil || m.database.ID != id {
 		return integration.DatabaseResponse{}, datasource.ErrNotFound
 	}
@@ -90,6 +113,9 @@ func (m *mockIntegrationSvc) GetDatabase(_ context.Context, id uuid.UUID) (integ
 }
 
 func (m *mockIntegrationSvc) UpdateDatabase(_ context.Context, id uuid.UUID, req integration.DatabaseCreateRequest) (integration.DatabaseResponse, error) {
+	if m.err != nil {
+		return integration.DatabaseResponse{}, m.err
+	}
 	if m.database.ID == uuid.Nil || m.database.ID != id {
 		return integration.DatabaseResponse{}, datasource.ErrNotFound
 	}
@@ -102,6 +128,9 @@ func (m *mockIntegrationSvc) UpdateDatabase(_ context.Context, id uuid.UUID, req
 }
 
 func (m *mockIntegrationSvc) DeleteDatabase(_ context.Context, id uuid.UUID) error {
+	if m.err != nil {
+		return m.err
+	}
 	if m.database.ID == uuid.Nil || m.database.ID != id {
 		return datasource.ErrNotFound
 	}
@@ -111,6 +140,9 @@ func (m *mockIntegrationSvc) DeleteDatabase(_ context.Context, id uuid.UUID) err
 
 func (m *mockIntegrationSvc) CreateMCP(_ context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error) {
 	m.mcpReq = req
+	if m.err != nil {
+		return mcp.McpServerConfigResponse{}, m.err
+	}
 	if m.mcp.ID == uuid.Nil {
 		m.mcp = mcp.McpServerConfigResponse{ID: uuid.New(), Name: req.Name, TransportType: req.TransportType}
 	}
@@ -118,6 +150,9 @@ func (m *mockIntegrationSvc) CreateMCP(_ context.Context, req mcp.CreateRequest)
 }
 
 func (m *mockIntegrationSvc) GetMCP(_ context.Context, id uuid.UUID) (mcp.McpServerConfigResponse, error) {
+	if m.err != nil {
+		return mcp.McpServerConfigResponse{}, m.err
+	}
 	if m.mcp.ID == uuid.Nil || m.mcp.ID != id {
 		return mcp.McpServerConfigResponse{}, mcp.ErrNotFound
 	}
@@ -125,6 +160,9 @@ func (m *mockIntegrationSvc) GetMCP(_ context.Context, id uuid.UUID) (mcp.McpSer
 }
 
 func (m *mockIntegrationSvc) UpdateMCP(_ context.Context, id uuid.UUID, req mcp.UpdateRequest) (mcp.McpServerConfigResponse, error) {
+	if m.err != nil {
+		return mcp.McpServerConfigResponse{}, m.err
+	}
 	if m.mcp.ID == uuid.Nil || m.mcp.ID != id {
 		return mcp.McpServerConfigResponse{}, mcp.ErrNotFound
 	}
@@ -135,6 +173,9 @@ func (m *mockIntegrationSvc) UpdateMCP(_ context.Context, id uuid.UUID, req mcp.
 }
 
 func (m *mockIntegrationSvc) DeleteMCP(_ context.Context, id uuid.UUID) error {
+	if m.err != nil {
+		return m.err
+	}
 	if m.mcp.ID == uuid.Nil || m.mcp.ID != id {
 		return mcp.ErrNotFound
 	}
@@ -232,6 +273,38 @@ func TestIntegrationHandler_CreateHTTP_Success(t *testing.T) {
 
 	assert.Equal(t, http.StatusCreated, w.Code)
 	assert.Equal(t, "ERP API", svc.lastReq.Name)
+}
+
+func TestIntegrationHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("http", func(t *testing.T) {
+		r, svc := setupIntegrationHandler()
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/http", bytes.NewBufferString(`{"name":"first","method":"GET","url":"https://api.example.com"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.lastReq.Name)
+	})
+
+	t.Run("database", func(t *testing.T) {
+		r, svc := setupIntegrationHandler()
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/database", bytes.NewBufferString(`{"name":"first","type":"POSTGRESQL","host":"db.example.com"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.dbReq.Name)
+	})
+
+	t.Run("mcp", func(t *testing.T) {
+		r, svc := setupIntegrationHandler()
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/mcp", bytes.NewBufferString(`{"name":"first","transportType":"stdio"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.mcpReq.Name)
+	})
 }
 
 func TestIntegrationHandler_GetHTTP_Success(t *testing.T) {
@@ -335,6 +408,49 @@ func TestIntegrationHandler_UpdateDatabaseSuccess(t *testing.T) {
 	assert.True(t, svc.dbReq.AllowWrite)
 }
 
+func TestIntegrationHandler_UpdateDatabaseRejectsDuplicateJSONKeyBeforeService(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	body := []byte(`{"name":"first","name":"second","type":"POSTGRESQL","host":"pg.internal","query":"SELECT 1"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/integrations/database/"+svc.database.ID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Equal(t, "Orders DB", svc.database.Name)
+}
+
+func TestIntegrationHandler_PatchDatabase_MergesOmittedFields(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	svc.database.Description = "existing description"
+	svc.database.Type = datasource.DataSourceTypePostgreSQL
+	svc.database.Host = "pg.internal"
+	svc.database.Port = 5432
+	svc.database.Database = "orders"
+	svc.database.DBUser = "orders_user"
+	svc.database.Query = "SELECT 1"
+	svc.database.AllowWrite = true
+
+	body := []byte(`{"query":"SELECT 2"}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/integrations/database/"+svc.database.ID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "Orders DB", svc.dbReq.Name)
+	assert.Equal(t, "existing description", svc.dbReq.Description)
+	assert.Equal(t, datasource.DataSourceTypePostgreSQL, svc.dbReq.Type)
+	assert.Equal(t, "pg.internal", svc.dbReq.Host)
+	assert.Equal(t, 5432, svc.dbReq.Port)
+	assert.Equal(t, "orders", svc.dbReq.Database)
+	assert.Equal(t, "orders_user", svc.dbReq.DBUser)
+	assert.Equal(t, "SELECT 2", svc.dbReq.Query)
+	assert.True(t, svc.dbReq.AllowWrite)
+}
+
 func TestIntegrationHandler_UpdateDatabase_NotFound(t *testing.T) {
 	r, _ := setupIntegrationHandler()
 	body, _ := json.Marshal(integration.DatabaseCreateRequest{Name: "x", Type: datasource.DataSourceTypePostgreSQL})
@@ -413,4 +529,271 @@ func TestIntegrationHandler_DeleteMCP_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestIntegrationHandler_List_RejectsInvalidFilters(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		field string
+	}{
+		{name: "invalid enabled", query: "enabled=maybe", field: "enabled"},
+		{name: "invalid origin", query: "origin=unknown", field: "origin"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := setupIntegrationHandler()
+			req := httptest.NewRequest(http.MethodGet, "/api/integrations?"+tt.query, nil)
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), "invalid "+tt.field+" filter")
+		})
+	}
+}
+
+func TestIntegrationHandler_List_ServiceFailure(t *testing.T) {
+	r, svc := setupIntegrationHandler()
+	svc.err = errors.New("service unavailable")
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "internal error")
+}
+
+func TestIntegrationHandler_HTTPRejectsInvalidRequests(t *testing.T) {
+	validID := uuid.NewString()
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "get invalid id", method: http.MethodGet, path: "/api/integrations/http/invalid"},
+		{name: "update invalid id", method: http.MethodPut, path: "/api/integrations/http/invalid", body: `{}`},
+		{name: "delete invalid id", method: http.MethodDelete, path: "/api/integrations/http/invalid"},
+		{name: "create invalid body", method: http.MethodPost, path: "/api/integrations/http", body: `{`},
+		{name: "update invalid body", method: http.MethodPut, path: "/api/integrations/http/" + validID, body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := setupIntegrationHandler()
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
+}
+
+func TestIntegrationHandler_HTTPNotFound(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		body   string
+	}{
+		{name: "get", method: http.MethodGet},
+		{name: "update", method: http.MethodPatch, body: `{"name":"ERP","method":"GET","url":"https://example.com"}`},
+		{name: "delete", method: http.MethodDelete},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := setupIntegrationHandler()
+			req := httptest.NewRequest(tt.method, "/api/integrations/http/"+uuid.NewString(), bytes.NewBufferString(tt.body))
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusNotFound, w.Code)
+		})
+	}
+}
+
+func TestIntegrationHandler_HTTPServiceFailures(t *testing.T) {
+	validID := uuid.NewString()
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		err    error
+		status int
+	}{
+		{name: "create duplicate", method: http.MethodPost, path: "/api/integrations/http", body: `{}`, err: tool.ErrDuplicateName, status: http.StatusConflict},
+		{name: "create generic", method: http.MethodPost, path: "/api/integrations/http", body: `{}`, err: errors.New("create failed"), status: http.StatusUnprocessableEntity},
+		{name: "get generic", method: http.MethodGet, path: "/api/integrations/http/" + validID, err: errors.New("get failed"), status: http.StatusUnprocessableEntity},
+		{name: "update generic", method: http.MethodPut, path: "/api/integrations/http/" + validID, body: `{}`, err: errors.New("update failed"), status: http.StatusUnprocessableEntity},
+		{name: "delete generic", method: http.MethodDelete, path: "/api/integrations/http/" + validID, err: errors.New("delete failed"), status: http.StatusUnprocessableEntity},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, svc := setupIntegrationHandler()
+			svc.err = tt.err
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.status, w.Code)
+		})
+	}
+}
+
+func TestIntegrationHandler_DatabaseRejectsInvalidRequests(t *testing.T) {
+	validID := uuid.NewString()
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create invalid body", method: http.MethodPost, path: "/api/integrations/database", body: `{`},
+		{name: "get invalid id", method: http.MethodGet, path: "/api/integrations/database/invalid"},
+		{name: "update invalid id", method: http.MethodPut, path: "/api/integrations/database/invalid", body: `{}`},
+		{name: "patch invalid id", method: http.MethodPatch, path: "/api/integrations/database/invalid", body: `{}`},
+		{name: "delete invalid id", method: http.MethodDelete, path: "/api/integrations/database/invalid"},
+		{name: "update invalid body", method: http.MethodPut, path: "/api/integrations/database/" + validID, body: `{`},
+		{name: "patch invalid body", method: http.MethodPatch, path: "/api/integrations/database/" + validID, body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := setupIntegrationHandler()
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
+}
+
+func TestIntegrationHandler_DatabaseNotFound(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		body   string
+	}{
+		{name: "get", method: http.MethodGet},
+		{name: "patch", method: http.MethodPatch, body: `{"query":"SELECT 1"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := setupIntegrationHandler()
+			req := httptest.NewRequest(tt.method, "/api/integrations/database/"+uuid.NewString(), bytes.NewBufferString(tt.body))
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusNotFound, w.Code)
+		})
+	}
+}
+
+func TestIntegrationHandler_DatabaseServiceFailures(t *testing.T) {
+	validID := uuid.NewString()
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create", method: http.MethodPost, path: "/api/integrations/database", body: `{}`},
+		{name: "get", method: http.MethodGet, path: "/api/integrations/database/" + validID},
+		{name: "update", method: http.MethodPut, path: "/api/integrations/database/" + validID, body: `{}`},
+		{name: "patch read current", method: http.MethodPatch, path: "/api/integrations/database/" + validID, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/integrations/database/" + validID},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, svc := setupIntegrationHandler()
+			svc.err = errors.New("database failed")
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+		})
+	}
+}
+
+func TestIntegrationHandler_MCPRejectsInvalidRequests(t *testing.T) {
+	validID := uuid.NewString()
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create invalid body", method: http.MethodPost, path: "/api/integrations/mcp", body: `{`},
+		{name: "get invalid id", method: http.MethodGet, path: "/api/integrations/mcp/invalid"},
+		{name: "update invalid id", method: http.MethodPut, path: "/api/integrations/mcp/invalid", body: `{}`},
+		{name: "delete invalid id", method: http.MethodDelete, path: "/api/integrations/mcp/invalid"},
+		{name: "update invalid body", method: http.MethodPut, path: "/api/integrations/mcp/" + validID, body: `{`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := setupIntegrationHandler()
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
+}
+
+func TestIntegrationHandler_MCPNotFound(t *testing.T) {
+	r, _ := setupIntegrationHandler()
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations/mcp/"+uuid.NewString(), nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestIntegrationHandler_MCPServiceFailures(t *testing.T) {
+	validID := uuid.NewString()
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create", method: http.MethodPost, path: "/api/integrations/mcp", body: `{}`},
+		{name: "get", method: http.MethodGet, path: "/api/integrations/mcp/" + validID},
+		{name: "update", method: http.MethodPatch, path: "/api/integrations/mcp/" + validID, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/integrations/mcp/" + validID},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, svc := setupIntegrationHandler()
+			svc.err = errors.New("mcp failed")
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+		})
+	}
 }

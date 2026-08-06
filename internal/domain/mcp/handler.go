@@ -2,13 +2,14 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
@@ -45,21 +46,25 @@ func NewHandler(svc mcpService) *Handler {
 	return &Handler{svc: svc}
 }
 
-// RegisterRoutes mounts MCP server config routes onto the given router.
+// RegisterRoutes mounts administrator-only MCP server config routes onto the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/mcp-server-configs", h.list)
-	r.Post("/api/mcp-server-configs", h.create)
 	// Bootstrap endpoint: requires mcp-client-runtime role (P-C351-1 / ACT-F3-12).
 	// Returns all auto-start configs for the runtime service to load at startup.
 	r.With(middleware.RequireRole("mcp-client-runtime")).Get("/api/mcp-server-configs/bootstrap", h.bootstrap)
-	r.Get("/api/mcp-server-configs/{id}", h.getByID)
-	r.Put("/api/mcp-server-configs/{id}", h.update)
-	r.Patch("/api/mcp-server-configs/{id}", h.update)
-	r.Delete("/api/mcp-server-configs/{id}", h.delete)
-	r.Get("/api/mcp-server-configs/{id}/auth-status", h.getAuthStatus)
-	r.Get("/api/mcp-server-configs/{id}/connect", h.getConnectURL)
-	r.Post("/api/mcp-server-configs/{id}/callback", h.handleCallback)
-	r.Get("/api/mcp-server-configs/{id}/tools", h.listTools)
+
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/mcp-server-configs", h.list)
+		r.Post("/api/mcp-server-configs", h.create)
+		r.Get("/api/mcp-server-configs/{id}", h.getByID)
+		r.Put("/api/mcp-server-configs/{id}", h.update)
+		r.Patch("/api/mcp-server-configs/{id}", h.update)
+		r.Delete("/api/mcp-server-configs/{id}", h.delete)
+		r.Get("/api/mcp-server-configs/{id}/auth-status", h.getAuthStatus)
+		r.Get("/api/mcp-server-configs/{id}/connect", h.getConnectURL)
+		r.Post("/api/mcp-server-configs/{id}/callback", h.handleCallback)
+		r.Get("/api/mcp-server-configs/{id}/tools", h.listTools)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +79,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -120,7 +125,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req UpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -187,7 +192,12 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Code string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" {
+	if err := httputil.DecodeSingleJSON(r.Body, &body); err != nil {
+		respond.Error(w, http.StatusBadRequest, "code is required")
+		return
+	}
+	body.Code = strings.TrimSpace(body.Code)
+	if body.Code == "" {
 		respond.Error(w, http.StatusBadRequest, "code is required")
 		return
 	}
@@ -255,6 +265,10 @@ func (h *Handler) getConnectURL(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "MCP server not found")
+			return
+		}
+		if errors.Is(err, ErrRedirectURLNotAllowed) {
+			respond.Error(w, http.StatusBadRequest, "invalid redirectUrl")
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, "internal error")

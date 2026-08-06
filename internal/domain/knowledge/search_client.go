@@ -16,8 +16,16 @@ type SearchResult struct {
 	KnowledgeBaseID uuid.UUID `json:"knowledgeBaseId"`
 }
 
+// SearchOptions controls the searchable knowledge bases, result limit, and
+// optional document metadata expression for one search request.
+type SearchOptions struct {
+	KBIDs          []uuid.UUID
+	TopK           int
+	MetadataFilter *MetadataFilter
+}
+
 // DocumentSearchClient performs semantic search against indexed document chunks
 // using pgvector cosine similarity. Implementations must be safe for concurrent use.
 type DocumentSearchClient interface {
-	Search(ctx context.Context, query string, kbIDs []uuid.UUID, topK int) ([]SearchResult, error)
+	Search(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error)
 }

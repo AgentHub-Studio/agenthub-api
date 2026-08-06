@@ -79,6 +79,10 @@ func (s *Service) Signup(ctx context.Context, req SignupRequest) (SignupResponse
 		ID:   tenantID,
 		Name: strings.TrimSpace(req.TenantName),
 	}); err != nil {
+		if errors.Is(err, tenant.ErrValidation) {
+			detail := strings.TrimPrefix(err.Error(), tenant.ErrValidation.Error()+": ")
+			return SignupResponse{}, fmt.Errorf("%w: %s", ErrValidation, detail)
+		}
 		return SignupResponse{}, fmt.Errorf("tenantsignup: create tenant: %w", err)
 	}
 
@@ -122,7 +126,7 @@ func (s *Service) buildLoginURL(tenantID string) string {
 // Mirrors the regex in tenant.Service for consistency — kept local to avoid a circular
 // dependency on an internal-only symbol.
 func isKebab(s string) bool {
-	if len(s) < 2 || len(s) > 63 {
+	if len(s) < 3 || len(s) > 63 {
 		return false
 	}
 	if s[0] == '-' || s[len(s)-1] == '-' {

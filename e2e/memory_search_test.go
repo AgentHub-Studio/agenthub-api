@@ -96,16 +96,22 @@ func TestE2E_AgentMemoryRecall(t *testing.T) {
 	require.Equal(t, http.StatusCreated, status)
 	agentID := agent["id"].(string)
 
-	// Seed some memory
-	c.Put("/api/agents/"+agentID+"/memory/pref-lang", map[string]any{"value": "Portuguese"}, nil)
+	// Seed semantic memory using the same fixed-size embedding required by pgvector.
+	embedding := make([]float32, 1024)
+	embedding[0] = 1
+	require.Equal(t, http.StatusOK, c.Put("/api/agents/"+agentID+"/memory/pref-lang", map[string]any{
+		"value":     "Portuguese",
+		"embedding": embedding,
+	}, nil))
 
-	// Recall — may return empty results without embeddings configured; just check HTTP 200
-	var recalled any
+	var recalled []map[string]any
 	status = c.Post("/api/agents/"+agentID+"/memory/recall", map[string]any{
-		"query": "language preference",
-		"topK":  3,
+		"embedding": embedding,
+		"limit":     3,
 	}, &recalled)
 	assert.Equal(t, http.StatusOK, status)
+	require.NotEmpty(t, recalled)
+	assert.Equal(t, "pref-lang", recalled[0]["key"])
 }
 
 // TestE2E_SearchReturnsResults validates the global search endpoint.

@@ -21,7 +21,6 @@ import (
 var (
 	indexedArgRe   = regexp.MustCompile(`\$ARGUMENTS\[(\d+)\]`)
 	shorthandArgRe = regexp.MustCompile(`\$(\d+)(?:\b|$)`)
-	namedArgRe     = regexp.MustCompile(`\$([a-zA-Z_][a-zA-Z0-9_]*)`)
 )
 
 // ParseArguments splits an arguments string into individual arguments.
@@ -83,6 +82,9 @@ func ParseArgumentNames(names string) []string {
 // unfilled arguments (e.g., "[arg2] [arg3]"). Returns empty string
 // if all arguments are filled.
 func GenerateArgumentHint(argNames []string, typedArgs []string) string {
+	if len(typedArgs) >= len(argNames) {
+		return ""
+	}
 	remaining := argNames[len(typedArgs):]
 	if len(remaining) == 0 {
 		return ""

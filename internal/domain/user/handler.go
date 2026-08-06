@@ -1,7 +1,6 @@
 package user
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 )
 
 // Handler holds HTTP handlers for the user domain.
@@ -23,22 +23,51 @@ func NewHandler(svc Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+func isKeycloakUpstreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "keycloak") ||
+		strings.Contains(msg, ".svc.cluster.local") ||
+		strings.Contains(msg, "Post \"http") ||
+		strings.Contains(msg, "Get \"http")
+}
+
+func respondKeycloakUpstreamError(w http.ResponseWriter, operation string, err error) bool {
+	if !isKeycloakUpstreamError(err) {
+		return false
+	}
+
+	slog.Error("user: keycloak upstream error", "operation", operation, "err", err)
+	httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": "user provisioning service unavailable"})
+	return true
+}
+
 // RegisterProtectedRoutes mounts authenticated user routes onto r.
 func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
-	r.Get("/api/users", h.list)
-	r.Post("/api/users", h.create)
-	r.Get("/api/users/roles", h.listRoles)
-	r.Get("/api/users/{id}", h.get)
-	r.Patch("/api/users/{id}", h.update)
-	r.Delete("/api/users/{id}", h.delete)
-	r.Post("/api/users/{id}/roles/{role}", h.assignRole)
-	r.Delete("/api/users/{id}/roles/{role}", h.removeRole)
-	r.Post("/api/users/{id}/reset-password", h.resetPassword)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/users", h.list)
+		r.Post("/api/users", h.create)
+		r.Get("/api/users/roles", h.listRoles)
+		r.Get("/api/users/{id}", h.get)
+		r.Patch("/api/users/{id}", h.update)
+		r.Delete("/api/users/{id}", h.delete)
+		r.Post("/api/users/{id}/roles/{role}", h.assignRole)
+		r.Delete("/api/users/{id}/roles/{role}", h.removeRole)
+		r.Post("/api/users/{id}/reset-password", h.resetPassword)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	users, err := h.svc.List(r.Context())
 	if err != nil {
+		if respondKeycloakUpstreamError(w, "list users", err) {
+			return
+		}
 		// Bug 268: erro era engolido sem log — qualquer falha do
 		// Keycloak Admin API caía em 500 sem visibilidade. Loga
 		// server-side para diagnóstico.
@@ -61,6 +90,9 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		if respondKeycloakUpstreamError(w, "get user", err) {
+			return
+		}
 		// Bug 270: log err para diagnóstico (mesma classe do bug 268).
 		slog.Error("user: get failed", "id", id, "err", err)
 		httputil.InternalServerError(w, "internal error")
@@ -71,7 +103,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
 		return
 	}
@@ -89,14 +121,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		// cluster (`http://keycloak.agenthub.svc.cluster.local:8080/...`)
 		// e mensagens técnicas (`context deadline exceeded`). Mapeia
 		// para 502 Bad Gateway sem vazar topology.
-		msg := err.Error()
-		if strings.Contains(msg, "context deadline exceeded") ||
-			strings.Contains(msg, "keycloak") ||
-			strings.Contains(msg, ".svc.cluster.local") ||
-			strings.Contains(msg, "Post \"http") ||
-			strings.Contains(msg, "Get \"http") {
-			slog.Error("user: keycloak upstream error", "err", err)
-			httputil.JSON(w, http.StatusBadGateway, map[string]string{"error": "user provisioning service unavailable"})
+		if respondKeycloakUpstreamError(w, "create user", err) {
 			return
 		}
 		httputil.BadRequest(w, err.Error())
@@ -112,7 +137,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
 		return
 	}
@@ -122,6 +147,9 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		if respondKeycloakUpstreamError(w, "update user", err) {
+			return
+		}
 		slog.Error("user: update failed", "id", id, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
@@ -141,6 +169,9 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		if respondKeycloakUpstreamError(w, "delete user", err) {
+			return
+		}
 		slog.Error("user: delete failed", "id", id, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
@@ -158,6 +189,9 @@ func (h *Handler) assignRole(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.AssignRole(r.Context(), id, role); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httputil.NotFound(w, "user not found")
+			return
+		}
+		if respondKeycloakUpstreamError(w, "assign role", err) {
 			return
 		}
 		slog.Error("user: assign role failed", "id", id, "role", role, "err", err)
@@ -179,6 +213,9 @@ func (h *Handler) removeRole(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "user not found")
 			return
 		}
+		if respondKeycloakUpstreamError(w, "remove role", err) {
+			return
+		}
 		slog.Error("user: remove role failed", "id", id, "role", role, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
@@ -197,6 +234,9 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 			httputil.NotFound(w, "user not found")
 			return
 		}
+		if respondKeycloakUpstreamError(w, "reset password", err) {
+			return
+		}
 		slog.Error("user: reset password failed", "id", id, "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return
@@ -207,6 +247,9 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) listRoles(w http.ResponseWriter, r *http.Request) {
 	roles, err := h.svc.ListRoles(r.Context())
 	if err != nil {
+		if respondKeycloakUpstreamError(w, "list roles", err) {
+			return
+		}
 		slog.Error("user: list roles failed", "err", err)
 		httputil.InternalServerError(w, "internal error")
 		return

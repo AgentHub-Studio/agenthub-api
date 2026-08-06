@@ -159,7 +159,7 @@ func TestBDD_NormalizeAndSanitize(t *testing.T) {
 		// Given a tool result containing zero-width chars or RTL override
 		//       (PDF Section 11: defensive cleaning prevents prompt-
 		//       injection via output channel),
-		dangerous := "hello‮world​"
+		dangerous := "hello\u202eworld\u200b"
 
 		// When the sanitiser runs,
 		when, err := SanitizeUnicode(dangerous)
@@ -168,9 +168,9 @@ func TestBDD_NormalizeAndSanitize(t *testing.T) {
 		//      on the adversarial input.
 		assert.NoError(t, err,
 			"sanitiser must not error on adversarial input")
-		assert.NotContains(t, when, "‮",
+		assert.NotContains(t, when, "\u202e",
 			"RTL override must be removed (anti-spoofing)")
-		assert.NotContains(t, when, "​",
+		assert.NotContains(t, when, "\u200b",
 			"zero-width space must be removed")
 		assert.Contains(t, when, "hello")
 		assert.Contains(t, when, "world")
@@ -178,9 +178,9 @@ func TestBDD_NormalizeAndSanitize(t *testing.T) {
 
 	t.Run("Scenario_IsDangerousUnicodeFlagsAdversarialInput", func(t *testing.T) {
 		// Given inputs of varying safety levels,
-		assert.True(t, IsDangerousUnicode("hello‮world"),
+		assert.True(t, IsDangerousUnicode("hello\u202eworld"),
 			"RTL override must flag as dangerous")
-		assert.True(t, IsDangerousUnicode("zero​width"),
+		assert.True(t, IsDangerousUnicode("zero\u200bwidth"),
 			"zero-width space must flag as dangerous")
 		assert.False(t, IsDangerousUnicode("normal text 123"),
 			"plain ASCII must NOT flag as dangerous")

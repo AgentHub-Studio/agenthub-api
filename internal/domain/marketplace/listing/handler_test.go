@@ -20,7 +20,10 @@ import (
 
 // mockListingSvc is an in-memory implementation of the listingService interface.
 type mockListingSvc struct {
-	data map[uuid.UUID]listing.Listing
+	data      map[uuid.UUID]listing.Listing
+	createErr error
+	updateErr error
+	deleteErr error
 }
 
 func newMockListingSvc() *mockListingSvc {
@@ -61,6 +64,9 @@ func (m *mockListingSvc) GetByID(_ context.Context, id uuid.UUID) (listing.Listi
 }
 
 func (m *mockListingSvc) Create(_ context.Context, tenantID string, req listing.CreateListingRequest) (listing.ListingResponse, error) {
+	if m.createErr != nil {
+		return listing.ListingResponse{}, m.createErr
+	}
 	if req.Name == "" {
 		return listing.ListingResponse{}, listing.ErrNotFound
 	}
@@ -77,6 +83,9 @@ func (m *mockListingSvc) Create(_ context.Context, tenantID string, req listing.
 }
 
 func (m *mockListingSvc) Update(_ context.Context, id uuid.UUID, tenantID string, req listing.UpdateListingRequest) (listing.ListingResponse, error) {
+	if m.updateErr != nil {
+		return listing.ListingResponse{}, m.updateErr
+	}
 	l, ok := m.data[id]
 	if !ok {
 		return listing.ListingResponse{}, listing.ErrNotFound
@@ -89,6 +98,9 @@ func (m *mockListingSvc) Update(_ context.Context, id uuid.UUID, tenantID string
 }
 
 func (m *mockListingSvc) Delete(_ context.Context, id uuid.UUID, tenantID string) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
 	if _, ok := m.data[id]; !ok {
 		return listing.ErrNotFound
 	}
@@ -183,6 +195,65 @@ func TestListingHandler_Create_BadBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestListingHandler_Create_MapsPackageAndAuthorizationErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "missing package", err: listing.ErrPackageNotFound, want: http.StatusNotFound},
+		{name: "other tenant package", err: listing.ErrForbidden, want: http.StatusForbidden},
+		{name: "private package", err: listing.ErrPackageNotPublic, want: http.StatusUnprocessableEntity},
+		{name: "invalid package", err: listing.ErrValidation, want: http.StatusUnprocessableEntity},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, svc := setupListingHandler()
+			svc.createErr = tc.err
+			req := httptest.NewRequest(http.MethodPost, "/api/marketplace/listings", bytes.NewBufferString(`{"name":"listing","packageId":"`+uuid.NewString()+`","type":"AGENT"}`))
+			req = withTenant(req, "tenant-1")
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, tc.want, w.Code)
+			assert.Empty(t, svc.data)
+		})
+	}
+}
+
+func TestListingHandler_CreateAndUpdateRejectTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, svc := setupListingHandler()
+		req := httptest.NewRequest(http.MethodPost, "/api/marketplace/listings", bytes.NewBufferString(`{"name":"first","type":"AGENT"} {"name":"ignored"}`))
+		req = withTenant(req, "tenant-1")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Empty(t, svc.data)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		r, svc := setupListingHandler()
+		id := uuid.New()
+		original := listing.Listing{ID: id, TenantID: "tenant-1", Name: "unchanged", Status: listing.StatusActive}
+		svc.data[id] = original
+		req := httptest.NewRequest(http.MethodPut, "/api/marketplace/listings/"+id.String(), bytes.NewBufferString(`{"name":"changed"} {"name":"ignored"}`))
+		req = withTenant(req, "tenant-1")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Equal(t, original, svc.data[id])
+	})
+}
+
 func TestListingHandler_GetByID_OK(t *testing.T) {
 	r, svc := setupListingHandler()
 	id := uuid.New()
@@ -236,6 +307,17 @@ func TestListingHandler_Delete_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+func TestListingHandler_Delete_Forbidden(t *testing.T) {
+	r, svc := setupListingHandler()
+	svc.deleteErr = listing.ErrForbidden
+	req := withTenant(httptest.NewRequest(http.MethodDelete, "/api/marketplace/listings/"+uuid.NewString(), nil), "tenant-1")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
 func TestListingHandler_Update_OK(t *testing.T) {
 	r, svc := setupListingHandler()
 	id := uuid.New()
@@ -250,4 +332,18 @@ func TestListingHandler_Update_OK(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestListingHandler_Update_Forbidden(t *testing.T) {
+	r, svc := setupListingHandler()
+	svc.updateErr = listing.ErrForbidden
+	name := "not applied"
+	body, err := json.Marshal(listing.UpdateListingRequest{Name: &name})
+	require.NoError(t, err)
+	req := withTenant(httptest.NewRequest(http.MethodPatch, "/api/marketplace/listings/"+uuid.NewString(), bytes.NewReader(body)), "tenant-1")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }

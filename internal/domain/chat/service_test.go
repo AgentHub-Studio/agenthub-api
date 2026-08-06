@@ -2,6 +2,8 @@ package chat_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -12,14 +14,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/evals"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 type mockChatRepo struct {
-	sessions      map[uuid.UUID]chat.ChatSession
-	messages      []chat.ChatMessage
-	routingAgents []chat.AgentRoutingInfo
-	routingErr    error
+	sessions        map[uuid.UUID]chat.ChatSession
+	messages        []chat.ChatMessage
+	routingAgents   []chat.AgentRoutingInfo
+	routingErr      error
+	getSessionCalls int
 }
 
 func uuidPtr() *uuid.UUID { id := uuid.New(); return &id }
@@ -37,6 +41,7 @@ func (m *mockChatRepo) FindSessions(_ context.Context, _ pagination.PageRequest)
 }
 
 func (m *mockChatRepo) GetSessionByID(_ context.Context, id uuid.UUID) (chat.ChatSession, error) {
+	m.getSessionCalls++
 	s, ok := m.sessions[id]
 	if !ok {
 		return chat.ChatSession{}, chat.ErrNotFound
@@ -48,6 +53,28 @@ func (m *mockChatRepo) CreateSession(_ context.Context, s chat.ChatSession) (cha
 	s.ID = uuid.New()
 	s.Status = chat.StatusActive
 	m.sessions[s.ID] = s
+	return s, nil
+}
+
+func (m *mockChatRepo) CloneSession(_ context.Context, s chat.ChatSession, messages []chat.ChatMessage) (chat.ChatSession, error) {
+	s.ID = uuid.New()
+	s.Status = chat.StatusActive
+
+	copiedMessages := make([]chat.ChatMessage, 0, len(messages))
+	for _, message := range messages {
+		copied := message
+		copied.ID = uuid.New()
+		copied.SessionID = s.ID
+		copied.RunID = nil
+		copied.CreatedAt = time.Time{}
+		copied.ToolCalls = append(json.RawMessage(nil), message.ToolCalls...)
+		copied.Metadata = append(json.RawMessage(nil), message.Metadata...)
+		copied.TokenUsage = append(json.RawMessage(nil), message.TokenUsage...)
+		copiedMessages = append(copiedMessages, copied)
+	}
+
+	m.sessions[s.ID] = s
+	m.messages = append(m.messages, copiedMessages...)
 	return s, nil
 }
 
@@ -142,7 +169,7 @@ func (m *mockChatRepo) UpdateSessionAgent(_ context.Context, sessionID uuid.UUID
 	return nil
 }
 
-func (m *mockChatRepo) UpdateSessionSnapshots(_ context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage) error {
+func (m *mockChatRepo) UpdateSessionSnapshots(_ context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings, agentSnapshot json.RawMessage, agentSnapshotHash *string) error {
 	s, ok := m.sessions[sessionID]
 	if !ok {
 		return chat.ErrNotFound
@@ -150,6 +177,8 @@ func (m *mockChatRepo) UpdateSessionSnapshots(_ context.Context, sessionID uuid.
 	s.SystemPromptSnapshot = systemPrompt
 	s.ModelConfigSnapshot = modelConfig
 	s.SkillBindingsSnapshot = skillBindings
+	s.AgentSnapshot = agentSnapshot
+	s.AgentSnapshotHash = agentSnapshotHash
 	m.sessions[sessionID] = s
 	return nil
 }
@@ -208,7 +237,7 @@ func TestChatService_GetSession_NotFound(t *testing.T) {
 
 func TestChatService_ArchiveSession(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	created, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"test"})
+	created, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title: "test"})
 	require.NoError(t, err)
 	archived, err := svc.ArchiveSession(context.Background(), created.ID)
 	require.NoError(t, err)
@@ -217,7 +246,7 @@ func TestChatService_ArchiveSession(t *testing.T) {
 
 func TestChatService_AddMessage(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title: "q&a"})
 	require.NoError(t, err)
 	msg, err := svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{
 		Role:    "user",
@@ -228,12 +257,138 @@ func TestChatService_AddMessage(t *testing.T) {
 	assert.NotEqual(t, uuid.Nil, msg.ID)
 }
 
+func TestChatService_CloneSession_CopiesMessagesUntilMessageID(t *testing.T) {
+	repo := newMockRepo()
+	svc := chat.NewService(repo, nil)
+	ctx := context.Background()
+	agentID := uuid.New()
+
+	source, err := svc.CreateSession(ctx, chat.CreateSessionRequest{AgentID: &agentID, Title: "Original"})
+	require.NoError(t, err)
+	systemPrompt := "stable prompt"
+	sourceEntity := repo.sessions[source.ID]
+	sourceEntity.SystemPromptSnapshot = &systemPrompt
+	sourceEntity.ModelConfigSnapshot = json.RawMessage(`{"model":"test"}`)
+	sourceEntity.SkillBindingsSnapshot = json.RawMessage(`{"skillIds":[]}`)
+	sourceEntity.AgentSnapshot = json.RawMessage(`{"systemPrompt":"stable prompt","modelConfig":{"model":"test"}}`)
+	sourceHash := sha256.Sum256(sourceEntity.AgentSnapshot)
+	sourceHashText := hex.EncodeToString(sourceHash[:])
+	sourceEntity.AgentSnapshotHash = &sourceHashText
+	configHash := "a3e561b1d7f768f844e412e23b02c5b45d3e78c82d75912d7c4e3f9b4968da12"
+	sourceEntity.ConfigHash = &configHash
+	repo.sessions[source.ID] = sourceEntity
+
+	firstID := uuid.New()
+	secondID := uuid.New()
+	runID := uuid.New()
+	repo.messages = append(repo.messages,
+		chat.ChatMessage{ID: firstID, SessionID: source.ID, Role: "user", Content: "primeira", MessageType: chat.MessageTypeText, RunID: &runID},
+		chat.ChatMessage{ID: secondID, SessionID: source.ID, Role: "user", Content: "segunda", MessageType: chat.MessageTypeText, RunID: &runID},
+	)
+
+	clone, err := svc.CloneSession(ctx, source.ID, chat.CloneSessionRequest{
+		UntilMessageID: &firstID,
+		Title:          "Variant A",
+	})
+
+	require.NoError(t, err)
+	assert.NotEqual(t, source.ID, clone.ID)
+	assert.Equal(t, "Variant A", clone.Title)
+	assert.Equal(t, chat.StatusActive, clone.Status)
+	require.NotNil(t, clone.ClonedFromSessionID)
+	assert.Equal(t, source.ID, *clone.ClonedFromSessionID)
+	require.NotNil(t, clone.ClonedFromSessionTitle)
+	assert.Equal(t, "Original", *clone.ClonedFromSessionTitle)
+	require.NotNil(t, clone.AgentID)
+	assert.Equal(t, agentID, *clone.AgentID)
+
+	clonedSession := repo.sessions[clone.ID]
+	require.NotNil(t, clonedSession.SystemPromptSnapshot)
+	assert.Equal(t, "stable prompt", *clonedSession.SystemPromptSnapshot)
+	assert.JSONEq(t, `{"model":"test"}`, string(clonedSession.ModelConfigSnapshot))
+	assert.JSONEq(t, `{"skillIds":[]}`, string(clonedSession.SkillBindingsSnapshot))
+	assert.JSONEq(t, `{"systemPrompt":"stable prompt","modelConfig":{"model":"test"}}`, string(clonedSession.AgentSnapshot))
+	require.NotNil(t, clonedSession.AgentSnapshotHash)
+	assert.Equal(t, sourceHashText, *clonedSession.AgentSnapshotHash)
+	require.NotNil(t, clonedSession.ConfigHash)
+	assert.Equal(t, configHash, *clonedSession.ConfigHash)
+
+	clonedMessages, err := repo.FindAllMessages(ctx, clone.ID)
+	require.NoError(t, err)
+	require.Len(t, clonedMessages, 1)
+	assert.NotEqual(t, firstID, clonedMessages[0].ID)
+	assert.Equal(t, clone.ID, clonedMessages[0].SessionID)
+	assert.Equal(t, "primeira", clonedMessages[0].Content)
+	assert.Equal(t, chat.MessageTypeText, clonedMessages[0].MessageType)
+	assert.Nil(t, clonedMessages[0].RunID)
+
+	originalMessages, err := repo.FindAllMessages(ctx, source.ID)
+	require.NoError(t, err)
+	assert.Len(t, originalMessages, 2)
+	assert.Equal(t, secondID, originalMessages[1].ID)
+}
+
+func TestChatService_CloneSession_CloneDoesNotAffectOriginal(t *testing.T) {
+	repo := newMockRepo()
+	svc := chat.NewService(repo, nil)
+	ctx := context.Background()
+
+	source, err := svc.CreateSession(ctx, chat.CreateSessionRequest{Title: "Original"})
+	require.NoError(t, err)
+	repo.messages = append(repo.messages, chat.ChatMessage{
+		ID:          uuid.New(),
+		SessionID:   source.ID,
+		Role:        "user",
+		Content:     "mensagem original",
+		MessageType: chat.MessageTypeText,
+	})
+
+	clone, err := svc.CloneSession(ctx, source.ID, chat.CloneSessionRequest{})
+	require.NoError(t, err)
+	_, err = svc.AddMessage(ctx, clone.ID, chat.CreateMessageRequest{Role: "user", Content: "mensagem exclusiva do clone"})
+	require.NoError(t, err)
+
+	originalMessages, err := repo.FindAllMessages(ctx, source.ID)
+	require.NoError(t, err)
+	clonedMessages, err := repo.FindAllMessages(ctx, clone.ID)
+	require.NoError(t, err)
+
+	require.Len(t, originalMessages, 1)
+	require.Len(t, clonedMessages, 2)
+	assert.Equal(t, "mensagem original", originalMessages[0].Content)
+	assert.Equal(t, []string{"mensagem original", "mensagem exclusiva do clone"}, []string{clonedMessages[0].Content, clonedMessages[1].Content})
+}
+
+func TestChatService_CloneSession_UntilMessageMustBelongToSession(t *testing.T) {
+	repo := newMockRepo()
+	svc := chat.NewService(repo, nil)
+	ctx := context.Background()
+
+	source, err := svc.CreateSession(ctx, chat.CreateSessionRequest{Title: "Original"})
+	require.NoError(t, err)
+	missingBoundary := uuid.New()
+
+	_, err = svc.CloneSession(ctx, source.ID, chat.CloneSessionRequest{UntilMessageID: &missingBoundary})
+
+	require.ErrorIs(t, err, chat.ErrMessageNotFound)
+	assert.Len(t, repo.sessions, 1)
+}
+
 // --- mock SessionRunner ---
 
 type mockSessionRunner struct {
 	events    []chat.RunEvent
 	err       error
 	lastInput chat.RunInput
+}
+
+type mockEvalRecorder struct {
+	calls chan evals.RecordRequest
+}
+
+func (m *mockEvalRecorder) RecordRunComplete(_ context.Context, req evals.RecordRequest) (evals.EvalRun, bool, error) {
+	m.calls <- req
+	return evals.EvalRun{}, true, nil
 }
 
 func (m *mockSessionRunner) RunSession(_ context.Context, in chat.RunInput) (<-chan chat.RunEvent, error) {
@@ -247,6 +402,48 @@ func (m *mockSessionRunner) RunSession(_ context.Context, in chat.RunInput) (<-c
 	}
 	close(ch)
 	return ch, nil
+}
+
+func TestChatService_RunSession_RecordsEvalOnRunComplete(t *testing.T) {
+	repo := newMockRepo()
+	agentID := uuid.New()
+	runner := &mockSessionRunner{
+		events: []chat.RunEvent{
+			{Type: "text_delta", Data: []byte(`{"content":"ok"}`)},
+			{Type: "run_complete", Data: []byte(`{"totalTurns":1}`)},
+		},
+	}
+	recorder := &mockEvalRecorder{calls: make(chan evals.RecordRequest, 1)}
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		ID:     agentID,
+		Status: "PUBLISHED",
+		EvalConfig: evals.EvalConfig{
+			Scorers:    []string{"exact_match"},
+			SampleRate: 1,
+		},
+	}}
+	svc := chat.NewService(repo, runner).WithAgentLoader(loader).WithEvalRecorder(recorder)
+
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "eval sampling",
+	})
+	require.NoError(t, err)
+
+	ch, err := svc.RunSession(context.Background(), session.ID, "Hello", "test-tenant")
+	require.NoError(t, err)
+	for range ch {
+	}
+
+	select {
+	case req := <-recorder.calls:
+		assert.Equal(t, session.ID, req.SessionID)
+		assert.Equal(t, agentID, req.AgentID)
+		require.Equal(t, []string{"exact_match"}, req.Config.Scorers)
+		assert.Equal(t, 1.0, req.Config.SampleRate)
+	case <-time.After(time.Second):
+		t.Fatal("eval recorder was not called")
+	}
 }
 
 func TestChatService_RunSession_Success(t *testing.T) {
@@ -404,7 +601,7 @@ func TestChatService_RunSession_SessionNotFound(t *testing.T) {
 
 func TestChatService_ListMessages(t *testing.T) {
 	svc := chat.NewService(newMockRepo(), nil)
-	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title:"q&a"})
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{AgentID: uuidPtr(), Title: "q&a"})
 	require.NoError(t, err)
 	for i := 0; i < 3; i++ {
 		_, err = svc.AddMessage(context.Background(), session.ID, chat.CreateMessageRequest{Role: "user", Content: "msg"})
@@ -414,6 +611,27 @@ func TestChatService_ListMessages(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), page.TotalElements)
 	assert.Len(t, page.Content, 3)
+}
+
+func TestChatService_CreateAndRunSession_ReusesCreatedSnapshot(t *testing.T) {
+	repo := newMockRepo()
+	agentID := uuid.New()
+	config := &chat.AgentRunConfig{ID: agentID, Status: "PUBLISHED"}
+	runner := &mockSessionRunner{}
+	svc := chat.NewService(repo, runner).WithAgentLoader(&mockAgentLoader{cfg: config})
+
+	run, err := svc.CreateAndRunSession(context.Background(), chat.CreateSessionRequest{
+		AgentID:     &agentID,
+		Title:       "a2a invocation",
+		AgentConfig: config,
+	}, "hello", "target-tenant")
+	require.NoError(t, err)
+	require.NotNil(t, run.Events)
+	assert.Equal(t, 0, repo.getSessionCalls, "new session must not be read again before its first run")
+	require.NotNil(t, runner.lastInput.UserMessageID, "user message must be persisted before the runner starts")
+	assert.Equal(t, run.Session.ID, runner.lastInput.SessionID)
+	assert.Equal(t, agentID, runner.lastInput.AgentID)
+	assert.Same(t, config, runner.lastInput.AgentConfig)
 }
 
 // --- TR-01-TASK-12: User message persisted before run (P-C178-2) ---
@@ -483,11 +701,13 @@ func TestRunSession_RunnerError_UserMessageStillPersisted(t *testing.T) {
 
 // mockAgentLoader is a test double for chat.AgentLoader.
 type mockAgentLoader struct {
-	cfg *chat.AgentRunConfig
-	err error
+	cfg   *chat.AgentRunConfig
+	err   error
+	calls int
 }
 
 func (m *mockAgentLoader) GetAgentForRun(_ context.Context, _ uuid.UUID) (*chat.AgentRunConfig, error) {
+	m.calls++
 	return m.cfg, m.err
 }
 
@@ -511,6 +731,94 @@ func TestCreateSession_SnapshotsSystemPromptAtCreation(t *testing.T) {
 	stored := repo.sessions[session.ID]
 	require.NotNil(t, stored.SystemPromptSnapshot)
 	assert.Equal(t, prompt, *stored.SystemPromptSnapshot)
+}
+
+func TestCreateSession_UsesProvidedAgentConfig(t *testing.T) {
+	repo := newMockRepo()
+	agentID := uuid.New()
+	config := &chat.AgentRunConfig{
+		ID:           agentID,
+		SystemPrompt: "Use the supplied configuration.",
+		Status:       "PUBLISHED",
+	}
+	loader := &mockAgentLoader{err: errors.New("loader must not be called")}
+	svc := chat.NewService(repo, nil).WithAgentLoader(loader)
+
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID:     &agentID,
+		Title:       "test",
+		AgentConfig: config,
+	})
+
+	require.NoError(t, err)
+	assert.Zero(t, loader.calls)
+	stored := repo.sessions[session.ID]
+	require.NotNil(t, stored.SystemPromptSnapshot)
+	assert.Equal(t, config.SystemPrompt, *stored.SystemPromptSnapshot)
+}
+
+func TestCreateSession_SnapshotsCanonicalAgentSnapshotAndHash(t *testing.T) {
+	repo := newMockRepo()
+	skillID1 := uuid.New()
+	skillID2 := uuid.New()
+	prompt := "You are ARIA, a helpful assistant."
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		SystemPrompt: prompt,
+		ModelConfig:  json.RawMessage(`{"provider":"openrouter","model":"openai/gpt-4.1-mini"}`),
+		Status:       "PUBLISHED",
+		SkillIDs:     []uuid.UUID{skillID1, skillID2},
+	}}
+	svc := chat.NewService(repo, nil).WithAgentLoader(loader)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	stored := repo.sessions[session.ID]
+	require.NotEmpty(t, stored.AgentSnapshot)
+	require.NotNil(t, stored.AgentSnapshotHash)
+	require.Len(t, *stored.AgentSnapshotHash, 64)
+	_, err = hex.DecodeString(*stored.AgentSnapshotHash)
+	require.NoError(t, err)
+	hash := sha256.Sum256(stored.AgentSnapshot)
+	assert.Equal(t, hex.EncodeToString(hash[:]), *stored.AgentSnapshotHash)
+
+	var snapshot chat.AgentSnapshotData
+	require.NoError(t, json.Unmarshal(stored.AgentSnapshot, &snapshot))
+	assert.Equal(t, prompt, snapshot.SystemPrompt)
+	assert.JSONEq(t, `{"provider":"openrouter","model":"openai/gpt-4.1-mini"}`, string(snapshot.ModelConfig))
+	assert.Equal(t, []uuid.UUID{skillID1, skillID2}, snapshot.SkillIDs)
+}
+
+func TestCreateSession_CanonicalAgentSnapshotRedactsModelAPIKey(t *testing.T) {
+	repo := newMockRepo()
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		SystemPrompt: "You are ARIA.",
+		ModelConfig:  json.RawMessage(`{"provider":"openai","model":"gpt-4.1-mini","apiKey":"sk-secret","api_secret":"legacy-secret","temperature":0.2}`),
+		Status:       "PUBLISHED",
+	}}
+	svc := chat.NewService(repo, nil).WithAgentLoader(loader)
+
+	agentID := uuid.New()
+	session, err := svc.CreateSession(context.Background(), chat.CreateSessionRequest{
+		AgentID: &agentID,
+		Title:   "test",
+	})
+	require.NoError(t, err)
+
+	stored := repo.sessions[session.ID]
+	require.NotEmpty(t, stored.AgentSnapshot)
+	assert.NotContains(t, string(stored.AgentSnapshot), "sk-secret")
+	assert.NotContains(t, string(stored.AgentSnapshot), "legacy-secret")
+	assert.NotContains(t, string(stored.AgentSnapshot), "apiKey")
+	assert.NotContains(t, string(stored.AgentSnapshot), "api_secret")
+
+	var snapshot chat.AgentSnapshotData
+	require.NoError(t, json.Unmarshal(stored.AgentSnapshot, &snapshot))
+	assert.JSONEq(t, `{"provider":"openai","model":"gpt-4.1-mini","temperature":0.2}`, string(snapshot.ModelConfig))
 }
 
 func TestCreateSession_NoLoader_NoSnapshot(t *testing.T) {
@@ -549,6 +857,107 @@ func TestRunSession_PassesSnapshotToRunner(t *testing.T) {
 	// The runner must have received the snapshot.
 	require.NotNil(t, runner.lastInput.SystemPromptSnapshot)
 	assert.Equal(t, snapshot, *runner.lastInput.SystemPromptSnapshot)
+}
+
+func TestRunSession_SystemPromptOverrideUpdatesSessionSnapshotAndRunnerInput(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+
+	original := "Persisted session snapshot."
+	override := "Preview prompt from Studio."
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	repo.sessions[sessionID] = chat.ChatSession{
+		ID:                   sessionID,
+		AgentID:              &agentID,
+		Status:               chat.StatusActive,
+		SystemPromptSnapshot: &original,
+	}
+
+	svc := chat.NewService(repo, runner)
+	_, err := svc.RunSession(context.Background(), sessionID, "Hello", "tenant", chat.RunSessionOptions{
+		SystemPromptOverride: &override,
+	})
+	require.NoError(t, err)
+
+	stored := repo.sessions[sessionID]
+	require.NotNil(t, stored.SystemPromptSnapshot)
+	assert.Equal(t, override, *stored.SystemPromptSnapshot)
+	assert.JSONEq(t, `{"systemPrompt":"Preview prompt from Studio."}`, string(stored.AgentSnapshot))
+	require.NotNil(t, stored.AgentSnapshotHash)
+	hash := sha256.Sum256(stored.AgentSnapshot)
+	assert.Equal(t, hex.EncodeToString(hash[:]), *stored.AgentSnapshotHash)
+	assert.Equal(t, override, runner.lastInput.SystemPrompt)
+	require.NotNil(t, runner.lastInput.SystemPromptSnapshot)
+	assert.Equal(t, override, *runner.lastInput.SystemPromptSnapshot)
+}
+
+func TestRunSession_AppliesInputProcessorsBeforePersistingAndRunning(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	repo.sessions[sessionID] = chat.ChatSession{
+		ID:      sessionID,
+		AgentID: &agentID,
+		Status:  chat.StatusActive,
+	}
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		ID:              agentID,
+		Status:          "PUBLISHED",
+		InputProcessors: []string{"upper_caser", "pii_redactor"},
+	}}
+	svc := chat.NewService(repo, runner).WithAgentLoader(loader)
+
+	_, err := svc.RunSession(context.Background(), sessionID, "Meu CPF é 123.456.789-00", "tenant")
+
+	require.NoError(t, err)
+	require.Len(t, repo.messages, 1)
+	msg := repo.messages[0]
+	assert.Equal(t, "MEU CPF É [REDACTED:CPF]", msg.Content)
+	assert.Equal(t, "MEU CPF É [REDACTED:CPF]", runner.lastInput.UserMessage)
+
+	var metadata struct {
+		OriginalContent  string   `json:"originalContent"`
+		ProcessedContent string   `json:"processedContent"`
+		InputProcessors  []string `json:"inputProcessors"`
+	}
+	require.NoError(t, json.Unmarshal(msg.Metadata, &metadata))
+	assert.Equal(t, "Meu CPF é 123.456.789-00", metadata.OriginalContent)
+	assert.Equal(t, "MEU CPF É [REDACTED:CPF]", metadata.ProcessedContent)
+	assert.Equal(t, []string{"upper_caser", "pii_redactor"}, metadata.InputProcessors)
+
+	resp := chat.MessageResponseFrom(msg)
+	require.NotNil(t, resp.OriginalContent)
+	require.NotNil(t, resp.ProcessedContent)
+	assert.Equal(t, metadata.OriginalContent, *resp.OriginalContent)
+	assert.Equal(t, metadata.ProcessedContent, *resp.ProcessedContent)
+}
+
+func TestRunSession_PassesOutputProcessorsToRunner(t *testing.T) {
+	repo := newMockRepo()
+	runner := &mockSessionRunner{}
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	repo.sessions[sessionID] = chat.ChatSession{
+		ID:      sessionID,
+		AgentID: &agentID,
+		Status:  chat.StatusActive,
+	}
+	loader := &mockAgentLoader{cfg: &chat.AgentRunConfig{
+		ID:               agentID,
+		Status:           "PUBLISHED",
+		OutputProcessors: []string{"pii_redactor"},
+	}}
+	svc := chat.NewService(repo, runner).WithAgentLoader(loader)
+
+	_, err := svc.RunSession(context.Background(), sessionID, "Hello", "tenant")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pii_redactor"}, runner.lastInput.OutputProcessors)
+	assert.Same(t, loader.cfg, runner.lastInput.AgentConfig)
 }
 
 // TestCreateSession_SnapshotsSkillBindings verifies that skill IDs from the agent loader

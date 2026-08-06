@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -67,6 +66,33 @@ func (c *Chain) Protected() []func(http.Handler) http.Handler {
 		authMiddleware(c.keycloakBaseURL, c.keycloakIssuerURL),
 		tenantMiddleware(),
 	)
+}
+
+// OptionalAuth returns middleware for routes that are public by default but
+// may return tenant-owned data when a valid Bearer token is present. Responses
+// are never cached because the same URL can produce a different result for an
+// authenticated owner than for an anonymous request.
+func (c *Chain) OptionalAuth() []func(http.Handler) http.Handler {
+	return append(c.Public(),
+		NoStoreCache,
+		optionalAuthMiddleware(c.keycloakBaseURL, c.keycloakIssuerURL),
+	)
+}
+
+// optionalAuthMiddleware leaves requests without an Authorization header
+// anonymous. If the caller presents credentials, it validates them exactly as
+// protected routes do and stores the tenant in the request context.
+func optionalAuthMiddleware(keycloakBaseURL, expectedIssuerPrefix string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		authenticated := authMiddleware(keycloakBaseURL, expectedIssuerPrefix)(tenantMiddleware()(next))
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			authenticated.ServeHTTP(w, r)
+		})
+	}
 }
 
 // authMiddleware validates the Bearer JWT signature against the Keycloak JWKS endpoint.
@@ -204,22 +230,6 @@ func extractRealmAndIssuer(payloadB64 string) (string, string, error) {
 		return "", "", fmt.Errorf("iss claim %q does not contain /realms/<name>", claims.Issuer)
 	}
 	return m[1], claims.Issuer, nil
-}
-
-// rsaKeyForToken is a jwt.Keyfunc that looks up the RSA key by "kid" header.
-// Used internally; exposed for testing.
-func rsaKeyForToken(keys map[string]*rsa.PublicKey) jwt.Keyfunc {
-	return func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		kid, _ := token.Header["kid"].(string)
-		key, ok := keys[kid]
-		if !ok {
-			return nil, fmt.Errorf("unknown kid: %q", kid)
-		}
-		return key, nil
-	}
 }
 
 var realmRegex = regexp.MustCompile(`/realms/([^/]+)`)

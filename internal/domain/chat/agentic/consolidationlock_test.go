@@ -62,6 +62,27 @@ func TestConsolidationLock_TryAcquire_DeadHolder(t *testing.T) {
 	assert.Equal(t, os.Getpid(), acq.HolderPID)
 }
 
+func TestConsolidationLock_TryAcquire_UsesPrivatePermissions(t *testing.T) {
+	root := t.TempDir()
+	lockDir := filepath.Join(root, "state")
+	cfg := agentic.ConsolidationLockConfig{
+		LockFilePath: filepath.Join(lockDir, ".consolidation.lock"),
+		StaleTimeout: 60 * time.Minute,
+	}
+	l := agentic.NewConsolidationLock(cfg)
+
+	_, err := l.TryAcquire()
+	require.NoError(t, err)
+
+	dirInfo, err := os.Stat(lockDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm())
+
+	fileInfo, err := os.Stat(cfg.LockFilePath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), fileInfo.Mode().Perm())
+}
+
 // --- Release ---
 
 func TestConsolidationLock_Release(t *testing.T) {

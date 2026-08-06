@@ -2,6 +2,8 @@ package skilleval
 
 import (
 	"encoding/json"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,14 +20,7 @@ type SuiteResponse struct {
 }
 
 func SuiteResponseFrom(s EvalSuite) SuiteResponse {
-	return SuiteResponse{
-		ID:          s.ID,
-		SkillID:     s.SkillID,
-		Name:        s.Name,
-		Description: s.Description,
-		CreatedAt:   s.CreatedAt,
-		UpdatedAt:   s.UpdatedAt,
-	}
+	return SuiteResponse(s)
 }
 
 // CaseResponse is the JSON representation of an EvalCase.
@@ -43,18 +38,7 @@ type CaseResponse struct {
 }
 
 func CaseResponseFrom(ec EvalCase) CaseResponse {
-	return CaseResponse{
-		ID:             ec.ID,
-		SuiteID:        ec.SuiteID,
-		Description:    ec.Description,
-		InputText:      ec.InputText,
-		ExpectedTool:   ec.ExpectedTool,
-		ExpectedOutput: ec.ExpectedOutput,
-		GraderType:     ec.GraderType,
-		GraderConfig:   ec.GraderConfig,
-		ShouldTrigger:  ec.ShouldTrigger,
-		CreatedAt:      ec.CreatedAt,
-	}
+	return CaseResponse(ec)
 }
 
 // RunResponse is the JSON representation of an EvalRun, optionally with case results.
@@ -103,17 +87,60 @@ type ResultResponse struct {
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
+var sensitiveResultDiagnosticLinePattern = regexp.MustCompile(`(?im)(^|:[\t ]+)[\t ]*(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|password|api[_-]?key|secret|client[_-]?secret)[\t ]*[:=][^\r\n]*`)
+
 func ResultResponseFrom(r CaseResult) ResultResponse {
-	return ResultResponse{
-		ID:           r.ID,
-		RunID:        r.RunID,
-		CaseID:       r.CaseID,
-		Passed:       r.Passed,
-		ActualOutput: r.ActualOutput,
-		Score:        r.Score,
-		ErrorMsg:     r.ErrorMsg,
-		DurationMs:   r.DurationMs,
-		CreatedAt:    r.CreatedAt,
+	response := ResultResponse(r)
+	if r.ErrorMsg != "" {
+		response.ErrorMsg = redactResultDiagnostic(r.ErrorMsg)
+	}
+	return response
+}
+
+func redactResultDiagnostic(value string) string {
+	var payload any
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return sensitiveResultDiagnosticLinePattern.ReplaceAllString(value, "$1[REDACTED]")
+	}
+
+	redacted, err := json.Marshal(redactResultDiagnosticValue(payload))
+	if err != nil {
+		return sensitiveResultDiagnosticLinePattern.ReplaceAllString(value, "$1[REDACTED]")
+	}
+	return sensitiveResultDiagnosticLinePattern.ReplaceAllString(string(redacted), "$1[REDACTED]")
+}
+
+func redactResultDiagnosticValue(value any) any {
+	switch current := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(current))
+		for key, child := range current {
+			if isSensitiveResultDiagnosticKey(key) {
+				continue
+			}
+			out[key] = redactResultDiagnosticValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(current))
+		for index, child := range current {
+			out[index] = redactResultDiagnosticValue(child)
+		}
+		return out
+	case string:
+		return sensitiveResultDiagnosticLinePattern.ReplaceAllString(current, "$1[REDACTED]")
+	default:
+		return value
+	}
+}
+
+func isSensitiveResultDiagnosticKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+	switch normalized {
+	case "authorization", "proxyauthorization", "cookie", "setcookie", "authtoken", "xauthtoken", "accesstoken", "refreshtoken", "apikey", "xapikey", "password", "secret", "clientsecret", "bearertoken":
+		return true
+	default:
+		return false
 	}
 }
 

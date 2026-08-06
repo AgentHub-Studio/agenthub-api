@@ -211,6 +211,18 @@ func TestAgentService_Create_AutoSlug(t *testing.T) {
 	assert.Equal(t, "my-test-agent", resp.Slug)
 }
 
+func TestAgentService_Create_PreservesProcessorOrder(t *testing.T) {
+	svc := newMockAgentSvc()
+	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+		Name:             "Processor Agent",
+		InputProcessors:  []string{"upper_caser", "pii_redactor"},
+		OutputProcessors: []string{"pii_redactor"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"upper_caser", "pii_redactor"}, resp.InputProcessors)
+	assert.Equal(t, []string{"pii_redactor"}, resp.OutputProcessors)
+}
+
 func TestAgentService_Get_NotFound(t *testing.T) {
 	svc := newMockAgentSvc()
 	_, err := svc.Get(context.Background(), uuid.New())
@@ -412,6 +424,64 @@ func TestUpdateAgent_InvalidProvider_ReturnsError(t *testing.T) {
 	assert.ErrorIs(t, err, agent.ErrInvalidModelConfig)
 }
 
+func TestAgentService_ModelFallbackAliasesMustAgree(t *testing.T) {
+	t.Run("create rejects conflicting chain aliases before persistence", func(t *testing.T) {
+		repo := newMockRepo()
+		svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+
+		_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+			Name: "Conflicting fallback aliases",
+			ModelConfig: mustJSON(`{
+				"fallback_chain":[{"provider":"openrouter","model":"primary","max_retries":1,"trigger_on":["timeout"]}],
+				"fallbackChain":[{"provider":"openrouter","model":"secondary","maxRetries":2,"triggerOn":["rate_limit"]}]
+			}`),
+		})
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, agent.ErrInvalidModelConfig)
+		assert.Empty(t, repo.data, "an ambiguous fallback chain must not be persisted")
+	})
+
+	t.Run("update rejects conflicting aliases inside one fallback step", func(t *testing.T) {
+		repo := newMockRepo()
+		svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+		created, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Existing agent"})
+		require.NoError(t, err)
+
+		_, err = svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{
+			ModelConfig: mustJSON(`{
+				"fallbackChain":[{
+					"provider":"openrouter",
+					"model":"primary",
+					"max_retries":1,
+					"maxRetries":2,
+					"trigger_on":["timeout"],
+					"triggerOn":["rate_limit"]
+				}]
+			}`),
+		})
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, agent.ErrInvalidModelConfig)
+		stored, findErr := repo.FindByID(context.Background(), created.ID)
+		require.NoError(t, findErr)
+		assert.Empty(t, stored.ModelConfig, "the rejected update must leave the persisted configuration unchanged")
+	})
+
+	t.Run("equivalent aliases remain compatible", func(t *testing.T) {
+		svc := newMockAgentSvc()
+		_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+			Name: "Compatible fallback aliases",
+			ModelConfig: mustJSON(`{
+				"fallback_chain":[{"provider":"openrouter","model":"primary","max_retries":1,"trigger_on":["timeout"]}],
+				"fallbackChain":[{"provider":"openrouter","model":"primary","maxRetries":1,"triggerOn":["timeout"]}]
+			}`),
+		})
+
+		require.NoError(t, err)
+	})
+}
+
 func TestCreateAgent_AllSupportedProviders_Accepted(t *testing.T) {
 	for _, provider := range agent.SupportedProviders {
 		t.Run(provider, func(t *testing.T) {
@@ -556,6 +626,26 @@ func TestVersionService_CreateDraft(t *testing.T) {
 	assert.Equal(t, 1, resp.VersionNumber)
 }
 
+func TestVersionService_CreateDraft_DefaultsToCurrentAgentSnapshot(t *testing.T) {
+	svc, ar, _ := newVersionSvc()
+	a := seedAgent(ar)
+	prompt := "current prompt"
+	ar.data[a.ID] = agent.Agent{
+		ID:           a.ID,
+		Name:         a.Name,
+		Slug:         a.Slug,
+		Status:       agent.StatusPublished,
+		SystemPrompt: &prompt,
+		ModelConfig:  mustJSON(`{"provider":"openrouter","model":"openai/gpt-oss-120b"}`),
+	}
+
+	resp, err := svc.CreateDraft(context.Background(), a.ID, agent.CreateAgentVersionRequest{Description: "snapshot"})
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{"systemPrompt":"current prompt"}`, string(resp.DefinitionJSON))
+	assert.JSONEq(t, `{"provider":"openrouter","model":"openai/gpt-oss-120b"}`, string(resp.ConfigJSON))
+}
+
 func TestVersionService_CreateDraft_AgentNotFound(t *testing.T) {
 	svc, _, _ := newVersionSvc()
 	_, err := svc.CreateDraft(context.Background(), uuid.New(), agent.CreateAgentVersionRequest{})
@@ -684,6 +774,39 @@ func TestVersionService_Rollback_RecordsAudit(t *testing.T) {
 	assert.Equal(t, audit.AuditActionUpdate, auditRecorder.requests[0].Action)
 	assert.Contains(t, auditRecorder.requests[0].Metadata, "rollback")
 	assert.Equal(t, "Rollback to version 1", resp.Description)
+}
+
+func TestVersionService_Rollback_RestoresSystemPromptAndModelConfig(t *testing.T) {
+	svc, ar, vr := newVersionSvc()
+	a := seedAgent(ar)
+
+	currentPrompt := "version 2"
+	ar.data[a.ID] = agent.Agent{
+		ID:           a.ID,
+		Name:         a.Name,
+		Slug:         a.Slug,
+		Status:       agent.StatusPublished,
+		SystemPrompt: &currentPrompt,
+		ModelConfig:  mustJSON(`{"provider":"openrouter","model":"openai/gpt-oss-20b"}`),
+	}
+	target := agent.AgentVersion{
+		ID:             uuid.New(),
+		AgentID:        a.ID,
+		VersionNumber:  1,
+		Status:         agent.VersionStatusPublished,
+		Description:    "v1",
+		DefinitionJSON: json.RawMessage(`{"systemPrompt":"version 1"}`),
+		ConfigJSON:     json.RawMessage(`{"provider":"openrouter","model":"openai/gpt-oss-120b"}`),
+	}
+	vr.data[target.ID] = target
+
+	_, err := svc.Rollback(context.Background(), a.ID, target.ID)
+	require.NoError(t, err)
+
+	got := ar.data[a.ID]
+	require.NotNil(t, got.SystemPrompt)
+	assert.Equal(t, "version 1", *got.SystemPrompt)
+	assert.JSONEq(t, string(target.ConfigJSON), string(got.ModelConfig))
 }
 
 // --- TR-01-TASK-31: rejeitar config.modelConfig aninhado (P-C249-2) ---
@@ -859,13 +982,14 @@ func TestGetWithReadiness_NotFound_ReturnsError(t *testing.T) {
 
 // --- TR-01-TASK-38: sanitizar HTML em campos de texto (P-C280-1) ---
 
-func TestCreate_StripHTMLFromName(t *testing.T) {
+func TestCreate_RejectHTMLFromName(t *testing.T) {
 	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
-	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 		Name: "<script>alert('xss')</script>My Agent",
 	})
-	require.NoError(t, err)
-	assert.Equal(t, "My Agent", resp.Name)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "HTML")
 }
 
 func TestCreate_StripHTMLFromDescription(t *testing.T) {
@@ -878,14 +1002,15 @@ func TestCreate_StripHTMLFromDescription(t *testing.T) {
 	assert.Equal(t, "Bold description with link", resp.Description)
 }
 
-func TestUpdate_StripHTMLFromName(t *testing.T) {
+func TestUpdate_RejectHTMLFromName(t *testing.T) {
 	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
 	created, _ := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Clean"})
 
 	malicious := `<img src=x onerror="alert(1)">Updated`
-	resp, err := svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{Name: &malicious})
-	require.NoError(t, err)
-	assert.Equal(t, "Updated", resp.Name)
+	_, err := svc.Update(context.Background(), created.ID, agent.UpdateAgentRequest{Name: &malicious})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "HTML")
 }
 
 func TestUpdate_StripHTMLFromDescription(t *testing.T) {
@@ -903,6 +1028,22 @@ func TestCreate_PlainTextName_Unchanged(t *testing.T) {
 	resp, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "My Normal Agent"})
 	require.NoError(t, err)
 	assert.Equal(t, "My Normal Agent", resp.Name)
+}
+
+func TestCreate_RejectInvalidCanonicalSlug(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent", Slug: "bad_slug"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "slug must match")
+}
+
+func TestCreate_RejectLongCanonicalSlug(t *testing.T) {
+	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{Name: "Agent", Slug: strings.Repeat("a", 65)})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agent.ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "slug must match")
 }
 
 // --- TR-01-TASK-40: persistir knowledgeBaseIds no agente (P-C285-1) ---
@@ -1034,18 +1175,9 @@ func ptrStr(s string) *string { return &s }
 
 func TestCreate_SystemPromptTooLong_ReturnsError(t *testing.T) {
 	svc := agent.NewService(newMockRepo(), &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
-	bigPrompt := string(make([]byte, 10001))
-	for i := range bigPrompt {
-		bigPrompt = bigPrompt[:i] + "x" + bigPrompt[i+1:]
-		break
-	}
-	buf := make([]byte, 10001)
-	for i := range buf {
-		buf[i] = 'x'
-	}
 	_, err := svc.Create(context.Background(), agent.CreateAgentRequest{
 		Name:         "Agent",
-		SystemPrompt: ptrStr(string(buf)),
+		SystemPrompt: ptrStr(strings.Repeat("x", 10001)),
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, agent.ErrInvalidRequest)

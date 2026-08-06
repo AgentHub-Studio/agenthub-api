@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -32,9 +33,12 @@ func NewHandler(svc analyticsService) *Handler {
 
 // RegisterRoutes mounts analytics endpoints on the router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/analytics/agents/{agentId}/usage", h.agentUsage)
-	r.Get("/api/analytics/agents/{agentId}/costs", h.agentCosts)
-	r.Get("/api/analytics/tools/top", h.topTools)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/analytics/agents/{agentId}/usage", h.agentUsage)
+		r.Get("/api/analytics/agents/{agentId}/costs", h.agentCosts)
+		r.Get("/api/analytics/tools/top", h.topTools)
+	})
 }
 
 func (h *Handler) agentUsage(w http.ResponseWriter, r *http.Request) {

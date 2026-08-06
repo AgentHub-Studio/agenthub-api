@@ -1,10 +1,12 @@
 package agentic_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -87,10 +89,14 @@ func TestSessionIngress_AppendLog_SendsLastUUID(t *testing.T) {
 	})
 
 	entry1 := agentic.NewTranscriptEntry("user", json.RawMessage(`{"content":"msg1"}`), nil)
-	si.AppendLog(context.Background(), "sess-1", entry1, server.URL, nil)
+	ok, err := si.AppendLog(context.Background(), "sess-1", entry1, server.URL, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
 
 	entry2 := agentic.NewTranscriptEntry("assistant", json.RawMessage(`{"content":"msg2"}`), &entry1.UUID)
-	si.AppendLog(context.Background(), "sess-1", entry2, server.URL, nil)
+	ok, err = si.AppendLog(context.Background(), "sess-1", entry2, server.URL, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
 
 	assert.Equal(t, 2, callCount)
 	assert.Equal(t, entry1.UUID, lastUUIDHeader, "second request should send first entry's UUID")
@@ -99,7 +105,7 @@ func TestSessionIngress_AppendLog_SendsLastUUID(t *testing.T) {
 func TestSessionIngress_AppendLog_AuthFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprint(w, "invalid token")
+		_, _ = fmt.Fprint(w, "invalid token")
 	}))
 	defer server.Close()
 
@@ -112,6 +118,62 @@ func TestSessionIngress_AppendLog_AuthFailure(t *testing.T) {
 
 	assert.Error(t, err, "should return error on 401")
 	assert.False(t, ok)
+}
+
+func TestSessionIngress_AppendLog_RedactsSensitiveAuthFailureBody(t *testing.T) {
+	const authorizationSecret = "session-ingress-auth-failure-authorization-secret"
+	const passwordSecret = "session-ingress-auth-failure-password-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprintf(w, "Authorization: Bearer %s\npassword=%s", authorizationSecret, passwordSecret)
+	}))
+	defer server.Close()
+
+	si := agentic.NewSessionIngress(agentic.SessionIngressConfig{
+		MaxRetries: 1, BaseDelayMs: 0, MaxDelayMs: 0,
+	})
+	entry := agentic.NewTranscriptEntry("user", nil, nil)
+
+	ok, err := si.AppendLog(context.Background(), "sess-auth-redaction", entry, server.URL, nil)
+
+	require.Error(t, err)
+	assert.False(t, ok)
+	assert.NotContains(t, err.Error(), authorizationSecret)
+	assert.NotContains(t, err.Error(), passwordSecret)
+	assert.NotContains(t, err.Error(), "Authorization:")
+	assert.NotContains(t, err.Error(), "password")
+	assert.Contains(t, err.Error(), "[REDACTED]")
+}
+
+func TestSessionIngress_AppendLog_RedactsSensitiveUnexpectedResponseBodyFromLogs(t *testing.T) {
+	const authorizationSecret = "session-ingress-authorization-secret"
+	const passwordSecret = "session-ingress-password-secret"
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = fmt.Fprintf(w, "Authorization: Bearer %s\npassword=%s", authorizationSecret, passwordSecret)
+	}))
+	defer server.Close()
+
+	si := agentic.NewSessionIngress(agentic.SessionIngressConfig{
+		MaxRetries: 1, BaseDelayMs: 0, MaxDelayMs: 0,
+	})
+	entry := agentic.NewTranscriptEntry("user", nil, nil)
+
+	ok, err := si.AppendLog(context.Background(), "sess-log-redaction", entry, server.URL, nil)
+
+	require.NoError(t, err)
+	assert.False(t, ok)
+	output := logs.String()
+	assert.NotContains(t, output, authorizationSecret)
+	assert.NotContains(t, output, passwordSecret)
+	assert.NotContains(t, output, "Authorization:")
+	assert.NotContains(t, output, "password")
+	assert.Contains(t, output, "[REDACTED]")
 }
 
 func TestSessionIngress_AppendLog_RetryOn500(t *testing.T) {
@@ -237,7 +299,10 @@ func TestSessionIngress_SequentialOrdering(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var entry agentic.TranscriptEntry
-		json.NewDecoder(r.Body).Decode(&entry)
+		if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		mu.Lock()
 		receivedOrder = append(receivedOrder, entry.UUID)
 		mu.Unlock()
@@ -256,14 +321,28 @@ func TestSessionIngress_SequentialOrdering(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 5)
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			si.AppendLog(context.Background(), "sess-ordered", entries[idx], server.URL, nil)
+			ok, err := si.AppendLog(context.Background(), "sess-ordered", entries[idx], server.URL, nil)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !ok {
+				errs <- fmt.Errorf("append log returned false")
+				return
+			}
+			errs <- nil
 		}(i)
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -278,7 +357,10 @@ func TestSessionIngress_MultiSessionIsolation(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var entry agentic.TranscriptEntry
-		json.NewDecoder(r.Body).Decode(&entry)
+		if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		mu.Lock()
 		sessionHits[entry.AgentID]++
 		mu.Unlock()
@@ -291,6 +373,7 @@ func TestSessionIngress_MultiSessionIsolation(t *testing.T) {
 	})
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 6)
 	for _, sessID := range []string{"sess-A", "sess-B"} {
 		for i := 0; i < 3; i++ {
 			wg.Add(1)
@@ -298,11 +381,24 @@ func TestSessionIngress_MultiSessionIsolation(t *testing.T) {
 				defer wg.Done()
 				entry := agentic.NewTranscriptEntry("user", nil, nil)
 				entry.AgentID = sid
-				si.AppendLog(context.Background(), sid, entry, server.URL, nil)
+				ok, err := si.AppendLog(context.Background(), sid, entry, server.URL, nil)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if !ok {
+					errs <- fmt.Errorf("append log returned false")
+					return
+				}
+				errs <- nil
 			}(sessID)
 		}
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -318,7 +414,7 @@ func TestSessionIngress_HydrateSession(t *testing.T) {
 		{UUID: "uuid-2", Type: "assistant", Timestamp: 2000},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(entries)
+		_ = json.NewEncoder(w).Encode(entries)
 	}))
 	defer server.Close()
 
@@ -332,7 +428,7 @@ func TestSessionIngress_HydrateSession(t *testing.T) {
 
 func TestSessionIngress_HydrateSession_Empty(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]agentic.TranscriptEntry{})
+		_ = json.NewEncoder(w).Encode([]agentic.TranscriptEntry{})
 	}))
 	defer server.Close()
 
@@ -347,7 +443,7 @@ func TestSessionIngress_HydrateSession_Empty(t *testing.T) {
 func TestSessionIngress_HydrateSession_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "internal error")
+		_, _ = fmt.Fprint(w, "internal error")
 	}))
 	defer server.Close()
 
@@ -367,7 +463,9 @@ func TestSessionIngress_CleanupSession(t *testing.T) {
 	defer server.Close()
 
 	entry := agentic.NewTranscriptEntry("user", nil, nil)
-	si.AppendLog(context.Background(), "sess-cleanup", entry, server.URL, nil)
+	ok, err := si.AppendLog(context.Background(), "sess-cleanup", entry, server.URL, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
 	assert.Equal(t, 1, si.ActiveSessions())
 
 	si.CleanupSession("sess-cleanup")
@@ -391,13 +489,15 @@ func TestSessionIngress_CustomHeaders(t *testing.T) {
 
 	entry := agentic.NewTranscriptEntry("user", nil, nil)
 	headers := map[string]string{"Authorization": "Bearer test-token"}
-	si.AppendLog(context.Background(), "sess-1", entry, server.URL, headers)
+	ok, err := si.AppendLog(context.Background(), "sess-1", entry, server.URL, headers)
+	require.NoError(t, err)
+	require.True(t, ok)
 
 	assert.Equal(t, "Bearer test-token", receivedAuth)
 }
 
 // helper
 func readBody(r *http.Request) ([]byte, error) {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	return io.ReadAll(r.Body)
 }

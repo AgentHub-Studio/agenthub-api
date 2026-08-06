@@ -5,20 +5,21 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"math/rand"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/randutil"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
 // FallbackResult is returned by retryStreamWithFallback to indicate which model was used.
 type FallbackResult struct {
-	Stream       <-chan ai.StreamChunk
-	ModelUsed    string // the model that succeeded
-	WasFallback  bool   // true if a fallback model was used
+	Stream           <-chan ai.StreamChunk
+	ModelUsed        string // the model that succeeded
+	WasFallback      bool   // true if a fallback model was used
+	UsedNonStreaming bool   // true if the primary model recovered through Chat
 }
 
 // retryStreamWithFallback wraps retryStream with model fallback support.
@@ -53,8 +54,36 @@ func retryStreamWithFallbackSource(
 		return &FallbackResult{Stream: stream, ModelUsed: opts.Model}, nil
 	}
 
+	// A provider may reject its streaming endpoint while accepting the equivalent
+	// non-streaming request. Convert that response back into StreamChunks so the
+	// runner keeps its public SSE contract.
+	nonStreaming, attempted, nonStreamingErr := retryNonStreamingAfterStreamFailure(
+		ctx,
+		model,
+		messages,
+		opts,
+		DefaultStreamFallbackConfig(),
+		err,
+	)
+	if attempted && nonStreamingErr == nil {
+		modelUsed := opts.Model
+		if nonStreaming.Model != "" {
+			modelUsed = nonStreaming.Model
+		}
+		return &FallbackResult{
+			Stream:           nonStreaming.Stream,
+			ModelUsed:        modelUsed,
+			UsedNonStreaming: true,
+		}, nil
+	}
+
+	fallbacks := effectiveFallbackSteps(config)
+
 	// No fallbacks configured — return the original error.
-	if len(config.ModelFallbacks) == 0 {
+	if len(fallbacks) == 0 {
+		if attempted {
+			return nil, nonStreamingErr
+		}
 		return nil, err
 	}
 
@@ -66,38 +95,68 @@ func retryStreamWithFallbackSource(
 	primaryModel := opts.Model
 	primaryErr := err
 
-	// Try each fallback model with 1 attempt.
-	for _, fallbackModel := range config.ModelFallbacks {
+	// Try each fallback model in configured order.
+	for _, fallback := range fallbacks {
 		slog.Warn("falling back to alternative model",
 			"from", primaryModel,
-			"to", fallbackModel,
+			"to", fallback.Model,
 			"primaryError", primaryErr,
 		)
 
 		if onFallback != nil {
-			onFallback(primaryModel, fallbackModel, primaryErr)
+			onFallback(primaryModel, fallback.Model, primaryErr)
 		}
 
 		fallbackOpts := opts
-		fallbackOpts.Model = fallbackModel
+		fallbackOpts.Model = fallback.Model
 
-		stream, err := retryStream(ctx, model, messages, fallbackOpts, 1, source)
+		stream, err := retryStream(ctx, model, messages, fallbackOpts, fallbackAttempts(fallback), source)
 		if err == nil {
 			return &FallbackResult{
 				Stream:      stream,
-				ModelUsed:   fallbackModel,
+				ModelUsed:   fallback.Model,
 				WasFallback: true,
 			}, nil
 		}
 
 		slog.Warn("fallback model also failed",
-			"model", fallbackModel,
+			"model", fallback.Model,
 			"error", err,
 		)
 	}
 
 	return nil, fmt.Errorf("all models failed (primary: %s, fallbacks: %v): %w",
-		primaryModel, config.ModelFallbacks, primaryErr)
+		primaryModel, fallbackModelNames(fallbacks), primaryErr)
+}
+
+func effectiveFallbackSteps(config RunConfig) []ModelFallbackStep {
+	if len(config.ModelFallbackChain) > 0 {
+		return config.ModelFallbackChain
+	}
+	steps := make([]ModelFallbackStep, 0, len(config.ModelFallbacks))
+	for _, model := range config.ModelFallbacks {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		steps = append(steps, ModelFallbackStep{Model: model, MaxRetries: 1})
+	}
+	return steps
+}
+
+func fallbackAttempts(step ModelFallbackStep) int {
+	if step.MaxRetries > 0 {
+		return step.MaxRetries
+	}
+	return 1
+}
+
+func fallbackModelNames(steps []ModelFallbackStep) []string {
+	names := make([]string, 0, len(steps))
+	for _, step := range steps {
+		names = append(names, step.Model)
+	}
+	return names
 }
 
 // shouldFallback checks if the error type qualifies for model fallback
@@ -237,7 +296,7 @@ func retryStream(
 		if backoff == 0 {
 			base := math.Pow(2, float64(attempt-1))
 			// Add ±25% jitter to prevent thundering herd on shared rate limits.
-			jitter := base * 0.25 * (2*rand.Float64() - 1) // [-25%, +25%]
+			jitter := base * 0.25 * (2*randutil.Float64() - 1) // [-25%, +25%]
 			backoff = time.Duration((base+jitter)*1000) * time.Millisecond
 		}
 		slog.Warn("retrying LLM call after transient error",
@@ -435,18 +494,18 @@ func getPromptTooLongTokenGap(errMsg string) int {
 type APIErrorClass string
 
 const (
-	ErrorClassNone             APIErrorClass = ""
-	ErrorClassRateLimit        APIErrorClass = "rate_limit"
-	ErrorClassServerOverload   APIErrorClass = "server_overload"
-	ErrorClassConnection       APIErrorClass = "connection_error"
-	ErrorClassStaleConnection  APIErrorClass = "stale_connection"
-	ErrorClassTimeout          APIErrorClass = "api_timeout"
-	ErrorClassAuth             APIErrorClass = "auth_error"
-	ErrorClassPromptTooLong    APIErrorClass = "prompt_too_long"
-	ErrorClassMediaSize        APIErrorClass = "media_size_error"
-	ErrorClassAborted          APIErrorClass = "aborted"
-	ErrorClassServerError      APIErrorClass = "server_error"
-	ErrorClassUnknown          APIErrorClass = "unknown"
+	ErrorClassNone            APIErrorClass = ""
+	ErrorClassRateLimit       APIErrorClass = "rate_limit"
+	ErrorClassServerOverload  APIErrorClass = "server_overload"
+	ErrorClassConnection      APIErrorClass = "connection_error"
+	ErrorClassStaleConnection APIErrorClass = "stale_connection"
+	ErrorClassTimeout         APIErrorClass = "api_timeout"
+	ErrorClassAuth            APIErrorClass = "auth_error"
+	ErrorClassPromptTooLong   APIErrorClass = "prompt_too_long"
+	ErrorClassMediaSize       APIErrorClass = "media_size_error"
+	ErrorClassAborted         APIErrorClass = "aborted"
+	ErrorClassServerError     APIErrorClass = "server_error"
+	ErrorClassUnknown         APIErrorClass = "unknown"
 )
 
 // classifyAPIError maps an error to a structured class for analytics and retry decisions.

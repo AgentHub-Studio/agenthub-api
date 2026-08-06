@@ -12,17 +12,55 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agenttemplate"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 )
 
 // buildRouter creates a test router with agent template routes mounted.
 func buildRouter() (*chi.Mux, *memRepo, *stubAgentCreator) {
+	return buildRouterWithRoles("admin")
+}
+
+func buildRouterWithRoles(roles ...string) (*chi.Mux, *memRepo, *stubAgentCreator) {
 	repo := newMemRepo()
 	creator := &stubAgentCreator{}
 	svc := agenttemplate.NewService(repo).WithAgentCreator(creator)
 	h := agenttemplate.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterRoutes(r)
 	return r, repo, creator
+}
+
+func TestAgentTemplateHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _, _ := buildRouterWithRoles("user")
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/agent-templates"},
+		{name: "create", method: http.MethodPost, path: "/api/agent-templates", body: `{}`},
+		{name: "get", method: http.MethodGet, path: "/api/agent-templates/template"},
+		{name: "instantiate", method: http.MethodPost, path: "/api/agent-templates/template/instantiate", body: `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 func TestHandler_List_ReturnsEmptyArray(t *testing.T) {
@@ -121,6 +159,31 @@ func TestHandler_Create_MissingName(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func TestHandler_CreateAndInstantiateRejectTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, repo, _ := buildRouter()
+		req := httptest.NewRequest(http.MethodPost, "/api/agent-templates", bytes.NewBufferString(`{"name":"Template","category":"custom"} {"name":"ignored"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Empty(t, repo.data)
+	})
+
+	t.Run("instantiate", func(t *testing.T) {
+		r, repo, creator := buildRouter()
+		seedTemplate(repo, "rag-assistant", "rag")
+		req := httptest.NewRequest(http.MethodPost, "/api/agent-templates/rag-assistant/instantiate", bytes.NewBufferString(`{"name":"Agent"} {"name":"ignored"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Empty(t, creator.created)
+	})
 }
 
 func TestHandler_Instantiate_Success(t *testing.T) {

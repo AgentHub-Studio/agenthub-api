@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/modelconfig"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -115,6 +116,10 @@ type RunConfig struct {
 	// ModelFallbacks is an ordered list of fallback models to try when the
 	// primary model fails with transient errors (rate limit, overload, timeout).
 	ModelFallbacks []string `json:"modelFallbacks,omitempty"`
+	// ModelFallbackChain is the canonical MA-08 fallback chain after the primary
+	// model has been resolved. Each entry can select a provider/model and its
+	// own attempt count.
+	ModelFallbackChain []ModelFallbackStep `json:"modelFallbackChain,omitempty"`
 
 	// FallbackOnRateLimit enables fallback on 429/529 errors. Default true.
 	FallbackOnRateLimit *bool `json:"fallbackOnRateLimit,omitempty"`
@@ -169,6 +174,17 @@ type RunConfig struct {
 	MaxHistoryMessages int `json:"maxHistoryMessages"`
 }
 
+// ModelFallbackStep describes one candidate in the canonical model fallback
+// chain. MaxRetries is treated as total attempts for the candidate because the
+// MA-08 acceptance criterion says max_retries=2 means two attempts before
+// moving to the next model.
+type ModelFallbackStep struct {
+	Provider   string   `json:"provider,omitempty"`
+	Model      string   `json:"model,omitempty"`
+	MaxRetries int      `json:"maxRetries,omitempty"`
+	TriggerOn  []string `json:"triggerOn,omitempty"`
+}
+
 // RunGates captures immutable, pre-computed boolean flags and derived values
 // snapshotted once at the start of a run. This prevents re-evaluating conditions
 // on every loop iteration and ensures consistent behavior throughout a single run
@@ -217,20 +233,19 @@ func BuildRunGates(cfg RunConfig, currentDepth int, hasSubtaskExec bool) RunGate
 // DefaultRunConfig returns sensible defaults for a Claude-class model.
 func DefaultRunConfig() RunConfig {
 	return RunConfig{
-		MaxIterations:              25,
-		MaxTokensPerCall:           4096,
-		ContextWindowSize:          200000,
-		CompactThreshold:           0.75,
+		MaxIterations:     25,
+		MaxTokensPerCall:  4096,
+		ContextWindowSize: 200000,
+		CompactThreshold:  0.75,
 		// Bug 220: aumentado para 120s. DOCUMENT_SEARCH em CPU leva
 		// ~28s (embedding 22s + pgvector 5s + overhead) — limite de 30s
 		// causava EOF intermitente entre agenthub-api e skill-runtime.
 		ToolTimeout: 120 * time.Second,
-		// TotalTimeout must be ≥ LLMCallTimeout; otherwise agents running
-		// slow providers (Ollama on CPU) abort mid-LLM-call. Both align with
-		// the async_executor runTimeout (15 min) to avoid contradictory
-		// cutoffs between layers. Agents can override via totalTimeoutSeconds.
-		TotalTimeout:   15 * time.Minute,
-		LLMCallTimeout: 15 * time.Minute, // P-C102-1: per-call timeout; configurable via LLM_CALL_TIMEOUT_SECS
+		// TotalTimeout remains aligned with async_executor runTimeout (15 min)
+		// while each individual LLM call uses the RT-01 default of 120s.
+		// Agents can override via totalTimeoutSeconds / llmCallTimeoutSeconds.
+		TotalTimeout:               15 * time.Minute,
+		LLMCallTimeout:             120 * time.Second, // P-C102-1 / RT-01: per-call timeout; configurable via LLM_CALL_TIMEOUT_SECS
 		ConcurrentReadTools:        3,
 		StreamBufferSize:           64,
 		MaxBudgetUSD:               0, // no limit by default
@@ -275,8 +290,8 @@ type modelConfig struct {
 	// TotalTimeoutSeconds overrides the default 5-minute run timeout.
 	// Useful for large local models that need more time per inference pass.
 	TotalTimeoutSeconds *int `json:"totalTimeoutSeconds,omitempty"`
-	// LLMCallTimeoutSeconds overrides the per-LLM-call timeout (P-C102-1).
-	// Default: 300 (5 minutes). Set to 0 to disable.
+	// LLMCallTimeoutSeconds overrides the per-LLM-call timeout (P-C102-1 / RT-01).
+	// Default: 120 seconds. Set to 0 to disable.
 	LLMCallTimeoutSeconds *int `json:"llmCallTimeoutSeconds,omitempty"`
 	// ToolMode opts the agent into stricter tool-selection behaviour. See
 	// RunConfig.ToolMode for semantics. Accepts "auto" (default), "required",
@@ -341,6 +356,34 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	if len(mc.ModelFallbacks) > 0 {
 		cfg.ModelFallbacks = mc.ModelFallbacks
 	}
+	if chain := modelconfig.ResolveFallbackChain(raw); len(chain) > 0 {
+		primary := chain[0]
+		if primary.Provider != "" {
+			cfg.Provider = primary.Provider
+		}
+		if primary.Model != "" {
+			cfg.Model = primary.Model
+		}
+		if primary.MaxRetries > 0 {
+			cfg.RetryMaxAttempts = primary.MaxRetries
+		}
+		applyFallbackTriggers(&cfg, primary.TriggerOn)
+		if len(chain) > 1 {
+			cfg.ModelFallbackChain = make([]ModelFallbackStep, 0, len(chain)-1)
+			cfg.ModelFallbacks = make([]string, 0, len(chain)-1)
+			for _, step := range chain[1:] {
+				cfg.ModelFallbackChain = append(cfg.ModelFallbackChain, ModelFallbackStep{
+					Provider:   step.Provider,
+					Model:      step.Model,
+					MaxRetries: step.MaxRetries,
+					TriggerOn:  step.TriggerOn,
+				})
+				if step.Model != "" {
+					cfg.ModelFallbacks = append(cfg.ModelFallbacks, step.Model)
+				}
+			}
+		}
+	}
 	if mc.FallbackOnRateLimit != nil {
 		cfg.FallbackOnRateLimit = mc.FallbackOnRateLimit
 	}
@@ -367,6 +410,28 @@ func RunConfigFromModelConfig(raw json.RawMessage) RunConfig {
 	}
 	cfg.ToolMode = normaliseToolMode(mc.ToolMode)
 	return cfg
+}
+
+func applyFallbackTriggers(cfg *RunConfig, triggerOn []string) {
+	if len(triggerOn) == 0 {
+		return
+	}
+	rateLimit := false
+	overload := false
+	timeout := false
+	for _, trigger := range triggerOn {
+		switch trigger {
+		case "rate_limit", "ratelimit", "429", "529":
+			rateLimit = true
+		case "overload", "provider_unavailable", "503", "502":
+			overload = true
+		case "timeout":
+			timeout = true
+		}
+	}
+	cfg.FallbackOnRateLimit = &rateLimit
+	cfg.FallbackOnOverload = &overload
+	cfg.FallbackOnTimeout = &timeout
 }
 
 // normaliseToolMode validates the raw toolMode string from modelConfig and

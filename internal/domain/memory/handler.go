@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -52,15 +53,18 @@ func (h *Handler) WithAgentExister(a agentExister) *Handler {
 
 // RegisterRoutes mounts memory endpoints on the router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/agents/{agentId}/memory", h.list)
-	r.Put("/api/agents/{agentId}/memory/{key}", h.upsert)
-	r.Get("/api/agents/{agentId}/memory/{key}", h.getByKey)
-	r.Delete("/api/agents/{agentId}/memory/{key}", h.deleteByKey)
-	r.Delete("/api/agents/{agentId}/memory", h.clear)
-	r.Post("/api/agents/{agentId}/memory/recall", h.recall)
-	r.Get("/api/agents/{agentId}/memory/search", h.search)
-	r.Get("/api/agents/{agentId}/memory/stats", h.stats)
-	r.Post("/api/agents/{agentId}/memory/bulk", h.bulkUpsert)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/agents/{agentId}/memory", h.list)
+		r.Put("/api/agents/{agentId}/memory/{key}", h.upsert)
+		r.Get("/api/agents/{agentId}/memory/{key}", h.getByKey)
+		r.Delete("/api/agents/{agentId}/memory/{key}", h.deleteByKey)
+		r.Delete("/api/agents/{agentId}/memory", h.clear)
+		r.Post("/api/agents/{agentId}/memory/recall", h.recall)
+		r.Get("/api/agents/{agentId}/memory/search", h.search)
+		r.Get("/api/agents/{agentId}/memory/stats", h.stats)
+		r.Post("/api/agents/{agentId}/memory/bulk", h.bulkUpsert)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +113,7 @@ func (h *Handler) upsert(w http.ResponseWriter, r *http.Request) {
 	}
 	key := chi.URLParam(r, "key")
 	var req UpsertMemoryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -190,7 +194,7 @@ func (h *Handler) recall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req RecallRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -284,7 +288,7 @@ func (h *Handler) bulkUpsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var entries []BulkMemoryEntry
-	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &entries); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -27,7 +28,12 @@ import (
 
 // mockMCPSvc satisfies the private mcpService interface in mcp.Handler.
 type mockMCPSvc struct {
-	configs map[uuid.UUID]mcp.McpServerConfigResponse
+	configs       map[uuid.UUID]mcp.McpServerConfigResponse
+	connectErr    error
+	callbackErr   error
+	callbackCalls int
+	callbackID    uuid.UUID
+	callbackCode  string
 }
 
 func newMockMCPSvc() *mockMCPSvc {
@@ -123,11 +129,14 @@ func (m *mockMCPSvc) GetAuthStatus(_ context.Context, _ uuid.UUID) (mcp.AuthStat
 }
 
 func (m *mockMCPSvc) GetConnectURL(_ context.Context, _ uuid.UUID, _ string) (mcp.ConnectURLResponse, error) {
-	return mcp.ConnectURLResponse{}, nil
+	return mcp.ConnectURLResponse{}, m.connectErr
 }
 
-func (m *mockMCPSvc) HandleOAuthCallback(_ context.Context, _ uuid.UUID, _ string) error {
-	return nil
+func (m *mockMCPSvc) HandleOAuthCallback(_ context.Context, id uuid.UUID, code string) error {
+	m.callbackCalls++
+	m.callbackID = id
+	m.callbackCode = code
+	return m.callbackErr
 }
 
 func (m *mockMCPSvc) ListTools(_ context.Context, _ uuid.UUID) ([]mcp.ToolResponse, error) {
@@ -135,9 +144,18 @@ func (m *mockMCPSvc) ListTools(_ context.Context, _ uuid.UUID) ([]mcp.ToolRespon
 }
 
 func setupMCP() (*chi.Mux, *mockMCPSvc) {
+	return setupMCPWithRoles("admin")
+}
+
+func setupMCPWithRoles(roles ...string) (*chi.Mux, *mockMCPSvc) {
 	svc := newMockMCPSvc()
 	h := mcp.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(middleware.ContextWithRoles(r.Context(), roles...)))
+		})
+	})
 	h.RegisterRoutes(r)
 	return r, svc
 }
@@ -172,8 +190,8 @@ func setupFakeKeycloak(t *testing.T, realm string) (*rsa.PrivateKey, string) {
 				"kty": "RSA",
 				"use": "sig",
 				"alg": "RS256",
-				"n":   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
-				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+				"n":   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
 			},
 		},
 	}
@@ -255,6 +273,52 @@ func TestMCPHandler_Create_InvalidBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestMCPHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, svc := setupMCP()
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/api/mcp-server-configs",
+			bytes.NewBufferString(`{"name":"first","transportType":"stdio"}{"name":"ignored"}`),
+		)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.configs)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		r, svc := setupMCP()
+		id := uuid.New()
+		svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "original", TransportType: "stdio"}
+		req := httptest.NewRequest(
+			http.MethodPut,
+			"/api/mcp-server-configs/"+id.String(),
+			bytes.NewBufferString(`{"name":"changed"}{"name":"ignored"}`),
+		)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, "original", svc.configs[id].Name)
+	})
+
+	t.Run("callback", func(t *testing.T) {
+		r, svc := setupMCP()
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/api/mcp-server-configs/"+uuid.NewString()+"/callback",
+			bytes.NewBufferString(`{"code":"authorization-code"}{"code":"ignored"}`),
+		)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Zero(t, svc.callbackCalls)
+	})
+}
+
 func TestMCPHandler_GetByID_NotFound(t *testing.T) {
 	r, _ := setupMCP()
 	req := httptest.NewRequest(http.MethodGet, "/api/mcp-server-configs/"+uuid.New().String(), nil)
@@ -283,6 +347,138 @@ func TestMCPHandler_Delete_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestMCPHandler_Connect_InvalidRedirectURL_ReturnsBadRequest(t *testing.T) {
+	r, svc := setupMCP()
+	svc.connectErr = mcp.ErrRedirectURLNotAllowed
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/mcp-server-configs/"+uuid.NewString()+"/connect?redirectUrl=https%3A%2F%2Fattacker.example%2Fcallback",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid redirectUrl")
+	assert.NotContains(t, w.Body.String(), "attacker.example")
+}
+
+func TestMCPHandler_Callback_ValidatesCodeBeforeService(t *testing.T) {
+	r, svc := setupMCP()
+	id := uuid.New()
+
+	for _, body := range []string{`{}`, `{"code":""}`, `{"code":"   \t\n"}`, `not-json`} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/mcp-server-configs/"+id.String()+"/callback", bytes.NewBufferString(body))
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, body)
+		assert.Contains(t, w.Body.String(), "code is required", body)
+	}
+	assert.Zero(t, svc.callbackCalls)
+}
+
+func TestMCPHandler_Callback_UsesTrimmedCodeAndMapsErrors(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		r, svc := setupMCP()
+		id := uuid.New()
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/mcp-server-configs/"+id.String()+"/callback", bytes.NewBufferString(`{"code":"  authorization-code  "}`))
+		r.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, 1, svc.callbackCalls)
+		assert.Equal(t, id, svc.callbackID)
+		assert.Equal(t, "authorization-code", svc.callbackCode)
+		assert.JSONEq(t, `{"status":"connected"}`, w.Body.String())
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		r, svc := setupMCP()
+		svc.callbackErr = mcp.ErrNotFound
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/mcp-server-configs/"+uuid.NewString()+"/callback", bytes.NewBufferString(`{"code":"authorization-code"}`))
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+		assert.Equal(t, 1, svc.callbackCalls)
+	})
+
+	t.Run("internal error is not reflected", func(t *testing.T) {
+		r, svc := setupMCP()
+		svc.callbackErr = errors.New("token endpoint http://internal.example failed")
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/mcp-server-configs/"+uuid.NewString()+"/callback", bytes.NewBufferString(`{"code":"authorization-code"}`))
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusInternalServerError, w.Code)
+		assert.Contains(t, w.Body.String(), "internal error")
+		assert.NotContains(t, w.Body.String(), "internal.example")
+	})
+}
+
+func TestMCPHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupMCPWithRoles("user")
+	id := uuid.NewString()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/mcp-server-configs"},
+		{name: "create", method: http.MethodPost, path: "/api/mcp-server-configs", body: `{"name":"server","transportType":"http"}`},
+		{name: "get", method: http.MethodGet, path: "/api/mcp-server-configs/" + id},
+		{name: "put", method: http.MethodPut, path: "/api/mcp-server-configs/" + id, body: `{}`},
+		{name: "patch", method: http.MethodPatch, path: "/api/mcp-server-configs/" + id, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/mcp-server-configs/" + id},
+		{name: "auth status", method: http.MethodGet, path: "/api/mcp-server-configs/" + id + "/auth-status"},
+		{name: "connect", method: http.MethodGet, path: "/api/mcp-server-configs/" + id + "/connect"},
+		{name: "callback", method: http.MethodPost, path: "/api/mcp-server-configs/" + id + "/callback", body: `{"code":"code"}`},
+		{name: "tools", method: http.MethodGet, path: "/api/mcp-server-configs/" + id + "/tools"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
+}
+
+func TestMCPHandler_DoesNotExposePublicRuntimeLifecycle(t *testing.T) {
+	r, svc := setupMCP()
+	id := uuid.New()
+	svc.configs[id] = mcp.McpServerConfigResponse{ID: id, Name: "lifecycle-private", Enabled: true}
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "status", method: http.MethodGet, path: "/api/mcp-server-configs/" + id.String() + "/status"},
+		{name: "start", method: http.MethodPost, path: "/api/mcp-server-configs/" + id.String() + "/start"},
+		{name: "stop", method: http.MethodPost, path: "/api/mcp-server-configs/" + id.String() + "/stop"},
+		{name: "restart", method: http.MethodPost, path: "/api/mcp-server-configs/" + id.String() + "/restart"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+			assert.Equal(t, http.StatusNotFound, w.Code)
+		})
+	}
 }
 
 // Bootstrap endpoint tests (ACT-F3-12 / P-C351-1).

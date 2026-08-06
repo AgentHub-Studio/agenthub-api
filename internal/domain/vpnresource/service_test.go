@@ -40,6 +40,15 @@ func (m *mockVpnRepo) GetByID(_ context.Context, _ string, id uuid.UUID) (vpnres
 	return v, nil
 }
 
+func (m *mockVpnRepo) ExistsByName(_ context.Context, _ string, name string) (bool, error) {
+	for _, v := range m.data {
+		if v.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *mockVpnRepo) Create(_ context.Context, _ string, v vpnresource.VpnResource) (vpnresource.VpnResource, error) {
 	v.ID = uuid.New()
 	m.data[v.ID] = v
@@ -112,8 +121,8 @@ func TestVpnService_Update_Success(t *testing.T) {
 
 func TestVpnService_ListAll(t *testing.T) {
 	svc := vpnresource.NewService(newMockRepo())
-	for i := 0; i < 2; i++ {
-		_, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: "VPN", OvpnConfigPath: "/tmp/x.ovpn"})
+	for _, name := range []string{"VPN A", "VPN B"} {
+		_, err := svc.Create(context.Background(), tenantID, vpnresource.CreateRequest{Name: name, OvpnConfigPath: "/tmp/x.ovpn"})
 		require.NoError(t, err)
 	}
 	items, total, err := svc.ListAll(context.Background(), tenantID, pagination.PageRequest{Page: 0, Size: 20})

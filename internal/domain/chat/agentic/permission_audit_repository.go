@@ -7,6 +7,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/database"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // PermissionAuditRepository persists permission audit entries to the
@@ -20,9 +23,22 @@ func NewPermissionAuditRepository(pool *pgxpool.Pool) *PermissionAuditRepository
 	return &PermissionAuditRepository{pool: pool}
 }
 
+func (r *PermissionAuditRepository) acquire(ctx context.Context) (*pgxpool.Conn, func(), error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, nil, fmt.Errorf("permission audit: acquire tenant connection: %w", err)
+	}
+	return conn, release, nil
+}
+
 // LogDecision inserts one permission audit entry into the database.
 // Failures are non-fatal — the caller may log and continue.
 func (r *PermissionAuditRepository) LogDecision(ctx context.Context, entry PermissionAuditEntry) error {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	const q = `
 		INSERT INTO permission_audit_log
 			(session_id, run_id, tool_name, decision, matched_rule, input_snippet, created_at)
@@ -40,7 +56,7 @@ func (r *PermissionAuditRepository) LogDecision(ctx context.Context, entry Permi
 		matchedRule = &entry.MatchedRule
 	}
 
-	_, err := r.pool.Exec(ctx, q,
+	_, err = conn.Exec(ctx, q,
 		entry.SessionID,
 		entry.RunID,
 		entry.ToolName,
@@ -58,6 +74,11 @@ func (r *PermissionAuditRepository) LogDecision(ctx context.Context, entry Permi
 // ListBySession returns the most recent audit entries for a session, newest first.
 // Limit defaults to 100 when zero.
 func (r *PermissionAuditRepository) ListBySession(ctx context.Context, sessionID uuid.UUID, limit int) ([]PermissionAuditEntry, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if limit <= 0 {
 		limit = 100
 	}
@@ -68,7 +89,7 @@ func (r *PermissionAuditRepository) ListBySession(ctx context.Context, sessionID
 		ORDER  BY created_at DESC
 		LIMIT  $2`
 
-	rows, err := r.pool.Query(ctx, q, sessionID, limit)
+	rows, err := conn.Query(ctx, q, sessionID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("permission audit list: %w", err)
 	}

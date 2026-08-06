@@ -74,11 +74,9 @@ func TestCoreAgent_SlugsAreFilesystemAndURLSafe(t *testing.T) {
 	}
 }
 
-func TestCoreAgent_BindingsCountIsKnownDiscrepancy(t *testing.T) {
-	// The migration has a known slug-mismatch — only the core-assistant
-	// binding produces rows (cross-product with all skills = 7).
-	// This constant DOCUMENTS the observed-state. If the migration is
-	// fixed, this constant + the integration test must be updated together.
-	assert.Equal(t, 7, SeedExpectedAgentSkillBindingsCount,
-		"observed binding count = 7 (known discrepancy — see loader docs)")
+func TestCoreAgent_BindingCountsAreCanonical(t *testing.T) {
+	assert.Equal(t, 7, SeedExpectedAssistantSkillBindingsCount,
+		"core-assistant has universal coverage of the seven seeded skills")
+	assert.Equal(t, 24, SeedExpectedAgentSkillBindingsCount,
+		"the management catalog has seven assistant and seventeen specialist bindings")
 }

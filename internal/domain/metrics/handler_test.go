@@ -117,6 +117,28 @@ func TestMetricsHandler_Record_InvalidBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestMetricsHandler_Record_InvalidSessionIDReturnsUnprocessableEntity(t *testing.T) {
+	r, svc := setupMetrics()
+	req := httptest.NewRequest(http.MethodPost, "/api/metrics/", bytes.NewBufferString(`{"agentId":"`+uuid.NewString()+`","sessionId":"not-a-uuid","modelName":"gpt-4","provider":"openai"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Empty(t, svc.records)
+}
+
+func TestMetricsHandler_RecordRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	r, svc := setupMetrics()
+	req := httptest.NewRequest(http.MethodPost, "/api/metrics/", bytes.NewBufferString(`{"agentId":"`+uuid.NewString()+`","agentExecutionId":"`+uuid.NewString()+`","modelName":"gpt-4","provider":"openai"} {"modelName":"ignored"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, svc.records)
+}
+
 func TestMetricsHandler_AgentSummary_Success(t *testing.T) {
 	r, _ := setupMetrics()
 	agentID := uuid.New()

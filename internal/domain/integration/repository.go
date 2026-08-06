@@ -21,7 +21,7 @@ type GeneratedSkill struct {
 
 type managementRepository interface {
 	ListSkillsByToolID(ctx context.Context, toolID uuid.UUID) ([]GeneratedSkill, error)
-	UpdateSkillMetadata(ctx context.Context, skillID uuid.UUID, name, description string) error
+	UpdateSkillMetadata(ctx context.Context, skillID uuid.UUID, name, description, instructions string) error
 	CountToolBindings(ctx context.Context, skillID uuid.UUID) (int, error)
 	DeleteSkill(ctx context.Context, skillID uuid.UUID) error
 }
@@ -66,7 +66,7 @@ func (r *repository) ListSkillsByToolID(ctx context.Context, toolID uuid.UUID) (
 	return out, rows.Err()
 }
 
-func (r *repository) UpdateSkillMetadata(ctx context.Context, skillID uuid.UUID, name, description string) error {
+func (r *repository) UpdateSkillMetadata(ctx context.Context, skillID uuid.UUID, name, description, instructions string) error {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
 	if err != nil {
 		return err
@@ -74,8 +74,8 @@ func (r *repository) UpdateSkillMetadata(ctx context.Context, skillID uuid.UUID,
 	defer release()
 
 	tag, err := conn.Exec(ctx,
-		`UPDATE skill SET name = $1, description = $2, updated_at = NOW() WHERE id = $3`,
-		name, description, skillID,
+		`UPDATE skill SET name = $1, description = $2, instructions = $3, updated_at = NOW() WHERE id = $4`,
+		name, description, instructions, skillID,
 	)
 	if err != nil {
 		return fmt.Errorf("integration repo: update skill metadata: %w", err)

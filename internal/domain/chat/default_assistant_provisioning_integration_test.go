@@ -4,6 +4,8 @@ package chat_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -186,9 +188,14 @@ func TestIntegration_UpdateSessionSnapshots_Persists(t *testing.T) {
 	require.NoError(t, err)
 
 	prompt := "You are the routed agent."
+	agentSnapshot := json.RawMessage(`{"systemPrompt":"You are the routed agent.","modelConfig":{"provider":"openrouter","model":"mistralai/mistral-nemo"},"skillIds":[]}`)
+	agentSnapshotHash := sha256.Sum256(agentSnapshot)
+	agentSnapshotHashText := hex.EncodeToString(agentSnapshotHash[:])
 	err = repo.UpdateSessionSnapshots(ctx, created.ID, &prompt,
 		json.RawMessage(`{"provider":"openrouter","model":"mistralai/mistral-nemo"}`),
-		json.RawMessage(`{"skillIds":[]}`))
+		json.RawMessage(`{"skillIds":[]}`),
+		agentSnapshot,
+		&agentSnapshotHashText)
 	require.NoError(t, err)
 
 	got, err := repo.GetSessionByID(ctx, created.ID)
@@ -196,6 +203,25 @@ func TestIntegration_UpdateSessionSnapshots_Persists(t *testing.T) {
 	require.NotNil(t, got.SystemPromptSnapshot)
 	assert.Equal(t, prompt, *got.SystemPromptSnapshot)
 	assert.JSONEq(t, `{"provider":"openrouter","model":"mistralai/mistral-nemo"}`, string(got.ModelConfigSnapshot))
+	assert.JSONEq(t, string(agentSnapshot), string(got.AgentSnapshot))
+	require.NotNil(t, got.AgentSnapshotHash)
+	assert.Equal(t, agentSnapshotHashText, *got.AgentSnapshotHash)
+}
+
+func TestIntegration_UpdateSessionConfigHash_PersistsAndLoads(t *testing.T) {
+	pool, ctx := setupTenantSchema(t)
+	repo := chat.NewRepository(pool)
+
+	created, err := repo.CreateSession(ctx, chat.ChatSession{Title: "config hash test", Status: chat.StatusActive})
+	require.NoError(t, err)
+
+	hash := strings.Repeat("a", 64)
+	require.NoError(t, repo.UpdateSessionConfigHash(ctx, created.ID, hash))
+
+	got, err := repo.GetSessionByID(ctx, created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ConfigHash)
+	assert.Equal(t, hash, *got.ConfigHash)
 }
 
 // integrationRecordingRunner is a chat.SessionRunner that records the RunInput

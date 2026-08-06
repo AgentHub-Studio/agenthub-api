@@ -1,9 +1,12 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 )
 
 // CustomAdapter is a pass-through adapter for generic webhooks.
@@ -27,7 +30,7 @@ func (a *CustomAdapter) VerifyRequest(_ context.Context, _ Channel, _ map[string
 // ParseMessage extracts text, sender, and replyTo from the JSON body.
 func (a *CustomAdapter) ParseMessage(_ context.Context, _ Channel, body []byte) (InboundMessage, error) {
 	var req customInbound
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := httputil.DecodeSingleJSON(bytes.NewReader(body), &req); err != nil {
 		return InboundMessage{}, fmt.Errorf("custom: parse error: %w", err)
 	}
 	raw, _ := json.Marshal(req)

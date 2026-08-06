@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -10,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -166,9 +166,15 @@ func (h *Handler) record(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.FromContext(r.Context())
 
 	var req RecordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+	if req.SessionID != "" {
+		if _, err := uuid.Parse(req.SessionID); err != nil {
+			respond.Error(w, http.StatusUnprocessableEntity, "invalid sessionId")
+			return
+		}
 	}
 
 	m, err := h.svc.Record(r.Context(), tenantID, req)

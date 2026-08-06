@@ -63,3 +63,22 @@ func TestRemoveGrant(t *testing.T) {
 		t.Fatal("grant not removed")
 	}
 }
+
+func TestListGrantsFiltersByResource(t *testing.T) {
+	p := acl.NewMemoryProvider()
+	ctx := context.Background()
+	_, _ = p.AddGrant(ctx, acl.Grant{SubjectID: "u1", ResourceType: "agents", ResourceID: "a1", Actions: []string{"read"}})
+	_, _ = p.AddGrant(ctx, acl.Grant{SubjectID: "u2", ResourceType: "agents", ResourceID: "a2", Actions: []string{"read"}})
+	_, _ = p.AddGrant(ctx, acl.Grant{SubjectID: "u3", ResourceType: "tools", ResourceID: "a1", Actions: []string{"read"}})
+
+	grants, err := p.ListGrants(ctx, acl.GrantFilter{ResourceType: "agents", ResourceID: "a1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("len(grants) = %d, want 1", len(grants))
+	}
+	if grants[0].SubjectID != "u1" {
+		t.Fatalf("subject = %q, want u1", grants[0].SubjectID)
+	}
+}

@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	gocommons_tenant "github.com/AgentHub-Studio/agenthub-go-commons/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // Repository defines persistence operations for PendingApproval.
@@ -37,9 +37,14 @@ const approvalColumns = `id, execution_id, node_id, title, description, details,
 	responded_by, responded_at, comment, timeout_at, callback_url, notify_channels, created_at`
 
 func (r *pgRepository) setTenant(ctx context.Context, conn *pgxpool.Conn) error {
-	tenantID := gocommons_tenant.FromContext(ctx)
-	_, err := conn.Exec(ctx, fmt.Sprintf("SET search_path TO ah_%s, public", tenantID))
+	tenantID := tenant.FromContext(ctx)
+	_, err := conn.Exec(ctx, "SET search_path TO "+approvalTenantSearchPath(tenantID))
 	return err
+}
+
+func approvalTenantSearchPath(tenantID string) string {
+	schema := fmt.Sprintf("ah_%s", tenantID)
+	return pgx.Identifier{schema}.Sanitize() + ", public"
 }
 
 func (r *pgRepository) acquire(ctx context.Context) (*pgxpool.Conn, error) {
@@ -106,6 +111,10 @@ func (r *pgRepository) Create(ctx context.Context, req CreateApprovalRequest) (P
 		channels = []string{}
 	}
 	channelsJSON, _ := json.Marshal(channels)
+	var callbackURL any
+	if req.CallbackURL != nil {
+		callbackURL = *req.CallbackURL
+	}
 
 	row := conn.QueryRow(ctx, `
 		INSERT INTO pending_approval
@@ -113,7 +122,7 @@ func (r *pgRepository) Create(ctx context.Context, req CreateApprovalRequest) (P
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING `+approvalColumns,
 		req.ExecutionID, req.NodeID, req.Title, req.Description, req.Details,
-		StatusPending, req.TimeoutAt, req.CallbackURL, channelsJSON,
+		StatusPending, req.TimeoutAt, callbackURL, channelsJSON,
 	)
 	return scanApproval(row)
 }
@@ -209,13 +218,17 @@ func (r *pgRepository) Respond(ctx context.Context, id uuid.UUID, respondedBy st
 		status = StatusRejected
 	}
 	now := time.Now()
+	var comment any
+	if req.Comment != nil {
+		comment = *req.Comment
+	}
 
 	row := conn.QueryRow(ctx, `
 		UPDATE pending_approval
 		SET status = $1, responded_by = $2, responded_at = $3, comment = $4
 		WHERE id = $5 AND status = $6
 		RETURNING `+approvalColumns,
-		status, respondedBy, now, req.Comment, id, StatusPending,
+		status, respondedBy, now, comment, id, StatusPending,
 	)
 	a, err := scanApproval(row)
 	if errors.Is(err, pgx.ErrNoRows) {

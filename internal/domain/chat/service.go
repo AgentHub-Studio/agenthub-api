@@ -2,6 +2,8 @@ package chat
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,9 @@ import (
 
 	"github.com/google/uuid"
 
+	agentdomain "github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic/processors"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/evals"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
@@ -21,13 +26,17 @@ type AgentLoader interface {
 	GetAgentForRun(ctx context.Context, id uuid.UUID) (*AgentRunConfig, error)
 }
 
-
 // AgentRunConfig carries agent fields consumed by the agentic Runner.
 type AgentRunConfig struct {
-	ID               uuid.UUID
-	SystemPrompt     string
-	ModelConfig      json.RawMessage // raw JSON — passed to RunConfigFromModelConfig
-	PermissionRules  json.RawMessage // raw JSON — {"allow":[],"deny":[],"confirm":[]}
+	ID              uuid.UUID
+	Name            string
+	SystemPrompt    string
+	ModelConfig     json.RawMessage // raw JSON — passed to RunConfigFromModelConfig
+	PermissionRules json.RawMessage // raw JSON — {"allow":[],"deny":[],"confirm":[]}
+	EvalConfig      evals.EvalConfig
+	// InputProcessors and OutputProcessors are ordered built-in processor names.
+	InputProcessors  []string
+	OutputProcessors []string
 	// EnableManagement controls whether the agenthub_manage builtin tool is included.
 	// P-C184-2: both this flag AND the caller's admin role must be true.
 	EnableManagement bool
@@ -67,12 +76,28 @@ type RunEvent struct {
 	Data json.RawMessage `json:"data"`
 }
 
+// PreparedSessionRun contains an isolated session and its already-prepared
+// event stream. It is used by trusted internal callers that create and run a
+// session in the same request.
+type PreparedSessionRun struct {
+	Session         ChatSessionResponse
+	Events          <-chan RunEvent
+	SessionCreateMS int64
+	RunPrepareMS    int64
+}
+
 // RunInput carries everything needed to start an agentic run.
 type RunInput struct {
-	RunID        uuid.UUID // ID of the persisted run
-	SessionID    uuid.UUID
-	AgentID      uuid.UUID
-	UserMessage  string
+	RunID     uuid.UUID // ID of the persisted run
+	SessionID uuid.UUID
+	AgentID   uuid.UUID
+	// AgentConfig is the configuration loaded by the chat service for this
+	// invocation. It lets the runner reuse the same request-scoped view instead
+	// of issuing a duplicate read before the run starts.
+	AgentConfig *AgentRunConfig
+	UserMessage string
+	// SystemPrompt is a request-scoped override. It has precedence over the
+	// session snapshot but does not mutate the Agent record.
 	SystemPrompt string
 	TenantID     string
 	// UserMessageID is non-nil when the user message was already persisted by the
@@ -93,12 +118,15 @@ type RunInput struct {
 	// the agent at session creation time. Passed to the runner to filter MCP tools.
 	// P-C253-1: agent-level MCP binding enforcement.
 	MCPServerNamesSnapshot []string
+	// OutputProcessors contains ordered built-in processor names applied to the
+	// assistant response before it is persisted or streamed to callers.
+	OutputProcessors []string
 }
 
 // ElicitationResponder routes a user's elicitation response to the active run.
 // Implemented by agentic.SessionRunnerAdapter; no-op on other implementations.
 type ElicitationResponder interface {
-	RespondElicitation(sessionID, requestID string, result ElicitationResult) bool
+	RespondElicitation(ctx context.Context, sessionID, requestID string, result ElicitationResult) bool
 }
 
 // ElicitationResult mirrors agentic.ElicitationResult to avoid circular imports.
@@ -153,11 +181,17 @@ type SessionRunner interface {
 	RunSession(ctx context.Context, in RunInput) (<-chan RunEvent, error)
 }
 
+// EvalRunRecorder persists eval sampling decisions after a successful run.
+type EvalRunRecorder interface {
+	RecordRunComplete(ctx context.Context, req evals.RecordRequest) (evals.EvalRun, bool, error)
+}
+
 // Service provides business logic for chat operations.
 type Service struct {
-	repo        Repository
-	runner      SessionRunner
-	agentLoader AgentLoader // optional — used to capture agent snapshot at session creation
+	repo         Repository
+	runner       SessionRunner
+	agentLoader  AgentLoader // optional — used to capture agent snapshot at session creation
+	evalRecorder EvalRunRecorder
 }
 
 // NewService creates a new Service backed by the given Repository.
@@ -169,6 +203,12 @@ func NewService(repo Repository, runner SessionRunner) *Service {
 // WithAgentLoader wires an agent loader for capturing snapshots at session creation.
 func (s *Service) WithAgentLoader(loader AgentLoader) *Service {
 	s.agentLoader = loader
+	return s
+}
+
+// WithEvalRecorder wires eval sampling for completed synchronous runs.
+func (s *Service) WithEvalRecorder(recorder EvalRunRecorder) *Service {
+	s.evalRecorder = recorder
 	return s
 }
 
@@ -210,15 +250,26 @@ func (s *Service) GetSession(ctx context.Context, id uuid.UUID) (ChatSessionResp
 
 // CreateSession creates a new chat session.
 func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (ChatSessionResponse, error) {
+	created, err := s.createSession(ctx, req)
+	if err != nil {
+		return ChatSessionResponse{}, err
+	}
+	return SessionResponseFrom(created), nil
+}
+
+// createSession persists a session and returns the complete internal snapshot.
+// Callers that immediately start a run can reuse that snapshot and avoid a
+// redundant database read.
+func (s *Service) createSession(ctx context.Context, req CreateSessionRequest) (ChatSession, error) {
 	// Bug 183: strip HTML do title (XSS prevention).
 	req.Title = sanitize.StripHTML(req.Title)
 	if req.Title == "" {
-		return ChatSessionResponse{}, fmt.Errorf("chat service: title is required")
+		return ChatSession{}, fmt.Errorf("chat service: title is required")
 	}
 	// Bug 135: title varchar(500) — gate length antes do INSERT
 	// (sem isso 422 vazava SQL 22001 para o cliente).
 	if len(req.Title) > 500 {
-		return ChatSessionResponse{}, fmt.Errorf("chat service: title exceeds maximum length of 500 chars (got %d)", len(req.Title))
+		return ChatSession{}, fmt.Errorf("chat service: title exceeds maximum length of 500 chars (got %d)", len(req.Title))
 	}
 
 	session := ChatSession{
@@ -231,7 +282,14 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// the persona, model config and skill bindings remain consistent throughout
 	// the conversation even if the agent is updated between turns.
 	if req.AgentID != nil && s.agentLoader != nil {
-		if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *req.AgentID); err == nil {
+		agentCfg := req.AgentConfig
+		if agentCfg == nil || agentCfg.ID != *req.AgentID {
+			loadedCfg, err := s.agentLoader.GetAgentForRun(ctx, *req.AgentID)
+			if err == nil {
+				agentCfg = loadedCfg
+			}
+		}
+		if agentCfg != nil {
 			// Bug 245: rejeitar criação de session em agent que não está PUBLISHED.
 			// ErrAgentNotPublished e ErrAgentArchived já estavam definidos no
 			// package mas nunca eram disparados em CreateSession. Resultado:
@@ -239,9 +297,9 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			// no primeiro run que algo não funcionava.
 			switch strings.ToUpper(agentCfg.Status) {
 			case "ARCHIVED":
-				return ChatSessionResponse{}, ErrAgentArchived
+				return ChatSession{}, ErrAgentArchived
 			case "DRAFT":
-				return ChatSessionResponse{}, ErrAgentNotPublished
+				return ChatSession{}, ErrAgentNotPublished
 			}
 			snapshotAgent(agentCfg, &session)
 		}
@@ -250,10 +308,94 @@ func (s *Service) CreateSession(ctx context.Context, req CreateSessionRequest) (
 
 	created, err := s.repo.CreateSession(ctx, session)
 	if err != nil {
-		return ChatSessionResponse{}, fmt.Errorf("chat service: create session: %w", err)
+		return ChatSession{}, fmt.Errorf("chat service: create session: %w", err)
+	}
+
+	return created, nil
+}
+
+// CloneSession creates a new active session with the source session metadata
+// and a copy of the source messages. UntilMessageID, when set, is inclusive.
+func (s *Service) CloneSession(ctx context.Context, id uuid.UUID, req CloneSessionRequest) (ChatSessionResponse, error) {
+	source, err := s.repo.GetSessionByID(ctx, id)
+	if err != nil {
+		return ChatSessionResponse{}, err
+	}
+	sourceID := source.ID
+	sourceTitle := source.Title
+
+	messages, err := s.repo.FindAllMessages(ctx, id)
+	if err != nil {
+		return ChatSessionResponse{}, fmt.Errorf("chat service: load messages for clone: %w", err)
+	}
+	selected := messages
+	if req.UntilMessageID != nil {
+		boundary := -1
+		for i, msg := range messages {
+			if msg.ID == *req.UntilMessageID {
+				boundary = i
+				break
+			}
+		}
+		if boundary < 0 {
+			return ChatSessionResponse{}, ErrMessageNotFound
+		}
+		selected = messages[:boundary+1]
+	}
+
+	title, err := cloneSessionTitle(req.Title, source.Title)
+	if err != nil {
+		return ChatSessionResponse{}, err
+	}
+
+	session := ChatSession{
+		AgentID:                source.AgentID,
+		Title:                  title,
+		Status:                 StatusActive,
+		ClonedFromSessionID:    &sourceID,
+		ClonedFromSessionTitle: &sourceTitle,
+		SystemPromptSnapshot:   cloneStringPtr(source.SystemPromptSnapshot),
+		ModelConfigSnapshot:    cloneRawMessage(source.ModelConfigSnapshot),
+		SkillBindingsSnapshot:  cloneRawMessage(source.SkillBindingsSnapshot),
+		AgentSnapshot:          cloneRawMessage(source.AgentSnapshot),
+		AgentSnapshotHash:      cloneStringPtr(source.AgentSnapshotHash),
+		ConfigHash:             cloneStringPtr(source.ConfigHash),
+	}
+	created, err := s.repo.CloneSession(ctx, session, selected)
+	if err != nil {
+		return ChatSessionResponse{}, fmt.Errorf("chat service: clone session: %w", err)
 	}
 
 	return SessionResponseFrom(created), nil
+}
+
+func cloneSessionTitle(requestedTitle, sourceTitle string) (string, error) {
+	title := sanitize.StripHTML(requestedTitle)
+	if title == "" {
+		title = "Copy of " + sourceTitle
+		if len(title) > 500 {
+			title = title[:500]
+		}
+	}
+	if len(title) > 500 {
+		return "", fmt.Errorf("chat service: title exceeds maximum length of 500 chars (got %d)", len(title))
+	}
+	return title, nil
+}
+
+func cloneRawMessage(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
+}
+
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // snapshotAgent captures the agent's persona, model config and skill bindings
@@ -278,6 +420,35 @@ func snapshotAgent(agentCfg *AgentRunConfig, sess *ChatSession) {
 			sess.SkillBindingsSnapshot = snapshotJSON
 		}
 	}
+	refreshCanonicalAgentSnapshot(sess)
+}
+
+func refreshCanonicalAgentSnapshot(sess *ChatSession) {
+	if sess == nil {
+		return
+	}
+	systemPrompt := ""
+	if sess.SystemPromptSnapshot != nil {
+		systemPrompt = *sess.SystemPromptSnapshot
+	}
+	snapshotData := AgentSnapshotData{
+		SystemPrompt: systemPrompt,
+		ModelConfig:  cloneRawMessage(agentdomain.SanitizeModelConfig(sess.ModelConfigSnapshot)),
+	}
+	if len(sess.SkillBindingsSnapshot) > 2 {
+		var skillSnapshot SkillBindingsSnapshotData
+		if err := json.Unmarshal(sess.SkillBindingsSnapshot, &skillSnapshot); err == nil && len(skillSnapshot.SkillIDs) > 0 {
+			snapshotData.SkillIDs = append([]uuid.UUID(nil), skillSnapshot.SkillIDs...)
+		}
+	}
+	snapshotJSON, err := json.Marshal(snapshotData)
+	if err != nil {
+		return
+	}
+	hash := sha256.Sum256(snapshotJSON)
+	hashText := hex.EncodeToString(hash[:])
+	sess.AgentSnapshot = snapshotJSON
+	sess.AgentSnapshotHash = &hashText
 }
 
 // ArchiveSession sets a session's status to ARCHIVED.
@@ -405,9 +576,9 @@ func (s *Service) AddMessage(ctx context.Context, sessionID uuid.UUID, req Creat
 
 // RespondElicitation routes a user response to an active elicitation request.
 // Returns false when the session has no active run or the requestID is not found.
-func (s *Service) RespondElicitation(sessionID, requestID string, result ElicitationResult) bool {
+func (s *Service) RespondElicitation(ctx context.Context, sessionID, requestID string, result ElicitationResult) bool {
 	if r, ok := s.runner.(ElicitationResponder); ok {
-		return r.RespondElicitation(sessionID, requestID, result)
+		return r.RespondElicitation(ctx, sessionID, requestID, result)
 	}
 	return false
 }
@@ -425,14 +596,51 @@ func (s *Service) ApplyClientState(sessionID uuid.UUID, patch ClientStatePatch) 
 // RunSession starts an agentic run for the given session.
 // It loads the session, validates it has an agent, then delegates to the SessionRunner.
 // The caller (SSE handler) consumes the returned channel for streaming.
-func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string) (<-chan RunEvent, error) {
+func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessage, tenantID string, opts ...RunSessionOptions) (<-chan RunEvent, error) {
 	if s.runner == nil {
 		return nil, fmt.Errorf("chat service: agentic features not configured")
 	}
+	runOpts := mergeRunSessionOptions(opts...)
 
 	session, err := s.repo.GetSessionByID(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("chat service: get session: %w", err)
+	}
+	return s.runPreparedSession(ctx, session, userMessage, tenantID, runOpts)
+}
+
+// CreateAndRunSession creates an isolated session and immediately prepares its
+// run from the just-persisted snapshot. It keeps the normal persistence order
+// while avoiding a read of a session that cannot yet be observed externally.
+func (s *Service) CreateAndRunSession(ctx context.Context, req CreateSessionRequest, userMessage, tenantID string) (PreparedSessionRun, error) {
+	if s.runner == nil {
+		return PreparedSessionRun{}, fmt.Errorf("chat service: agentic features not configured")
+	}
+
+	createStarted := time.Now()
+	session, err := s.createSession(ctx, req)
+	if err != nil {
+		return PreparedSessionRun{}, err
+	}
+	prepareStarted := time.Now()
+	events, err := s.runPreparedSession(ctx, session, userMessage, tenantID, RunSessionOptions{
+		AgentConfig: req.AgentConfig,
+	})
+	if err != nil {
+		return PreparedSessionRun{}, err
+	}
+	return PreparedSessionRun{
+		Session:         SessionResponseFrom(session),
+		Events:          events,
+		SessionCreateMS: time.Since(createStarted).Milliseconds(),
+		RunPrepareMS:    time.Since(prepareStarted).Milliseconds(),
+	}, nil
+}
+
+func (s *Service) runPreparedSession(ctx context.Context, session ChatSession, userMessage, tenantID string, runOpts RunSessionOptions) (<-chan RunEvent, error) {
+	var agentCfg *AgentRunConfig
+	if session.AgentID != nil && runOpts.AgentConfig != nil && runOpts.AgentConfig.ID == *session.AgentID {
+		agentCfg = runOpts.AgentConfig
 	}
 	if session.AgentID == nil {
 		routed, err := routeAgentID(ctx, s.repo, userMessage)
@@ -442,7 +650,7 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		if routed == nil {
 			return nil, fmt.Errorf("chat service: %w", ErrNoAgentAvailable)
 		}
-		if err := s.repo.UpdateSessionAgent(ctx, sessionID, *routed); err != nil {
+		if err := s.repo.UpdateSessionAgent(ctx, session.ID, *routed); err != nil {
 			return nil, fmt.Errorf("chat service: bind routed agent: %w", err)
 		}
 		session.AgentID = routed
@@ -451,25 +659,56 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 		// conversation. Non-fatal on failure — the run still proceeds using the
 		// agent's current config via the adapter's snapshot fallback.
 		if s.agentLoader != nil {
-			if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *routed); err == nil {
-				snapshotAgent(agentCfg, &session)
-				if err := s.repo.UpdateSessionSnapshots(ctx, sessionID,
-					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot); err != nil {
+			if cfg, err := s.agentLoader.GetAgentForRun(ctx, *routed); err == nil {
+				agentCfg = cfg
+				snapshotAgent(cfg, &session)
+				if err := s.repo.UpdateSessionSnapshots(ctx, session.ID,
+					session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot,
+					session.AgentSnapshot, session.AgentSnapshotHash); err != nil {
 					slog.Warn("chat service: failed to persist routed-agent snapshot",
-						"sessionID", sessionID, "agentID", *routed, "error", err)
+						"sessionID", session.ID, "agentID", *routed, "error", err)
 				}
 			}
 		}
+	}
+	var systemPromptOverride string
+	if runOpts.SystemPromptOverride != nil {
+		systemPromptOverride = strings.TrimSpace(*runOpts.SystemPromptOverride)
+		if systemPromptOverride != "" {
+			session.SystemPromptSnapshot = &systemPromptOverride
+			refreshCanonicalAgentSnapshot(&session)
+			if err := s.repo.UpdateSessionSnapshots(ctx, session.ID,
+				session.SystemPromptSnapshot, session.ModelConfigSnapshot, session.SkillBindingsSnapshot,
+				session.AgentSnapshot, session.AgentSnapshotHash); err != nil {
+				slog.Warn("chat service: failed to persist request system-prompt override",
+					"sessionID", session.ID, "agentID", *session.AgentID, "error", err)
+			}
+		}
+	}
+
+	if agentCfg == nil && s.agentLoader != nil && session.AgentID != nil {
+		if cfg, err := s.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
+			agentCfg = cfg
+		} else {
+			slog.Warn("chat service: failed to load agent processors",
+				"sessionID", session.ID, "agentID", *session.AgentID, "error", err)
+		}
+	}
+
+	processedUserMessage, userMessageMetadata, err := processUserMessage(ctx, userMessage, agentCfg)
+	if err != nil {
+		return nil, err
 	}
 
 	// P-C178-2: persist user message BEFORE starting the run so it is never lost
 	// even if the run fails to initialise (e.g. agent not published, model error).
 	var userMsgID *uuid.UUID
-	if userMessage != "" {
+	if processedUserMessage != "" {
 		msg := ChatMessage{
-			SessionID: sessionID,
+			SessionID: session.ID,
 			Role:      "user",
-			Content:   userMessage,
+			Content:   processedUserMessage,
+			Metadata:  userMessageMetadata,
 		}
 		persisted, err := s.repo.CreateMessage(ctx, msg)
 		if err != nil {
@@ -491,23 +730,116 @@ func (s *Service) RunSession(ctx context.Context, sessionID uuid.UUID, userMessa
 	// P-C253-1: load MCP server names bound to the agent so the runner can filter
 	// MCP tools to only those from servers explicitly bound to this agent.
 	var mcpServerNames []string
-	if s.agentLoader != nil {
-		if agentCfg, err := s.agentLoader.GetAgentForRun(ctx, *session.AgentID); err == nil {
-			mcpServerNames = agentCfg.MCPServerNames
-		}
+	var outputProcessors []string
+	if agentCfg != nil {
+		mcpServerNames = agentCfg.MCPServerNames
+		outputProcessors = append([]string(nil), agentCfg.OutputProcessors...)
 	}
 
-	return s.runner.RunSession(ctx, RunInput{
-		SessionID:              sessionID,
+	events, err := s.runner.RunSession(ctx, RunInput{
+		SessionID:              session.ID,
 		AgentID:                *session.AgentID,
-		UserMessage:            userMessage,
+		AgentConfig:            agentCfg,
+		UserMessage:            processedUserMessage,
+		SystemPrompt:           systemPromptOverride,
 		TenantID:               tenantID,
 		UserMessageID:          userMsgID,
 		SystemPromptSnapshot:   session.SystemPromptSnapshot,
 		ModelConfigSnapshot:    session.ModelConfigSnapshot,
 		SkillIDsSnapshot:       skillIDsSnapshot,
 		MCPServerNamesSnapshot: mcpServerNames,
+		OutputProcessors:       outputProcessors,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return s.withEvalSampling(ctx, events, session.ID, *session.AgentID, agentCfg), nil
+}
+
+func (s *Service) withEvalSampling(ctx context.Context, events <-chan RunEvent, sessionID, agentID uuid.UUID, agentCfg *AgentRunConfig) <-chan RunEvent {
+	if s.evalRecorder == nil || agentCfg == nil {
+		return events
+	}
+	out := make(chan RunEvent)
+	go func() {
+		defer close(out)
+		recorded := false
+		for ev := range events {
+			out <- ev
+			if ev.Type == "run_complete" && !recorded {
+				recorded = true
+				cfg := agentCfg.EvalConfig
+				go s.recordEvalRun(context.WithoutCancel(ctx), sessionID, agentID, cfg, nil)
+			}
+		}
+	}()
+	return out
+}
+
+func (s *Service) recordEvalRun(ctx context.Context, sessionID, agentID uuid.UUID, cfg evals.EvalConfig, chatRunID *uuid.UUID) {
+	if s.evalRecorder == nil {
+		return
+	}
+	if _, sampled, err := s.evalRecorder.RecordRunComplete(ctx, evals.RecordRequest{
+		ChatRunID: chatRunID,
+		SessionID: sessionID,
+		AgentID:   agentID,
+		Config:    cfg,
+	}); err != nil {
+		slog.Warn("chat service: failed to record eval run", "sessionID", sessionID, "agentID", agentID, "error", err)
+	} else if sampled {
+		slog.Debug("chat service: eval run sampled", "sessionID", sessionID, "agentID", agentID)
+	}
+}
+
+func mergeRunSessionOptions(opts ...RunSessionOptions) RunSessionOptions {
+	var merged RunSessionOptions
+	for _, opt := range opts {
+		if opt.SystemPromptOverride != nil {
+			merged.SystemPromptOverride = opt.SystemPromptOverride
+		}
+		if opt.AgentConfig != nil {
+			merged.AgentConfig = opt.AgentConfig
+		}
+	}
+	return merged
+}
+
+type inputProcessorMetadata struct {
+	OriginalContent  string   `json:"originalContent"`
+	ProcessedContent string   `json:"processedContent"`
+	InputProcessors  []string `json:"inputProcessors,omitempty"`
+	OutputProcessors []string `json:"outputProcessors,omitempty"`
+}
+
+func processUserMessage(ctx context.Context, userMessage string, agentCfg *AgentRunConfig) (string, json.RawMessage, error) {
+	if userMessage == "" || agentCfg == nil || len(agentCfg.InputProcessors) == 0 {
+		return userMessage, nil, nil
+	}
+	pipeline, err := processors.BuildPipeline(agentCfg.InputProcessors, nil)
+	if err != nil {
+		return "", nil, fmt.Errorf("chat service: build input processors: %w", err)
+	}
+	out, reject, err := pipeline.RunInput(ctx, []processors.Message{{Role: "user", Content: userMessage}})
+	if err != nil {
+		return "", nil, fmt.Errorf("chat service: run input processors: %w", err)
+	}
+	if reject != "" {
+		return "", nil, fmt.Errorf("chat service: input processor rejected message: %s", reject)
+	}
+	if len(out) == 0 {
+		return "", nil, fmt.Errorf("chat service: input processors returned no messages")
+	}
+	processed := out[0].Content
+	metadata, err := json.Marshal(inputProcessorMetadata{
+		OriginalContent:  userMessage,
+		ProcessedContent: processed,
+		InputProcessors:  append([]string(nil), agentCfg.InputProcessors...),
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("chat service: encode input processor metadata: %w", err)
+	}
+	return processed, metadata, nil
 }
 
 // agentRouter is the subset of Repository needed to route a user message to a

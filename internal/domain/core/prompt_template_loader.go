@@ -62,14 +62,14 @@ func (l *CorePromptTemplateLoader) LoadAll(ctx context.Context) ([]CorePromptTem
 		       system_prompt, recommended_temperature, recommended_max_tokens,
 		       requires_tools, placeholders,
 		       is_recommended, is_active, sort_order
-		  FROM ah_core.prompt_template
+		  FROM ah_core.core_prompt_template
 		 WHERE is_active = true
 		 ORDER BY sort_order, slug`
 
 	rows, err := conn.Query(ctx, query)
 	if err != nil {
 		if isUndefinedRelation(err) {
-			slog.WarnContext(ctx, "core: ah_core.prompt_template not accessible", "err", err)
+			slog.WarnContext(ctx, "core: ah_core.core_prompt_template not accessible", "err", err)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("core: query prompt_template: %w", err)

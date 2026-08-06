@@ -1,20 +1,81 @@
 package agent_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 // --- minimal stubs ---
+
+func TestBundleHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	h := agent.NewBundleHandler(nil, nil)
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), "user")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	h.RegisterBundleRoutes(r)
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "export", method: http.MethodGet, path: "/api/agents/" + uuid.NewString() + "/export"},
+		{name: "import", method: http.MethodPost, path: "/api/agents/import", body: `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
+}
+
+func TestBundleHandlerRejectsTrailingJSONWithoutImport(t *testing.T) {
+	svc := newMockSvc()
+	importer := agent.NewImporter(svc, &stubSkillCreator{}, newStubBindingRepo())
+	h := agent.NewBundleHandler(nil, importer)
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), "admin")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	h.RegisterBundleRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/import", bytes.NewBufferString(`{"formatVersion":"1","agent":{"name":"first","slug":"first"}}{"formatVersion":"1"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Empty(t, svc.agents)
+}
 
 // stubSkillCreator implements agent.SkillCreator.
 type stubSkillCreator struct {
@@ -59,8 +120,8 @@ func (r *stubSkillRepo) GetByID(_ context.Context, id uuid.UUID) (skill.Skill, e
 func (r *stubSkillRepo) Update(_ context.Context, _ uuid.UUID, _ skill.UpdateRequest) (skill.Skill, error) {
 	return skill.Skill{}, nil
 }
-func (r *stubSkillRepo) Delete(_ context.Context, _ uuid.UUID) error                 { return nil }
-func (r *stubSkillRepo) SlugExists(_ context.Context, _ string) (bool, error)        { return false, nil }
+func (r *stubSkillRepo) Delete(_ context.Context, _ uuid.UUID) error          { return nil }
+func (r *stubSkillRepo) SlugExists(_ context.Context, _ string) (bool, error) { return false, nil }
 func (r *stubSkillRepo) ListByAgentID(_ context.Context, _ uuid.UUID) ([]skill.Skill, error) {
 	return nil, nil
 }
@@ -122,6 +183,45 @@ func (r *stubBindingRepo) GetSkillTokenBudgets(_ context.Context, _ uuid.UUID) (
 
 var _ agent.BindingRepository = (*stubBindingRepo)(nil)
 
+type stubToolRepo struct {
+	toolsBySkill map[uuid.UUID][]tool.Tool
+}
+
+func (r *stubToolRepo) List(_ context.Context, _ pagination.PageRequest, _ string) ([]tool.Tool, int64, error) {
+	return nil, 0, nil
+}
+func (r *stubToolRepo) ListLabels(_ context.Context) ([]string, error) {
+	return nil, nil
+}
+func (r *stubToolRepo) Create(_ context.Context, t tool.Tool) (tool.Tool, error) {
+	return t, nil
+}
+func (r *stubToolRepo) GetByID(_ context.Context, id uuid.UUID) (tool.Tool, error) {
+	return tool.Tool{ID: id}, nil
+}
+func (r *stubToolRepo) Update(_ context.Context, _ uuid.UUID, t tool.Tool) (tool.Tool, error) {
+	return t, nil
+}
+func (r *stubToolRepo) Delete(_ context.Context, _ uuid.UUID) error {
+	return nil
+}
+func (r *stubToolRepo) BindToSkill(_ context.Context, skillID uuid.UUID, req tool.BindRequest) (tool.SkillTool, error) {
+	return tool.SkillTool{ID: uuid.New(), SkillID: skillID, ToolID: req.ToolID}, nil
+}
+func (r *stubToolRepo) UnbindFromSkill(_ context.Context, _, _ uuid.UUID) error {
+	return nil
+}
+func (r *stubToolRepo) ListBySkill(_ context.Context, skillID uuid.UUID) ([]tool.SkillTool, []tool.Tool, error) {
+	tools := r.toolsBySkill[skillID]
+	bindings := make([]tool.SkillTool, len(tools))
+	for i, t := range tools {
+		bindings[i] = tool.SkillTool{ID: uuid.New(), SkillID: skillID, ToolID: t.ID}
+	}
+	return bindings, tools, nil
+}
+
+var _ tool.ToolRepository = (*stubToolRepo)(nil)
+
 // --- tests ---
 
 func TestExporter_Export_NoSkills(t *testing.T) {
@@ -175,6 +275,64 @@ func TestExporter_Export_WithSkills(t *testing.T) {
 	require.Len(t, bundle.Skills, 1)
 	assert.Equal(t, "search", bundle.Skills[0].Slug)
 	assert.Equal(t, skillID, bundle.Skills[0].OriginalID)
+}
+
+func TestExporter_Export_WithToolsRedactsToolCredentials(t *testing.T) {
+	svc := newMockSvc()
+	agentID := uuid.New()
+	svc.agents[agentID] = agent.AgentResponse{
+		ID:          agentID,
+		Name:        "Tool Agent",
+		Slug:        "tool-agent",
+		Description: "Exports tools",
+	}
+
+	skillID := uuid.New()
+	skillRepo := newStubSkillRepo(skill.Skill{
+		ID:           skillID,
+		Name:         "Webhook",
+		Slug:         "webhook",
+		Instructions: "Call webhook.",
+	})
+	binding := newStubBindingRepo()
+	binding.skillIDs[agentID] = []uuid.UUID{skillID}
+
+	toolRepo := &stubToolRepo{toolsBySkill: map[uuid.UUID][]tool.Tool{
+		skillID: {
+			{
+				ID:   uuid.New(),
+				Name: "Webhook HTTP",
+				Slug: "webhook-http",
+				Type: tool.ToolTypeHTTP,
+				Config: []byte(`{
+					"url":"https://api.example.com/hooks",
+					"auth_token":"Bearer bundle-secret",
+					"authToken":"bundle-secret-2",
+					"headers":{
+						"Authorization":"Bearer header-secret",
+						"X-API-Key":"header-key",
+						"X-Safe":"ok"
+					}
+				}`),
+			},
+		},
+	}}
+
+	exporter := agent.NewExporter(svc, skillRepo, binding).WithToolRepo(toolRepo)
+	bundle, err := exporter.Export(context.Background(), agentID)
+	require.NoError(t, err)
+	require.Len(t, bundle.Tools, 1)
+
+	data, err := json.Marshal(bundle)
+	require.NoError(t, err)
+	body := string(data)
+	assert.NotContains(t, body, "auth_token")
+	assert.NotContains(t, body, "authToken")
+	assert.NotContains(t, body, "bundle-secret")
+	assert.NotContains(t, body, "bundle-secret-2")
+	assert.NotContains(t, body, "Bearer header-secret")
+	assert.NotContains(t, body, "header-key")
+	assert.Contains(t, body, `"X-Safe":"ok"`)
 }
 
 func TestExporter_Export_AgentNotFound(t *testing.T) {

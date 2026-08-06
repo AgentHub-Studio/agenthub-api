@@ -156,10 +156,10 @@ func (t CoordinatedTask) Validate() error {
 
 // CoordinationPlan is the inputs to the coordinator.
 type CoordinationPlan struct {
-	Strategy        MultiAgentStrategy
-	FailurePolicy   MultiAgentFailurePolicy
-	Tasks           []CoordinatedTask
-	MaxParallelism  int // 0 = unbounded
+	Strategy       MultiAgentStrategy
+	FailurePolicy  MultiAgentFailurePolicy
+	Tasks          []CoordinatedTask
+	MaxParallelism int // 0 = unbounded
 }
 
 // Validate checks plan-level invariants (strategy + DAG validity).
@@ -340,13 +340,6 @@ func (c *MultiAgentCoordinator) NextBatch(state CoordinationState) ([]string, er
 			s := statusOf[dep]
 			if s != MultiAgentTaskCompleted {
 				ready = false
-				// skip_downstream_on_failure: if any dep failed/skipped,
-				// this task is also skipped (caller marks it).
-				if plan.FailurePolicy == MultiAgentSkipDownstreamOnFailure &&
-					(s == MultiAgentTaskFailed || s == MultiAgentTaskSkipped) {
-					// Caller's responsibility to mark; coordinator
-					// does not include it in eligible.
-				}
 				break
 			}
 		}
@@ -410,15 +403,15 @@ func (c *MultiAgentCoordinator) SummariseState(state CoordinationState) map[Mult
 
 // Sentinel errors.
 var (
-	ErrMultiAgentBadStrategy         = errors.New("multi-agent: invalid strategy")
-	ErrMultiAgentBadFailurePolicy    = errors.New("multi-agent: invalid failure policy")
-	ErrMultiAgentBadTaskStatus       = errors.New("multi-agent: invalid task status")
-	ErrMultiAgentBadParallelism      = errors.New("multi-agent: max parallelism must be >= 0")
-	ErrMultiAgentEmptyPlan           = errors.New("multi-agent: plan must have at least one task")
-	ErrMultiAgentEmptyTaskID         = errors.New("multi-agent: task id required")
+	ErrMultiAgentBadStrategy          = errors.New("multi-agent: invalid strategy")
+	ErrMultiAgentBadFailurePolicy     = errors.New("multi-agent: invalid failure policy")
+	ErrMultiAgentBadTaskStatus        = errors.New("multi-agent: invalid task status")
+	ErrMultiAgentBadParallelism       = errors.New("multi-agent: max parallelism must be >= 0")
+	ErrMultiAgentEmptyPlan            = errors.New("multi-agent: plan must have at least one task")
+	ErrMultiAgentEmptyTaskID          = errors.New("multi-agent: task id required")
 	ErrMultiAgentEmptyTaskDescription = errors.New("multi-agent: task description required")
-	ErrMultiAgentDuplicateTaskID     = errors.New("multi-agent: duplicate task id in plan")
-	ErrMultiAgentSelfDependency      = errors.New("multi-agent: task cannot depend on itself")
-	ErrMultiAgentUnknownDependency   = errors.New("multi-agent: dependency references unknown task")
-	ErrMultiAgentCycleDetected       = errors.New("multi-agent: dependency cycle detected")
+	ErrMultiAgentDuplicateTaskID      = errors.New("multi-agent: duplicate task id in plan")
+	ErrMultiAgentSelfDependency       = errors.New("multi-agent: task cannot depend on itself")
+	ErrMultiAgentUnknownDependency    = errors.New("multi-agent: dependency references unknown task")
+	ErrMultiAgentCycleDetected        = errors.New("multi-agent: dependency cycle detected")
 )

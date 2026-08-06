@@ -23,6 +23,14 @@ var ErrValidation = errors.New("listing: validation failed")
 // listing (cross-tenant). Mapeado para 403 no handler.
 var ErrForbidden = errors.New("listing: forbidden")
 
+// ErrPackageNotFound is returned when a listing references a package that no
+// longer exists in the registry.
+var ErrPackageNotFound = errors.New("listing: package not found")
+
+// ErrPackageNotPublic is returned when an owner attempts to publish a PRIVATE
+// registry package in the public marketplace.
+var ErrPackageNotPublic = errors.New("listing: package must be public")
+
 // PackageType represents the category of a marketplace listing.
 type PackageType string
 

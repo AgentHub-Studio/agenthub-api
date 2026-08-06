@@ -40,7 +40,7 @@ func TestE2E_RegistryPackageLifecycle(t *testing.T) {
 	var mine testutil.Page[map[string]any]
 	status = c.Get("/api/packages/mine?page=0&size=20", &mine)
 	assert.Equal(t, http.StatusOK, status)
-	assert.GreaterOrEqual(t, mine.TotalElements, int64(1))
+	assert.GreaterOrEqual(t, mine.TotalElements, 1)
 
 	// --- Get by ID ---
 	var fetched map[string]any
@@ -72,18 +72,20 @@ func TestE2E_RegistryVersionLifecycle(t *testing.T) {
 		cfg.e2eUserPassword,
 	)
 	c := tenant.Client(t, cfg.backendURL)
+	packageSlug := "versioned-pkg-" + tenant.Slug
 
 	// Setup: create package first
 	var pkg map[string]any
 	status := c.Post("/api/packages", map[string]any{
-		"name":       "versioned-pkg",
-		"slug":       "versioned-pkg",
+		"name":        packageSlug,
+		"slug":        packageSlug,
 		"description": "Package for version E2E",
-		"type":       "AGENT",
-		"visibility": "private",
+		"type":        "AGENT",
+		"visibility":  "private",
 	}, &pkg)
 	require.Equal(t, http.StatusCreated, status)
 	pkgID := pkg["id"].(string)
+	t.Cleanup(func() { c.Delete("/api/packages/" + pkgID) })
 
 	versionBase := "/api/packages/" + pkgID + "/versions"
 
@@ -92,17 +94,18 @@ func TestE2E_RegistryVersionLifecycle(t *testing.T) {
 	status = c.Post(versionBase, map[string]any{
 		"version":     "1.0.0",
 		"changelog":   "Initial release",
-		"storagePath": "packages/versioned-pkg/1.0.0/package.tar.gz",
+		"storagePath": "packages/" + packageSlug + "/1.0.0/package.tar.gz",
 		"checksum":    "sha256:abc123",
 	}, &version)
 	require.Equal(t, http.StatusCreated, status)
 	assert.Equal(t, "1.0.0", version["version"])
 
 	// --- List versions ---
-	var versionPage testutil.Page[map[string]any]
-	status = c.Get(versionBase+"?page=0&size=10", &versionPage)
+	var versions []map[string]any
+	status = c.Get(versionBase, &versions)
 	assert.Equal(t, http.StatusOK, status)
-	assert.GreaterOrEqual(t, versionPage.TotalElements, int64(1))
+	require.NotEmpty(t, versions)
+	assert.Equal(t, "1.0.0", versions[0]["version"])
 
 	// --- Get specific version ---
 	var fetchedV map[string]any
@@ -124,17 +127,20 @@ func TestE2E_PublicPackageListing(t *testing.T) {
 		cfg.e2eUserPassword,
 	)
 	c := tenant.Client(t, cfg.backendURL)
+	packageSlug := "public-agent-" + tenant.Slug
 
 	// Create a public package
 	var pkg map[string]any
 	status := c.Post("/api/packages", map[string]any{
-		"name":       "public-agent",
-		"slug":       "public-agent-e2e",
+		"name":        packageSlug,
+		"slug":        packageSlug,
 		"description": "A publicly visible agent",
-		"type":       "AGENT",
-		"visibility": "public",
+		"type":        "AGENT",
+		"visibility":  "public",
 	}, &pkg)
 	require.Equal(t, http.StatusCreated, status)
+	pkgID := pkg["id"].(string)
+	t.Cleanup(func() { c.Delete("/api/packages/" + pkgID) })
 
 	// Public listing (no auth needed — use raw http)
 	var publicPage testutil.Page[map[string]any]

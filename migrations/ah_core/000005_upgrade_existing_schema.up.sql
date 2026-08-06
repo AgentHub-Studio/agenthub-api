@@ -22,9 +22,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_ah_core_tool_slug    ON ah_core.tool (slug)
 CREATE INDEX IF NOT EXISTS idx_ah_core_tool_slug          ON ah_core.tool (slug);
 CREATE INDEX IF NOT EXISTS idx_ah_core_tool_is_active     ON ah_core.tool (is_active);
 
--- ah_core.agent: add agent_type, enable_management, is_active if missing
+-- ah_core.agent: add agent_type, current_version, enable_management, is_active if missing
 ALTER TABLE ah_core.agent
     ADD COLUMN IF NOT EXISTS agent_type        VARCHAR(50)  NOT NULL DEFAULT 'ASSISTANT',
+    ADD COLUMN IF NOT EXISTS current_version   INTEGER      NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS enable_management BOOLEAN      NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS is_active         BOOLEAN      NOT NULL DEFAULT TRUE;
 

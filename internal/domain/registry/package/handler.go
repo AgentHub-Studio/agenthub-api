@@ -2,7 +2,6 @@ package pkg
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/apierror"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
@@ -17,8 +17,8 @@ import (
 // packageService defines the methods used by Handler.
 type packageService interface {
 	ListPublic(ctx context.Context, req pagination.PageRequest) (pagination.Page[PackageResponse], error)
-	GetByID(ctx context.Context, id uuid.UUID) (PackageResponse, error)
-	GetBySlug(ctx context.Context, slug string) (PackageResponse, error)
+	GetAccessibleByID(ctx context.Context, id uuid.UUID, tenantID string) (PackageResponse, error)
+	GetAccessibleBySlug(ctx context.Context, slug string, tenantID string) (PackageResponse, error)
 	ListByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) (pagination.Page[PackageResponse], error)
 	Create(ctx context.Context, req CreatePackageRequest, tenantID string) (PackageResponse, error)
 	Update(ctx context.Context, id uuid.UUID, req UpdatePackageRequest, tenantID string) (PackageResponse, error)
@@ -40,6 +40,15 @@ func NewHandler(svc packageService) *Handler {
 func (h *Handler) RegisterPublicRoutes(r chi.Router) {
 	r.Get("/api/packages", h.listPublic)
 	r.Get("/api/packages/search", h.search)
+	// Keep /api/packages/search as the original public API while exposing the
+	// canonical registry route consumed by MCP clients.
+	r.Get("/api/registry/search", h.search)
+}
+
+// RegisterReadRoutes mounts package detail routes behind optional
+// authentication. Anonymous callers can read only PUBLIC packages while an
+// authenticated author can also read their PRIVATE packages.
+func (h *Handler) RegisterReadRoutes(r chi.Router) {
 	r.Get("/api/packages/{id}", h.getByID)
 	r.Get("/api/packages/slug/{slug}", h.getBySlug)
 }
@@ -70,7 +79,7 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
-	p, err := h.svc.GetByID(r.Context(), id)
+	p, err := h.svc.GetAccessibleByID(r.Context(), id, tenantFromContext(r))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			apierror.Write(w, http.StatusNotFound, "package not found")
@@ -85,7 +94,7 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 // getBySlug godoc — GET /api/packages/slug/{slug}
 func (h *Handler) getBySlug(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	p, err := h.svc.GetBySlug(r.Context(), slug)
+	p, err := h.svc.GetAccessibleBySlug(r.Context(), slug, tenantFromContext(r))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			apierror.Write(w, http.StatusNotFound, "package not found")
@@ -121,7 +130,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CreatePackageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -155,7 +164,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdatePackageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

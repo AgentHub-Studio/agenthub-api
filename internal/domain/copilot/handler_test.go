@@ -22,9 +22,11 @@ import (
 type fakeChatModel struct {
 	response string
 	err      error
+	calls    int
 }
 
 func (m *fakeChatModel) Chat(_ context.Context, _ []commonsai.Message, _ commonsai.ChatOptions) (*commonsai.ChatResponse, error) {
+	m.calls++
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -85,6 +87,18 @@ func TestHandler_Completions_400_InvalidJSON(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandler_CompletionsRejectsTrailingJSONWithoutCallingModel(t *testing.T) {
+	model := &fakeChatModel{response: "world"}
+	r := setup(copilot.NewService(&fakeFactory{model: model}))
+	req := httptest.NewRequest(http.MethodPost, "/api/copilot/completions", bytes.NewBufferString(`{"text":"hello"} {"text":"ignored"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Zero(t, model.calls)
 }
 
 func TestHandler_Completions_422_EmptyText(t *testing.T) {

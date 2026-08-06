@@ -169,13 +169,26 @@ func TestAssetService_DownloadURL_Success(t *testing.T) {
 		StoragePath: "packages/" + pkgID.String() + "/assets/some-file.tgz",
 	}
 
-	resp, err := svc.DownloadURL(context.Background(), assetID)
+	resp, err := svc.DownloadURL(context.Background(), pkgID, assetID)
 	require.NoError(t, err)
 	assert.NotEmpty(t, resp.URL)
 }
 
 func TestAssetService_DownloadURL_NotFound(t *testing.T) {
 	svc := installation.NewService(newMockAssetRepo(), newMockStorage())
-	_, err := svc.DownloadURL(context.Background(), uuid.New())
+	_, err := svc.DownloadURL(context.Background(), uuid.New(), uuid.New())
+	require.ErrorIs(t, err, installation.ErrNotFound)
+}
+
+func TestAssetService_DownloadURL_RejectsAssetFromAnotherPackage(t *testing.T) {
+	repo := newMockAssetRepo()
+	assetID := uuid.New()
+	repo.assets[assetID] = installation.PackageAsset{
+		ID:        assetID,
+		PackageID: uuid.New(),
+		Filename:  "other.tgz",
+	}
+
+	_, err := installation.NewService(repo, newMockStorage()).DownloadURL(context.Background(), uuid.New(), assetID)
 	require.ErrorIs(t, err, installation.ErrNotFound)
 }

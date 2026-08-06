@@ -27,7 +27,7 @@ type ExecutionRepository interface {
 	Transition(ctx context.Context, id uuid.UUID, from, to string, output []byte, errMsg *string) error
 	Cancel(ctx context.Context, id uuid.UUID) error
 	ListNodes(ctx context.Context, executionID uuid.UUID) ([]AgentExecutionNode, error)
-	ListToolExecutions(ctx context.Context, nodeExecutionID uuid.UUID) ([]ToolExecution, error)
+	ListToolExecutions(ctx context.Context, executionID uuid.UUID, nodeExecutionID uuid.UUID) ([]ToolExecution, error)
 }
 
 // Repository provides data access for execution tables.
@@ -60,11 +60,11 @@ func (r *Repository) List(ctx context.Context, agentID *uuid.UUID, status *strin
 
 	const query = `
 		SELECT id, agent_id, pipeline_id, status, input, output, error_message,
-		       started_at, finished_at, duration_ms
+		       COALESCE(started_at, created_at), finished_at, duration_ms
 		  FROM agent_execution
 		 WHERE ($1::UUID IS NULL OR agent_id = $1)
 		   AND ($2::VARCHAR IS NULL OR status = $2)
-		 ORDER BY started_at DESC
+		 ORDER BY COALESCE(started_at, created_at) DESC
 		 LIMIT $3 OFFSET $4`
 	rows, err := conn.Query(ctx, query, agentID, status, req.Size, req.Offset())
 	if err != nil {
@@ -86,8 +86,8 @@ func (r *Repository) Create(ctx context.Context, e AgentExecution) (AgentExecuti
 	defer release()
 
 	const query = `
-		INSERT INTO agent_execution (agent_id, pipeline_id, status, input)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO agent_execution (agent_id, pipeline_id, status, input, started_at)
+		VALUES ($1, $2, $3, $4, NOW())
 		RETURNING id, agent_id, pipeline_id, status, input, output, error_message,
 		          started_at, finished_at, duration_ms`
 	row := conn.QueryRow(ctx, query, e.AgentID, e.PipelineID, e.Status, e.Input)
@@ -105,7 +105,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (AgentExecution,
 
 	const query = `
 		SELECT id, agent_id, pipeline_id, status, input, output, error_message,
-		       started_at, finished_at, duration_ms
+		       COALESCE(started_at, created_at), finished_at, duration_ms
 		  FROM agent_execution WHERE id = $1`
 	row := conn.QueryRow(ctx, query, id)
 	return scanExecutionRow(row)
@@ -178,7 +178,7 @@ func (r *Repository) GetDetails(ctx context.Context, id uuid.UUID) (ExecutionDet
 
 	details := ExecutionDetails{AgentExecution: exec, Nodes: make([]NodeDetails, len(nodes))}
 	for i, n := range nodes {
-		tools, err := r.ListToolExecutions(ctx, n.ID)
+		tools, err := r.ListToolExecutions(ctx, id, n.ID)
 		if err != nil {
 			return ExecutionDetails{}, err
 		}
@@ -216,14 +216,28 @@ func (r *Repository) Transition(ctx context.Context, id uuid.UUID, from, to stri
 	return nil
 }
 
-// ListToolExecutions returns tool executions for a given node execution.
-func (r *Repository) ListToolExecutions(ctx context.Context, nodeExecutionID uuid.UUID) ([]ToolExecution, error) {
+// ListToolExecutions returns tool executions for a node that belongs to the requested execution.
+func (r *Repository) ListToolExecutions(ctx context.Context, executionID uuid.UUID, nodeExecutionID uuid.UUID) ([]ToolExecution, error) {
 	tenantID := tenant.FromContext(ctx)
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
+
+	var nodeExists bool
+	if err := conn.QueryRow(ctx,
+		`SELECT EXISTS (
+		    SELECT 1 FROM agent_execution_node
+		     WHERE id = $1 AND execution_id = $2
+		)`,
+		nodeExecutionID, executionID,
+	).Scan(&nodeExists); err != nil {
+		return nil, fmt.Errorf("execution: check node ownership: %w", err)
+	}
+	if !nodeExists {
+		return nil, ErrNotFound
+	}
 
 	const query = `
 		SELECT id, node_execution_id, tool_id, status, input, output, error_message,

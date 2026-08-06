@@ -75,6 +75,37 @@ func TestHandler_RefreshTokenKeepsOpaqueKey(t *testing.T) {
 	assert.Equal(t, "new", payload.Token)
 }
 
+func TestHandler_CreateAndRefreshRejectTrailingJSONWithoutSessionEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		handler := NewHandler()
+		router := chi.NewRouter()
+		handler.RegisterRoutes(router)
+		req := httptest.NewRequest(http.MethodPost, "/api/session", bytes.NewBufferString(`{"token":"jwt","tenantId":"test","apiBaseUrl":"https://api.cezar.dev"} {"token":"ignored"}`))
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Empty(t, handler.sessions)
+	})
+
+	t.Run("refresh", func(t *testing.T) {
+		handler := NewHandler()
+		handler.store("opaque", sessionPayload{Token: "old", TenantID: "test", APIBaseURL: "https://api.cezar.dev"})
+		router := chi.NewRouter()
+		handler.RegisterRoutes(router)
+		req := httptest.NewRequest(http.MethodPut, "/api/session/opaque/token", bytes.NewBufferString(`{"token":"new"} {"token":"ignored"}`))
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		payload, ok := handler.load("opaque")
+		require.True(t, ok)
+		assert.Equal(t, "old", payload.Token)
+	})
+}
+
 func TestHandler_ExpiredSessionReturnsNotFound(t *testing.T) {
 	now := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
 	handler := NewHandler()

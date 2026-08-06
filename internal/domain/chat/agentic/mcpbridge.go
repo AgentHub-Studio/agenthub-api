@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/mcpruntime"
 )
 
 const mcpToolPrefix = "mcp__"
@@ -120,6 +123,9 @@ func (b *MCPToolBridge) Execute(ctx context.Context, toolName string, input json
 	if !ok {
 		return nil, fmt.Errorf("mcpbridge: invalid MCP tool name %q", toolName)
 	}
+	if b.filterEnabled && !b.allowedServers[serverName] {
+		return nil, fmt.Errorf("mcpbridge: server %q is not allowed for this agent", serverName)
+	}
 
 	start := time.Now()
 	output, err := b.mcpClient.CallTool(ctx, b.tenantID, serverName, mcpToolName, input)
@@ -167,21 +173,34 @@ func ParseMCPToolName(name string) (serverName, toolName string, ok bool) {
 
 // HTTPMCPClient implements MCPClientService by calling the agenthub-mcp-client-runtime via HTTP.
 type HTTPMCPClient struct {
-	baseURL string
-	client  *http.Client
+	baseURL       string
+	client        *http.Client
+	tokenProvider MCPRuntimeTokenProvider
 }
 
 // NewHTTPMCPClient creates an HTTP-based MCP client.
-// If baseURL is empty it defaults to http://agenthub-mcp-client-runtime:8083.
+// If baseURL is empty it defaults to the in-cluster MCP runtime HTTP Service.
 func NewHTTPMCPClient(baseURL string) *HTTPMCPClient {
+	return newHTTPMCPClient(baseURL, nil)
+}
+
+// NewAuthenticatedHTTPMCPClient creates the production MCP client. Calls fail
+// closed without the provider, preventing user-token forwarding or a tenant
+// selected from a request parameter.
+func NewAuthenticatedHTTPMCPClient(baseURL string, tokenProvider MCPRuntimeTokenProvider) *HTTPMCPClient {
+	return newHTTPMCPClient(baseURL, tokenProvider)
+}
+
+func newHTTPMCPClient(baseURL string, tokenProvider MCPRuntimeTokenProvider) *HTTPMCPClient {
 	if baseURL == "" {
-		baseURL = "http://agenthub-mcp-client-runtime:8083"
+		baseURL = mcpruntime.DefaultHTTPURL
 	}
 	return &HTTPMCPClient{
 		baseURL: baseURL,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
+		tokenProvider: tokenProvider,
 	}
 }
 
@@ -198,10 +217,12 @@ type listToolsResponse struct {
 // Returns (partial-tools, error) when some servers failed — the error
 // aggregates all per-server warning messages so the caller can surface them.
 func (c *HTTPMCPClient) ListTools(ctx context.Context, tenantID string) ([]MCPToolInfo, error) {
-	url := fmt.Sprintf("%s/api/tools?tenantId=%s", c.baseURL, tenantID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tools", nil)
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: new request: %w", err)
+	}
+	if err := c.authenticateRequest(ctx, tenantID, req); err != nil {
+		return nil, err
 	}
 
 	resp, err := c.client.Do(req)
@@ -263,12 +284,14 @@ func (c *HTTPMCPClient) CallTool(ctx context.Context, tenantID, serverName, tool
 		return nil, fmt.Errorf("mcpclient: marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/tools/call?tenantId=%s", c.baseURL, tenantID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/tools/call", bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if err := c.authenticateRequest(ctx, tenantID, req); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -287,8 +310,10 @@ func (c *HTTPMCPClient) CallTool(ctx context.Context, tenantID, serverName, tool
 
 	var result callToolResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		// If we can't parse, return raw body.
-		return body, nil
+		// The runtime contract is always a JSON envelope. Treat a malformed
+		// success body as a transport failure rather than exposing it to the
+		// model as a successful tool result.
+		return nil, fmt.Errorf("mcpclient: decode tool response: %w", err)
 	}
 
 	if result.Error != nil {
@@ -307,6 +332,18 @@ func (c *HTTPMCPClient) CallTool(ctx context.Context, tenantID, serverName, tool
 	}
 
 	return result.Output, nil
+}
+
+func (c *HTTPMCPClient) authenticateRequest(ctx context.Context, tenantID string, req *http.Request) error {
+	if c.tokenProvider == nil {
+		return errors.New("mcpclient: Keycloak workload token provider is required")
+	}
+	token, err := c.tokenProvider.Token(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("mcpclient: obtain Keycloak workload token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }
 
 // --- CachedMCPClient ---
@@ -383,16 +420,29 @@ func (c *CachedMCPClient) CallTool(ctx context.Context, tenantID, serverName, to
 // --- CircuitBreakerMCPClient ---
 
 // CircuitBreakerMCPClient wraps an MCPClientService and tracks consecutive
-// failures per MCP server. After maxFailures consecutive errors from a server,
-// that server is disabled and its tools are excluded from subsequent ListTools
-// responses. The failure count resets on a successful CallTool.
+// failures per tenant and MCP server. After maxFailures consecutive errors from
+// a server, that tenant's server is disabled and its tools are excluded from
+// subsequent ListTools responses. The failure count resets on a successful
+// CallTool.
 // P-C275-1: auto-disable of MCP servers after 3 consecutive failures.
 type CircuitBreakerMCPClient struct {
 	inner       MCPClientService
 	maxFailures int
 	mu          sync.Mutex
-	failures    map[string]int  // key: serverName → consecutive failure count
-	disabled    map[string]bool // key: serverName → whether server is tripped
+	failures    map[mcpCircuitKey]int  // key: tenant/server → consecutive failure count
+	disabled    map[mcpCircuitKey]bool // key: tenant/server → whether server is tripped
+}
+
+type mcpCircuitKey struct {
+	tenantID   string
+	serverName string
+}
+
+func newMCPCircuitKey(tenantID, serverName string) mcpCircuitKey {
+	return mcpCircuitKey{
+		tenantID:   strings.TrimSpace(tenantID),
+		serverName: strings.TrimSpace(serverName),
+	}
 }
 
 // NewCircuitBreakerMCPClient creates a new circuit breaker wrapper.
@@ -405,8 +455,8 @@ func NewCircuitBreakerMCPClient(inner MCPClientService, maxFailures int) *Circui
 	return &CircuitBreakerMCPClient{
 		inner:       inner,
 		maxFailures: maxFailures,
-		failures:    make(map[string]int),
-		disabled:    make(map[string]bool),
+		failures:    make(map[mcpCircuitKey]int),
+		disabled:    make(map[mcpCircuitKey]bool),
 	}
 }
 
@@ -422,7 +472,7 @@ func (c *CircuitBreakerMCPClient) ListTools(ctx context.Context, tenantID string
 
 	out := make([]MCPToolInfo, 0, len(all))
 	for _, tool := range all {
-		if !c.disabled[tool.ServerName] {
+		if !c.disabled[newMCPCircuitKey(tenantID, tool.ServerName)] {
 			out = append(out, tool)
 		}
 	}
@@ -433,35 +483,76 @@ func (c *CircuitBreakerMCPClient) ListTools(ctx context.Context, tenantID string
 // On success the failure counter for the server is reset.
 // Once maxFailures is reached, the server is disabled.
 func (c *CircuitBreakerMCPClient) CallTool(ctx context.Context, tenantID, serverName, toolName string, input json.RawMessage) (json.RawMessage, error) {
+	key := newMCPCircuitKey(tenantID, serverName)
+	c.mu.Lock()
+	isDisabled := c.disabled[key]
+	c.mu.Unlock()
+	if isDisabled {
+		return nil, fmt.Errorf("mcp server %q is disabled for tenant %q after consecutive failures", key.serverName, key.tenantID)
+	}
+
 	result, err := c.inner.CallTool(ctx, tenantID, serverName, toolName, input)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if err != nil {
-		c.failures[serverName]++
-		if c.failures[serverName] >= c.maxFailures {
-			c.disabled[serverName] = true
+		c.failures[key]++
+		if c.failures[key] >= c.maxFailures {
+			c.disabled[key] = true
 		}
 	} else {
 		// Reset on success.
-		c.failures[serverName] = 0
+		delete(c.failures, key)
 	}
 
 	return result, err
 }
 
-// IsDisabled reports whether the given server has been auto-disabled.
+// IsDisabled reports whether the given server has been auto-disabled for any
+// tenant. New callers that know the tenant should use IsDisabledForTenant.
 func (c *CircuitBreakerMCPClient) IsDisabled(serverName string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.disabled[serverName]
+	for key, isDisabled := range c.disabled {
+		if key.serverName == strings.TrimSpace(serverName) && isDisabled {
+			return true
+		}
+	}
+	return false
 }
 
-// Reset clears the circuit breaker state for all servers (for testing or admin reset).
+// IsDisabledForTenant reports whether a server is auto-disabled for one tenant.
+func (c *CircuitBreakerMCPClient) IsDisabledForTenant(tenantID, serverName string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.disabled[newMCPCircuitKey(tenantID, serverName)]
+}
+
+// Reset clears circuit breaker state for the named server in every tenant.
+// It preserves the legacy server-only reset behavior. New callers that know
+// the tenant should use ResetForTenant.
 func (c *CircuitBreakerMCPClient) Reset(serverName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.failures, serverName)
-	delete(c.disabled, serverName)
+	serverName = strings.TrimSpace(serverName)
+	for key := range c.failures {
+		if key.serverName == serverName {
+			delete(c.failures, key)
+		}
+	}
+	for key := range c.disabled {
+		if key.serverName == serverName {
+			delete(c.disabled, key)
+		}
+	}
+}
+
+// ResetForTenant clears circuit breaker state for one tenant/server pair.
+func (c *CircuitBreakerMCPClient) ResetForTenant(tenantID, serverName string) {
+	key := newMCPCircuitKey(tenantID, serverName)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.failures, key)
+	delete(c.disabled, key)
 }

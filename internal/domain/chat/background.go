@@ -14,6 +14,7 @@ type RunStatus string
 const (
 	RunStatusActive    RunStatus = "active"
 	RunStatusCompleted RunStatus = "completed"
+	RunStatusCancelled RunStatus = "cancelled"
 )
 
 // BackgroundRun tracks a single backgrounded agentic run.
@@ -113,6 +114,9 @@ func (reg *BackgroundRunRegistry) MarkCompleted(runID string) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
 	if run, ok := reg.runs[runID]; ok {
+		if run.Status != RunStatusActive {
+			return
+		}
 		run.Status = RunStatusCompleted
 		run.CompletedAt = time.Now()
 	}
@@ -124,7 +128,7 @@ func (reg *BackgroundRunRegistry) Cancel(runID string) {
 	defer reg.mu.Unlock()
 	if run, ok := reg.runs[runID]; ok && run.Status == RunStatusActive {
 		run.cancel()
-		run.Status = RunStatusCompleted
+		run.Status = RunStatusCancelled
 		run.CompletedAt = time.Now()
 	}
 }
@@ -168,8 +172,12 @@ func (reg *BackgroundRunRegistry) cleanup() {
 
 	cutoff := time.Now().Add(-reg.ttl)
 	for id, run := range reg.runs {
-		if run.Status == RunStatusCompleted && run.CompletedAt.Before(cutoff) {
+		if isTerminalRunStatus(run.Status) && run.CompletedAt.Before(cutoff) {
 			delete(reg.runs, id)
 		}
 	}
+}
+
+func isTerminalRunStatus(status RunStatus) bool {
+	return status == RunStatusCompleted || status == RunStatusCancelled
 }

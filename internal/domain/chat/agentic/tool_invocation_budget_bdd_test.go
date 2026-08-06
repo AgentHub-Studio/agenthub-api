@@ -62,8 +62,8 @@ func TestBDD_TOOL010_WarnPolicyRecordsButDoesNotBlock(t *testing.T) {
 		TotalCap: 2,
 		Policy:   ToolBudgetPolicyWarn,
 	})
-	b.Record(ToolCategoryRead)
-	b.Record(ToolCategoryRead)
+	require.NoError(t, b.Record(ToolCategoryRead))
+	require.NoError(t, b.Record(ToolCategoryRead))
 	// exceed the cap
 	require.NoError(t, b.Record(ToolCategoryRead), "warn policy must not return error")
 	snap := b.Snapshot()
@@ -79,7 +79,7 @@ func TestBDD_TOOL010_PercentUsedReflectsProgress(t *testing.T) {
 		Policy:   ToolBudgetPolicyWarn,
 	})
 	for i := 0; i < 75; i++ {
-		b.Record(ToolCategoryInternal)
+		require.NoError(t, b.Record(ToolCategoryInternal))
 	}
 	assert.Equal(t, 75, b.Snapshot().PercentUsed())
 }

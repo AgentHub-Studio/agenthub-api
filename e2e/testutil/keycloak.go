@@ -41,9 +41,9 @@ func (k *KeycloakClient) UserToken(realm, username, password string) (string, er
 	return k.fetchToken(realm, "agenthub-frontend", username, password)
 }
 
-// CreateAdminUser creates a user in the given realm, sets a permanent password
-// and assigns the "admin" realm role. Returns the new user's UUID.
-func (k *KeycloakClient) CreateAdminUser(realm, username, password string) (string, error) {
+// CreateUser creates an enabled user with a permanent password and no elevated
+// realm role. Returns the new user's UUID.
+func (k *KeycloakClient) CreateUser(realm, username, password string) (string, error) {
 	adminToken, err := k.AdminToken()
 	if err != nil {
 		return "", fmt.Errorf("keycloak: admin token: %w", err)
@@ -51,10 +51,13 @@ func (k *KeycloakClient) CreateAdminUser(realm, username, password string) (stri
 
 	// 1. Create user
 	body, _ := json.Marshal(map[string]any{
-		"username":      username,
-		"enabled":       true,
-		"emailVerified": true,
-		"email":         username + "@e2e.test",
+		"username":        username,
+		"enabled":         true,
+		"emailVerified":   true,
+		"email":           username + "@e2e.test",
+		"firstName":       "E2E",
+		"lastName":        "Admin",
+		"requiredActions": []string{},
 		"credentials": []map[string]any{
 			{"type": "password", "value": password, "temporary": false},
 		},
@@ -73,6 +76,21 @@ func (k *KeycloakClient) CreateAdminUser(realm, username, password string) (stri
 
 	location := resp.Header.Get("Location")
 	userID := location[strings.LastIndex(location, "/")+1:]
+	return userID, nil
+}
+
+// CreateAdminUser creates a user in the given realm, sets a permanent password
+// and assigns the "admin" realm role. Returns the new user's UUID.
+func (k *KeycloakClient) CreateAdminUser(realm, username, password string) (string, error) {
+	userID, err := k.CreateUser(realm, username, password)
+	if err != nil {
+		return "", err
+	}
+
+	adminToken, err := k.AdminToken()
+	if err != nil {
+		return userID, fmt.Errorf("keycloak: admin token for role assignment: %w", err)
+	}
 
 	// 2. Fetch "admin" role
 	roleResp, err := k.adminRequest(http.MethodGet,
@@ -82,6 +100,10 @@ func (k *KeycloakClient) CreateAdminUser(realm, username, password string) (stri
 		return userID, fmt.Errorf("keycloak: get admin role: %w", err)
 	}
 	defer roleResp.Body.Close()
+	if roleResp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(roleResp.Body)
+		return userID, fmt.Errorf("keycloak: get admin role %d: %s", roleResp.StatusCode, raw)
+	}
 	rawRole, _ := io.ReadAll(roleResp.Body)
 
 	// 3. Assign role
@@ -92,10 +114,34 @@ func (k *KeycloakClient) CreateAdminUser(realm, username, password string) (stri
 		return userID, fmt.Errorf("keycloak: assign role: %w", err)
 	}
 	defer assignResp.Body.Close()
+	if assignResp.StatusCode != http.StatusNoContent {
+		raw, _ := io.ReadAll(assignResp.Body)
+		return userID, fmt.Errorf("keycloak: assign admin role %d: %s", assignResp.StatusCode, raw)
+	}
 	return userID, nil
 }
 
-// DeleteRealm deletes the given realm. Errors are logged but not fatal.
+// DeleteUser removes a user from a realm. A missing user is already clean.
+func (k *KeycloakClient) DeleteUser(realm, userID string) error {
+	adminToken, err := k.AdminToken()
+	if err != nil {
+		return err
+	}
+	resp, err := k.adminRequest(http.MethodDelete,
+		fmt.Sprintf("/admin/realms/%s/users/%s", realm, userID),
+		adminToken, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak: delete user %d: %s", resp.StatusCode, raw)
+	}
+	return nil
+}
+
+// DeleteRealm deletes the given realm. A missing realm is already clean.
 func (k *KeycloakClient) DeleteRealm(realm string) error {
 	adminToken, err := k.AdminToken()
 	if err != nil {
@@ -108,6 +154,10 @@ func (k *KeycloakClient) DeleteRealm(realm string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak: delete realm %d: %s", resp.StatusCode, raw)
+	}
 	return nil
 }
 

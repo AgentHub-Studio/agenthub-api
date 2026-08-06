@@ -2,7 +2,6 @@ package dependency
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -10,6 +9,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/apierror"
+	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
@@ -21,15 +22,15 @@ type dependencyService interface {
 	Resolve(ctx context.Context, packageID uuid.UUID) (ResolvedDependency, error)
 }
 
-// packageExister verifies parent package existence (bug 210 batch).
-type packageExister interface {
-	GetByID(ctx context.Context, id uuid.UUID) error
+// packageReader verifies parent visibility before serving package resources.
+type packageReader interface {
+	GetAccessibleByID(ctx context.Context, id uuid.UUID, tenantID string) (pkg.PackageResponse, error)
 }
 
 // Handler exposes the HTTP interface for package dependencies.
 type Handler struct {
 	svc dependencyService
-	pkg packageExister
+	pkg packageReader
 }
 
 // NewHandler creates a new dependency Handler.
@@ -37,8 +38,8 @@ func NewHandler(svc dependencyService) *Handler {
 	return &Handler{svc: svc}
 }
 
-// WithPackageExister wires the parent-package existence checker.
-func (h *Handler) WithPackageExister(p packageExister) *Handler {
+// WithPackageReader wires the parent-package visibility checker.
+func (h *Handler) WithPackageReader(p packageReader) *Handler {
 	h.pkg = p
 	return h
 }
@@ -58,11 +59,8 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
-	if h.pkg != nil {
-		if err := h.pkg.GetByID(r.Context(), packageID); err != nil {
-			apierror.Write(w, http.StatusNotFound, "package not found")
-			return
-		}
+	if !h.ensurePackageReadable(w, r, packageID) {
+		return
 	}
 	deps, err := h.svc.List(r.Context(), packageID)
 	if err != nil {
@@ -84,8 +82,11 @@ func (h *Handler) add(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
+	if !h.ensurePackageReadable(w, r, packageID) {
+		return
+	}
 	var req AddDependencyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -119,6 +120,9 @@ func (h *Handler) remove(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
+	if !h.ensurePackageReadable(w, r, packageID) {
+		return
+	}
 	depID, err := uuid.Parse(chi.URLParam(r, "depId"))
 	if err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid dependency id")
@@ -147,6 +151,9 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
+	if !h.ensurePackageReadable(w, r, packageID) {
+		return
+	}
 	tree, err := h.svc.Resolve(r.Context(), packageID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -161,4 +168,15 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 
 func tenantFromContext(ctx context.Context) string {
 	return tenant.FromContext(ctx)
+}
+
+func (h *Handler) ensurePackageReadable(w http.ResponseWriter, r *http.Request, packageID uuid.UUID) bool {
+	if h.pkg == nil {
+		return true
+	}
+	if _, err := h.pkg.GetAccessibleByID(r.Context(), packageID, tenantFromContext(r.Context())); err != nil {
+		apierror.Write(w, http.StatusNotFound, "package not found")
+		return false
+	}
+	return true
 }

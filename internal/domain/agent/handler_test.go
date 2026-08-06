@@ -15,14 +15,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 // mockAgentSvc implements agent.Service for handler tests.
 type mockAgentSvc struct {
-	agents     map[uuid.UUID]agent.AgentResponse
-	updateErr  error // if set, Update returns this error
-	publishErr error // if set, Publish returns this error
+	agents      map[uuid.UUID]agent.AgentResponse
+	createCalls int
+	updateCalls int
+	updateErr   error // if set, Update returns this error
+	publishErr  error // if set, Publish returns this error
 }
 
 func newMockSvc() *mockAgentSvc {
@@ -46,6 +49,7 @@ func (m *mockAgentSvc) Get(_ context.Context, id uuid.UUID) (agent.AgentResponse
 }
 
 func (m *mockAgentSvc) Create(_ context.Context, req agent.CreateAgentRequest) (agent.AgentResponse, error) {
+	m.createCalls++
 	id := uuid.New()
 	resp := agent.AgentResponse{
 		ID:   id,
@@ -56,7 +60,22 @@ func (m *mockAgentSvc) Create(_ context.Context, req agent.CreateAgentRequest) (
 	return resp, nil
 }
 
+func TestHandlerCreateRejectsConflictingEvalSampleRateAliasesWithoutCallingService(t *testing.T) {
+	r, svc := setupAgent()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewBufferString(`{
+"name":"conflicting eval sample rate",
+"slug":"conflicting-eval-sample-rate",
+"eval_config":{"scorers":["exact_match"],"sampleRate":0,"sample_rate":1}
+}`))
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Zero(t, svc.createCalls, "agent service must not receive an ambiguous eval configuration")
+}
+
 func (m *mockAgentSvc) Update(_ context.Context, id uuid.UUID, req agent.UpdateAgentRequest) (agent.AgentResponse, error) {
+	m.updateCalls++
 	if m.updateErr != nil {
 		return agent.AgentResponse{}, m.updateErr
 	}
@@ -147,8 +166,103 @@ func (m *mockAgentSvc) GetWithReadiness(_ context.Context, id uuid.UUID) (agent.
 }
 
 func setupAgent() (*chi.Mux, *mockAgentSvc) {
+	return setupAgentWithRoles("admin")
+}
+
+func setupAgentWithRoles(roles ...string) (*chi.Mux, *mockAgentSvc) {
 	svc := newMockSvc()
 	h := agent.NewHandler(svc)
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	h.RegisterRoutes(r)
+	return r, svc
+}
+
+func setupAgentWithService(svc agent.Service) *chi.Mux {
+	h := agent.NewHandler(svc)
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), "admin")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	h.RegisterRoutes(r)
+	return r
+}
+
+func TestAgentHandler_CreateRejectsConflictingModelFallbackAliases(t *testing.T) {
+	repo := newMockRepo()
+	svc := agent.NewService(repo, &mockNoopBindingRepo{}, &mockNoopSkillRepo{})
+	r := setupAgentWithService(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewBufferString(`{
+		"name":"conflicting fallback aliases",
+		"modelConfig":{
+			"fallback_chain":[{"provider":"openrouter","model":"snake-primary"}],
+			"fallbackChain":[{"provider":"ollama","model":"camel-primary"}]
+		}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "fallback_chain")
+	assert.Empty(t, repo.data, "the HTTP boundary must not persist an ambiguous modelConfig")
+}
+
+type mockTemplateGetter struct {
+	calls int
+}
+
+func (m *mockTemplateGetter) Get(_ context.Context, _ uuid.UUID) (agent.TemplateContent, error) {
+	m.calls++
+	return agent.TemplateContent{Content: "template content"}, nil
+}
+
+func setupAgentWithTemplate(templates agent.TemplateGetter) (*chi.Mux, *mockAgentSvc) {
+	svc := newMockSvc()
+	h := agent.NewHandler(svc).WithTemplateGetter(templates)
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), "admin")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	h.RegisterRoutes(r)
+	return r, svc
+}
+
+type fakeReadAccess struct {
+	allowed      bool
+	calls        int
+	subjectID    string
+	resourceType string
+	resourceID   string
+	action       string
+}
+
+func (f *fakeReadAccess) CanAccess(_ context.Context, subjectID, resourceType, resourceID, action string) (bool, error) {
+	f.calls++
+	f.subjectID = subjectID
+	f.resourceType = resourceType
+	f.resourceID = resourceID
+	f.action = action
+	return f.allowed, nil
+}
+
+func setupAgentWithReadAccess(identity agent.RequestIdentity, checker *fakeReadAccess) (*chi.Mux, *mockAgentSvc) {
+	svc := newMockSvc()
+	h := agent.NewHandler(svc).WithReadAccess(checker, func(*http.Request) agent.RequestIdentity {
+		return identity
+	})
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
 	return r, svc
@@ -179,6 +293,42 @@ func TestAgentHandler_List_Empty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+func TestAgentHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupAgentWithRoles("user")
+	id := uuid.NewString()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create", method: http.MethodPost, path: "/api/agents", body: `{"name":"Agent","slug":"agent"}`},
+		{name: "bulk delete", method: http.MethodDelete, path: "/api/agents", body: `{"ids":["` + id + `"]}`},
+		{name: "put", method: http.MethodPut, path: "/api/agents/" + id, body: `{}`},
+		{name: "patch", method: http.MethodPatch, path: "/api/agents/" + id, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/agents/" + id},
+		{name: "publish", method: http.MethodPost, path: "/api/agents/" + id + "/publish"},
+		{name: "archive", method: http.MethodPost, path: "/api/agents/" + id + "/archive"},
+		{name: "restore", method: http.MethodPost, path: "/api/agents/" + id + "/restore"},
+		{name: "clone", method: http.MethodPost, path: "/api/agents/" + id + "/clone", body: `{}`},
+		{name: "apply template", method: http.MethodPost, path: "/api/agents/" + id + "/apply-template", body: `{}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
+}
+
 func TestAgentHandler_Create_Success(t *testing.T) {
 	r, _ := setupAgent()
 	body, _ := json.Marshal(agent.CreateAgentRequest{Name: "My Agent"})
@@ -201,6 +351,69 @@ func TestAgentHandler_Create_InvalidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAgentHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, svc := setupAgent()
+		req := httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewBufferString(`{"name":"first"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.agents)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		r, svc := setupAgent()
+		id := uuid.New()
+		svc.agents[id] = agent.AgentResponse{ID: id, Name: "original"}
+		req := httptest.NewRequest(http.MethodPatch, "/api/agents/"+id.String(), bytes.NewBufferString(`{"name":"changed"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, "original", svc.agents[id].Name)
+		assert.Zero(t, svc.updateCalls)
+	})
+
+	t.Run("bulk delete", func(t *testing.T) {
+		r, svc := setupAgent()
+		id := uuid.New()
+		svc.agents[id] = agent.AgentResponse{ID: id, Name: "original"}
+		req := httptest.NewRequest(http.MethodDelete, "/api/agents", bytes.NewBufferString(`{"ids":["`+id.String()+`"]}{"ids":[]}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Contains(t, svc.agents, id)
+	})
+
+	t.Run("clone", func(t *testing.T) {
+		r, svc := setupAgent()
+		id := uuid.New()
+		svc.agents[id] = agent.AgentResponse{ID: id, Name: "original"}
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/"+id.String()+"/clone", bytes.NewBufferString(`{"name":"copy"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Len(t, svc.agents, 1)
+	})
+
+	t.Run("apply template", func(t *testing.T) {
+		templates := &mockTemplateGetter{}
+		r, svc := setupAgentWithTemplate(templates)
+		id := uuid.New()
+		svc.agents[id] = agent.AgentResponse{ID: id, Name: "original"}
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/"+id.String()+"/apply-template", bytes.NewBufferString(`{"template_id":"`+uuid.NewString()+`"}{"merge":true}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Zero(t, templates.calls)
+		assert.Zero(t, svc.updateCalls)
+	})
 }
 
 func TestAgentHandler_Get_Success(t *testing.T) {
@@ -231,6 +444,52 @@ func TestAgentHandler_Get_InvalidID(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAgentHandler_Get_ForbiddenWithoutReadGrant(t *testing.T) {
+	checker := &fakeReadAccess{allowed: false}
+	r, svc := setupAgentWithReadAccess(agent.RequestIdentity{SubjectID: "viewer@test.local", Roles: []string{"user"}}, checker)
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Private Agent"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+id.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equal(t, 1, checker.calls)
+	assert.Equal(t, "viewer@test.local", checker.subjectID)
+	assert.Equal(t, "agents", checker.resourceType)
+	assert.Equal(t, id.String(), checker.resourceID)
+	assert.Equal(t, "read", checker.action)
+}
+
+func TestAgentHandler_Get_AllowedWithReadGrant(t *testing.T) {
+	checker := &fakeReadAccess{allowed: true}
+	r, svc := setupAgentWithReadAccess(agent.RequestIdentity{SubjectID: "viewer@test.local", Roles: []string{"user"}}, checker)
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Shared Agent"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+id.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 1, checker.calls)
+}
+
+func TestAgentHandler_Get_AdminBypassesReadGrant(t *testing.T) {
+	checker := &fakeReadAccess{allowed: false}
+	r, svc := setupAgentWithReadAccess(agent.RequestIdentity{SubjectID: "admin@test.local", Roles: []string{"admin"}}, checker)
+	id := uuid.New()
+	svc.agents[id] = agent.AgentResponse{ID: id, Name: "Admin Agent"}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+id.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 0, checker.calls)
 }
 
 func TestAgentHandler_Delete_Success(t *testing.T) {

@@ -14,10 +14,10 @@ import (
 
 // mockExecRepo implements ExecutionRepository for unit tests.
 type mockExecRepo struct {
-	data      map[uuid.UUID]execution.AgentExecution
-	nodes     map[uuid.UUID][]execution.AgentExecutionNode
-	tools     map[uuid.UUID][]execution.ToolExecution
-	transErr  error
+	data     map[uuid.UUID]execution.AgentExecution
+	nodes    map[uuid.UUID][]execution.AgentExecutionNode
+	tools    map[uuid.UUID][]execution.ToolExecution
+	transErr error
 }
 
 func newMockRepo() *mockExecRepo {
@@ -111,7 +111,17 @@ func (m *mockExecRepo) ListNodes(_ context.Context, execID uuid.UUID) ([]executi
 	return m.nodes[execID], nil
 }
 
-func (m *mockExecRepo) ListToolExecutions(_ context.Context, nodeID uuid.UUID) ([]execution.ToolExecution, error) {
+func (m *mockExecRepo) ListToolExecutions(_ context.Context, execID uuid.UUID, nodeID uuid.UUID) ([]execution.ToolExecution, error) {
+	found := false
+	for _, node := range m.nodes[execID] {
+		if node.ID == nodeID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, execution.ErrNotFound
+	}
 	return m.tools[nodeID], nil
 }
 

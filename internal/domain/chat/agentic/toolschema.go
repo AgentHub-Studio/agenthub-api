@@ -85,6 +85,9 @@ type LLMTool struct {
 	// Injected into the system prompt as a sub-bullet under the tool listing.
 	// Inspired by Claude Code's BundledSkillDefinition.whenToUse.
 	WhenToUse string `json:"-"` // not sent to LLM; injected into system prompt
+	// SkillSlug stores the owning skill slug when this LLM tool name maps to a
+	// skill-bound child tool (Name may be tool.slug in multi-tool mode).
+	SkillSlug string `json:"-"` // not sent to LLM
 	// InterruptBehavior is "block" or "" (meaning cancel).
 	// "block" tools complete before the run stops; "" tools are aborted immediately.
 	// Inspired by Claude Code's Tool.ts interruptBehavior(): 'cancel' | 'block'.
@@ -128,6 +131,7 @@ type ToolSchemaBuilder struct {
 	enableManagement       bool        // P-C184-2: gate agenthub_manage to agents with enable_management=true
 	disableAskUser         bool        // per-agent opt-out — removes ask_user from the builtin set
 	disableAgentDelegation bool        // per-agent opt-out — removes the agent sub-agent spawner
+	requestRoles           []string    // authenticated caller roles used for skill required_roles filtering
 	skillIDsSnapshot       []uuid.UUID // P-C115-1: when set, use these IDs instead of querying by agentID
 	lastUserOnlySkills     []skill.Skill
 	lastWarnings           []string
@@ -148,6 +152,9 @@ func (b *ToolSchemaBuilder) Clone() *ToolSchemaBuilder {
 	cloned := *b
 	if len(b.lastUserOnlySkills) > 0 {
 		cloned.lastUserOnlySkills = append([]skill.Skill(nil), b.lastUserOnlySkills...)
+	}
+	if len(b.requestRoles) > 0 {
+		cloned.requestRoles = append([]string(nil), b.requestRoles...)
 	}
 	cloned.lastWarnings = nil
 	return &cloned
@@ -212,6 +219,13 @@ func (b *ToolSchemaBuilder) WithDisableAgentDelegation(disabled bool) *ToolSchem
 // - Sub-agents from inheriting management scope from their parent (P-C281-1)
 func (b *ToolSchemaBuilder) WithEnableManagement(enabled bool) *ToolSchemaBuilder {
 	b.enableManagement = enabled
+	return b
+}
+
+// WithRequestRoles sets the authenticated caller roles used to filter
+// skill.RequiredRoles before the LLM tool schema is built.
+func (b *ToolSchemaBuilder) WithRequestRoles(roles []string) *ToolSchemaBuilder {
+	b.requestRoles = append([]string(nil), roles...)
 	return b
 }
 
@@ -284,6 +298,7 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 			}
 		}
 	}
+	skills = filterSkillsByRequiredRoles(skills, b.requestRoles)
 
 	// Load per-skill token budgets for this agent (optional).
 	var budgetMap map[uuid.UUID]*int
@@ -342,7 +357,7 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 
 		// Convert legacy knowledgebase.KnowledgeBase to the internal type if needed
 		// or use the response format.
-		var kbs []knowledgebase.KnowledgeBase = kbsResp
+		kbs := kbsResp
 
 		// Auto-include tenant-wide KBs that are not explicitly linked
 		allKbs, _, err := b.kbs.List(ctx, pagination.PageRequest{Page: 0, Size: 100})
@@ -470,6 +485,42 @@ func (b *ToolSchemaBuilder) Build(ctx context.Context, agentID uuid.UUID) ([]LLM
 	})
 
 	return tools, nil
+}
+
+func filterSkillsByRequiredRoles(skills []skill.Skill, requestRoles []string) []skill.Skill {
+	if len(skills) == 0 {
+		return skills
+	}
+	filtered := make([]skill.Skill, 0, len(skills))
+	for _, sk := range skills {
+		if skillVisibleForRoles(sk.RequiredRoles, requestRoles) {
+			filtered = append(filtered, sk)
+		}
+	}
+	return filtered
+}
+
+func skillVisibleForRoles(requiredRoles, requestRoles []string) bool {
+	if len(requiredRoles) == 0 {
+		return true
+	}
+	roles := make(map[string]struct{}, len(requestRoles))
+	for _, role := range requestRoles {
+		role = strings.TrimSpace(role)
+		if role != "" {
+			roles[role] = struct{}{}
+		}
+	}
+	for _, required := range requiredRoles {
+		required = strings.TrimSpace(required)
+		if required == "" {
+			continue
+		}
+		if _, ok := roles[required]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func appendNonDuplicateMCPTools(tools []LLMTool, mcpTools []LLMTool) []LLMTool {
@@ -648,6 +699,7 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		Name:                   sk.Slug,
 		Description:            description,
 		InputSchema:            inputSchema,
+		SkillSlug:              sk.Slug,
 		ReadOnly:               readOnly,
 		MaxResultChars:         maxResultChars,
 		ShouldDefer:            shouldDefer,
@@ -657,6 +709,7 @@ func (b *ToolSchemaBuilder) skillToLLMTool(ctx context.Context, sk skill.Skill) 
 		AlwaysLoad:             alwaysLoad,
 		DisableModelInvocation: sk.DisableModelInvocation,
 		ConcurrencySafe:        concurrencySafe,
+		ContextMode:            sk.ContextMode,
 		InterruptBehavior:      interruptBehavior,
 		IsSearchOrRead:         isSearchOrRead,
 	}, hasActiveTool, nil
@@ -741,6 +794,7 @@ func (b *ToolSchemaBuilder) skillToLLMTools(ctx context.Context, sk skill.Skill)
 			Name:                   bt.Slug,
 			Description:            desc,
 			InputSchema:            schema,
+			SkillSlug:              sk.Slug,
 			ReadOnly:               readOnly,
 			MaxResultChars:         maxResultChars,
 			ShouldDefer:            bt.ShouldDefer,
@@ -750,6 +804,7 @@ func (b *ToolSchemaBuilder) skillToLLMTools(ctx context.Context, sk skill.Skill)
 			AlwaysLoad:             bt.AlwaysLoad,
 			DisableModelInvocation: sk.DisableModelInvocation,
 			ConcurrencySafe:        concurrencySafe,
+			ContextMode:            sk.ContextMode,
 			InterruptBehavior:      interruptBehavior,
 			IsSearchOrRead:         bt.IsSearchOrRead,
 		})
@@ -784,9 +839,9 @@ var templateVarRe = regexp.MustCompile(`\{\{input\.(\w+)\}\}|\{(\w+)\}`)
 //
 // Priority:
 //  1. Explicit "inputSchema" field in config — used as-is.
-//  2. For HTTP tools: template variables extracted from "url" and "body_template"
-//     fields (e.g. {city} in the URL becomes a required string parameter so the
-//     LLM knows what inputs to provide).
+//  2. For HTTP tools: template variables extracted from URL and every supported
+//     body-template alias (e.g. {city} becomes a required string parameter so
+//     the LLM knows what inputs to provide).
 func deriveSchemaFromToolConfig(t tool.Tool) json.RawMessage {
 	if len(t.Config) == 0 {
 		return nil
@@ -853,11 +908,12 @@ func deriveSchemaFromToolConfig(t tool.Tool) json.RawMessage {
 		}
 	}
 
-	// For HTTP tools: auto-derive schema from {variable} placeholders in url/body_template.
+	// For HTTP tools: auto-derive schema from {variable} placeholders in URL and
+	// all body aliases accepted by the HTTP executor.
 	// This ensures the LLM knows what parameters to pass even when inputSchema is absent.
 	seen := map[string]bool{}
 	var vars []string
-	for _, field := range []string{"url", "urlTemplate", "body_template"} {
+	for _, field := range []string{"url", "urlTemplate", "bodyTemplate", "body_template", "body"} {
 		if s, ok := cfg[field].(string); ok {
 			for _, m := range templateVarRe.FindAllStringSubmatch(s, -1) {
 				// Group 1: {{input.key}} form; Group 2: {key} form.
@@ -930,12 +986,145 @@ func documentSearchTool(kbs []knowledgebase.KnowledgeBase) LLMTool {
 				"type": "string",
 				"description": "Optional UUID of a specific knowledge base to search"
 			},
+			"metadataFilter": {
+				"type": "object",
+				"description": "Optional V2 document metadata filter. Use exactly one expression: a predicate {field,op,value}, {all:[...]}, {any:[...]}, or {not:{...}}. Field accepts one or two metadata levels separated by a dot, for example customer.region. Operators: eq, neq, in, notIn, exists, notExists, gt, gte, lt, lte, like, ilike, containsAny, containsAll. The encoded filter is limited to 16 KiB; the server also enforces depth 8, 64 predicates, 32 expressions per group, and 64 list values.",
+				"$ref": "#/$defs/metadataFilter"
+			},
 			"limit": {
 				"type": "integer",
 				"description": "Maximum number of results to return (default 5)"
 			}
 		},
-		"required": ["query"]
+		"required": ["query"],
+		"$defs": {
+			"metadataFilter": {
+				"type": "object",
+				"oneOf": [
+					{"$ref": "#/$defs/metadataPredicate"},
+					{"$ref": "#/$defs/metadataAllGroup"},
+					{"$ref": "#/$defs/metadataAnyGroup"},
+					{"$ref": "#/$defs/metadataNotGroup"}
+				]
+			},
+			"metadataAllGroup": {
+				"type": "object",
+				"properties": {
+					"all": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/metadataFilter"}}
+				},
+				"required": ["all"],
+				"additionalProperties": false
+			},
+			"metadataAnyGroup": {
+				"type": "object",
+				"properties": {
+					"any": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/metadataFilter"}}
+				},
+				"required": ["any"],
+				"additionalProperties": false
+			},
+			"metadataNotGroup": {
+				"type": "object",
+				"properties": {
+					"not": {"$ref": "#/$defs/metadataFilter"}
+				},
+				"required": ["not"],
+				"additionalProperties": false
+			},
+			"metadataPredicate": {
+				"oneOf": [
+					{
+						"type": "object",
+						"properties": {
+							"field": {"$ref": "#/$defs/metadataField"},
+							"op": {"enum": ["eq", "neq"]},
+							"value": {"$ref": "#/$defs/metadataEqValue"}
+						},
+						"required": ["field", "op", "value"],
+						"additionalProperties": false
+					},
+					{
+						"type": "object",
+						"properties": {
+							"field": {"$ref": "#/$defs/metadataField"},
+							"op": {"enum": ["in", "notIn"]},
+							"value": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/metadataScalar"}}
+						},
+						"required": ["field", "op", "value"],
+						"additionalProperties": false
+					},
+					{
+						"type": "object",
+						"properties": {
+							"field": {"$ref": "#/$defs/metadataField"},
+							"op": {"enum": ["exists", "notExists"]}
+						},
+						"required": ["field", "op"],
+						"additionalProperties": false
+					},
+					{
+						"type": "object",
+						"properties": {
+							"field": {"$ref": "#/$defs/metadataField"},
+							"op": {"enum": ["gt", "gte", "lt", "lte"]},
+							"value": {"type": "number"}
+						},
+						"required": ["field", "op", "value"],
+						"additionalProperties": false
+					},
+					{
+						"type": "object",
+						"properties": {
+							"field": {"$ref": "#/$defs/metadataField"},
+							"op": {"enum": ["like", "ilike"]},
+							"value": {"type": "string"}
+						},
+						"required": ["field", "op", "value"],
+						"additionalProperties": false
+					},
+					{
+						"type": "object",
+						"properties": {
+							"field": {"$ref": "#/$defs/metadataField"},
+							"op": {"enum": ["containsAny", "containsAll"]},
+							"value": {"type": "array", "maxItems": 64, "items": {"type": "string"}}
+						},
+						"required": ["field", "op", "value"],
+						"additionalProperties": false
+					}
+				]
+			},
+			"metadataField": {
+				"type": "string",
+				"minLength": 1,
+				"description": "One or two metadata keys separated by a dot, for example customer.region"
+			},
+			"metadataScalar": {
+				"type": ["string", "number", "boolean"]
+			},
+			"metadataEqValue": {
+				"oneOf": [
+					{"$ref": "#/$defs/metadataScalar"},
+					{"$ref": "#/$defs/metadataStringArray"},
+					{"$ref": "#/$defs/metadataSecondLevelObject"}
+				]
+			},
+			"metadataSecondLevelObject": {
+				"type": "object",
+				"minProperties": 1,
+				"additionalProperties": {
+					"oneOf": [
+						{"$ref": "#/$defs/metadataScalar"},
+						{"$ref": "#/$defs/metadataStringArray"}
+					]
+				}
+			},
+			"metadataStringArray": {
+				"type": "array",
+				"maxItems": 64,
+				"items": {"type": "string"}
+			}
+		}
 	}`)
 	return LLMTool{
 		Name:        "document_search",

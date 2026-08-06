@@ -16,6 +16,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/agent"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
+	chatTask "github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/task"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/integration"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledge"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
@@ -43,8 +44,13 @@ type ChatModelFactory interface {
 	// from the tenant's settings. Returns "" if not configured.
 	ResolveModel(ctx context.Context, provider string) string
 	// ResolveDefaultProvider returns the tenant's configured default LLM provider
-	// from the "general.defaultProvider" setting. Returns "" if not configured.
+	// from the "llm.defaultProvider" setting. Returns "" if not configured.
 	ResolveDefaultProvider(ctx context.Context) string
+}
+
+type toolSuspendStateStore interface {
+	CreateToolSuspendState(ctx context.Context, sessionID uuid.UUID, requestID, toolName string, payload json.RawMessage) error
+	ResolveToolSuspendState(ctx context.Context, sessionID uuid.UUID, requestID string, result chat.ElicitationResult) (bool, error)
 }
 
 // SessionRunnerAdapter implements chat.SessionRunner by creating a Runner
@@ -60,12 +66,17 @@ type SessionRunnerAdapter struct {
 	repo         chat.Repository
 	agentLoader  AgentConfigLoader
 	agentRepo    agent.Repository
+	agentSvc     agent.Service
 	skillRepo    *skill.Repository
 	toolRepo     *tool.Repository
 	integRepo    *integration.Service
 	mcpRepo      mcp.Repository
+	skillManager *skill.Service
+	toolManager  *tool.Service
+	mcpManager   *mcp.Service
 	mcpClient    MCPClientService
 	docSearch    knowledge.DocumentSearchClient // P-E1-2: wired when embedding service is available
+	audit        ManagementAuditRecorder
 
 	// llmCallTimeout overrides the default per-LLM-call timeout set by DefaultRunConfig.
 	// P-C102-1: sourced from LLM_CALL_TIMEOUT_SECS env var at server startup.
@@ -84,6 +95,8 @@ type SessionRunnerAdapter struct {
 
 	// permAudit, when set, records permission decisions for every tool call.
 	permAudit PermissionAuditLogger
+	// taskRepo persists delegated sub-agent work for the parent session.
+	taskRepo chatTask.Repository
 }
 
 // WithClientStateStore wires a [ClientStateStore] for CopilotKit Phase 1
@@ -204,6 +217,7 @@ func NewSessionRunnerAdapterWithFactory(
 		repo:         repo,
 		agentLoader:  agentLoader,
 		agentRepo:    agentRepo,
+		agentSvc:     nil,
 		skillRepo:    skillRepo,
 		toolRepo:     toolRepo,
 		integRepo:    integRepo,
@@ -232,6 +246,12 @@ func (a *SessionRunnerAdapter) WithPermissionAuditLogger(logger PermissionAuditL
 	return a
 }
 
+// WithTaskRepository enables persistence of delegated sub-agent task lifecycles.
+func (a *SessionRunnerAdapter) WithTaskRepository(repo chatTask.Repository) *SessionRunnerAdapter {
+	a.taskRepo = repo
+	return a
+}
+
 // WithDocumentSearchClient wires the document search client so the document_search
 // builtin tool executes locally via pgvector instead of failing with "not available".
 // P-E1-2: call this when the embedding service URL is configured.
@@ -247,6 +267,52 @@ func (a *SessionRunnerAdapter) WithMemoryBridge(bridge *MemoryBridge) *SessionRu
 	return a
 }
 
+// WithAgentService wires an agent service used by management operations.
+// Management deletes go through this service to keep audit logging consistent
+// with other write paths.
+func (a *SessionRunnerAdapter) WithAgentService(svc agent.Service) *SessionRunnerAdapter {
+	a.agentSvc = svc
+	return a
+}
+
+// WithManagementServices wires the same configured services used by the public
+// API into agenthub_manage, keeping its mutations on the canonical boundaries.
+func (a *SessionRunnerAdapter) WithManagementServices(skillSvc *skill.Service, toolSvc *tool.Service, mcpSvc *mcp.Service) *SessionRunnerAdapter {
+	a.skillManager = skillSvc
+	a.toolManager = toolSvc
+	a.mcpManager = mcpSvc
+	return a
+}
+
+// WithManagementAuditRecorder wires audit logging for destructive management operations.
+func (a *SessionRunnerAdapter) WithManagementAuditRecorder(recorder ManagementAuditRecorder) *SessionRunnerAdapter {
+	a.audit = recorder
+	return a
+}
+
+func (a *SessionRunnerAdapter) newManagementExecutor() *ManagementExecutor {
+	skillManager := a.skillManager
+	if skillManager == nil && a.skillRepo != nil {
+		skillManager = skill.NewService(a.skillRepo)
+	}
+	toolManager := a.toolManager
+	if toolManager == nil && a.toolRepo != nil {
+		toolManager = tool.NewService(a.toolRepo)
+	}
+	mcpManager := a.mcpManager
+	if mcpManager == nil && a.mcpRepo != nil {
+		mcpManager = mcp.NewService(a.mcpRepo)
+	}
+	return NewManagementExecutor(
+		a.agentSvc,
+		a.agentRepo,
+		a.skillRepo,
+		skillManager,
+		a.toolRepo,
+		a.mcpRepo,
+	).WithToolManager(toolManager).WithMCPManager(mcpManager).WithAuditRecorder(a.audit)
+}
+
 // staticModelFactory always returns the same ChatModel regardless of provider.
 type staticModelFactory struct {
 	model ai.ChatModel
@@ -259,8 +325,68 @@ func (f staticModelFactory) Build(_ context.Context, _, _ string) (ai.ChatModel,
 	return f.model, nil
 }
 
-func (f staticModelFactory) ResolveModel(_ context.Context, _ string) string          { return "" }
+func (f staticModelFactory) ResolveModel(_ context.Context, _ string) string { return "" }
 func (f staticModelFactory) ResolveDefaultProvider(_ context.Context) string { return "" }
+
+func (a *SessionRunnerAdapter) withFallbackModels(ctx context.Context, config RunConfig, primary ai.ChatModel) (ai.ChatModel, error) {
+	if len(config.ModelFallbackChain) == 0 || primary == nil {
+		return primary, nil
+	}
+	router := &fallbackRoutingModel{
+		primary: primary,
+		byModel: map[string]ai.ChatModel{
+			config.Model: primary,
+		},
+	}
+	for _, step := range config.ModelFallbackChain {
+		if step.Model == "" {
+			continue
+		}
+		provider := step.Provider
+		if provider == "" {
+			provider = config.Provider
+		}
+		if provider == "" || provider == config.Provider {
+			router.byModel[step.Model] = primary
+			continue
+		}
+		model, err := a.modelFactory.Build(ctx, provider, step.Model)
+		if err != nil {
+			return nil, fmt.Errorf("session runner: build fallback model for provider %q: %w", provider, err)
+		}
+		router.byModel[step.Model] = model
+	}
+	if len(router.byModel) <= 1 {
+		return primary, nil
+	}
+	return router, nil
+}
+
+type fallbackRoutingModel struct {
+	primary ai.ChatModel
+	byModel map[string]ai.ChatModel
+}
+
+func (m *fallbackRoutingModel) Chat(ctx context.Context, messages []ai.Message, opts ai.ChatOptions) (*ai.ChatResponse, error) {
+	return m.modelFor(opts.Model).Chat(ctx, messages, opts)
+}
+
+func (m *fallbackRoutingModel) ChatStream(ctx context.Context, messages []ai.Message, opts ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+	return m.modelFor(opts.Model).ChatStream(ctx, messages, opts)
+}
+
+func (m *fallbackRoutingModel) GetProviderName() string {
+	return m.primary.GetProviderName()
+}
+
+func (m *fallbackRoutingModel) modelFor(model string) ai.ChatModel {
+	if m != nil && model != "" {
+		if selected, ok := m.byModel[model]; ok && selected != nil {
+			return selected
+		}
+	}
+	return m.primary
+}
 
 // nopPersister is a MessagePersister that accepts writes without hitting the
 // database. It is used for sub-agent (subtask) runners whose sessions are
@@ -277,6 +403,7 @@ type adapterRunnerFactory struct {
 	adapter      *SessionRunnerAdapter
 	chatModel    ai.ChatModel
 	agentMailbox *AgentMailbox
+	coordinator  *CoordinatorState
 }
 
 func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
@@ -293,8 +420,7 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 		config,
 	)
 	if f.adapter.agentRepo != nil {
-		// Pass skill.NewService as skillDeleter so delete operations enforce binding checks. P-C185-1.
-		managementExec := NewManagementExecutor(f.adapter.agentRepo, f.adapter.skillRepo, skill.NewService(f.adapter.skillRepo), f.adapter.toolRepo, f.adapter.mcpRepo)
+		managementExec := f.adapter.newManagementExecutor()
 		runner.WithManagementExecutor(managementExec)
 	}
 	if f.adapter.mcpClient != nil {
@@ -306,6 +432,7 @@ func (f *adapterRunnerFactory) NewRunner(config RunConfig) *Runner {
 	runner.WithAgentMailbox(f.agentMailbox)
 	subtaskExec := NewSubtaskExecutor(f)
 	subtaskExec.WithAgentMailbox(f.agentMailbox)
+	subtaskExec.WithCoordinatorState(f.coordinator)
 	runner.WithSubtaskExecutor(subtaskExec)
 	f.adapter.attachAuxiliaryComponents(runner, f, f.chatModel, config)
 
@@ -363,9 +490,13 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		a.prompt.ClearCacheForAgent(in.AgentID)
 	}
 
-	agentCfg, err := a.agentLoader.GetAgentForRun(ctx, in.AgentID)
-	if err != nil {
-		return nil, fmt.Errorf("session runner: load agent: %w", err)
+	agentCfg := in.AgentConfig
+	if agentCfg == nil || agentCfg.ID != in.AgentID {
+		var err error
+		agentCfg, err = a.agentLoader.GetAgentForRun(ctx, in.AgentID)
+		if err != nil {
+			return nil, fmt.Errorf("session runner: load agent: %w", err)
+		}
 	}
 
 	// P-C178-1: reject runs for agents that are not PUBLISHED.
@@ -378,7 +509,8 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		// OK — proceed
 	}
 
-	config := resolveRunConfig(ctx, a.modelFactory, agentCfg.ModelConfig, a.llmCallTimeout)
+	effectiveModelConfig := resolveModelConfig(in, agentCfg)
+	config := resolveRunConfig(ctx, a.modelFactory, effectiveModelConfig, a.llmCallTimeout)
 
 	// Resolve the ChatModel for this agent's provider from the factory.
 	// The model name is passed so the factory can select the correct API
@@ -387,14 +519,29 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	if err != nil {
 		return nil, fmt.Errorf("session runner: build model for provider %q: %w", config.Provider, err)
 	}
+	chatModel, err = a.withFallbackModels(ctx, config, chatModel)
+	if err != nil {
+		return nil, err
+	}
 	// P-I1-1: log the effective model/provider at run start so operators can verify
 	// which model is executing without querying the DB.
 	slog.Info("agentic: run started", "model", config.Model, "provider", config.Provider, "agentID", in.AgentID)
 
 	// Create a shared mailbox for inter-agent messaging within this run.
 	agentMailbox := NewAgentMailbox()
+	var coordinator *CoordinatorState
+	if a.taskRepo != nil {
+		coordinator = NewCoordinatorState().
+			WithRepository(a.taskRepo, in.SessionID).
+			WithContext(ctx)
+	}
 
-	factory := &adapterRunnerFactory{adapter: a, chatModel: chatModel, agentMailbox: agentMailbox}
+	factory := &adapterRunnerFactory{
+		adapter:      a,
+		chatModel:    chatModel,
+		agentMailbox: agentMailbox,
+		coordinator:  coordinator,
+	}
 	runner := NewRunner(
 		chatModel,
 		a.skillClient,
@@ -410,8 +557,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	// P-C325-2: wire metadata persister so run metrics are recorded on completion.
 	runner.WithMetadataPersister(a.repo)
 	if a.agentRepo != nil {
-		// Pass skill.NewService as skillDeleter so delete operations enforce binding checks. P-C185-1.
-		managementExec := NewManagementExecutor(a.agentRepo, a.skillRepo, skill.NewService(a.skillRepo), a.toolRepo, a.mcpRepo)
+		managementExec := a.newManagementExecutor()
 		runner.WithManagementExecutor(managementExec)
 	}
 	if a.mcpClient != nil {
@@ -425,6 +571,7 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	runner.WithAgentMailbox(agentMailbox)
 	subtaskExec := NewSubtaskExecutor(factory)
 	subtaskExec.WithAgentMailbox(agentMailbox)
+	subtaskExec.WithCoordinatorState(coordinator)
 	runner.WithSubtaskExecutor(subtaskExec)
 	a.attachAuxiliaryComponents(runner, factory, chatModel, config)
 
@@ -459,6 +606,15 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 			ServerName: req.ServerName,
 			Payload:    payload,
 		})
+		if store, ok := a.repo.(toolSuspendStateStore); ok {
+			if err := store.CreateToolSuspendState(ctx, in.SessionID, req.RequestID, "ask_user", json.RawMessage(data)); err != nil {
+				slog.Warn("agentic: failed to persist suspended tool state",
+					"requestID", req.RequestID,
+					"sessionID", in.SessionID,
+					"error", err,
+				)
+			}
+		}
 		slog.Info("agentic: emitting input_request SSE event",
 			"requestID", req.RequestID,
 			"payloadSize", len(payload),
@@ -469,18 +625,30 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 
 	// P-C115-1: use session snapshot when available to preserve persona consistency.
 	effectiveSystemPrompt := resolveSystemPrompt(in, agentCfg)
-	effectiveModelConfig := resolveModelConfig(in, agentCfg)
-	_ = effectiveModelConfig // model config snapshot used for future provider resolution
+	requestContext := requestContextFromContext(ctx, in.TenantID)
+	outputProcessors := in.OutputProcessors
+	if len(outputProcessors) == 0 {
+		outputProcessors = agentCfg.OutputProcessors
+	}
 
-	// P-C173-1: detect modelConfig changes between turns and persist a system
-	// notification so the LLM is aware the configuration has changed.
+	// P-C173-1 / RT-01: detect agent config changes between turns and persist a
+	// system notification so the LLM is aware the session remains pinned to its
+	// snapshot. ConfigHash remains modelConfig-specific for backward compatibility;
+	// the SSE payload uses the canonical agent snapshot hash.
 	currentHash := hashConfig(agentCfg.ModelConfig)
+	currentSnapshotHash := hashAgentSnapshot(agentCfg)
+	var configChangedEvent *RunEvent
 	if session, err := a.repo.GetSessionByID(ctx, in.SessionID); err == nil {
-		if detectConfigChange(session, agentCfg.ModelConfig) {
+		if detectAgentConfigChange(session, agentCfg) {
+			ev := NewRunEvent(EventConfigChanged, ConfigChangedData{
+				OldPersona:      "redacted",
+				NewSnapshotHash: currentSnapshotHash,
+			})
+			configChangedEvent = &ev
 			notif := chat.ChatMessage{
 				SessionID:   in.SessionID,
 				Role:        "system",
-				Content:     "[system] Agent configuration was updated since the last turn. The new settings are now in effect.",
+				Content:     "[system] Agent configuration changed after this session snapshot was created. This run continues with the session snapshot; start a new session to use the updated agent configuration.",
 				MessageType: chat.MessageTypeSystem,
 			}
 			if _, msgErr := a.repo.CreateMessage(ctx, notif); msgErr != nil {
@@ -494,17 +662,20 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		SessionID:              in.SessionID,
 		AgentID:                in.AgentID,
 		UserMessage:            in.UserMessage,
+		UserMessageID:          in.UserMessageID,
 		SystemPrompt:           effectiveSystemPrompt,
 		TenantID:               in.TenantID,
 		PermissionRules:        ParsePermissionRules(agentCfg.PermissionRules),
+		RequestContext:         requestContext,
 		Elicitation:            elicHandler,
-		FrontendActions:        store, // CopilotKit Phase 1 (ClientStateStore satisfies FrontendActionsProvider)
-		IsAdmin:                callerHasAdminRole(ctx),    // P-C298-1
+		FrontendActions:        store,                     // CopilotKit Phase 1 (ClientStateStore satisfies FrontendActionsProvider)
+		IsAdmin:                callerHasAdminRole(ctx),   // P-C298-1
 		EnableManagement:       agentCfg.EnableManagement, // P-C184-2
 		DisableAskUser:         agentCfg.DisableAskUser,
 		DisableAgentDelegation: agentCfg.DisableAgentDelegation,
 		SkillIDsSnapshot:       in.SkillIDsSnapshot,       // P-C115-1: use snapshot if available
 		MCPServerNamesSnapshot: in.MCPServerNamesSnapshot, // P-C253-1: filter MCP tools by bound servers
+		OutputProcessors:       append([]string(nil), outputProcessors...),
 		PermissionAudit:        a.permAudit,
 	})
 
@@ -527,6 +698,10 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 		// proxies (Traefik, nginx) or browsers may close the idle connection.
 		heartbeat := time.NewTicker(15 * time.Second)
 		defer heartbeat.Stop()
+
+		if configChangedEvent != nil {
+			chatCh <- chat.RunEvent{Type: string(configChangedEvent.Type), Data: configChangedEvent.Data}
+		}
 
 		for {
 			select {
@@ -555,18 +730,151 @@ func (a *SessionRunnerAdapter) RunSession(ctx context.Context, in chat.RunInput)
 	return chatCh, nil
 }
 
+// EffectivePrompt renders the session's agent prompt using the same dynamic
+// RequestContext rules as the runner, but without starting an LLM run.
+func (a *SessionRunnerAdapter) EffectivePrompt(ctx context.Context, sessionID uuid.UUID, identity chat.PromptIdentity) (chat.EffectivePromptResponse, error) {
+	session, err := a.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return chat.EffectivePromptResponse{}, err
+	}
+	if session.AgentID == nil {
+		return chat.EffectivePromptResponse{}, chat.ErrNoAgentAvailable
+	}
+	agentCfg, err := a.agentLoader.GetAgentForRun(ctx, *session.AgentID)
+	if err != nil {
+		return chat.EffectivePromptResponse{}, err
+	}
+	rawPrompt := resolveSystemPrompt(chat.RunInput{SystemPromptSnapshot: session.SystemPromptSnapshot}, agentCfg)
+	systemPrompt, warnings := ResolveSystemPromptPlaceholdersWithWarnings(rawPrompt, requestContextFromPromptIdentity(identity))
+	if warnings == nil {
+		warnings = []string{}
+	}
+	return chat.EffectivePromptResponse{
+		SessionID:    session.ID,
+		AgentID:      session.AgentID,
+		SystemPrompt: systemPrompt,
+		Warnings:     warnings,
+	}, nil
+}
+
+// EffectiveTools renders the session's callable tools for the current request
+// identity without starting an LLM run.
+func (a *SessionRunnerAdapter) EffectiveTools(ctx context.Context, sessionID uuid.UUID, identity chat.PromptIdentity) (chat.EffectiveToolsResponse, error) {
+	session, err := a.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return chat.EffectiveToolsResponse{}, err
+	}
+	if session.AgentID == nil {
+		return chat.EffectiveToolsResponse{}, chat.ErrNoAgentAvailable
+	}
+	agentCfg, err := a.agentLoader.GetAgentForRun(ctx, *session.AgentID)
+	if err != nil {
+		return chat.EffectiveToolsResponse{}, err
+	}
+	toolBuilder := a.tools.Clone()
+	if toolBuilder == nil {
+		return chat.EffectiveToolsResponse{}, fmt.Errorf("effective tools: tool builder not configured")
+	}
+	if a.mcpClient != nil {
+		bridge := NewMCPToolBridge(a.mcpClient, identity.TenantID)
+		// Keep the same nil-versus-empty binding contract as Runner: nil means
+		// no MCP bindings are configured, while an empty non-nil slice means
+		// bindings exist but none are enabled.
+		if agentCfg.MCPServerNames != nil {
+			bridge.WithAllowedServerNames(agentCfg.MCPServerNames)
+		}
+		toolBuilder.WithMCPBridge(bridge)
+	}
+	skillIDsSnapshot := skillIDsFromSessionSnapshot(session.SkillBindingsSnapshot)
+	if len(skillIDsSnapshot) > 0 {
+		toolBuilder.WithSkillIDsSnapshot(skillIDsSnapshot)
+	}
+	toolBuilder.
+		WithDepthLimits(0, 3).
+		WithAdminScope(roleListHas(identity.Roles, "admin")).
+		WithEnableManagement(agentCfg.EnableManagement).
+		WithDisableAskUser(agentCfg.DisableAskUser).
+		WithDisableAgentDelegation(agentCfg.DisableAgentDelegation).
+		WithRequestRoles(identity.Roles)
+
+	result, err := toolBuilder.BuildWithDeferred(ctx, *session.AgentID)
+	if err != nil {
+		return chat.EffectiveToolsResponse{}, err
+	}
+	deferred := make(map[string]struct{}, len(result.Deferred))
+	for _, tool := range result.Deferred {
+		deferred[tool.Name] = struct{}{}
+	}
+	tools := make([]chat.EffectiveToolResponse, 0, len(result.All))
+	for _, tool := range result.All {
+		_, isDeferred := deferred[tool.Name]
+		tools = append(tools, chat.EffectiveToolResponse{
+			Name:        tool.Name,
+			Description: tool.Description,
+			Builtin:     tool.Builtin,
+			SkillSlug:   tool.SkillSlug,
+			Deferred:    isDeferred,
+		})
+	}
+	warnings := result.Warnings
+	if warnings == nil {
+		warnings = []string{}
+	}
+	return chat.EffectiveToolsResponse{
+		SessionID: session.ID,
+		AgentID:   session.AgentID,
+		Tools:     tools,
+		Warnings:  warnings,
+	}, nil
+}
+
+func skillIDsFromSessionSnapshot(raw json.RawMessage) []uuid.UUID {
+	if len(raw) <= 2 {
+		return nil
+	}
+	var snap chat.SkillBindingsSnapshotData
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil
+	}
+	return snap.SkillIDs
+}
+
+func roleListHas(roles []string, want string) bool {
+	for _, role := range roles {
+		if strings.TrimSpace(role) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // RespondElicitation routes a user's elicitation response to the active run
 // for the given session. It accepts a chat.ElicitationResult (to satisfy the
 // chat.ElicitationResponder interface without circular imports) and converts it
 // to the agentic.ElicitationResult used by the handler queue.
 // Returns false when no active run is found (session has already completed or
 // the requestId does not exist).
-func (a *SessionRunnerAdapter) RespondElicitation(sessionID, requestID string, result chat.ElicitationResult) bool {
+func (a *SessionRunnerAdapter) RespondElicitation(ctx context.Context, sessionID, requestID string, result chat.ElicitationResult) bool {
 	agResult := ElicitationResult{
 		Action:  ElicitationAction(result.Action),
 		Content: result.Content,
 	}
-	return a.elicitation.Respond(sessionID, requestID, agResult)
+	responded := a.elicitation.Respond(sessionID, requestID, agResult)
+	parsedSessionID, parseErr := uuid.Parse(sessionID)
+	if parseErr == nil {
+		if store, ok := a.repo.(toolSuspendStateStore); ok {
+			resolved, err := store.ResolveToolSuspendState(ctx, parsedSessionID, requestID, result)
+			if err != nil {
+				slog.Warn("agentic: failed to resolve suspended tool state",
+					"requestID", requestID,
+					"sessionID", sessionID,
+					"error", err,
+				)
+			}
+			responded = responded || resolved
+		}
+	}
+	return responded
 }
 
 // ApplyClientState merges a CopilotKit client-state patch into the per-session
@@ -660,29 +968,8 @@ func (a *SessionRunnerAdapter) attachAuxiliaryComponents(
 // Parsing is without signature verification — the token is already validated
 // by the auth middleware before reaching this point.
 func callerHasAdminRole(ctx context.Context) bool {
-	raw := tenant.TokenFromContext(ctx)
-	if raw == "" {
-		return false
-	}
-	// JWT = header.payload.signature — parse only the payload segment.
-	parts := strings.SplitN(raw, ".", 3)
-	if len(parts) != 3 {
-		return false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return false
-	}
-	var claims struct {
-		RealmAccess struct {
-			Roles []string `json:"roles"`
-		} `json:"realm_access"`
-		// Keycloak may place roles in resource_access.<clientId>.roles
-		ResourceAccess map[string]struct {
-			Roles []string `json:"roles"`
-		} `json:"resource_access"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
+	claims, ok := requestClaimsFromContext(ctx)
+	if !ok {
 		return false
 	}
 	// Check realm-level roles first.
@@ -702,6 +989,101 @@ func callerHasAdminRole(ctx context.Context) bool {
 	return false
 }
 
+type requestClaims struct {
+	Subject     string `json:"sub"`
+	Email       string `json:"email"`
+	Username    string `json:"preferred_username"`
+	RealmAccess struct {
+		Roles []string `json:"roles"`
+	} `json:"realm_access"`
+	// Keycloak may place roles in resource_access.<clientId>.roles.
+	ResourceAccess map[string]struct {
+		Roles []string `json:"roles"`
+	} `json:"resource_access"`
+}
+
+func requestClaimsFromContext(ctx context.Context) (requestClaims, bool) {
+	raw := tenant.TokenFromContext(ctx)
+	if raw == "" {
+		return requestClaims{}, false
+	}
+	// JWT = header.payload.signature — parse only the payload segment. Signature
+	// verification already happened in auth middleware.
+	parts := strings.SplitN(raw, ".", 3)
+	if len(parts) != 3 {
+		return requestClaims{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return requestClaims{}, false
+	}
+	var claims requestClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return requestClaims{}, false
+	}
+	return claims, true
+}
+
+func requestContextFromContext(ctx context.Context, tenantID string) RequestContext {
+	claims, _ := requestClaimsFromContext(ctx)
+	if tenantID == "" {
+		tenantID = tenant.FromContext(ctx)
+	}
+	return requestContextFromPromptIdentity(chat.PromptIdentity{
+		UserID:     claims.Subject,
+		UserEmail:  claims.Email,
+		Username:   claims.Username,
+		Roles:      rolesFromRequestClaims(claims),
+		TenantID:   tenantID,
+		TenantName: tenantID,
+	})
+}
+
+func requestContextFromPromptIdentity(identity chat.PromptIdentity) RequestContext {
+	userEmail := identity.UserEmail
+	if userEmail == "" {
+		userEmail = identity.Username
+	}
+	if userEmail == "" {
+		userEmail = identity.UserID
+	}
+	tenantName := identity.TenantName
+	if tenantName == "" {
+		tenantName = identity.TenantID
+	}
+	return RequestContext{
+		UserID:     identity.UserID,
+		UserEmail:  userEmail,
+		UserRoles:  append([]string(nil), identity.Roles...),
+		TenantID:   identity.TenantID,
+		TenantName: tenantName,
+	}
+}
+
+func rolesFromRequestClaims(claims requestClaims) []string {
+	seen := map[string]struct{}{}
+	var roles []string
+	add := func(role string) {
+		if role == "" {
+			return
+		}
+		if _, ok := seen[role]; ok {
+			return
+		}
+		seen[role] = struct{}{}
+		roles = append(roles, role)
+	}
+	for _, role := range claims.RealmAccess.Roles {
+		add(role)
+	}
+	for _, access := range claims.ResourceAccess {
+		for _, role := range access.Roles {
+			add(role)
+		}
+	}
+	return roles
+}
+
 // repoHistoryLoader adapts chat.Repository to HistoryLoader.
 type repoHistoryLoader struct {
 	repo chat.Repository
@@ -715,6 +1097,9 @@ func (l *repoHistoryLoader) FindAllMessages(ctx context.Context, sessionID uuid.
 // P-C115-1: uses the session snapshot when available to preserve persona consistency
 // even when the agent is updated between turns.
 func resolveSystemPrompt(in chat.RunInput, agentCfg *chat.AgentRunConfig) string {
+	if strings.TrimSpace(in.SystemPrompt) != "" {
+		return strings.TrimSpace(in.SystemPrompt)
+	}
 	if in.SystemPromptSnapshot != nil && *in.SystemPromptSnapshot != "" {
 		return *in.SystemPromptSnapshot
 	}
@@ -754,6 +1139,30 @@ func hashConfig(config json.RawMessage) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func hashAgentSnapshot(agentCfg *chat.AgentRunConfig) string {
+	if agentCfg == nil {
+		return ""
+	}
+	snapshot := chat.AgentSnapshotData{
+		SystemPrompt: agentCfg.SystemPrompt,
+		ModelConfig:  cloneRawMessage(agent.SanitizeModelConfig(agentCfg.ModelConfig)),
+		SkillIDs:     append([]uuid.UUID(nil), agentCfg.SkillIDs...),
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func cloneRawMessage(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
+}
+
 // detectConfigChange returns true when the agent's current modelConfig differs
 // from the hash stored in the session (i.e. the config was updated since the
 // previous run). Returns false when the session has no stored hash (first run).
@@ -762,4 +1171,43 @@ func detectConfigChange(session chat.ChatSession, currentConfig json.RawMessage)
 		return false
 	}
 	return *session.ConfigHash != hashConfig(currentConfig)
+}
+
+func detectAgentConfigChange(session chat.ChatSession, agentCfg *chat.AgentRunConfig) bool {
+	if agentCfg == nil {
+		return false
+	}
+	if session.SystemPromptSnapshot != nil &&
+		*session.SystemPromptSnapshot != "" &&
+		*session.SystemPromptSnapshot != agentCfg.SystemPrompt {
+		return true
+	}
+	if detectConfigChange(session, agentCfg.ModelConfig) {
+		return true
+	}
+	return skillBindingsChanged(session.SkillBindingsSnapshot, agentCfg.SkillIDs)
+}
+
+func skillBindingsChanged(snapshot json.RawMessage, current []uuid.UUID) bool {
+	if len(snapshot) <= 2 {
+		return false
+	}
+	var data chat.SkillBindingsSnapshotData
+	if err := json.Unmarshal(snapshot, &data); err != nil {
+		return false
+	}
+	if len(data.SkillIDs) != len(current) {
+		return true
+	}
+	remaining := make(map[uuid.UUID]int, len(current))
+	for _, id := range current {
+		remaining[id]++
+	}
+	for _, id := range data.SkillIDs {
+		if remaining[id] == 0 {
+			return true
+		}
+		remaining[id]--
+	}
+	return false
 }

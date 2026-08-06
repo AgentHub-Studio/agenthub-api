@@ -1,20 +1,28 @@
 package device
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 // Handler exposes Device Node Network endpoints.
 type Handler struct {
-	svc Service
+	svc   Service
+	agent agentExister
+}
+
+// agentExister verifies that an agent parent exists before nested device routes.
+type agentExister interface {
+	GetByID(ctx context.Context, id uuid.UUID) error
 }
 
 // NewHandler creates a Handler.
@@ -22,21 +30,31 @@ func NewHandler(svc Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// WithAgentExister wires the parent-agent existence checker for nested routes.
+func (h *Handler) WithAgentExister(agent agentExister) *Handler {
+	h.agent = agent
+	return h
+}
+
 // RegisterRoutes mounts device endpoints under r.
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Route("/api/devices", func(r chi.Router) {
-		r.Get("/", h.list)
-		r.Post("/", h.create)
-		r.Get("/{id}", h.getByID)
-		r.Put("/{id}", h.update)
-		r.Patch("/{id}", h.update)
-		r.Delete("/{id}", h.delete)
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RequireRole("admin"))
+			r.Get("/", h.list)
+			r.Post("/", h.create)
+			r.Get("/{id}", h.getByID)
+			r.Put("/{id}", h.update)
+			r.Patch("/{id}", h.update)
+			r.Delete("/{id}", h.delete)
+		})
 		// Heartbeat endpoint — called by MCP client runtime.
-		r.Post("/{id}/heartbeat", h.heartbeat)
+		r.With(middleware.RequireRole("mcp-client-runtime")).Post("/{id}/heartbeat", h.heartbeat)
 	})
 
 	// Agent–device bindings nested under agents.
 	r.Route("/api/agents/{agentId}/devices", func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
 		r.Get("/", h.listByAgent)
 		r.Post("/{deviceId}", h.attach)
 		r.Delete("/{deviceId}", h.detach)
@@ -55,7 +73,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateDeviceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -100,7 +118,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateDeviceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -146,7 +164,7 @@ func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req HeartbeatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -167,14 +185,15 @@ func (h *Handler) listByAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid agent id")
 		return
 	}
+	if h.agent != nil {
+		if err := h.agent.GetByID(r.Context(), agentID); err != nil {
+			writeError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+	}
 	devices, err := h.svc.ListByAgent(r.Context(), agentID)
 	if err != nil {
-		// Bug 206: ListByAgent retornava 500 quando agent inexiste — embora
-		// a query funcionalmente retorne 0 rows, alguma falha em acquire/
-		// scan disparava 500. Log + mensagem opaca; cliente recebe lista
-		// vazia em vez de 500 confuso.
-		slog.Warn("device: listByAgent error, returning empty", "agentID", agentID, "err", err)
-		writeJSON(w, http.StatusOK, []DeviceResponse{})
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if devices == nil {
@@ -226,7 +245,7 @@ func (h *Handler) detach(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

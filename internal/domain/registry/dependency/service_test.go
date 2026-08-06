@@ -90,7 +90,7 @@ func (m *mockPkgRepo) Create(_ context.Context, p pkg.Package) (pkg.Package, err
 	m.data[p.ID] = p
 	return p, nil
 }
-func (m *mockPkgRepo) Update(_ context.Context, id uuid.UUID, name, description, visibility string) (pkg.Package, error) {
+func (m *mockPkgRepo) Update(_ context.Context, id uuid.UUID, name, description, visibility string, tags []string) (pkg.Package, error) {
 	return pkg.Package{}, nil
 }
 func (m *mockPkgRepo) Delete(_ context.Context, id uuid.UUID) error { return nil }

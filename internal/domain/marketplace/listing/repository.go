@@ -36,24 +36,26 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 
 // FindAll returns all active listings paginated.
 func (r *Repository) FindAll(ctx context.Context, req pagination.PageRequest) ([]Listing, int64, error) {
-	const q = `SELECT id, tenant_id, package_id, name, slug, description, type, category,
-	             status, avg_rating, review_count, created_at, updated_at
-	           FROM marketplace_listing
-	           WHERE status != 'REMOVED'
-	           ORDER BY name ASC
+	const q = `SELECT ml.id, ml.tenant_id, ml.package_id, ml.name, ml.slug, ml.description, ml.type, ml.category,
+	             ml.status, ml.avg_rating, ml.review_count, ml.created_at, ml.updated_at
+	           FROM marketplace_listing ml
+	           JOIN public.package_registry pr ON pr.id = ml.package_id AND pr.visibility = 'PUBLIC'
+	           WHERE ml.status != 'REMOVED'
+	           ORDER BY ml.name ASC
 	           LIMIT $1 OFFSET $2`
-	const cq = `SELECT COUNT(*) FROM marketplace_listing WHERE status != 'REMOVED'`
+	const cq = `SELECT COUNT(*) FROM marketplace_listing ml JOIN public.package_registry pr ON pr.id = ml.package_id AND pr.visibility = 'PUBLIC' WHERE ml.status != 'REMOVED'`
 	return r.query(ctx, q, cq, req, nil)
 }
 
 // FindByType returns listings filtered by package type.
 func (r *Repository) FindByType(ctx context.Context, t PackageType, req pagination.PageRequest) ([]Listing, int64, error) {
-	const q = `SELECT id, tenant_id, package_id, name, slug, description, type, category,
-	             status, avg_rating, review_count, created_at, updated_at
-	           FROM marketplace_listing
-	           WHERE type = $3 AND status != 'REMOVED'
-	           ORDER BY name ASC LIMIT $1 OFFSET $2`
-	const cq = `SELECT COUNT(*) FROM marketplace_listing WHERE type = $1 AND status != 'REMOVED'`
+	const q = `SELECT ml.id, ml.tenant_id, ml.package_id, ml.name, ml.slug, ml.description, ml.type, ml.category,
+	             ml.status, ml.avg_rating, ml.review_count, ml.created_at, ml.updated_at
+	           FROM marketplace_listing ml
+	           JOIN public.package_registry pr ON pr.id = ml.package_id AND pr.visibility = 'PUBLIC'
+	           WHERE ml.type = $3 AND ml.status != 'REMOVED'
+	           ORDER BY ml.name ASC LIMIT $1 OFFSET $2`
+	const cq = `SELECT COUNT(*) FROM marketplace_listing ml JOIN public.package_registry pr ON pr.id = ml.package_id AND pr.visibility = 'PUBLIC' WHERE ml.type = $1 AND ml.status != 'REMOVED'`
 	rows, err := r.db.Query(ctx, q, req.Size, req.Offset(), string(t))
 	if err != nil {
 		return nil, 0, err
@@ -72,12 +74,13 @@ func (r *Repository) FindByType(ctx context.Context, t PackageType, req paginati
 
 // FindByCategory returns listings filtered by category.
 func (r *Repository) FindByCategory(ctx context.Context, cat string, req pagination.PageRequest) ([]Listing, int64, error) {
-	const q = `SELECT id, tenant_id, package_id, name, slug, description, type, category,
-	             status, avg_rating, review_count, created_at, updated_at
-	           FROM marketplace_listing
-	           WHERE category = $3 AND status != 'REMOVED'
-	           ORDER BY name ASC LIMIT $1 OFFSET $2`
-	const cq = `SELECT COUNT(*) FROM marketplace_listing WHERE category = $1 AND status != 'REMOVED'`
+	const q = `SELECT ml.id, ml.tenant_id, ml.package_id, ml.name, ml.slug, ml.description, ml.type, ml.category,
+	             ml.status, ml.avg_rating, ml.review_count, ml.created_at, ml.updated_at
+	           FROM marketplace_listing ml
+	           JOIN public.package_registry pr ON pr.id = ml.package_id AND pr.visibility = 'PUBLIC'
+	           WHERE ml.category = $3 AND ml.status != 'REMOVED'
+	           ORDER BY ml.name ASC LIMIT $1 OFFSET $2`
+	const cq = `SELECT COUNT(*) FROM marketplace_listing ml JOIN public.package_registry pr ON pr.id = ml.package_id AND pr.visibility = 'PUBLIC' WHERE ml.category = $1 AND ml.status != 'REMOVED'`
 	rows, err := r.db.Query(ctx, q, req.Size, req.Offset(), cat)
 	if err != nil {
 		return nil, 0, err
@@ -96,21 +99,24 @@ func (r *Repository) FindByCategory(ctx context.Context, cat string, req paginat
 
 // FindBySlug finds a listing by its slug.
 func (r *Repository) FindBySlug(ctx context.Context, slug string) (Listing, error) {
-	const q = `SELECT id, tenant_id, package_id, name, slug, description, type, category,
-	             status, avg_rating, review_count, created_at, updated_at
-	           FROM marketplace_listing WHERE slug = $1 AND status != 'REMOVED'`
+	const q = `SELECT ml.id, ml.tenant_id, ml.package_id, ml.name, ml.slug, ml.description, ml.type, ml.category,
+	             ml.status, ml.avg_rating, ml.review_count, ml.created_at, ml.updated_at
+	           FROM marketplace_listing ml
+	           JOIN public.package_registry pr ON pr.id = ml.package_id AND pr.visibility = 'PUBLIC'
+	           WHERE ml.slug = $1 AND ml.status != 'REMOVED'`
 	row := r.db.QueryRow(ctx, q, slug)
 	return scanRow(row)
 }
 
 // FindByTenant returns listings owned by the given tenant.
 func (r *Repository) FindByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) ([]Listing, int64, error) {
-	const q = `SELECT id, tenant_id, package_id, name, slug, description, type, category,
-	             status, avg_rating, review_count, created_at, updated_at
-	           FROM marketplace_listing
-	           WHERE tenant_id = $3 AND status != 'REMOVED'
-	           ORDER BY name ASC LIMIT $1 OFFSET $2`
-	const cq = `SELECT COUNT(*) FROM marketplace_listing WHERE tenant_id = $1 AND status != 'REMOVED'`
+	const q = `SELECT ml.id, ml.tenant_id, ml.package_id, ml.name, ml.slug, ml.description, ml.type, ml.category,
+	             ml.status, ml.avg_rating, ml.review_count, ml.created_at, ml.updated_at
+	           FROM marketplace_listing ml
+	           JOIN public.package_registry pr ON pr.id = ml.package_id AND pr.visibility = 'PUBLIC'
+	           WHERE ml.tenant_id = $3 AND ml.status != 'REMOVED'
+	           ORDER BY ml.name ASC LIMIT $1 OFFSET $2`
+	const cq = `SELECT COUNT(*) FROM marketplace_listing ml JOIN public.package_registry pr ON pr.id = ml.package_id AND pr.visibility = 'PUBLIC' WHERE ml.tenant_id = $1 AND ml.status != 'REMOVED'`
 	rows, err := r.db.Query(ctx, q, req.Size, req.Offset(), tenantID)
 	if err != nil {
 		return nil, 0, err
@@ -150,7 +156,7 @@ func (r *Repository) Create(ctx context.Context, l Listing) (Listing, error) {
 	             status, avg_rating, review_count, created_at, updated_at`
 	row := r.db.QueryRow(ctx, q,
 		l.ID, l.TenantID, l.PackageID, l.Name, l.Slug, l.Description,
-		string(l.Type), "1.0.0", l.Category, string(l.Status), l.AvgRating, l.ReviewCount)
+		string(l.Type), l.Category, string(l.Status), l.AvgRating, l.ReviewCount)
 	return scanRow(row)
 }
 

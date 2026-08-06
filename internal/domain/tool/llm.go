@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
 
 // llmConfig holds the tenant-configured LLM provider settings.
@@ -21,10 +26,13 @@ type llmConfig struct {
 
 var llmHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
+var errLLMRedirectURLNotAllowed = errors.New("LLM redirect URL is not allowed")
+
 // callLLM sends a single-turn request to an OpenAI-compatible chat completions endpoint
 // and returns the assistant message content.
 func callLLM(ctx context.Context, cfg llmConfig, systemPrompt, userPrompt string) (string, error) {
-	baseURL := cfg.BaseURL
+	baseURL := strings.TrimSpace(cfg.BaseURL)
+	configuredBaseURL := baseURL != ""
 	if baseURL == "" {
 		switch cfg.Provider {
 		case "anthropic":
@@ -36,6 +44,10 @@ func callLLM(ctx context.Context, cfg llmConfig, systemPrompt, userPrompt string
 		default: // openai
 			baseURL = "https://api.openai.com/v1"
 		}
+	}
+	endpoint, err := buildLLMChatCompletionsEndpoint(baseURL, configuredBaseURL)
+	if err != nil {
+		return "", err
 	}
 
 	type message struct {
@@ -59,7 +71,8 @@ func callLLM(ctx context.Context, cfg llmConfig, systemPrompt, userPrompt string
 		return "", fmt.Errorf("llm: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(body))
+	// #nosec G704 -- endpoint is built from a validated configured base URL or a fixed provider default.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("llm: create request: %w", err)
 	}
@@ -68,11 +81,11 @@ func callLLM(ctx context.Context, cfg llmConfig, systemPrompt, userPrompt string
 		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	}
 
-	resp, err := llmHTTPClient.Do(req)
+	resp, err := protectedLLMHTTPClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("llm: http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -127,11 +140,11 @@ func callAnthropic(ctx context.Context, cfg llmConfig, systemPrompt, userPrompt 
 	req.Header.Set("x-api-key", cfg.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := llmHTTPClient.Do(req)
+	resp, err := protectedLLMHTTPClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("anthropic: http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -153,4 +166,62 @@ func callAnthropic(ctx context.Context, cfg llmConfig, systemPrompt, userPrompt 
 		}
 	}
 	return "", fmt.Errorf("anthropic: no text content in response")
+}
+
+func buildLLMChatCompletionsEndpoint(rawBase string, validateBase bool) (string, error) {
+	rawBase = strings.TrimSpace(rawBase)
+	if rawBase == "" || containsLLMURLControlChar(rawBase) {
+		return "", errors.New("llm: invalid base URL")
+	}
+
+	base, err := url.Parse(rawBase)
+	if err != nil {
+		return "", errors.New("llm: invalid base URL")
+	}
+	if base.Scheme != "http" && base.Scheme != "https" {
+		return "", errors.New("llm: unsupported base URL scheme")
+	}
+	if base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return "", errors.New("llm: invalid base URL")
+	}
+	if validateBase {
+		if err := ssrf.ValidateURL(base.String()); err != nil {
+			return "", errors.New("llm: base URL is not allowed")
+		}
+	}
+
+	escapedPath := strings.TrimRight(base.EscapedPath(), "/") + "/chat/completions"
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return "", errors.New("llm: invalid base URL path")
+	}
+	base.Path = decodedPath
+	base.RawPath = escapedPath
+	return base.String(), nil
+}
+
+func containsLLMURLControlChar(value string) bool {
+	return strings.IndexFunc(value, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0
+}
+
+func protectedLLMHTTPClient() *http.Client {
+	client := llmHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+
+	protected := *client
+	previousCheckRedirect := client.CheckRedirect
+	protected.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := ssrf.ValidateURL(req.URL.String()); err != nil {
+			return errLLMRedirectURLNotAllowed
+		}
+		if previousCheckRedirect != nil {
+			return previousCheckRedirect(req, via)
+		}
+		return nil
+	}
+	return &protected
 }

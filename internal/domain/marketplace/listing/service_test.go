@@ -9,8 +9,28 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/marketplace/listing"
+	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+type mockPackageReader struct {
+	pkg pkg.Package
+	err error
+}
+
+func (m mockPackageReader) GetByID(_ context.Context, _ uuid.UUID) (pkg.Package, error) {
+	if m.err != nil {
+		return pkg.Package{}, m.err
+	}
+	return m.pkg, nil
+}
+
+func newListingService(repo *mockListingRepo, ownerTenantID string) *listing.Service {
+	return listing.NewService(repo, mockPackageReader{pkg: pkg.Package{
+		AuthorTenantID: ownerTenantID,
+		Visibility:     pkg.PackageVisibilityPublic,
+	}})
+}
 
 type mockListingRepo struct {
 	data map[uuid.UUID]listing.Listing
@@ -108,7 +128,7 @@ func (m *mockListingRepo) UpdateRatingStats(_ context.Context, id uuid.UUID, avg
 }
 
 func TestListingService_Create_AutoSlug(t *testing.T) {
-	svc := listing.NewService(newMockRepo())
+	svc := newListingService(newMockRepo(), "tenant-1")
 	res, err := svc.Create(context.Background(), "tenant-1", listing.CreateListingRequest{
 		Name:      "My Agent",
 		PackageID: uuid.New(),
@@ -120,7 +140,7 @@ func TestListingService_Create_AutoSlug(t *testing.T) {
 }
 
 func TestListingService_Create_CustomSlug(t *testing.T) {
-	svc := listing.NewService(newMockRepo())
+	svc := newListingService(newMockRepo(), "tenant-1")
 	res, err := svc.Create(context.Background(), "tenant-1", listing.CreateListingRequest{
 		Name:      "My Agent",
 		Slug:      "custom-slug",
@@ -132,20 +152,20 @@ func TestListingService_Create_CustomSlug(t *testing.T) {
 }
 
 func TestListingService_Create_MissingName(t *testing.T) {
-	svc := listing.NewService(newMockRepo())
+	svc := newListingService(newMockRepo(), "tenant-1")
 	_, err := svc.Create(context.Background(), "tenant-1", listing.CreateListingRequest{PackageID: uuid.New()})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "name is required")
 }
 
 func TestListingService_GetByID_NotFound(t *testing.T) {
-	svc := listing.NewService(newMockRepo())
+	svc := newListingService(newMockRepo(), "tenant-1")
 	_, err := svc.GetByID(context.Background(), uuid.New())
 	require.ErrorIs(t, err, listing.ErrNotFound)
 }
 
 func TestListingService_Update_Forbidden(t *testing.T) {
-	svc := listing.NewService(newMockRepo())
+	svc := newListingService(newMockRepo(), "tenant-owner")
 	res, err := svc.Create(context.Background(), "tenant-owner", listing.CreateListingRequest{
 		Name: "Agent", PackageID: uuid.New(), Type: "AGENT",
 	})
@@ -153,18 +173,17 @@ func TestListingService_Update_Forbidden(t *testing.T) {
 
 	name := "New Name"
 	_, err = svc.Update(context.Background(), res.ID, "other-tenant", listing.UpdateListingRequest{Name: &name})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "forbidden")
+	require.ErrorIs(t, err, listing.ErrForbidden)
 }
 
 func TestListingService_Delete_NotFound(t *testing.T) {
-	svc := listing.NewService(newMockRepo())
+	svc := newListingService(newMockRepo(), "tenant-1")
 	err := svc.Delete(context.Background(), uuid.New(), "tenant-1")
 	require.ErrorIs(t, err, listing.ErrNotFound)
 }
 
 func TestListingService_ListAll(t *testing.T) {
-	svc := listing.NewService(newMockRepo())
+	svc := newListingService(newMockRepo(), "tenant-1")
 	for i := 0; i < 3; i++ {
 		_, err := svc.Create(context.Background(), "tenant-1", listing.CreateListingRequest{
 			Name: "Agent", PackageID: uuid.New(), Type: "AGENT",
@@ -177,7 +196,7 @@ func TestListingService_ListAll(t *testing.T) {
 }
 
 func TestListingService_ListByType(t *testing.T) {
-	svc := listing.NewService(newMockRepo())
+	svc := newListingService(newMockRepo(), "t1")
 	_, err := svc.Create(context.Background(), "t1", listing.CreateListingRequest{Name: "A1", PackageID: uuid.New(), Type: "AGENT"})
 	require.NoError(t, err)
 	_, err = svc.Create(context.Background(), "t1", listing.CreateListingRequest{Name: "S1", PackageID: uuid.New(), Type: "SKILL"})
@@ -186,4 +205,58 @@ func TestListingService_ListByType(t *testing.T) {
 	page, err := svc.ListByType(context.Background(), listing.PackageTypeAgent, pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), page.TotalElements)
+}
+
+func TestListingService_Create_RejectsMissingPackage(t *testing.T) {
+	repo := newMockRepo()
+	svc := listing.NewService(repo, mockPackageReader{err: pkg.ErrNotFound})
+
+	_, err := svc.Create(context.Background(), "tenant-1", listing.CreateListingRequest{
+		Name: "Missing", PackageID: uuid.New(), Type: "AGENT",
+	})
+
+	require.ErrorIs(t, err, listing.ErrPackageNotFound)
+	assert.Empty(t, repo.data)
+}
+
+func TestListingService_Create_RejectsPackageOwnedByAnotherTenant(t *testing.T) {
+	repo := newMockRepo()
+	svc := newListingService(repo, "package-owner")
+
+	_, err := svc.Create(context.Background(), "attacker-tenant", listing.CreateListingRequest{
+		Name: "Spoofed listing", PackageID: uuid.New(), Type: "AGENT",
+	})
+
+	require.ErrorIs(t, err, listing.ErrForbidden)
+	assert.Empty(t, repo.data)
+}
+
+func TestListingService_Create_RejectsPrivatePackage(t *testing.T) {
+	repo := newMockRepo()
+	svc := listing.NewService(repo, mockPackageReader{pkg: pkg.Package{
+		AuthorTenantID: "owner",
+		Visibility:     pkg.PackageVisibilityPrivate,
+	}})
+
+	_, err := svc.Create(context.Background(), "owner", listing.CreateListingRequest{
+		Name: "Private package", PackageID: uuid.New(), Type: "AGENT",
+	})
+
+	require.ErrorIs(t, err, listing.ErrPackageNotPublic)
+	assert.Empty(t, repo.data)
+}
+
+func TestListingService_Create_HidesPrivatePackageFromAnotherTenant(t *testing.T) {
+	repo := newMockRepo()
+	svc := listing.NewService(repo, mockPackageReader{pkg: pkg.Package{
+		AuthorTenantID: "owner",
+		Visibility:     pkg.PackageVisibilityPrivate,
+	}})
+
+	_, err := svc.Create(context.Background(), "other-tenant", listing.CreateListingRequest{
+		Name: "Private package", PackageID: uuid.New(), Type: "AGENT",
+	})
+
+	require.ErrorIs(t, err, listing.ErrPackageNotFound)
+	assert.Empty(t, repo.data)
 }

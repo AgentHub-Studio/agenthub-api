@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -19,6 +20,8 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
+
+var errTokenURLNotAllowed = errors.New("oauth: token URL is not allowed")
 
 // CredentialRepository defines the persistence interface for OAuthCredential.
 type CredentialRepository interface {
@@ -316,24 +319,13 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	if req.Username == nil {
 		req.Username = existing.Username
 	}
-	// Bug 139: secrets também precisam ser merged para passar pela
-	// validação per-authType ("clientSecret is required for ..."),
-	// mesmo quando o usuário não está rotacionando o segredo. O
-	// resolveUpdatedSecret depois trata essa rota corretamente.
-	if req.ClientSecret == nil {
-		req.ClientSecret = existing.ClientSecret
-	}
-	if req.APIKeyValue == nil {
-		req.APIKeyValue = existing.APIKeyValue
-	}
-	if req.BearerToken == nil {
-		req.BearerToken = existing.BearerToken
-	}
-	if req.Password == nil {
-		req.Password = existing.Password
-	}
+	validationReq := req
+	validationReq.ClientSecret = preserveSecretForUpdate(req.ClientSecret, existing.ClientSecret)
+	validationReq.APIKeyValue = preserveSecretForUpdate(req.APIKeyValue, existing.APIKeyValue)
+	validationReq.BearerToken = preserveSecretForUpdate(req.BearerToken, existing.BearerToken)
+	validationReq.Password = preserveSecretForUpdate(req.Password, existing.Password)
 	// Validação após merge: name + authType + per-authType requirements.
-	if err := validateCreateRequest(req); err != nil {
+	if err := validateCreateRequest(validationReq); err != nil {
 		return OAuthCredential{}, err
 	}
 
@@ -381,10 +373,21 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 }
 
 func (s *Service) resolveUpdatedSecret(incoming *string, existing *string) (*string, error) {
-	if incoming == nil || *incoming == "" || *incoming == "***" {
+	if shouldPreserveSecretForUpdate(incoming) {
 		return existing, nil
 	}
 	return s.encryptSecret(incoming)
+}
+
+func preserveSecretForUpdate(incoming, existing *string) *string {
+	if shouldPreserveSecretForUpdate(incoming) {
+		return existing
+	}
+	return incoming
+}
+
+func shouldPreserveSecretForUpdate(incoming *string) bool {
+	return incoming == nil || strings.TrimSpace(*incoming) == "" || *incoming == "***"
 }
 
 // Delete removes an OAuth credential and its token cache entry.
@@ -408,7 +411,7 @@ func (s *Service) ResolveAuthHeader(ctx context.Context, tenantID string, id uui
 	switch c.AuthType {
 	case AuthTypeOAuth2ClientCredentials, AuthTypeOAuth2AuthorizationCode:
 		// Check database status first
- 	if c.AuthType == AuthTypeOAuth2AuthorizationCode {
+		if c.AuthType == AuthTypeOAuth2AuthorizationCode {
 			if c.BearerToken != nil && *c.BearerToken != "" && (c.ExpiresAt == nil || time.Now().Before(c.ExpiresAt.Add(-30*time.Second))) {
 				tokenPtr, _ := s.DecryptSecret(c.BearerToken)
 				if tokenPtr != nil && *tokenPtr != "" {
@@ -610,9 +613,33 @@ func (s *Service) doTokenRequest(ctx context.Context, tokenURL string, params ur
 	return token, expiresIn, err
 }
 
+// tokenRequestClient revalidates every redirect before another token request is sent.
+func (s *Service) tokenRequestClient() HTTPClient {
+	client, ok := s.httpClient.(*http.Client)
+	if !ok {
+		return s.httpClient
+	}
+
+	protected := *client
+	previousCheckRedirect := client.CheckRedirect
+	protected.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := ssrf.ValidateURL(req.URL.String()); err != nil {
+			return errTokenURLNotAllowed
+		}
+		if previousCheckRedirect != nil {
+			return previousCheckRedirect(req, via)
+		}
+		return nil
+	}
+	return &protected
+}
+
 func (s *Service) doFullTokenRequest(ctx context.Context, tokenURL string, params url.Values) (string, string, int, error) {
 	if tokenURL == "" {
 		return "", "", 0, fmt.Errorf("oauth: token_url is empty")
+	}
+	if err := ssrf.ValidateURL(tokenURL); err != nil {
+		return "", "", 0, errTokenURLNotAllowed
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(params.Encode()))
 	if err != nil {
@@ -621,11 +648,14 @@ func (s *Service) doFullTokenRequest(ctx context.Context, tokenURL string, param
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.tokenRequestClient().Do(req)
 	if err != nil {
+		if errors.Is(err, errTokenURLNotAllowed) {
+			return "", "", 0, errTokenURLNotAllowed
+		}
 		return "", "", 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", "", 0, fmt.Errorf("oauth: token endpoint returned %d", resp.StatusCode)

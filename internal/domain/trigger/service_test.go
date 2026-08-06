@@ -113,6 +113,23 @@ func (m *mockRepo) CompleteRun(_ context.Context, runID uuid.UUID, status trigge
 	return nil
 }
 
+func (m *mockRepo) CompleteRunBySession(_ context.Context, sessionID uuid.UUID, status trigger.RunStatus, turns, tokens *int, errMsg *string) error {
+	for id, r := range m.runs {
+		if r.SessionID != sessionID {
+			continue
+		}
+		r.Status = status
+		r.TotalTurns = turns
+		r.TotalTokens = tokens
+		r.Error = errMsg
+		now := time.Now()
+		r.CompletedAt = &now
+		m.runs[id] = r
+		return nil
+	}
+	return trigger.ErrNotFound
+}
+
 func (m *mockRepo) ListRuns(_ context.Context, triggerID uuid.UUID, page pagination.PageRequest) (pagination.Page[trigger.AgentTriggerRun], error) {
 	var items []trigger.AgentTriggerRun
 	for _, r := range m.runs {
@@ -278,12 +295,14 @@ func TestService_List(t *testing.T) {
 	svc := trigger.NewService(repo, cron)
 
 	agentID := uuid.New()
-	svc.Create(context.Background(), agentID, trigger.CreateTriggerRequest{
+	_, err := svc.Create(context.Background(), agentID, trigger.CreateTriggerRequest{
 		Name: "t1", CronExpression: "0 * * * *",
 	})
-	svc.Create(context.Background(), agentID, trigger.CreateTriggerRequest{
+	require.NoError(t, err)
+	_, err = svc.Create(context.Background(), agentID, trigger.CreateTriggerRequest{
 		Name: "t2", CronExpression: "*/5 * * * *",
 	})
+	require.NoError(t, err)
 
 	page, err := svc.List(context.Background(), agentID, pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)

@@ -31,7 +31,10 @@ func (s *stubToolCatalog) List(_ context.Context, _ pagination.PageRequest, tool
 	return pagination.NewPage([]tool.Response{}, 0, pagination.PageRequest{Page: 0, Size: 1000}), nil
 }
 
-type stubDatasourceCatalog struct{ items []datasource.DataSource }
+type stubDatasourceCatalog struct {
+	items   []datasource.DataSource
+	updated []uuid.UUID
+}
 
 func (s *stubDatasourceCatalog) ListAll(_ context.Context, _ string, _ pagination.PageRequest) ([]datasource.DataSource, int, error) {
 	return s.items, len(s.items), nil
@@ -69,6 +72,7 @@ func (s *stubDatasourceCatalog) Update(_ context.Context, _ string, id uuid.UUID
 		if item.ID != id {
 			continue
 		}
+		s.updated = append(s.updated, id)
 		item.Name = req.Name
 		item.Type = req.Type
 		item.Host = req.Host
@@ -243,10 +247,11 @@ type stubManagementRepo struct {
 }
 
 type generatedSkillFixture struct {
-	id          uuid.UUID
-	name        string
-	description string
-	category    string
+	id           uuid.UUID
+	name         string
+	description  string
+	instructions string
+	category     string
 }
 
 func (s *stubManagementRepo) ListSkillsByToolID(_ context.Context, _ uuid.UUID) ([]integrationGeneratedSkill, error) {
@@ -257,8 +262,15 @@ func (s *stubManagementRepo) ListSkillsByToolID(_ context.Context, _ uuid.UUID) 
 	return out, nil
 }
 
-func (s *stubManagementRepo) UpdateSkillMetadata(_ context.Context, skillID uuid.UUID, _, _ string) error {
+func (s *stubManagementRepo) UpdateSkillMetadata(_ context.Context, skillID uuid.UUID, name, description, instructions string) error {
 	s.updated = append(s.updated, skillID)
+	for i, item := range s.skills {
+		if item.id == skillID {
+			s.skills[i].name = name
+			s.skills[i].description = description
+			s.skills[i].instructions = instructions
+		}
+	}
 	return nil
 }
 
@@ -394,6 +406,52 @@ func TestService_List_MarksStandaloneVPNAndOrphanDatabaseToolAsAdvanced(t *testi
 		assert.True(t, item.Advanced)
 		assert.Equal(t, integration.IntegrationTypeDatabaseQuery, item.Type)
 	}
+}
+
+func TestService_List_MarksDatabaseToolWithoutGeneratedSkillBindingAsAdvanced(t *testing.T) {
+	now := time.Now().UTC()
+	datasourceID := uuid.New()
+	toolID := uuid.New()
+	manualSkillID := uuid.New()
+	toolResp := tool.Response{
+		ID:          toolID,
+		Name:        "Orders Query",
+		Type:        tool.ToolTypeSQL,
+		Description: "Manual SQL tool",
+		Config:      map[string]any{"dataSourceId": datasourceID.String(), "query": "SELECT * FROM orders"},
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{
+		id:       manualSkillID,
+		category: "CUSTOM_DATABASE",
+	}}}
+	svc := integration.NewService(
+		&stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+			string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{toolResp}, 1, pagination.PageRequest{Page: 0, Size: 1000}),
+		}},
+		&stubDatasourceCatalog{items: []datasource.DataSource{{
+			ID:        datasourceID,
+			Name:      "Orders DB",
+			Type:      datasource.DataSourceTypePostgreSQL,
+			Host:      "pg.internal",
+			Port:      5432,
+			Database:  "orders",
+			DBUser:    "orders_user",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}}},
+		&stubMCPCatalog{},
+		&stubVPNCatalog{},
+	).WithHTTPManagement(&stubSkillCreator{}, &stubHTTPToolManager{}, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	page, err := svc.List(ctx, pagination.PageRequest{Page: 0, Size: 20}, integration.ListFilters{})
+
+	require.NoError(t, err)
+	require.Len(t, page.Content, 1)
+	assert.True(t, page.Content[0].Advanced)
+	assert.Contains(t, page.Content[0].Summary, "tool:Orders Query")
 }
 
 func TestService_List_AppliesFilters(t *testing.T) {
@@ -580,6 +638,7 @@ func TestService_CreateDatabase_GeneratesDatasourceSkillAndTool(t *testing.T) {
 	assert.Equal(t, tool.ToolTypeSQL, toolManager.created[0].Type)
 	assert.Len(t, skillCreator.created, 1)
 	assert.Equal(t, "INTEGRATION_DATABASE", skillCreator.created[0].Category)
+	assert.Contains(t, skillCreator.created[0].Instructions, "SELECT * FROM orders LIMIT 10")
 }
 
 func TestService_UpdateDatabase_UpdatesGeneratedSkillMetadata(t *testing.T) {
@@ -628,6 +687,504 @@ func TestService_UpdateDatabase_UpdatesGeneratedSkillMetadata(t *testing.T) {
 	assert.Equal(t, "Orders DB Updated", resp.Name)
 	assert.Len(t, toolManager.updated, 1)
 	assert.NotEmpty(t, repo.updated)
+}
+
+func TestService_UpdateDatabase_RefreshesGeneratedSkillInstructions(t *testing.T) {
+	datasourceID := uuid.New()
+	toolID := uuid.New()
+	skillID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+		ID:        datasourceID,
+		Name:      "Orders DB",
+		Type:      datasource.DataSourceTypePostgreSQL,
+		Host:      "pg.internal",
+		Port:      5432,
+		Database:  "orders",
+		DBUser:    "orders_user",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}}}
+	toolManager := &stubHTTPToolManager{item: tool.Response{
+		ID:          toolID,
+		Name:        "Orders Query",
+		Type:        tool.ToolTypeSQL,
+		Config:      map[string]any{"dataSourceId": datasourceID.String(), "query": "SELECT stale FROM orders"},
+		Description: "old",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{
+		id:           skillID,
+		category:     "INTEGRATION_DATABASE",
+		instructions: "Use the generated SQL tool to read the configured postgresql database. Default query: SELECT stale FROM orders",
+	}}}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{toolManager.item}, 1, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	_, err := svc.UpdateDatabase(ctx, datasourceID, integration.DatabaseCreateRequest{
+		Name:        "Orders DB",
+		Description: "fresh",
+		Type:        datasource.DataSourceTypePostgreSQL,
+		Host:        "pg.internal",
+		Port:        5432,
+		Database:    "orders",
+		DBUser:      "orders_user",
+		Query:       "UPDATE orders SET synced = true",
+		AllowWrite:  true,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, repo.skills, 1)
+	assert.NotContains(t, repo.skills[0].instructions, "SELECT stale FROM orders")
+	assert.Contains(t, repo.skills[0].instructions, "UPDATE orders SET synced = true")
+	assert.Contains(t, repo.skills[0].instructions, "execute")
+}
+
+func TestService_UpdateDatabase_RejectsBlankQueryBeforeUpdatingCompanions(t *testing.T) {
+	datasourceID := uuid.New()
+	toolID := uuid.New()
+	skillID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+		ID:        datasourceID,
+		Name:      "Orders DB",
+		Type:      datasource.DataSourceTypePostgreSQL,
+		Host:      "pg.internal",
+		Port:      5432,
+		Database:  "orders",
+		DBUser:    "orders_user",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}}}
+	toolManager := &stubHTTPToolManager{item: tool.Response{
+		ID:          toolID,
+		Name:        "Orders Query",
+		Type:        tool.ToolTypeSQL,
+		Config:      map[string]any{"dataSourceId": datasourceID.String(), "query": "SELECT * FROM orders"},
+		Description: "old",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{
+		id:           skillID,
+		category:     "INTEGRATION_DATABASE",
+		instructions: "Use the generated SQL tool to read the configured postgresql database. Default query: SELECT * FROM orders",
+	}}}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{toolManager.item}, 1, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	_, err := svc.UpdateDatabase(ctx, datasourceID, integration.DatabaseCreateRequest{
+		Name:        "Orders DB",
+		Description: "invalid blank query",
+		Type:        datasource.DataSourceTypePostgreSQL,
+		Host:        "pg.internal",
+		Port:        5432,
+		Database:    "orders",
+		DBUser:      "orders_user",
+		Query:       "   ",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "query is required")
+	assert.Empty(t, datasources.updated)
+	assert.Empty(t, toolManager.updated)
+	assert.Empty(t, repo.updated)
+	require.Len(t, repo.skills, 1)
+	assert.Contains(t, repo.skills[0].instructions, "SELECT * FROM orders")
+}
+
+func TestService_UpdateDatabase_RejectsExplicitInvalidDatasourceFieldsBeforeUpdatingCompanions(t *testing.T) {
+	newFixture := func(t *testing.T) (context.Context, uuid.UUID, *stubDatasourceCatalog, *stubHTTPToolManager, *stubManagementRepo, *integration.Service) {
+		t.Helper()
+		datasourceID := uuid.New()
+		toolID := uuid.New()
+		skillID := uuid.New()
+		datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+			ID:        datasourceID,
+			Name:      "Orders DB",
+			Type:      datasource.DataSourceTypePostgreSQL,
+			Host:      "pg.internal",
+			Port:      5432,
+			Database:  "orders",
+			DBUser:    "orders_user",
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		}}}
+		toolManager := &stubHTTPToolManager{item: tool.Response{
+			ID:          toolID,
+			Name:        "Orders Query",
+			Type:        tool.ToolTypeSQL,
+			Config:      map[string]any{"dataSourceId": datasourceID.String(), "query": "SELECT * FROM orders"},
+			Description: "old",
+			CreatedAt:   time.Now().UTC(),
+			UpdatedAt:   time.Now().UTC(),
+		}}
+		repo := &stubManagementRepo{skills: []generatedSkillFixture{{
+			id:           skillID,
+			category:     "INTEGRATION_DATABASE",
+			instructions: "Use the generated SQL tool to read the configured postgresql database. Default query: SELECT * FROM orders",
+		}}}
+		toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+			string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{toolManager.item}, 1, pagination.PageRequest{Page: 0, Size: 1000}),
+		}}
+		svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+			WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+		return tenantctx.NewContext(context.Background(), "test-tenant"), datasourceID, datasources, toolManager, repo, svc
+	}
+
+	baseRequest := func() integration.DatabaseCreateRequest {
+		return integration.DatabaseCreateRequest{
+			Name:        "Orders DB",
+			Description: "should reject invalid datasource field",
+			Type:        datasource.DataSourceTypePostgreSQL,
+			Host:        "pg.internal",
+			Port:        5432,
+			Database:    "orders",
+			DBUser:      "orders_user",
+			Query:       "SELECT * FROM orders WHERE id = $1",
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*integration.DatabaseCreateRequest)
+		wantErr string
+	}{
+		{
+			name: "blank database",
+			mutate: func(req *integration.DatabaseCreateRequest) {
+				req.Database = "   "
+			},
+			wantErr: "database is required",
+		},
+		{
+			name: "blank db user",
+			mutate: func(req *integration.DatabaseCreateRequest) {
+				req.DBUser = "   "
+			},
+			wantErr: "dbUser is required",
+		},
+		{
+			name: "zero port",
+			mutate: func(req *integration.DatabaseCreateRequest) {
+				req.Port = 0
+			},
+			wantErr: "port must be between 1 and 65535",
+		},
+		{
+			name: "unsupported type",
+			mutate: func(req *integration.DatabaseCreateRequest) {
+				req.Type = datasource.DataSourceType("SQLITE")
+			},
+			wantErr: "unsupported type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, datasourceID, datasources, toolManager, repo, svc := newFixture(t)
+			req := baseRequest()
+			tt.mutate(&req)
+
+			_, err := svc.UpdateDatabase(ctx, datasourceID, req)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Empty(t, datasources.updated)
+			assert.Empty(t, toolManager.updated)
+			assert.Empty(t, repo.updated)
+			require.Len(t, repo.skills, 1)
+			assert.Contains(t, repo.skills[0].instructions, "SELECT * FROM orders")
+		})
+	}
+}
+
+func TestService_UpdateDatabase_RejectsMultipleLinkedDatabaseToolsBeforeUpdating(t *testing.T) {
+	datasourceID := uuid.New()
+	toolID := uuid.New()
+	duplicateToolID := uuid.New()
+	skillID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+		ID:        datasourceID,
+		Name:      "Orders DB",
+		Type:      datasource.DataSourceTypePostgreSQL,
+		Host:      "pg.internal",
+		Port:      5432,
+		Database:  "orders",
+		DBUser:    "orders_user",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}}}
+	primaryTool := tool.Response{
+		ID:          toolID,
+		Name:        "Orders Query",
+		Type:        tool.ToolTypeSQL,
+		Config:      map[string]any{"dataSourceId": datasourceID.String(), "query": "SELECT * FROM orders"},
+		Description: "primary",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	duplicateTool := tool.Response{
+		ID:          duplicateToolID,
+		Name:        "Orders Query Duplicate",
+		Type:        tool.ToolTypeSQL,
+		Config:      map[string]any{"datasource_id": datasourceID.String(), "query": "SELECT id FROM orders"},
+		Description: "duplicate",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	toolManager := &stubHTTPToolManager{item: primaryTool}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{id: skillID, category: "INTEGRATION_DATABASE"}}}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{primaryTool, duplicateTool}, 2, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	_, err := svc.UpdateDatabase(ctx, datasourceID, integration.DatabaseCreateRequest{
+		Name:        "Orders DB Updated",
+		Description: "should not update",
+		Type:        datasource.DataSourceTypePostgreSQL,
+		Host:        "pg2.internal",
+		Port:        5432,
+		Database:    "orders",
+		DBUser:      "orders_user",
+		Query:       "UPDATE orders SET synced = true",
+		AllowWrite:  true,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multiple database tools")
+	assert.Empty(t, datasources.updated)
+	assert.Empty(t, toolManager.updated)
+	assert.Empty(t, repo.updated)
+}
+
+func TestService_UpdateDatabase_RejectsMissingLinkedDatabaseToolBeforeUpdating(t *testing.T) {
+	datasourceID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+		ID:        datasourceID,
+		Name:      "Orders DB",
+		Type:      datasource.DataSourceTypePostgreSQL,
+		Host:      "pg.internal",
+		Port:      5432,
+		Database:  "orders",
+		DBUser:    "orders_user",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}}}
+	toolManager := &stubHTTPToolManager{}
+	repo := &stubManagementRepo{}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{}, 0, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	_, err := svc.UpdateDatabase(ctx, datasourceID, integration.DatabaseCreateRequest{
+		Name:        "Orders DB Updated",
+		Description: "should not update",
+		Type:        datasource.DataSourceTypePostgreSQL,
+		Host:        "pg2.internal",
+		Port:        5432,
+		Database:    "orders_updated",
+		DBUser:      "orders_updated",
+		Query:       "UPDATE orders SET synced = true",
+		AllowWrite:  true,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no linked database tool")
+	assert.Empty(t, datasources.updated)
+	assert.Empty(t, toolManager.updated)
+	assert.Empty(t, repo.updated)
+}
+
+func TestService_UpdateDatabase_RejectsManualSkillBindingBeforeUpdatingCompanions(t *testing.T) {
+	datasourceID := uuid.New()
+	toolID := uuid.New()
+	manualSkillID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+		ID:        datasourceID,
+		Name:      "Orders DB",
+		Type:      datasource.DataSourceTypePostgreSQL,
+		Host:      "pg.internal",
+		Port:      5432,
+		Database:  "orders",
+		DBUser:    "orders_user",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}}}
+	primaryTool := tool.Response{
+		ID:          toolID,
+		Name:        "Orders Query",
+		Type:        tool.ToolTypeSQL,
+		Config:      map[string]any{"dataSourceId": datasourceID.String(), "query": "SELECT * FROM orders"},
+		Description: "manual companion",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	toolManager := &stubHTTPToolManager{item: primaryTool}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{id: manualSkillID, category: "CUSTOM_DATABASE"}}}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{primaryTool}, 1, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	_, err := svc.UpdateDatabase(ctx, datasourceID, integration.DatabaseCreateRequest{
+		Name:        "Orders DB Updated",
+		Description: "should not update manual companion",
+		Type:        datasource.DataSourceTypePostgreSQL,
+		Host:        "pg2.internal",
+		Port:        5432,
+		Database:    "orders_updated",
+		DBUser:      "orders_updated",
+		Query:       "UPDATE orders SET synced = true",
+		AllowWrite:  true,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "generated database skill")
+	assert.Empty(t, datasources.updated)
+	assert.Empty(t, toolManager.updated)
+	assert.Empty(t, repo.updated)
+}
+
+func TestService_DeleteDatabase_RejectsMultipleLinkedDatabaseToolsBeforeDeletingDatasource(t *testing.T) {
+	datasourceID := uuid.New()
+	toolID := uuid.New()
+	duplicateToolID := uuid.New()
+	skillID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+		ID:        datasourceID,
+		Name:      "Orders DB",
+		Type:      datasource.DataSourceTypePostgreSQL,
+		Host:      "pg.internal",
+		Port:      5432,
+		Database:  "orders",
+		DBUser:    "orders_user",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}}}
+	primaryTool := tool.Response{
+		ID:          toolID,
+		Name:        "Orders Query",
+		Type:        tool.ToolTypeSQL,
+		Config:      map[string]any{"dataSourceId": datasourceID.String(), "query": "SELECT * FROM orders"},
+		Description: "primary",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	duplicateTool := tool.Response{
+		ID:          duplicateToolID,
+		Name:        "Orders Query Duplicate",
+		Type:        tool.ToolTypeSQL,
+		Config:      map[string]any{"datasource_id": datasourceID.String(), "query": "SELECT id FROM orders"},
+		Description: "duplicate",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	toolManager := &stubHTTPToolManager{item: primaryTool}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{id: skillID, category: "INTEGRATION_DATABASE"}}, counts: map[uuid.UUID]int{skillID: 0}}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{primaryTool, duplicateTool}, 2, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	err := svc.DeleteDatabase(ctx, datasourceID)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multiple database tools")
+	assert.Len(t, datasources.items, 1)
+	assert.Empty(t, toolManager.deleted)
+	assert.Empty(t, repo.deleted)
+}
+
+func TestService_DeleteDatabase_RejectsManualSkillBindingBeforeDeletingCompanions(t *testing.T) {
+	datasourceID := uuid.New()
+	toolID := uuid.New()
+	manualSkillID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+		ID:        datasourceID,
+		Name:      "Orders DB",
+		Type:      datasource.DataSourceTypePostgreSQL,
+		Host:      "pg.internal",
+		Port:      5432,
+		Database:  "orders",
+		DBUser:    "orders_user",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}}}
+	primaryTool := tool.Response{
+		ID:          toolID,
+		Name:        "Orders Query",
+		Type:        tool.ToolTypeSQL,
+		Config:      map[string]any{"dataSourceId": datasourceID.String(), "query": "SELECT * FROM orders"},
+		Description: "manual companion",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	toolManager := &stubHTTPToolManager{item: primaryTool}
+	repo := &stubManagementRepo{skills: []generatedSkillFixture{{id: manualSkillID, category: "CUSTOM_DATABASE"}}, counts: map[uuid.UUID]int{manualSkillID: 1}}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{primaryTool}, 1, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	err := svc.DeleteDatabase(ctx, datasourceID)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "generated database skill")
+	assert.Len(t, datasources.items, 1)
+	assert.Empty(t, toolManager.unbound)
+	assert.Empty(t, toolManager.deleted)
+	assert.Empty(t, repo.deleted)
+}
+
+func TestService_DeleteDatabase_RejectsMissingLinkedDatabaseToolBeforeDeletingDatasource(t *testing.T) {
+	datasourceID := uuid.New()
+	datasources := &stubDatasourceCatalog{items: []datasource.DataSource{{
+		ID:        datasourceID,
+		Name:      "Orders DB",
+		Type:      datasource.DataSourceTypePostgreSQL,
+		Host:      "pg.internal",
+		Port:      5432,
+		Database:  "orders",
+		DBUser:    "orders_user",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}}}
+	toolManager := &stubHTTPToolManager{}
+	repo := &stubManagementRepo{}
+	toolCatalog := &stubToolCatalog{pages: map[string]pagination.Page[tool.Response]{
+		string(tool.ToolTypeSQL): pagination.NewPage([]tool.Response{}, 0, pagination.PageRequest{Page: 0, Size: 1000}),
+	}}
+	svc := integration.NewService(toolCatalog, datasources, &stubMCPCatalog{}, &stubVPNCatalog{}).
+		WithHTTPManagement(&stubSkillCreator{}, toolManager, repo)
+	ctx := tenantctx.NewContext(context.Background(), "test-tenant")
+
+	err := svc.DeleteDatabase(ctx, datasourceID)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no linked database tool")
+	assert.Len(t, datasources.items, 1)
+	assert.Empty(t, toolManager.deleted)
+	assert.Empty(t, repo.deleted)
 }
 
 func TestService_DeleteDatabase_RemovesGeneratedArtifacts(t *testing.T) {

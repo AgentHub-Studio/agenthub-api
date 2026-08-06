@@ -10,18 +10,26 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 )
 
+// PackageReader reads registry packages to bind a marketplace listing to its
+// owning tenant.
+type PackageReader interface {
+	GetByID(ctx context.Context, id uuid.UUID) (pkg.Package, error)
+}
+
 // Service implements business logic for marketplace listings.
 type Service struct {
-	repo ListingRepository
+	repo     ListingRepository
+	packages PackageReader
 }
 
 // NewService creates a new Service.
-func NewService(repo ListingRepository) *Service {
-	return &Service{repo: repo}
+func NewService(repo ListingRepository, packages PackageReader) *Service {
+	return &Service{repo: repo, packages: packages}
 }
 
 // ListAll returns all active listings paginated.
@@ -66,6 +74,9 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (ListingResponse, e
 	if err != nil {
 		return ListingResponse{}, err
 	}
+	if err := s.ensurePackagePublic(ctx, l.PackageID); err != nil {
+		return ListingResponse{}, err
+	}
 	return ResponseFrom(l), nil
 }
 
@@ -75,11 +86,17 @@ func (s *Service) GetBySlug(ctx context.Context, slug string) (ListingResponse, 
 	if err != nil {
 		return ListingResponse{}, err
 	}
+	if err := s.ensurePackagePublic(ctx, l.PackageID); err != nil {
+		return ListingResponse{}, err
+	}
 	return ResponseFrom(l), nil
 }
 
 // Create publishes a new marketplace listing.
 func (s *Service) Create(ctx context.Context, tenantID string, req CreateListingRequest) (ListingResponse, error) {
+	if req.PackageID == uuid.Nil {
+		return ListingResponse{}, fmt.Errorf("%w: packageId is required", ErrValidation)
+	}
 	// Bug 183: strip HTML do name (XSS prevention).
 	req.Name = sanitize.StripHTML(req.Name)
 	if req.Name == "" {
@@ -102,6 +119,25 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateListing
 	// Bug 159: cap description em 32KB.
 	if len(req.Description) > 32000 {
 		return ListingResponse{}, fmt.Errorf("%w: description exceeds maximum length of 32000 chars (got %d)", ErrValidation, len(req.Description))
+	}
+	if s.packages == nil {
+		return ListingResponse{}, fmt.Errorf("listing: package reader is not configured")
+	}
+	p, err := s.packages.GetByID(ctx, req.PackageID)
+	if err != nil {
+		if errors.Is(err, pkg.ErrNotFound) {
+			return ListingResponse{}, ErrPackageNotFound
+		}
+		return ListingResponse{}, fmt.Errorf("listing: get package: %w", err)
+	}
+	if p.Visibility != pkg.PackageVisibilityPublic {
+		if p.AuthorTenantID != tenantID {
+			return ListingResponse{}, ErrPackageNotFound
+		}
+		return ListingResponse{}, ErrPackageNotPublic
+	}
+	if p.AuthorTenantID != tenantID {
+		return ListingResponse{}, ErrForbidden
 	}
 	slug := req.Slug
 	if slug == "" {
@@ -129,6 +165,23 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateListing
 	return ResponseFrom(created), nil
 }
 
+func (s *Service) ensurePackagePublic(ctx context.Context, packageID uuid.UUID) error {
+	if s.packages == nil {
+		return fmt.Errorf("listing: package reader is not configured")
+	}
+	p, err := s.packages.GetByID(ctx, packageID)
+	if err != nil {
+		if errors.Is(err, pkg.ErrNotFound) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("listing: get package: %w", err)
+	}
+	if p.Visibility != pkg.PackageVisibilityPublic {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Update updates mutable fields of a listing.
 func (s *Service) Update(ctx context.Context, id uuid.UUID, tenantID string, req UpdateListingRequest) (ListingResponse, error) {
 	l, err := s.repo.FindByID(ctx, id)
@@ -136,7 +189,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, tenantID string, req
 		return ListingResponse{}, err
 	}
 	if l.TenantID != tenantID {
-		return ListingResponse{}, fmt.Errorf("listing: forbidden")
+		return ListingResponse{}, ErrForbidden
 	}
 	if req.Name != nil {
 		// Bug 114: name não pode ser vazio. Sem este gate admin pode
@@ -171,7 +224,7 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID, tenantID string) err
 		return err
 	}
 	if l.TenantID != tenantID {
-		return fmt.Errorf("listing: forbidden")
+		return ErrForbidden
 	}
 	return s.repo.SoftDelete(ctx, id)
 }

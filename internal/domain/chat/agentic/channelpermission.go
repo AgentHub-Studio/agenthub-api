@@ -40,7 +40,9 @@ func ShortRequestID(toolUseID string) string {
 
 func hashToPermID(input string) string {
 	h := fnv.New32a()
-	h.Write([]byte(input))
+	if _, err := h.Write([]byte(input)); err != nil {
+		panic("fnv32a hash write failed: " + err.Error())
+	}
 	v := h.Sum32()
 
 	var b [5]byte

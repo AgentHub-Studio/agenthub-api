@@ -4,14 +4,35 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/evals"
 )
 
-// sensitiveModelConfigKeys lists model config keys that must not be returned in API
-// responses or tool results. P-C211-1: apiKey must not appear in any response body.
-var sensitiveModelConfigKeys = []string{"apiKey", "api_key", "apiSecret", "api_secret"}
+// sensitiveModelConfigKeys lists normalized model config keys that must not be
+// returned in API responses or tool results. P-C211-1: apiKey must not appear
+// in any response body.
+var sensitiveModelConfigKeys = map[string]bool{
+	"apikey":             true,
+	"apisecret":          true,
+	"clientsecret":       true,
+	"secret":             true,
+	"password":           true,
+	"authtoken":          true,
+	"accesstoken":        true,
+	"refreshtoken":       true,
+	"bearertoken":        true,
+	"authorization":      true,
+	"proxyauthorization": true,
+	"xapikey":            true,
+	"xapitoken":          true,
+	"xauthtoken":         true,
+	"xaccesstoken":       true,
+	"xsecret":            true,
+}
 
 // SanitizeModelConfig removes credential keys from a raw model config JSON blob.
 // Returns the sanitized JSON; on parse error returns an empty JSON object.
@@ -20,18 +41,42 @@ func SanitizeModelConfig(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
 		return raw
 	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(raw, &m); err != nil {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
 		return raw
 	}
-	for _, k := range sensitiveModelConfigKeys {
-		delete(m, k)
-	}
-	sanitized, err := json.Marshal(m)
+	sanitized, err := json.Marshal(sanitizeModelConfigValue(value))
 	if err != nil {
 		return json.RawMessage(`{}`)
 	}
 	return sanitized
+}
+
+func sanitizeModelConfigValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if isSensitiveModelConfigKey(key) {
+				continue
+			}
+			out[key] = sanitizeModelConfigValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = sanitizeModelConfigValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func isSensitiveModelConfigKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+	return sensitiveModelConfigKeys[normalized]
 }
 
 // AgentManageResponse is the redacted DTO exposed by the agenthub_manage tool.
@@ -92,6 +137,9 @@ type Agent struct {
 	ModelConfig      json.RawMessage
 	PermissionRules  json.RawMessage
 	Config           json.RawMessage
+	EvalConfig       evals.EvalConfig
+	InputProcessors  []string
+	OutputProcessors []string
 	// EnableManagement controls whether the agenthub_manage builtin tool is included
 	// in this agent's toolset. Default false — requires explicit opt-in.
 	// P-C184-2: prevents agents from managing other agents without explicit authorization.
@@ -111,23 +159,23 @@ const (
 // AgentVersion is an immutable snapshot of an agent's configuration at a version number.
 // Stored in ah_{tenantID}.agent_version — no tenant_id column.
 type AgentVersion struct {
-	ID            uuid.UUID
-	AgentID       uuid.UUID
-	VersionNumber int
-	Status        VersionStatus
-	Description   string
+	ID             uuid.UUID
+	AgentID        uuid.UUID
+	VersionNumber  int
+	Status         VersionStatus
+	Description    string
 	DefinitionJSON json.RawMessage // pipeline graph definition
 	ConfigJSON     json.RawMessage // model/tool config
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	PublishedAt   *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	PublishedAt    *time.Time
 }
 
 // Sentinel errors for version operations.
 var (
-	ErrVersionNotFound       = fmt.Errorf("agent version not found")
-	ErrDraftAlreadyExists    = fmt.Errorf("agent already has an active draft version")
-	ErrVersionImmutable      = fmt.Errorf("published version is immutable")
+	ErrVersionNotFound        = fmt.Errorf("agent version not found")
+	ErrDraftAlreadyExists     = fmt.Errorf("agent already has an active draft version")
+	ErrVersionImmutable       = fmt.Errorf("published version is immutable")
 	ErrRollbackBlockedByDraft = fmt.Errorf("cannot rollback while a draft version exists; publish or discard the draft first")
 )
 
@@ -135,10 +183,10 @@ var (
 type ReadinessLevel string
 
 const (
-	ReadinessIncomplete  ReadinessLevel = "INCOMPLETE"  // 0–39
-	ReadinessBasic       ReadinessLevel = "BASIC"       // 40–59
-	ReadinessStandard    ReadinessLevel = "STANDARD"    // 60–79
-	ReadinessProduction  ReadinessLevel = "PRODUCTION"  // 80–100
+	ReadinessIncomplete ReadinessLevel = "INCOMPLETE" // 0–39
+	ReadinessBasic      ReadinessLevel = "BASIC"      // 40–59
+	ReadinessStandard   ReadinessLevel = "STANDARD"   // 60–79
+	ReadinessProduction ReadinessLevel = "PRODUCTION" // 80–100
 )
 
 // ReadinessCheck is a single pass/fail criterion in the readiness evaluation.
@@ -151,7 +199,7 @@ type ReadinessCheck struct {
 
 // ReadinessScore is the computed quality assessment of an agent.
 type ReadinessScore struct {
-	Score  int              `json:"score"`  // 0–100
+	Score  int              `json:"score"` // 0–100
 	Level  ReadinessLevel   `json:"level"`
 	Checks []ReadinessCheck `json:"checks"`
 }
