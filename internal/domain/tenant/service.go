@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/workloadidentity"
 )
 
 // provisionTimeout caps the per-tenant Keycloak realm provisioning. Realm
@@ -29,16 +30,15 @@ type Service interface {
 }
 
 type service struct {
-	repo               Repository
-	provisioningClient ProvisioningClient
-	presetSeeder       PresetSeeder
-	schemaMigrator     SchemaMigrator
+	repo                Repository
+	provisioningClient  ProvisioningClient
+	presetSeeder        PresetSeeder
+	schemaMigrator      SchemaMigrator
+	workloadCredentials workloadidentity.Store
 }
 
-// ProvisioningClient is a placeholder interface for Keycloak realm provisioning.
-// Wire a real implementation when Keycloak integration is ready.
 type ProvisioningClient interface {
-	ProvisionRealm(ctx context.Context, tenantID string, tenantName string) error
+	ProvisionRealm(ctx context.Context, tenantID string, tenantName string) (workloadidentity.Credential, error)
 }
 
 // PresetSeeder seeds default LLM presets for a newly-created tenant.
@@ -67,6 +67,11 @@ func (s *service) WithSchemaMigrator(sm SchemaMigrator) *service {
 	return s
 }
 
+func (s *service) WithWorkloadCredentialStore(store workloadidentity.Store) *service {
+	s.workloadCredentials = store
+	return s
+}
+
 func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantResponse, error) {
 	if req.ID == "" {
 		return TenantResponse{}, fmt.Errorf("%w: id is required", ErrValidation)
@@ -81,7 +86,7 @@ func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantRe
 	t := Tenant{
 		ID:     req.ID,
 		Name:   req.Name,
-		Status: StatusActive,
+		Status: StatusProvisioning,
 	}
 	created, err := s.repo.Create(ctx, t)
 	if err != nil {
@@ -108,13 +113,18 @@ func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantRe
 				"tenantID", created.ID,
 				"error", mErr.Error(),
 			)
-			// Non-fatal: schema can be created on next server restart via MigrateAllTenants.
+			if updErr := s.repo.UpdateStatus(provisionCtx, created.ID, StatusProvisioningFailed); updErr != nil {
+				return TenantResponse{}, fmt.Errorf("tenant: mark provisioning_failed after schema migration failure: %w", updErr)
+			}
+			created.Status = StatusProvisioningFailed
+			return ResponseFrom(created), nil
 		}
 	}
 
 	// Attempt Keycloak provisioning; on failure mark status but do not rollback.
 	if s.provisioningClient != nil {
-		if pErr := s.provisioningClient.ProvisionRealm(provisionCtx, created.ID, created.Name); pErr != nil {
+		credential, pErr := s.provisioningClient.ProvisionRealm(provisionCtx, created.ID, created.Name)
+		if pErr != nil {
 			slog.Warn("tenant: keycloak provisioning failed",
 				"tenantID", created.ID,
 				"error", pErr.Error(),
@@ -123,13 +133,28 @@ func (s *service) Create(ctx context.Context, req CreateTenantRequest) (TenantRe
 				slog.Error("tenant: failed to mark status provisioning_failed", "tenantID", created.ID, "err", updErr)
 			}
 			created.Status = StatusProvisioningFailed
+			return ResponseFrom(created), nil
+		}
+		if s.workloadCredentials != nil {
+			if cErr := s.workloadCredentials.Store(provisionCtx, created.ID, credential); cErr != nil {
+				slog.Warn("tenant: workload credential persistence failed", "tenantID", created.ID, "error", cErr.Error())
+				if updErr := s.repo.UpdateStatus(provisionCtx, created.ID, StatusProvisioningFailed); updErr != nil {
+					return TenantResponse{}, fmt.Errorf("tenant: mark provisioning_failed after credential persistence failure: %w", updErr)
+				}
+				created.Status = StatusProvisioningFailed
+				return ResponseFrom(created), nil
+			}
 		}
 	}
 
 	// Seed default LLM presets; non-fatal — log only.
 	if s.presetSeeder != nil {
-		_ = s.presetSeeder.SeedDefaults(ctx, created.ID)
+		_ = s.presetSeeder.SeedDefaults(provisionCtx, created.ID)
 	}
+	if err := s.repo.UpdateStatus(provisionCtx, created.ID, StatusActive); err != nil {
+		return TenantResponse{}, fmt.Errorf("tenant: mark active after provisioning: %w", err)
+	}
+	created.Status = StatusActive
 
 	return ResponseFrom(created), nil
 }

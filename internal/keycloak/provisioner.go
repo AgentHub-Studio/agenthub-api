@@ -3,26 +3,35 @@ package keycloak
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/workloadidentity"
 )
 
 // defaultRoles are the Keycloak realm roles created for every new tenant.
 var defaultRoles = []string{"admin", "user", "mcp-client-runtime", "PROXY_SERVICE"}
 
+const workloadAudienceMapperName = "agenthub-mcp-runtime-audience"
+
 // Config holds configuration for the Keycloak Admin API provisioner.
 type Config struct {
-	BaseURL        string // e.g. http://keycloak.internal:8080
-	AdminUsername  string
-	AdminPassword  string
-	AdminClientID  string // default: admin-cli
-	AdminRealm     string // default: master
-	FrontendClient string // default: agenthub-frontend
+	BaseURL          string // e.g. http://keycloak.internal:8080
+	AdminUsername    string
+	AdminPassword    string
+	AdminClientID    string // default: admin-cli
+	AdminRealm       string // default: master
+	FrontendClient   string // default: agenthub-frontend
+	WorkloadClientID string // default: agenthub-api
+	WorkloadAudience string // default: agenthub-mcp-client-runtime
 }
 
 // Provisioner implements tenant.ProvisioningClient using the Keycloak Admin REST API.
@@ -44,6 +53,12 @@ func NewProvisioner(cfg Config) *Provisioner {
 	if cfg.FrontendClient == "" {
 		cfg.FrontendClient = "agenthub-frontend"
 	}
+	if cfg.WorkloadClientID == "" {
+		cfg.WorkloadClientID = "agenthub-api"
+	}
+	if cfg.WorkloadAudience == "" {
+		cfg.WorkloadAudience = "agenthub-mcp-client-runtime"
+	}
 	return &Provisioner{
 		cfg: cfg,
 		// 120s — under sustained load (BDD ladder spinning up tenants
@@ -55,19 +70,177 @@ func NewProvisioner(cfg Config) *Provisioner {
 	}
 }
 
-// ProvisionRealm creates a Keycloak realm for the tenant with the default client and roles.
-// It tolerates 409 Conflict (already exists) for idempotency.
-func (p *Provisioner) ProvisionRealm(ctx context.Context, tenantID string, _ string) error {
+// ProvisionRealm creates the tenant realm and returns its unique internal
+// workload credential so that the caller can store it encrypted.
+func (p *Provisioner) ProvisionRealm(ctx context.Context, tenantID string, _ string) (workloadidentity.Credential, error) {
 	if err := p.createRealm(ctx, tenantID); err != nil {
-		return fmt.Errorf("keycloak provision: create realm: %w", err)
+		return workloadidentity.Credential{}, fmt.Errorf("keycloak provision: create realm: %w", err)
 	}
 	if err := p.createClient(ctx, tenantID); err != nil {
-		return fmt.Errorf("keycloak provision: create client: %w", err)
+		return workloadidentity.Credential{}, fmt.Errorf("keycloak provision: create client: %w", err)
+	}
+	credential, err := p.EnsureWorkloadIdentity(ctx, tenantID)
+	if err != nil {
+		return workloadidentity.Credential{}, fmt.Errorf("keycloak provision: workload identity: %w", err)
 	}
 	if err := p.createRealmRoles(ctx, tenantID, defaultRoles); err != nil {
-		return fmt.Errorf("keycloak provision: create roles: %w", err)
+		return workloadidentity.Credential{}, fmt.Errorf("keycloak provision: create roles: %w", err)
+	}
+	return credential, nil
+}
+
+// EnsureWorkloadIdentity creates or repairs the tenant-local Keycloak service
+// account used by agenthub-api to call the MCP runtime.
+func (p *Provisioner) EnsureWorkloadIdentity(ctx context.Context, tenantID string) (workloadidentity.Credential, error) {
+	secret, err := newWorkloadClientSecret()
+	if err != nil {
+		return workloadidentity.Credential{}, err
+	}
+	payload := map[string]any{
+		"clientId":                  p.cfg.WorkloadClientID,
+		"name":                      p.cfg.WorkloadClientID,
+		"enabled":                   true,
+		"publicClient":              false,
+		"clientAuthenticatorType":   "client-secret",
+		"secret":                    secret,
+		"protocol":                  "openid-connect",
+		"serviceAccountsEnabled":    true,
+		"standardFlowEnabled":       false,
+		"directAccessGrantsEnabled": false,
+		"implicitFlowEnabled":       false,
+		"fullScopeAllowed":          false,
+		"protocolMappers":           []map[string]any{p.audienceMapperPayload()},
+	}
+	resp, err := p.adminRequest(ctx, http.MethodPost, fmt.Sprintf("/admin/realms/%s/clients", url.PathEscape(tenantID)), payload)
+	if err != nil {
+		return workloadidentity.Credential{}, err
+	}
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return workloadidentity.Credential{}, fmt.Errorf("create workload client %d: %s", resp.StatusCode, body)
+	}
+	created := resp.StatusCode == http.StatusCreated
+	if err := resp.Body.Close(); err != nil {
+		return workloadidentity.Credential{}, fmt.Errorf("close workload client response: %w", err)
+	}
+
+	internalID, err := p.findClientInternalID(ctx, tenantID, p.cfg.WorkloadClientID)
+	if err != nil {
+		return workloadidentity.Credential{}, err
+	}
+	if err := p.ensureAudienceMapper(ctx, tenantID, internalID); err != nil {
+		return workloadidentity.Credential{}, err
+	}
+	if !created {
+		secret, err = p.getClientSecret(ctx, tenantID, internalID)
+		if err != nil {
+			return workloadidentity.Credential{}, err
+		}
+	}
+	return workloadidentity.Credential{ClientID: p.cfg.WorkloadClientID, ClientSecret: secret}, nil
+}
+
+func newWorkloadClientSecret() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("generate workload client secret: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func (p *Provisioner) findClientInternalID(ctx context.Context, tenantID, clientID string) (string, error) {
+	resp, err := p.adminRequest(ctx, http.MethodGet, fmt.Sprintf("/admin/realms/%s/clients?clientId=%s", url.PathEscape(tenantID), url.QueryEscape(clientID)), nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("find workload client %d: %s", resp.StatusCode, body)
+	}
+	var clients []struct {
+		ID       string `json:"id"`
+		ClientID string `json:"clientId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&clients); err != nil {
+		return "", fmt.Errorf("decode workload clients: %w", err)
+	}
+	for _, client := range clients {
+		if client.ClientID == clientID && client.ID != "" {
+			return client.ID, nil
+		}
+	}
+	return "", fmt.Errorf("workload client %q was not found after provisioning", clientID)
+}
+
+func (p *Provisioner) getClientSecret(ctx context.Context, tenantID, internalID string) (string, error) {
+	resp, err := p.adminRequest(ctx, http.MethodGet, fmt.Sprintf("/admin/realms/%s/clients/%s/client-secret", url.PathEscape(tenantID), url.PathEscape(internalID)), nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("read workload client secret %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode workload client secret: %w", err)
+	}
+	if result.Value == "" {
+		return "", errors.New("workload client secret is empty")
+	}
+	return result.Value, nil
+}
+
+func (p *Provisioner) ensureAudienceMapper(ctx context.Context, tenantID, internalID string) error {
+	path := fmt.Sprintf("/admin/realms/%s/clients/%s/protocol-mappers/models", url.PathEscape(tenantID), url.PathEscape(internalID))
+	resp, err := p.adminRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("list workload protocol mappers %d: %s", resp.StatusCode, body)
+	}
+	var mappers []struct {
+		Name           string            `json:"name"`
+		ProtocolMapper string            `json:"protocolMapper"`
+		Config         map[string]string `json:"config"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&mappers); err != nil {
+		return fmt.Errorf("decode workload protocol mappers: %w", err)
+	}
+	for _, mapper := range mappers {
+		if mapper.Name != workloadAudienceMapperName {
+			continue
+		}
+		if mapper.ProtocolMapper != "oidc-audience-mapper" || mapper.Config["included.custom.audience"] != p.cfg.WorkloadAudience || mapper.Config["access.token.claim"] != "true" {
+			return errors.New("workload audience mapper exists with an incompatible configuration")
+		}
+		return nil
+	}
+	resp, err = p.adminRequest(ctx, http.MethodPost, path, p.audienceMapperPayload())
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("create workload audience mapper %d: %s", resp.StatusCode, body)
 	}
 	return nil
+}
+
+func (p *Provisioner) audienceMapperPayload() map[string]any {
+	return map[string]any{
+		"name": workloadAudienceMapperName, "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper", "consentRequired": false,
+		"config": map[string]string{"included.custom.audience": p.cfg.WorkloadAudience, "access.token.claim": "true", "id.token.claim": "false", "introspection.token.claim": "true"},
+	}
 }
 
 func (p *Provisioner) getAdminToken(ctx context.Context) (string, error) {

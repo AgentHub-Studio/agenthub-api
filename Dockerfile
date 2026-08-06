@@ -9,9 +9,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-w -s -extldflags '-static'" \
     -o /build/bin/api \
     ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-w -s -extldflags '-static'" \
+    -o /build/bin/migrate-workload-identities \
+    ./cmd/migrate-workload-identities
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/bin/api /api
+COPY --from=builder /build/bin/migrate-workload-identities /migrate-workload-identities
 COPY --from=builder /build/migrations /migrations
 EXPOSE 8081
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

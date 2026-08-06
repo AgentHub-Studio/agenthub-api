@@ -69,6 +69,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	tenantctx "github.com/AgentHub-Studio/agenthub-api/internal/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/workloadidentity"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai/provider/anthropic"
@@ -102,17 +103,20 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build Keycloak realm provisioner for tenant creation.
 	provisioner := apikc.NewProvisioner(apikc.Config{
-		BaseURL:        cfg.KeycloakBaseURL,
-		AdminUsername:  cfg.KeycloakAdmin.AdminUsername,
-		AdminPassword:  cfg.KeycloakAdmin.AdminPassword,
-		AdminClientID:  cfg.KeycloakAdmin.AdminClientID,
-		AdminRealm:     cfg.KeycloakAdmin.AdminRealm,
-		FrontendClient: cfg.KeycloakAdmin.FrontendClient,
+		BaseURL:          cfg.KeycloakBaseURL,
+		AdminUsername:    cfg.KeycloakAdmin.AdminUsername,
+		AdminPassword:    cfg.KeycloakAdmin.AdminPassword,
+		AdminClientID:    cfg.KeycloakAdmin.AdminClientID,
+		AdminRealm:       cfg.KeycloakAdmin.AdminRealm,
+		FrontendClient:   cfg.KeycloakAdmin.FrontendClient,
+		WorkloadClientID: cfg.MCPRuntimeClientID,
+		WorkloadAudience: cfg.MCPRuntimeAudience,
 	})
 
 	// Instantiate domain handlers.
 	presetSeeder := llmpreset.NewSeeder(pool)
-	tenantSvc := tenant.NewService(tenant.NewRepository(pool), provisioner, presetSeeder)
+	workloadCredentials := workloadidentity.NewService(workloadidentity.NewRepository(pool), cfg.MCPRuntimeCredentialEncryptionKey)
+	tenantSvc := tenant.NewService(tenant.NewRepository(pool), provisioner, presetSeeder).WithWorkloadCredentialStore(workloadCredentials)
 
 	// Wire the schema migrator so that new tenants get their PostgreSQL schema
 	// created and migrated immediately upon provisioning (same path used on startup).
@@ -197,6 +201,17 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 	mcpSvc.WithOAuthService(oauthSvc)
 	if cfg.MCPRuntimeURL != "" {
 		mcpSvc.WithRuntimeURL(cfg.MCPRuntimeURL)
+		workloadTokenProvider, err := workloadidentity.NewKeycloakTokenProvider(
+			cfg.KeycloakBaseURL,
+			cfg.MCPRuntimeClientID,
+			workloadCredentials,
+			cfg.MCPRuntimeScopes,
+		)
+		if err != nil {
+			slog.Warn("mcp: runtime management disabled because workload authentication is incomplete", "error", err)
+		} else {
+			mcpSvc.WithRuntimeTokenProvider(workloadTokenProvider)
+		}
 	}
 	integrationSvc := integration.NewService(
 		toolSvc,
@@ -219,7 +234,7 @@ func New(cfg *config.Config, pool *pgxpool.Pool) *Server {
 
 	// Build agentic runner and wire it into the chat service.
 	chatRepo := chat.NewRepository(pool)
-	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo)
+	sessionRunner := buildAgenticRunner(cfg, pool, chatRepo, agentRepo, skillRepo, kbRepo, toolRepo, settingsRepo, mcpSvc.Repository(), integration.NewService(toolSvc, datasourceSvc, mcpSvc, vpnSvc), coreToolLoader, agentBindingRepo, workloadCredentials)
 	voiceSvc := chat.NewOpenAIVoiceServiceFromEnv()
 
 	var chatExecutor *chat.AsyncExecutor
@@ -802,6 +817,7 @@ func buildAgenticRunner(
 	integSvc *integration.Service,
 	coreToolLoader *core.CoreToolLoader,
 	bindingRepo agent.BindingRepository,
+	workloadCredentials workloadidentity.Resolver,
 ) chat.SessionRunner {
 	// Build an env-based fallback for agents that have no provider configured.
 	// This keeps backward-compatibility with existing deployments that set env vars.
@@ -863,10 +879,13 @@ func buildAgenticRunner(
 	// HTTPMCPClient calls the agenthub-mcp-client-runtime service which proxies
 	// external MCP servers and exposes their tools over HTTP.
 	if cfg.MCPRuntimeURL != "" {
-		mcpHTTPClient := agentic.NewHTTPMCPClient(cfg.MCPRuntimeURL)
-		cachedMCPClient := agentic.NewCachedMCPClient(mcpHTTPClient, 30*time.Second)
-		adapter.WithMCPClient(cachedMCPClient)
-		slog.Info("agentic: MCP client wired", "url", cfg.MCPRuntimeURL)
+		mcpClient, err := newMCPClient(cfg, workloadCredentials)
+		if err != nil {
+			slog.Warn("agentic: MCP client disabled because workload authentication is incomplete", "error", err)
+		} else {
+			adapter.WithMCPClient(mcpClient)
+			slog.Info("agentic: MCP client wired with Keycloak workload identity", "url", cfg.MCPRuntimeURL)
+		}
 	}
 
 	// P-E1-2: wire the document search client so the document_search builtin tool
@@ -896,6 +915,21 @@ func buildAgenticRunner(
 	}
 
 	return adapter
+}
+
+func newMCPClient(cfg *config.Config, workloadCredentials workloadidentity.Resolver) (agentic.MCPClientService, error) {
+	tokenProvider, err := agentic.NewKeycloakServiceTokenProvider(
+		cfg.KeycloakBaseURL,
+		cfg.MCPRuntimeClientID,
+		workloadCredentials,
+		cfg.MCPRuntimeScopes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	httpClient := agentic.NewAuthenticatedHTTPMCPClient(cfg.MCPRuntimeURL, tokenProvider)
+	cachedClient := agentic.NewCachedMCPClient(httpClient, 30*time.Second)
+	return agentic.NewCircuitBreakerMCPClient(cachedClient, 3), nil
 }
 
 // buildDefaultChatModel creates a ChatModel from environment variables as a fallback.

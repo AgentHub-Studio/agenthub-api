@@ -10,6 +10,7 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/workloadidentity"
 )
 
 type mockTenantRepo struct {
@@ -80,13 +81,15 @@ func (m *mockTenantRepo) Delete(_ context.Context, id string) error {
 // noopProvisioner is a successful no-op.
 type noopProvisioner struct{}
 
-func (n *noopProvisioner) ProvisionRealm(_ context.Context, _, _ string) error { return nil }
+func (n *noopProvisioner) ProvisionRealm(_ context.Context, _, _ string) (workloadidentity.Credential, error) {
+	return workloadidentity.Credential{ClientID: "agenthub-api", ClientSecret: "secret"}, nil
+}
 
 // failProvisioner always returns an error.
 type failProvisioner struct{}
 
-func (f *failProvisioner) ProvisionRealm(_ context.Context, _, _ string) error {
-	return errors.New("keycloak unavailable")
+func (f *failProvisioner) ProvisionRealm(_ context.Context, _, _ string) (workloadidentity.Credential, error) {
+	return workloadidentity.Credential{}, errors.New("keycloak unavailable")
 }
 
 func TestTenantService_Create_Success(t *testing.T) {

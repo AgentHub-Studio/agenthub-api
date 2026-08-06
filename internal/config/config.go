@@ -32,19 +32,23 @@ func (m MinIOConfig) IsConfigured() bool { return m.Endpoint != "" }
 
 // Config holds all configuration for agenthub-api.
 type Config struct {
-	Port                string
-	DatabaseURL         string
-	KeycloakBaseURL     string
-	KeycloakIssuerURL   string // KEYCLOAK_ISSUER_URL — bug 281: validar `iss` claim contra esta URL pública. Vazio = sem validação (legacy)
-	KeycloakAdmin       KeycloakAdminConfig
-	MinIO               MinIOConfig
-	CORSOrigins         []string
-	LogLevel            string
-	OAuthEncryptionKey  string // 32-byte AES-256 key; empty disables encryption (dev mode)
-	RabbitMQURL         string // RABBITMQ_URL — optional; enables document pipeline events when set
-	SkillRuntimeURL     string // SKILL_RUNTIME_URL — optional; base URL for skill-runtime service
-	MCPRuntimeURL       string // MCP_RUNTIME_URL — optional; base URL for mcp-client-runtime service
-	EmbeddingURL        string // EMBEDDING_URL — optional; base URL for embedding service (enables document_search)
+	Port                              string
+	DatabaseURL                       string
+	KeycloakBaseURL                   string
+	KeycloakIssuerURL                 string // KEYCLOAK_ISSUER_URL — bug 281: validar `iss` claim contra esta URL pública. Vazio = sem validação (legacy)
+	KeycloakAdmin                     KeycloakAdminConfig
+	MinIO                             MinIOConfig
+	CORSOrigins                       []string
+	LogLevel                          string
+	OAuthEncryptionKey                string   // 32-byte AES-256 key; empty disables encryption (dev mode)
+	RabbitMQURL                       string   // RABBITMQ_URL — optional; enables document pipeline events when set
+	SkillRuntimeURL                   string   // SKILL_RUNTIME_URL — optional; base URL for skill-runtime service
+	MCPRuntimeURL                     string   // MCP_RUNTIME_URL — optional; base URL for mcp-client-runtime service
+	MCPRuntimeClientID                string   // MCP_RUNTIME_CLIENT_ID — tenant-local Keycloak service client for runtime calls
+	MCPRuntimeAudience                string   // MCP_RUNTIME_AUDIENCE — audience required by mcp-client-runtime
+	MCPRuntimeCredentialEncryptionKey string   // MCP_RUNTIME_CREDENTIAL_ENCRYPTION_KEY — base64-encoded 32-byte AES-256 key for tenant workload credentials
+	MCPRuntimeScopes                  []string // MCP_RUNTIME_SCOPES — optional client-credentials scopes
+	EmbeddingURL                      string   // EMBEDDING_URL — optional; base URL for embedding service (enables document_search)
 	// LLMCallTimeoutSecs is the per-LLM-call timeout in seconds.
 	// P-C102-1: prevents stalled providers from blocking goroutines indefinitely.
 	// Default: 300 (5 minutes). Set to 0 to disable.
@@ -54,11 +58,11 @@ type Config struct {
 // Load reads configuration from environment variables.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Port:            getEnv("PORT", "8081"),
-		DatabaseURL:     os.Getenv("DATABASE_URL"),
+		Port:              getEnv("PORT", "8081"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		KeycloakBaseURL:   os.Getenv("KEYCLOAK_BASE_URL"),
 		KeycloakIssuerURL: os.Getenv("KEYCLOAK_ISSUER_URL"),
-		LogLevel:        getEnv("LOG_LEVEL", "info"),
+		LogLevel:          getEnv("LOG_LEVEL", "info"),
 		KeycloakAdmin: KeycloakAdminConfig{
 			AdminUsername:  getEnv("KEYCLOAK_ADMIN_USERNAME", "admin"),
 			AdminPassword:  os.Getenv("KEYCLOAK_ADMIN_PASSWORD"),
@@ -83,6 +87,10 @@ func Load() (*Config, error) {
 	cfg.RabbitMQURL = os.Getenv("RABBITMQ_URL")
 	cfg.SkillRuntimeURL = getEnv("SKILL_RUNTIME_URL", "http://agenthub-skill-runtime:8083")
 	cfg.MCPRuntimeURL = getEnv("MCP_RUNTIME_URL", "http://agenthub-mcp-client-runtime:8080")
+	cfg.MCPRuntimeClientID = getEnv("MCP_RUNTIME_CLIENT_ID", "agenthub-api")
+	cfg.MCPRuntimeAudience = getEnv("MCP_RUNTIME_AUDIENCE", "agenthub-mcp-client-runtime")
+	cfg.MCPRuntimeCredentialEncryptionKey = os.Getenv("MCP_RUNTIME_CREDENTIAL_ENCRYPTION_KEY")
+	cfg.MCPRuntimeScopes = splitNonEmpty(os.Getenv("MCP_RUNTIME_SCOPES"))
 	cfg.EmbeddingURL = getEnv("EMBEDDING_URL", "http://agenthub-embedding:8092")
 
 	// P-C102-1: per-LLM-call timeout. Default 300s (5 minutes).
@@ -104,6 +112,16 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func splitNonEmpty(csv string) []string {
+	var values []string
+	for _, value := range strings.Split(csv, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }
 
 func getEnv(key, defaultValue string) string {

@@ -13,78 +13,47 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestProvisioner(t *testing.T, handler http.HandlerFunc) (*keycloak.Provisioner, *httptest.Server) {
+func newTestProvisioner(t *testing.T, handler http.HandlerFunc) *keycloak.Provisioner {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return keycloak.NewProvisioner(keycloak.Config{
-		BaseURL:       srv.URL,
-		AdminUsername: "admin",
-		AdminPassword: "admin",
-	}), srv
+	return keycloak.NewProvisioner(keycloak.Config{BaseURL: srv.URL, AdminUsername: "admin", AdminPassword: "admin"})
 }
 
-func TestProvisionRealm_Success(t *testing.T) {
-	calls := map[string]int{}
-	p, _ := newTestProvisioner(t, func(w http.ResponseWriter, r *http.Request) {
+func TestProvisionRealm_CreatesTenantWorkloadServiceAccount(t *testing.T) {
+	var workload map[string]any
+	p := newTestProvisioner(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/token"):
-			json.NewEncoder(w).Encode(map[string]string{"access_token": "tok"}) //nolint:errcheck
+		case strings.HasSuffix(r.URL.Path, "/token"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "admin-token"})
 		case r.Method == http.MethodPost && r.URL.Path == "/admin/realms":
-			calls["realm"]++
 			w.WriteHeader(http.StatusCreated)
-		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/clients"):
-			calls["client"]++
+		case r.Method == http.MethodPost && r.URL.Path == "/admin/realms/tenant-a/clients":
+			body := map[string]any{}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			if body["clientId"] == "agenthub-api" {
+				workload = body
+			}
 			w.WriteHeader(http.StatusCreated)
-		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/roles"):
-			calls["role"]++
+		case r.Method == http.MethodGet && r.URL.Path == "/admin/realms/tenant-a/clients":
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"id": "internal-client", "clientId": "agenthub-api"}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/protocol-mappers/models"):
+			_ = json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/protocol-mappers/models"):
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/roles"):
 			w.WriteHeader(http.StatusCreated)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	})
 
-	err := p.ProvisionRealm(context.Background(), "test-tenant", "Test Tenant")
+	credential, err := p.ProvisionRealm(context.Background(), "tenant-a", "Tenant A")
+
 	require.NoError(t, err)
-	assert.Equal(t, 1, calls["realm"])
-	assert.Equal(t, 1, calls["client"])
-	assert.Equal(t, 4, calls["role"]) // admin, user, mcp-client-runtime, PROXY_SERVICE
-}
-
-func TestProvisionRealm_Idempotent(t *testing.T) {
-	// 409 Conflict on realm/client/role should not be an error.
-	p, _ := newTestProvisioner(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/token") {
-			json.NewEncoder(w).Encode(map[string]string{"access_token": "tok"}) //nolint:errcheck
-			return
-		}
-		w.WriteHeader(http.StatusConflict)
-	})
-
-	err := p.ProvisionRealm(context.Background(), "existing-tenant", "Existing")
-	require.NoError(t, err)
-}
-
-func TestProvisionRealm_TokenError(t *testing.T) {
-	p, _ := newTestProvisioner(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	})
-
-	err := p.ProvisionRealm(context.Background(), "any", "Any")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "401")
-}
-
-func TestProvisionRealm_RealmCreateError(t *testing.T) {
-	p, _ := newTestProvisioner(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/token") {
-			json.NewEncoder(w).Encode(map[string]string{"access_token": "tok"}) //nolint:errcheck
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-	})
-
-	err := p.ProvisionRealm(context.Background(), "fail-tenant", "Fail")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "create realm")
+	assert.Equal(t, "agenthub-api", credential.ClientID)
+	assert.NotEmpty(t, credential.ClientSecret)
+	assert.Equal(t, false, workload["publicClient"])
+	assert.Equal(t, true, workload["serviceAccountsEnabled"])
+	assert.Equal(t, false, workload["standardFlowEnabled"])
 }

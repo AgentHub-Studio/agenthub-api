@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -167,13 +168,24 @@ func ParseMCPToolName(name string) (serverName, toolName string, ok bool) {
 
 // HTTPMCPClient implements MCPClientService by calling the agenthub-mcp-client-runtime via HTTP.
 type HTTPMCPClient struct {
-	baseURL string
-	client  *http.Client
+	baseURL       string
+	client        *http.Client
+	tokenProvider MCPRuntimeTokenProvider
 }
 
 // NewHTTPMCPClient creates an HTTP-based MCP client.
 // If baseURL is empty it defaults to http://agenthub-mcp-client-runtime:8083.
 func NewHTTPMCPClient(baseURL string) *HTTPMCPClient {
+	return newHTTPMCPClient(baseURL, nil)
+}
+
+// NewAuthenticatedHTTPMCPClient creates the internal MCP client that uses a
+// tenant-local Keycloak workload identity for every request.
+func NewAuthenticatedHTTPMCPClient(baseURL string, tokenProvider MCPRuntimeTokenProvider) *HTTPMCPClient {
+	return newHTTPMCPClient(baseURL, tokenProvider)
+}
+
+func newHTTPMCPClient(baseURL string, tokenProvider MCPRuntimeTokenProvider) *HTTPMCPClient {
 	if baseURL == "" {
 		baseURL = "http://agenthub-mcp-client-runtime:8083"
 	}
@@ -182,6 +194,7 @@ func NewHTTPMCPClient(baseURL string) *HTTPMCPClient {
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
+		tokenProvider: tokenProvider,
 	}
 }
 
@@ -198,10 +211,12 @@ type listToolsResponse struct {
 // Returns (partial-tools, error) when some servers failed — the error
 // aggregates all per-server warning messages so the caller can surface them.
 func (c *HTTPMCPClient) ListTools(ctx context.Context, tenantID string) ([]MCPToolInfo, error) {
-	url := fmt.Sprintf("%s/api/tools?tenantId=%s", c.baseURL, tenantID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tools", nil)
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: new request: %w", err)
+	}
+	if err := c.authenticateRequest(ctx, tenantID, req); err != nil {
+		return nil, err
 	}
 
 	resp, err := c.client.Do(req)
@@ -263,12 +278,14 @@ func (c *HTTPMCPClient) CallTool(ctx context.Context, tenantID, serverName, tool
 		return nil, fmt.Errorf("mcpclient: marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/tools/call?tenantId=%s", c.baseURL, tenantID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/tools/call", bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: new request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if err := c.authenticateRequest(ctx, tenantID, req); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -307,6 +324,18 @@ func (c *HTTPMCPClient) CallTool(ctx context.Context, tenantID, serverName, tool
 	}
 
 	return result.Output, nil
+}
+
+func (c *HTTPMCPClient) authenticateRequest(ctx context.Context, tenantID string, req *http.Request) error {
+	if c.tokenProvider == nil {
+		return errors.New("mcpclient: Keycloak workload token provider is required")
+	}
+	token, err := c.tokenProvider.Token(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("mcpclient: obtain Keycloak workload token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }
 
 // --- CachedMCPClient ---

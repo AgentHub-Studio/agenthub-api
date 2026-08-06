@@ -19,6 +19,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/workloadidentity"
 )
 
 // envNamePattern é POSIX env name. Bug 252: env vars com keys como
@@ -41,7 +42,8 @@ type Service struct {
 	repo     Repository
 	oauthSvc oauthService
 	// Discovery from runtime
-	mcpRuntimeURL string
+	mcpRuntimeURL        string
+	runtimeTokenProvider workloadidentity.TokenProvider
 }
 
 // AuthServerMetadata represents OAuth 2.0 Authorization Server Metadata (RFC 8414).
@@ -76,6 +78,13 @@ func (s *Service) WithRuntimeURL(url string) *Service {
 	return s
 }
 
+// WithRuntimeTokenProvider authenticates runtime calls using the tenant-local
+// service account. User bearer tokens are never forwarded to the runtime.
+func (s *Service) WithRuntimeTokenProvider(provider workloadidentity.TokenProvider) *Service {
+	s.runtimeTokenProvider = provider
+	return s
+}
+
 // WithOAuthService attaches the oauth service to the MCP service.
 func (s *Service) WithOAuthService(oauthSvc oauthService) *Service {
 	s.oauthSvc = oauthSvc
@@ -85,6 +94,33 @@ func (s *Service) WithOAuthService(oauthSvc oauthService) *Service {
 // Repository returns the underlying repository.
 func (s *Service) Repository() Repository {
 	return s.repo
+}
+
+func (s *Service) doRuntime(ctx context.Context, method, target string, body io.Reader) (*http.Response, error) {
+	if s.runtimeTokenProvider == nil {
+		return nil, fmt.Errorf("mcp service: runtime workload authentication is not configured")
+	}
+	tenantID := tenant.FromContext(ctx)
+	if tenantID == "" {
+		return nil, fmt.Errorf("mcp service: tenant context is required for runtime request")
+	}
+	token, err := s.runtimeTokenProvider.Token(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("mcp service: obtain runtime workload token: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
+	if err != nil {
+		return nil, fmt.Errorf("mcp service: create runtime request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mcp service: contact runtime: %w", err)
+	}
+	return resp, nil
 }
 
 // List returns all MCP server configs for the tenant.
@@ -584,8 +620,7 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, mcpServerID uuid.UUID
 
 	// Unregister the server from the runtime so that the next request forces a reload of the new tokens
 	if s.mcpRuntimeURL != "" {
-		req, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/servers/%s", s.mcpRuntimeURL, config.Name), nil)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := s.doRuntime(ctx, http.MethodDelete, fmt.Sprintf("%s/servers/%s", s.mcpRuntimeURL, config.Name), nil)
 		if err == nil {
 			defer resp.Body.Close()
 			log.Printf("mcp service: unregistered server %s from runtime to force token reload", config.Name)
@@ -617,7 +652,7 @@ func (s *Service) ListTools(ctx context.Context, id uuid.UUID) ([]ToolResponse, 
 		log.Printf("mcp service: failed to ensure server registration for %s: %v", config.Name, err)
 	}
 
-	resp, err := http.Get(url)
+	resp, err := s.doRuntime(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("mcp service: tools: failed to contact runtime: %w", err)
 	}
@@ -658,7 +693,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 	// 1. Check if registered
 	statusURL := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
 	for i := 0; i < 5; i++ {
-		resp, err := http.Get(statusURL)
+		resp, err := s.doRuntime(ctx, http.MethodGet, statusURL, nil)
 		if err == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -674,7 +709,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 
 					// Try to start explicitly
 					startURL := fmt.Sprintf("%s/servers/%s/start", s.mcpRuntimeURL, config.Name)
-					startResp, startErr := http.Post(startURL, "application/json", nil)
+					startResp, startErr := s.doRuntime(ctx, http.MethodPost, startURL, nil)
 					if startErr == nil {
 						defer startResp.Body.Close()
 						if startResp.StatusCode == http.StatusUnauthorized {
@@ -733,7 +768,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 
 	body, _ := json.Marshal(regReq)
 	regURL := fmt.Sprintf("%s/servers", s.mcpRuntimeURL)
-	resp, err := http.Post(regURL, "application/json", bytes.NewReader(body))
+	resp, err := s.doRuntime(ctx, http.MethodPost, regURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to register server in runtime: %w", err)
 	}
