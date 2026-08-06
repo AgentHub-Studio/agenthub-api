@@ -3,6 +3,9 @@ package agentic_test
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -371,6 +376,96 @@ func TestRunner_SubtaskIntegration(t *testing.T) {
 	assert.GreaterOrEqual(t, model.CallCount(), 3)
 }
 
+func TestRunner_ForkModeSkillRoutesThroughSubtaskExecutor(t *testing.T) {
+	var runtimeRequests atomic.Int32
+	skillRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		runtimeRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"output":{"inline":true},"latencyMs":1}`))
+	}))
+	t.Cleanup(skillRuntime.Close)
+
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			switch idx {
+			case 0:
+				return makeToolCallStream("tc_fork", "deep-research", `{"topic":"latency","depth":"high"}`), nil
+			case 1:
+				return makeTextStream("forked research result"), nil
+			default:
+				return makeTextStream("final answer from parent"), nil
+			}
+		},
+	}
+
+	skillID := uuid.New()
+	toolID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{{
+		ID:           skillID,
+		Name:         "Deep Research",
+		Slug:         "deep-research",
+		Description:  "Perform long-running research",
+		Instructions: "Investigate independently and summarize findings.",
+		ContextMode:  "fork",
+	}}}
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID:          toolID,
+			Name:        "Research Tool",
+			Type:        "HTTP",
+			Config:      json.RawMessage(`{"inputSchema":{"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}`),
+		}},
+	}
+
+	persister := &mockPersister{}
+	factory := &mockRunnerFactory{model: model, persister: persister}
+	subtaskExec := agentic.NewSubtaskExecutor(factory)
+
+	config := agentic.DefaultRunConfig()
+	config.MaxIterations = 5
+	config.MaxDepth = 3
+
+	runner := agentic.NewRunner(
+		model,
+		agentic.NewSkillRuntimeClient(skillRuntime.URL),
+		agentic.NewPromptBuilder(skills, &mockKBLister{}, nil, agentic.DefaultPromptConfig()),
+		agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}),
+		nil,
+		nil,
+		persister,
+		&mockHistoryLoader{},
+		nil,
+		config,
+	)
+	runner.WithSubtaskExecutor(subtaskExec)
+
+	events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "Research latency",
+		SystemPrompt: "You are a coordinator.",
+		TenantID:     "test-tenant",
+		CurrentDepth: 0,
+	}))
+
+	assert.Equal(t, int32(0), runtimeRequests.Load(), "fork-mode skill must not execute inline through skill-runtime")
+	assert.True(t, hasEventType(events, agentic.EventSubtaskStart), "fork-mode skill should emit subtask_start")
+	assert.True(t, hasEventType(events, agentic.EventSubtaskComplete), "fork-mode skill should emit subtask_complete")
+	assert.GreaterOrEqual(t, model.CallCount(), 3, "parent, child, then parent continuation should all call the model")
+
+	startEv := findEvent(t, events, agentic.EventSubtaskStart)
+	var startData agentic.SubtaskStartData
+	require.NoError(t, json.Unmarshal(startEv.Data, &startData))
+	assert.Contains(t, startData.Description, "deep-research")
+	assert.Contains(t, startData.Description, `"topic":"latency"`)
+}
+
 func TestToolSchemaBuilder_AgentToolAtDepth0(t *testing.T) {
 	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), &mockKBLister{})
 	builder.WithDepthLimits(0, 3)
@@ -589,4 +684,104 @@ func TestSubtaskExecutor_TokensPropagatedToResult(t *testing.T) {
 	// We only assert it's non-negative since mock usage counts vary.
 	assert.GreaterOrEqual(t, result.SubtaskTokens, 0)
 	assert.GreaterOrEqual(t, result.SubtaskCostUSD, float64(0))
+}
+
+func TestSubtaskExecutor_PersistsSubtaskLifecycle(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			return makeTextStream("persisted subtask result"), nil
+		},
+	}
+
+	sessionID := uuid.New()
+	repo := newMockPersistRepo()
+	coordinator := agentic.NewCoordinatorState().
+		WithRepository(repo, sessionID).
+		WithContext(context.Background())
+
+	exec := agentic.NewSubtaskExecutor(&mockRunnerFactory{model: model, persister: &mockPersister{}}).
+		WithCoordinatorState(coordinator)
+	parentCh := make(chan agentic.RunEvent, 16)
+
+	result := exec.Execute(context.Background(), parentCh, ai.ToolCall{
+		ID:   "tc_persisted_subtask",
+		Type: "function",
+		Function: ai.ToolFunction{
+			Name:      "agent",
+			Arguments: `{"prompt":"Persist this delegated task"}`,
+		},
+	}, agentic.RunInput{
+		SessionID: sessionID,
+		AgentID:   uuid.New(),
+		TenantID:  "test-tenant",
+	}, agentic.DefaultRunConfig(), 0)
+
+	require.Nil(t, result.Error)
+	var output agentic.SubtaskResult
+	require.NoError(t, json.Unmarshal(result.Output, &output))
+
+	persisted, ok := repo.tasks[output.SubtaskID]
+	require.True(t, ok, "delegated work must be persisted under the SSE subtask ID")
+	assert.Equal(t, sessionID, persisted.SessionID)
+	assert.Equal(t, "implementation", persisted.Phase)
+	assert.Equal(t, "completed", persisted.Status)
+	assert.NotEmpty(t, persisted.AssignedTo)
+	require.NotNil(t, persisted.CompletedAt)
+
+	require.Len(t, repo.notifications, 1)
+	assert.Equal(t, output.SubtaskID, repo.notifications[0].TaskID)
+	assert.Equal(t, "completed", repo.notifications[0].Status)
+	assert.Contains(t, repo.notifications[0].Summary, "persisted subtask result")
+
+	close(parentCh)
+	events := collectEvents(parentCh)
+	startEvent := findEvent(t, events, agentic.EventSubtaskStart)
+	completeEvent := findEvent(t, events, agentic.EventSubtaskComplete)
+	var start agentic.SubtaskStartData
+	var complete agentic.SubtaskCompleteData
+	require.NoError(t, json.Unmarshal(startEvent.Data, &start))
+	require.NoError(t, json.Unmarshal(completeEvent.Data, &complete))
+	assert.Equal(t, output.SubtaskID, start.ID)
+	assert.Equal(t, output.SubtaskID, complete.ID)
+}
+
+func TestSubtaskExecutor_PersistsBudgetExhaustion(t *testing.T) {
+	sessionID := uuid.New()
+	repo := newMockPersistRepo()
+	coordinator := agentic.NewCoordinatorState().
+		WithRepository(repo, sessionID).
+		WithContext(context.Background())
+
+	exec := agentic.NewSubtaskExecutor(&mockRunnerFactory{model: &mockChatModel{}, persister: &mockPersister{}}).
+		WithCoordinatorState(coordinator)
+	parentCh := make(chan agentic.RunEvent, 16)
+	config := agentic.DefaultRunConfig()
+	config.MaxBudgetUSD = 1
+
+	result := exec.Execute(context.Background(), parentCh, ai.ToolCall{
+		ID:   "tc_persisted_budget_failure",
+		Type: "function",
+		Function: ai.ToolFunction{
+			Name:      "agent",
+			Arguments: `{"prompt":"This task cannot fit the remaining budget"}`,
+		},
+	}, agentic.RunInput{
+		SessionID:          sessionID,
+		AgentID:            uuid.New(),
+		TenantID:           "test-tenant",
+		RemainingBudgetUSD: 1,
+	}, config, 1)
+
+	require.NotNil(t, result.Error)
+	require.Len(t, repo.tasks, 1)
+	for taskID, persisted := range repo.tasks {
+		assert.Equal(t, "failed", persisted.Status)
+		require.NotNil(t, persisted.CompletedAt)
+		require.Len(t, repo.notifications, 1)
+		assert.Equal(t, taskID, repo.notifications[0].TaskID)
+		assert.Equal(t, "failed", repo.notifications[0].Status)
+		require.NotNil(t, repo.notifications[0].Error)
+		assert.Contains(t, *repo.notifications[0].Error, "no budget remaining")
+		assert.Contains(t, repo.notifications[0].Summary, "no budget remaining")
+	}
 }

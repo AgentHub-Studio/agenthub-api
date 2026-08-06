@@ -18,6 +18,7 @@ type CreateRequest struct {
 	Instructions           string   `json:"instructions"`
 	Category               string   `json:"category"`
 	AllowedTools           []string `json:"allowedTools"`
+	RequiredRoles          []string `json:"requiredRoles"`
 	DisableModelInvocation bool     `json:"disableModelInvocation"`
 	ContextMode            string   `json:"contextMode"`
 	WhenToUse              *string  `json:"whenToUse"`
@@ -37,34 +38,44 @@ type CreateRequest struct {
 
 // UpdateRequest is the payload for updating a skill.
 type UpdateRequest struct {
-	Name                   string   `json:"name"`
-	Description            string   `json:"description"`
-	Instructions           string   `json:"instructions"`
-	Category               string   `json:"category"`
-	AllowedTools           []string `json:"allowedTools"`
-	DisableModelInvocation bool     `json:"disableModelInvocation"`
-	ContextMode            string   `json:"contextMode"`
-	WhenToUse              *string  `json:"whenToUse"`
-	ArgumentHint           *string  `json:"argumentHint"`
-	ShouldDefer            bool     `json:"shouldDefer"`
+	Name                   string            `json:"name"`
+	Description            string            `json:"description"`
+	Instructions           string            `json:"instructions"`
+	Category               string            `json:"category"`
+	AllowedTools           []string          `json:"allowedTools"`
+	RequiredRoles          []string          `json:"requiredRoles"`
+	DisableModelInvocation bool              `json:"disableModelInvocation"`
+	ContextMode            string            `json:"contextMode"`
+	WhenToUse              *string           `json:"whenToUse"`
+	ArgumentHint           *string           `json:"argumentHint"`
+	ShouldDefer            bool              `json:"shouldDefer"`
+	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"`
+	EffortLevel            string            `json:"effortLevel,omitempty"`
+	AssociatedAgents       []string          `json:"associatedAgents,omitempty"`
+	DynamicHooks           []string          `json:"dynamicHooks,omitempty"`
 }
 
 // Response is the JSON representation of a Skill.
 type Response struct {
-	ID                     uuid.UUID `json:"id"`
-	Name                   string    `json:"name"`
-	Slug                   string    `json:"slug"`
-	Description            string    `json:"description"`
-	Instructions           string    `json:"instructions"`
-	Category               string    `json:"category"`
-	AllowedTools           []string  `json:"allowedTools"`
-	DisableModelInvocation bool      `json:"disableModelInvocation"`
-	ContextMode            string    `json:"contextMode"`
-	WhenToUse              *string   `json:"whenToUse"`
-	ArgumentHint           *string   `json:"argumentHint"`
-	ShouldDefer            bool      `json:"shouldDefer"`
-	CreatedAt              time.Time `json:"createdAt"`
-	UpdatedAt              time.Time `json:"updatedAt"`
+	ID                     uuid.UUID         `json:"id"`
+	Name                   string            `json:"name"`
+	Slug                   string            `json:"slug"`
+	Description            string            `json:"description"`
+	Instructions           string            `json:"instructions"`
+	Category               string            `json:"category"`
+	AllowedTools           []string          `json:"allowedTools"`
+	RequiredRoles          []string          `json:"requiredRoles"`
+	DisableModelInvocation bool              `json:"disableModelInvocation"`
+	ContextMode            string            `json:"contextMode"`
+	WhenToUse              *string           `json:"whenToUse"`
+	ArgumentHint           *string           `json:"argumentHint"`
+	ShouldDefer            bool              `json:"shouldDefer"`
+	ModelOverrides         map[string]string `json:"modelOverrides,omitempty"`
+	EffortLevel            string            `json:"effortLevel,omitempty"`
+	AssociatedAgents       []string          `json:"associatedAgents,omitempty"`
+	DynamicHooks           []string          `json:"dynamicHooks,omitempty"`
+	CreatedAt              time.Time         `json:"createdAt"`
+	UpdatedAt              time.Time         `json:"updatedAt"`
 }
 
 // ResponseFrom converts a Skill to a Response.

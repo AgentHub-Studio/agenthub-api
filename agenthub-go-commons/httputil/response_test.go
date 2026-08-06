@@ -120,6 +120,49 @@ func TestBindJSON(t *testing.T) {
 		err := httputil.BindJSON(r, &p)
 		assert.ErrorContains(t, err, "invalid JSON")
 	})
+
+	t.Run("rejects multiple JSON values", func(t *testing.T) {
+		r := httptest.NewRequest("POST", "/", strings.NewReader(`{"name":"first"}{"name":"second"}`))
+		var p payload
+		err := httputil.BindJSON(r, &p)
+		assert.ErrorContains(t, err, "invalid JSON")
+	})
+
+	t.Run("rejects duplicate object keys", func(t *testing.T) {
+		for _, body := range []string{
+			`{"name":"first","name":"second"}`,
+			`{"name":"first","\u006eame":"second"}`,
+			`{"name":"valid","metadata":{"source":"first","source":"second"}}`,
+			`{"name":"valid","items":[{"source":"first","source":"second"}]}`,
+		} {
+			r := httptest.NewRequest("POST", "/", strings.NewReader(body))
+			var p payload
+			err := httputil.BindJSON(r, &p)
+			assert.ErrorContains(t, err, "duplicate JSON object key", body)
+		}
+	})
+
+	t.Run("accepts body at maximum", func(t *testing.T) {
+		const maxBodyBytes = 1 << 20
+		body := `{"name":"` + strings.Repeat("x", maxBodyBytes-len(`{"name":""}`)) + `"}`
+		require.Len(t, body, maxBodyBytes)
+
+		r := httptest.NewRequest("POST", "/", strings.NewReader(body))
+		var p payload
+		require.NoError(t, httputil.BindJSON(r, &p))
+		assert.Len(t, p.Name, maxBodyBytes-len(`{"name":""}`))
+	})
+
+	t.Run("rejects body longer than maximum", func(t *testing.T) {
+		const maxBodyBytes = 1 << 20
+		body := `{"name":"` + strings.Repeat("x", maxBodyBytes-len(`{"name":""}`)) + `"}`
+		require.Len(t, body, maxBodyBytes)
+
+		r := httptest.NewRequest("POST", "/", strings.NewReader(body+" "))
+		var p payload
+		err := httputil.BindJSON(r, &p)
+		assert.ErrorContains(t, err, "request body exceeds")
+	})
 }
 
 func TestValidate(t *testing.T) {

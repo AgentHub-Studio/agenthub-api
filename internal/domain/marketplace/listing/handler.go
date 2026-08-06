@@ -2,13 +2,13 @@ package listing
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -37,9 +37,19 @@ func NewHandler(svc listingService) *Handler {
 
 // RegisterRoutes mounts listing routes on the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
+	h.RegisterReadRoutes(r)
+	h.RegisterWriteRoutes(r)
+}
+
+// RegisterReadRoutes mounts the public listing read routes.
+func (h *Handler) RegisterReadRoutes(r chi.Router) {
 	r.Get("/api/marketplace/listings", h.list)
-	r.Post("/api/marketplace/listings", h.create)
 	r.Get("/api/marketplace/listings/{id}", h.getByID)
+}
+
+// RegisterWriteRoutes mounts listing mutations, which require a tenant.
+func (h *Handler) RegisterWriteRoutes(r chi.Router) {
+	r.Post("/api/marketplace/listings", h.create)
 	r.Put("/api/marketplace/listings/{id}", h.update)
 	r.Patch("/api/marketplace/listings/{id}", h.update)
 	r.Delete("/api/marketplace/listings/{id}", h.delete)
@@ -72,7 +82,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.FromContext(r.Context())
 	var req CreateListingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -82,7 +92,23 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			respond.Error(w, http.StatusConflict, err.Error())
 			return
 		}
-		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+		if errors.Is(err, ErrPackageNotFound) {
+			respond.Error(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, ErrPackageNotPublic) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		if errors.Is(err, ErrForbidden) {
+			respond.Error(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if errors.Is(err, ErrValidation) {
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)
@@ -114,7 +140,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateListingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -127,6 +153,10 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		// Bug 114: ErrValidation no Update precisa de mapping 422.
 		if errors.Is(err, ErrValidation) {
 			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		if errors.Is(err, ErrForbidden) {
+			respond.Error(w, http.StatusForbidden, err.Error())
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, "internal error")
@@ -145,6 +175,10 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Delete(r.Context(), id, tenantID); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "listing not found")
+			return
+		}
+		if errors.Is(err, ErrForbidden) {
+			respond.Error(w, http.StatusForbidden, err.Error())
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, "internal error")

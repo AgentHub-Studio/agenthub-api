@@ -90,24 +90,40 @@ func retryStreamWithNonStreamingFallback(
 		return StreamFallbackResult{Stream: stream}, nil
 	}
 
+	result, _, fallbackErr := retryNonStreamingAfterStreamFailure(ctx, model, messages, opts, retryOpts, err)
+	return result, fallbackErr
+}
+
+// retryNonStreamingAfterStreamFailure converts an already exhausted streaming
+// attempt to a non-streaming request when the error is stream-specific. The
+// attempted result distinguishes an ineligible error from a failed fallback.
+func retryNonStreamingAfterStreamFailure(
+	ctx context.Context,
+	model ai.ChatModel,
+	messages []ai.Message,
+	opts ai.ChatOptions,
+	retryOpts StreamFallbackConfig,
+	streamErr error,
+) (result StreamFallbackResult, attempted bool, err error) {
+
 	// If non-streaming fallback is disabled, return the error.
 	if !retryOpts.Enabled {
-		return StreamFallbackResult{}, err
+		return StreamFallbackResult{}, false, streamErr
 	}
 
 	// Don't fallback for errors that won't be helped by switching to non-streaming.
-	if isPromptTooLong(err) || isAbortError(err) || isMediaSizeError(err) {
-		return StreamFallbackResult{}, err
+	if isPromptTooLong(streamErr) || isAbortError(streamErr) || isMediaSizeError(streamErr) {
+		return StreamFallbackResult{}, false, streamErr
 	}
 
 	// Check if this is a streaming-specific error worth retrying non-streaming.
-	if !isStreamingFallbackEligible(err) {
-		return StreamFallbackResult{}, err
+	if !isStreamingFallbackEligible(streamErr) {
+		return StreamFallbackResult{}, false, streamErr
 	}
 
 	slog.Warn("streaming failed, falling back to non-streaming API",
 		"model", opts.Model,
-		"error", err,
+		"error", streamErr,
 		"timeout_ms", retryOpts.TimeoutMs,
 	)
 
@@ -118,14 +134,17 @@ func retryStreamWithNonStreamingFallback(
 
 	// Use the Chat (non-streaming) API.
 	response, nsErr := model.Chat(nsCtx, messages, opts)
+	if nsErr == nil && response == nil {
+		nsErr = fmt.Errorf("non-streaming fallback returned no response")
+	}
 	if nsErr != nil {
 		// Return the original streaming error if non-streaming also fails.
 		slog.Warn("non-streaming fallback also failed",
 			"model", opts.Model,
-			"streamError", err,
+			"streamError", streamErr,
 			"nonStreamError", nsErr,
 		)
-		return StreamFallbackResult{}, fmt.Errorf("streaming and non-streaming both failed: streaming=%v, non-streaming=%w", err, nsErr)
+		return StreamFallbackResult{}, true, fmt.Errorf("streaming and non-streaming both failed: streaming=%v, non-streaming=%w", streamErr, nsErr)
 	}
 	if response == nil {
 		return StreamFallbackResult{}, fmt.Errorf("streaming and non-streaming both failed: streaming=%v, non-streaming returned an empty response", err)
@@ -149,7 +168,7 @@ func retryStreamWithNonStreamingFallback(
 		Stream:           ch,
 		Model:            response.Model,
 		UsedNonStreaming: true,
-	}, nil
+	}, true, nil
 }
 
 // isStreamingFallbackEligible returns true if the error suggests a streaming-specific

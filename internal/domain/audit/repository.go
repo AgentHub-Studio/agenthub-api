@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -122,6 +123,29 @@ func (r *Repository) GetByID(ctx context.Context, tenantID string, id uuid.UUID)
 		return AuditLog{}, ErrNotFound
 	}
 	return l, err
+}
+
+// ApplyRetention counts or deletes audit entries older than cutoff.
+func (r *Repository) ApplyRetention(ctx context.Context, tenantID string, cutoff time.Time, dryRun bool) (int, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
+	if dryRun {
+		var total int
+		if err := conn.QueryRow(ctx, `SELECT COUNT(*) FROM audit_log WHERE created_at < $1`, cutoff).Scan(&total); err != nil {
+			return 0, fmt.Errorf("audit: retention count: %w", err)
+		}
+		return total, nil
+	}
+
+	tag, err := conn.Exec(ctx, `DELETE FROM audit_log WHERE created_at < $1`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("audit: retention delete: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // Record appends a new audit log entry.

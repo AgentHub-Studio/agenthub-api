@@ -2,6 +2,7 @@ package document_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -11,16 +12,23 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase/graph"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 // mockDocRepo is an in-memory Repository for unit tests.
 type mockDocRepo struct {
-	data map[uuid.UUID]document.Document
+	data   map[uuid.UUID]document.Document
+	chunks map[uuid.UUID][]string
+	graphs map[uuid.UUID]graph.Snapshot
 }
 
 func newMockRepo() *mockDocRepo {
-	return &mockDocRepo{data: make(map[uuid.UUID]document.Document)}
+	return &mockDocRepo{
+		data:   make(map[uuid.UUID]document.Document),
+		chunks: make(map[uuid.UUID][]string),
+		graphs: make(map[uuid.UUID]graph.Snapshot),
+	}
 }
 
 func (m *mockDocRepo) FindByKnowledgeBase(_ context.Context, kbID uuid.UUID, _ pagination.PageRequest) ([]document.Document, int64, error) {
@@ -48,6 +56,16 @@ func (m *mockDocRepo) Create(_ context.Context, d document.Document) (document.D
 	d.Status = document.StatusPending
 	m.data[d.ID] = d
 	return d, nil
+}
+
+func (m *mockDocRepo) ReplaceTextChunks(_ context.Context, documentID uuid.UUID, chunks []string) error {
+	m.chunks[documentID] = chunks
+	return nil
+}
+
+func (m *mockDocRepo) ReplaceTextGraph(_ context.Context, documentID, _ uuid.UUID, snapshot graph.Snapshot) error {
+	m.graphs[documentID] = snapshot
+	return nil
 }
 
 func (m *mockDocRepo) UpdateStatus(_ context.Context, id uuid.UUID, status document.DocumentStatus) (document.Document, error) {
@@ -91,8 +109,49 @@ func (m *mockPublisher) PublishUploaded(_ context.Context, e document.DocumentUp
 func newSvc() (*document.Service, *mockStorage, *mockPublisher) {
 	storage := &mockStorage{}
 	publisher := &mockPublisher{}
-	svc := document.NewService(newMockRepo(), storage, publisher, "documents")
+	svc := document.NewService(newMockRepo(), storage, publisher, "test-bucket")
 	return svc, storage, publisher
+}
+
+func TestDocumentService_Upload_TextIndexesChunks(t *testing.T) {
+	repo := newMockRepo()
+	storage := &mockStorage{}
+	publisher := &mockPublisher{}
+	svc := document.NewService(repo, storage, publisher, "test-bucket")
+
+	d, err := svc.Upload(context.Background(), document.UploadRequest{
+		KnowledgeBaseID: uuid.New(),
+		FileName:        "notes.txt",
+		ContentType:     "text/plain",
+		Content:         strings.NewReader("first paragraph\n\nsecond paragraph"),
+	})
+
+	require.NoError(t, err)
+	require.Len(t, repo.chunks[d.ID], 2)
+	assert.Equal(t, "first paragraph", repo.chunks[d.ID][0])
+	assert.Equal(t, "second paragraph", repo.chunks[d.ID][1])
+	assert.Equal(t, document.StatusPending, d.Status)
+}
+
+func TestDocumentService_Upload_TextIndexesGraph(t *testing.T) {
+	repo := newMockRepo()
+	storage := &mockStorage{}
+	publisher := &mockPublisher{}
+	svc := document.NewService(repo, storage, publisher, "test-bucket")
+
+	d, err := svc.Upload(context.Background(), document.UploadRequest{
+		KnowledgeBaseID: uuid.New(),
+		FileName:        "org.txt",
+		ContentType:     "text/plain",
+		Content:         strings.NewReader("Alice reporta para Bob."),
+	})
+
+	require.NoError(t, err)
+	require.Len(t, repo.graphs[d.ID].Entities, 2)
+	require.Len(t, repo.graphs[d.ID].Edges, 1)
+	assert.Equal(t, "Alice", repo.graphs[d.ID].Edges[0].Source)
+	assert.Equal(t, "Bob", repo.graphs[d.ID].Edges[0].Target)
+	assert.Equal(t, "reports_to", repo.graphs[d.ID].Edges[0].Relation)
 }
 
 func TestDocumentService_Upload_Success(t *testing.T) {
@@ -121,6 +180,8 @@ func TestDocumentService_Upload_Success(t *testing.T) {
 	assert.Equal(t, d.ID, ev.DocumentID)
 	assert.Equal(t, kbID, ev.KnowledgeBaseID)
 	assert.Equal(t, d.StoragePath, ev.StoragePath)
+	assert.Equal(t, "test-bucket", ev.Bucket)
+	assert.Equal(t, "test-bucket/"+d.StoragePath, ev.FilePath)
 	assert.Equal(t, "application/pdf", ev.ContentType)
 	assert.Equal(t, "report.pdf", ev.FileName)
 }
@@ -132,6 +193,23 @@ func TestDocumentService_Upload_MissingFileName(t *testing.T) {
 		Content:         strings.NewReader("data"),
 	})
 	require.Error(t, err)
+}
+
+func TestDocumentService_Upload_RejectsOversizeMetadataBeforeStorage(t *testing.T) {
+	svc, storage, publisher := newSvc()
+	overSizeMetadata := `{"source":"` + strings.Repeat("x", 16<<10) + `"}`
+
+	_, err := svc.Upload(context.Background(), document.UploadRequest{
+		KnowledgeBaseID: uuid.New(),
+		FileName:        "report.txt",
+		ContentType:     "text/plain",
+		Content:         strings.NewReader("content"),
+		Metadata:        json.RawMessage(overSizeMetadata),
+	})
+
+	require.Error(t, err)
+	assert.Empty(t, storage.uploaded)
+	assert.Empty(t, publisher.events)
 }
 
 func TestDocumentService_GetByID_NotFound(t *testing.T) {

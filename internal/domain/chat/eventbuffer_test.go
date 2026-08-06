@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -74,11 +75,11 @@ func TestEventBuffer_EventsSince_AfterNewest(t *testing.T) {
 func TestEventBuffer_CircularOverwrite(t *testing.T) {
 	buf := chat.NewEventBuffer(3)
 
-	buf.Append(makeEvent("text_delta", "a"))  // seq 1
-	buf.Append(makeEvent("text_delta", "b"))  // seq 2
-	buf.Append(makeEvent("text_delta", "c"))  // seq 3
-	buf.Append(makeEvent("text_delta", "d"))  // seq 4 — evicts seq 1
-	buf.Append(makeEvent("text_delta", "e"))  // seq 5 — evicts seq 2
+	buf.Append(makeEvent("text_delta", "a")) // seq 1
+	buf.Append(makeEvent("text_delta", "b")) // seq 2
+	buf.Append(makeEvent("text_delta", "c")) // seq 3
+	buf.Append(makeEvent("text_delta", "d")) // seq 4 — evicts seq 1
+	buf.Append(makeEvent("text_delta", "e")) // seq 5 — evicts seq 2
 
 	assert.Equal(t, 3, buf.Len())
 	assert.Equal(t, uint64(3), buf.OldestSeq())
@@ -139,6 +140,42 @@ func TestParseSSEID_Invalid(t *testing.T) {
 	}
 }
 
+func TestParseSSEID_RejectsNonCanonicalSequence(t *testing.T) {
+	tests := []string{
+		"run:+1",
+		"run:01",
+	}
+	for _, input := range tests {
+		_, _, ok := chat.ParseSSEID(input)
+		assert.False(t, ok, "expected false for non-canonical input: %q", input)
+	}
+}
+
+func FuzzParseSSEIDCanonicalRoundTrip(f *testing.F) {
+	for _, seed := range []string{
+		"run-123:1",
+		"550e8400-e29b-41d4-a716-446655440000:100",
+		"run:0",
+		"run:+1",
+		"run:01",
+		":42",
+		"run:",
+		"not-an-sse-id",
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, input string) {
+		runID, seq, ok := chat.ParseSSEID(input)
+		if !ok {
+			return
+		}
+
+		require.NotEmpty(t, runID)
+		require.Equal(t, input, (chat.BufferedEvent{ID: seq}).FormatSSEID(runID))
+	})
+}
+
 func TestFormatSSEID(t *testing.T) {
 	be := chat.BufferedEvent{ID: 42, Event: makeEvent("text_delta", "hello")}
 	assert.Equal(t, "run-123:42", be.FormatSSEID("run-123"))
@@ -148,9 +185,13 @@ func TestRunEventBufferRegistry_GetOrCreate(t *testing.T) {
 	reg := chat.NewRunEventBufferRegistry()
 	assert.Equal(t, 0, reg.Len())
 
-	buf1 := reg.GetOrCreate("run-1", 100)
+	sessionID := uuid.New()
+	buf1 := reg.GetOrCreateForSession("run-1", sessionID, 100)
 	assert.NotNil(t, buf1)
 	assert.Equal(t, 1, reg.Len())
+	owner, ok := reg.Owner("run-1")
+	require.True(t, ok)
+	assert.Equal(t, sessionID, owner)
 
 	// Same key returns same buffer.
 	buf2 := reg.GetOrCreate("run-1", 200)
@@ -175,6 +216,8 @@ func TestRunEventBufferRegistry_Remove(t *testing.T) {
 	reg.Remove("run-1")
 	assert.Equal(t, 0, reg.Len())
 	assert.Nil(t, reg.Get("run-1"))
+	_, ok := reg.Owner("run-1")
+	assert.False(t, ok)
 }
 
 func TestEventBuffer_ConcurrentAccess(t *testing.T) {

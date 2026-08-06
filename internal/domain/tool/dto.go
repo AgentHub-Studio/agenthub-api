@@ -2,6 +2,7 @@ package tool
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 // SkillID is optional — when provided the tool is automatically bound to that
 // skill after creation (active, priority 0), saving callers a second API call.
 type CreateRequest struct {
-	Name        string          `json:"name"`
+	Name string `json:"name"`
 	// Slug is optional. When omitted, it is auto-derived from Name (see ToSlug).
 	// Must be unique per tenant; conflicts return 422 DuplicateName.
 	Slug        string          `json:"slug,omitempty"`
@@ -64,34 +65,48 @@ type Response struct {
 
 // SkillToolResponse is the JSON representation of a SkillTool binding.
 type SkillToolResponse struct {
-	ID        uuid.UUID    `json:"id"`
-	SkillID   uuid.UUID    `json:"skillId"`
-	Tool      Response     `json:"tool"`
-	Priority  int          `json:"priority"`
-	IsActive  bool         `json:"isActive"`
-	CreatedAt time.Time    `json:"createdAt"`
+	ID        uuid.UUID `json:"id"`
+	SkillID   uuid.UUID `json:"skillId"`
+	Tool      Response  `json:"tool"`
+	Priority  int       `json:"priority"`
+	IsActive  bool      `json:"isActive"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
-// sensitiveToolConfigKeys lists config keys that must not be returned in API responses
-// or tool results. P-C239-1: auth_token must not appear in any tool response body.
-var sensitiveToolConfigKeys = []string{
-	"auth_token", "authToken", "password", "secret", "apiKey", "api_key",
-	"clientSecret", "client_secret", "bearerToken", "bearer_token",
+// sensitiveToolConfigKeys lists normalized config keys that must not be
+// returned in API responses or tool results. P-C239-1: auth_token must not
+// appear in any tool response body.
+var sensitiveToolConfigKeys = map[string]bool{
+	"authtoken":          true,
+	"password":           true,
+	"secret":             true,
+	"apikey":             true,
+	"clientsecret":       true,
+	"bearertoken":        true,
+	"accesstoken":        true,
+	"refreshtoken":       true,
+	"authorization":      true,
+	"proxyauthorization": true,
+	"xapikey":            true,
+	"xapitoken":          true,
+	"xauthtoken":         true,
+	"xaccesstoken":       true,
+	"xsecret":            true,
 }
 
 // sensitiveHeaderKeys lists HTTP header names whose values must be masked in
 // tool config responses. Bug 156: tool config.headers exposed Authorization,
 // X-API-Key, etc — credentials any read-access user could harvest.
 var sensitiveHeaderKeys = map[string]bool{
-	"authorization":   true,
+	"authorization":       true,
 	"proxy-authorization": true,
-	"x-api-key":       true,
-	"x-api-token":     true,
-	"x-auth-token":    true,
-	"x-access-token":  true,
-	"x-secret":        true,
-	"cookie":          true,
-	"set-cookie":      true,
+	"x-api-key":           true,
+	"x-api-token":         true,
+	"x-auth-token":        true,
+	"x-access-token":      true,
+	"x-secret":            true,
+	"cookie":              true,
+	"set-cookie":          true,
 }
 
 // SanitizeToolConfig removes credential keys from a raw tool config JSON blob
@@ -102,29 +117,114 @@ func SanitizeToolConfig(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
 		return raw
 	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return raw // not a flat object — return as-is rather than corrupt it
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return raw // return as-is rather than corrupt invalid JSON
 	}
-	for _, k := range sensitiveToolConfigKeys {
-		delete(m, k)
-	}
-	// Bug 156: mask sensitive headers (Authorization, X-API-Key, etc).
-	if hdrs, ok := m["headers"].(map[string]interface{}); ok {
-		for k, v := range hdrs {
-			if sensitiveHeaderKeys[strings.ToLower(k)] {
-				if s, ok := v.(string); ok && s != "" {
-					hdrs[k] = "***"
-				}
-			}
-		}
-		m["headers"] = hdrs
-	}
-	sanitized, err := json.Marshal(m)
+	sanitized, err := json.Marshal(sanitizeToolConfigValue(value))
 	if err != nil {
 		return raw
 	}
 	return sanitized
+}
+
+func sanitizeToolConfigValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if isSensitiveToolConfigKey(key) {
+				continue
+			}
+			if isToolConfigURLKey(key) {
+				if rawURL, ok := child.(string); ok {
+					out[key] = redactSensitiveURLQueryValues(rawURL)
+					continue
+				}
+			}
+			if strings.EqualFold(key, "headers") {
+				if headers, ok := child.(map[string]any); ok {
+					out[key] = sanitizeToolConfigHeaders(headers)
+					continue
+				}
+			}
+			out[key] = sanitizeToolConfigValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = sanitizeToolConfigValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func isToolConfigURLKey(key string) bool {
+	switch strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key)) {
+	case "url", "urltemplate", "baseurl":
+		return true
+	default:
+		return false
+	}
+}
+
+func redactSensitiveURLQueryValues(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	changed := false
+	if parsed.User != nil {
+		parsed.User = url.User("***")
+		changed = true
+	}
+
+	if parsed.RawQuery != "" {
+		query, err := url.ParseQuery(parsed.RawQuery)
+		if err == nil {
+			for key, values := range query {
+				if !isSensitiveToolConfigKey(key) {
+					continue
+				}
+				for i := range values {
+					values[i] = "***"
+				}
+				query[key] = values
+				changed = true
+			}
+			if changed {
+				parsed.RawQuery = query.Encode()
+			}
+		}
+	}
+
+	if !changed {
+		return rawURL
+	}
+	return parsed.String()
+}
+
+func sanitizeToolConfigHeaders(headers map[string]any) map[string]any {
+	out := make(map[string]any, len(headers))
+	for key, value := range headers {
+		if sensitiveHeaderKeys[strings.ToLower(key)] {
+			if s, ok := value.(string); ok && s != "" {
+				out[key] = "***"
+				continue
+			}
+		}
+		out[key] = sanitizeToolConfigValue(value)
+	}
+	return out
+}
+
+func isSensitiveToolConfigKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+	return sensitiveToolConfigKeys[normalized]
 }
 
 // ResponseFrom converts a Tool to a Response.

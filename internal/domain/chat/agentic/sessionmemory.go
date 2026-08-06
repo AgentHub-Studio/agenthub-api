@@ -53,11 +53,11 @@ type SessionMemoryExtractor struct {
 	config     SessionMemoryConfig
 	tpl        PromptTemplateResolver
 
-	mu                     sync.Mutex
-	lastExtractionTokens   int
-	lastExtractionTime     time.Time
-	toolCallsSinceLastExt  int
-	totalExtractions       int
+	mu                    sync.Mutex
+	lastExtractionTokens  int
+	lastExtractionTime    time.Time
+	toolCallsSinceLastExt int
+	totalExtractions      int
 }
 
 // NewSessionMemoryExtractor creates a SessionMemoryExtractor.
@@ -147,10 +147,12 @@ func (e *SessionMemoryExtractor) Extract(
 	extractionNum := e.totalExtractions
 	e.mu.Unlock()
 
+	baseCtx := detachedContext(ctx)
+
 	// Run extraction in background (fire-and-forget).
 	go func() {
-		// Create a separate context that won't be cancelled by the parent's timeout.
-		extractCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		// Preserve request values while detaching from request cancellation.
+		extractCtx, cancel := context.WithTimeout(baseCtx, 60*time.Second)
 		defer cancel()
 
 		result := e.forkRunner.Run(extractCtx, ForkedAgentParams{
@@ -185,6 +187,13 @@ func (e *SessionMemoryExtractor) Extract(
 			"duration", result.Duration,
 		)
 	}()
+}
+
+func detachedContext(parent context.Context) context.Context {
+	if parent == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(parent)
 }
 
 func (e *SessionMemoryExtractor) resolveExtractionPrompt(ctx context.Context, agentID uuid.UUID) string {

@@ -113,30 +113,21 @@ func (m *mockRepo) CompleteRun(_ context.Context, runID uuid.UUID, status trigge
 	return nil
 }
 
-func (m *mockRepo) CompleteRunBySession(_ context.Context, sessionID uuid.UUID, status trigger.RunStatus, turns, tokens *int, errMsg *string) (trigger.AgentTriggerRun, trigger.AgentTrigger, bool, error) {
-	var latestID uuid.UUID
-	var latest trigger.AgentTriggerRun
+func (m *mockRepo) CompleteRunBySession(_ context.Context, sessionID uuid.UUID, status trigger.RunStatus, turns, tokens *int, errMsg *string) error {
 	for id, r := range m.runs {
-		if r.SessionID == sessionID && r.Status == trigger.RunStatusRunning && (latestID == uuid.Nil || r.StartedAt.After(latest.StartedAt)) {
-			latestID = id
-			latest = r
+		if r.SessionID != sessionID {
+			continue
 		}
+		r.Status = status
+		r.TotalTurns = turns
+		r.TotalTokens = tokens
+		r.Error = errMsg
+		now := time.Now()
+		r.CompletedAt = &now
+		m.runs[id] = r
+		return nil
 	}
-	if latestID == uuid.Nil {
-		return trigger.AgentTriggerRun{}, trigger.AgentTrigger{}, false, nil
-	}
-	latest.Status = status
-	latest.TotalTurns = turns
-	latest.TotalTokens = tokens
-	latest.Error = errMsg
-	now := time.Now()
-	latest.CompletedAt = &now
-	m.runs[latestID] = latest
-	parent, ok := m.triggers[latest.TriggerID]
-	if !ok {
-		return trigger.AgentTriggerRun{}, trigger.AgentTrigger{}, false, trigger.ErrNotFound
-	}
-	return latest, parent, true, nil
+	return trigger.ErrNotFound
 }
 
 func (m *mockRepo) ListRuns(_ context.Context, triggerID uuid.UUID, page pagination.PageRequest) (pagination.Page[trigger.AgentTriggerRun], error) {
@@ -368,62 +359,4 @@ func TestService_Create_WithInputTemplate(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"message":"Generate daily report"}`, string(result.InputTemplate))
-}
-
-func TestService_Create_WithNotificationWebhook(t *testing.T) {
-	repo := newMockRepo()
-	cron := &mockCron{nextTime: time.Now().Add(time.Hour)}
-	svc := trigger.NewService(repo, cron)
-	webhookID := uuid.New()
-
-	result, err := svc.Create(context.Background(), uuid.New(), trigger.CreateTriggerRequest{
-		Name:                  "daily",
-		CronExpression:        "0 9 * * *",
-		NotificationWebhookID: &webhookID,
-	})
-
-	require.NoError(t, err)
-	require.NotNil(t, result.NotificationWebhookID)
-	assert.Equal(t, webhookID, *result.NotificationWebhookID)
-}
-
-func TestService_Update_ClearsNotificationWebhook(t *testing.T) {
-	repo := newMockRepo()
-	cron := &mockCron{nextTime: time.Now().Add(time.Hour)}
-	svc := trigger.NewService(repo, cron)
-	webhookID := uuid.New()
-	created, err := svc.Create(context.Background(), uuid.New(), trigger.CreateTriggerRequest{
-		Name:                  "daily",
-		CronExpression:        "0 9 * * *",
-		NotificationWebhookID: &webhookID,
-	})
-	require.NoError(t, err)
-
-	updated, err := svc.Update(context.Background(), created.ID, trigger.UpdateTriggerRequest{
-		NotificationWebhookID: trigger.NullableUUID{Set: true, Value: nil},
-	})
-
-	require.NoError(t, err)
-	assert.Nil(t, updated.NotificationWebhookID)
-}
-
-func TestService_Update_ClearsInputTemplateWithJSONNull(t *testing.T) {
-	repo := newMockRepo()
-	cron := &mockCron{nextTime: time.Now().Add(time.Hour)}
-	svc := trigger.NewService(repo, cron)
-	tmpl := json.RawMessage(`{"message":"hello"}`)
-	created, err := svc.Create(context.Background(), uuid.New(), trigger.CreateTriggerRequest{
-		Name:           "daily",
-		CronExpression: "0 9 * * *",
-		InputTemplate:  tmpl,
-	})
-	require.NoError(t, err)
-
-	nullTemplate := json.RawMessage(`null`)
-	updated, err := svc.Update(context.Background(), created.ID, trigger.UpdateTriggerRequest{
-		InputTemplate: &nullTemplate,
-	})
-
-	require.NoError(t, err)
-	assert.Nil(t, updated.InputTemplate)
 }

@@ -3,9 +3,8 @@
 package e2e
 
 import (
-	"context"
 	"net/http"
-	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -22,20 +21,18 @@ func TestE2E_HealthCheck(t *testing.T) {
 }
 
 func TestE2E_AgentCRUD(t *testing.T) {
-	if os.Getenv("E2E_TESTS") == "" {
-		t.Skip("set E2E_TESTS=1 to run e2e tests")
-	}
-	ctx := context.Background()
-	_ = ctx
-
-	token := os.Getenv("AUTH_TOKEN")
-	client := testutil.NewAPIClient(t, e2eConfig().backendURL, token)
+	cfg := e2eConfig()
+	tenant := testutil.NewTenantFixture(t,
+		cfg.backendURL, cfg.keycloakURL,
+		cfg.keycloakAdmin, cfg.keycloakAdminPass,
+		cfg.e2eUserPassword,
+	)
+	client := tenant.Client(t, cfg.backendURL)
 
 	// Create agent
 	createReq := map[string]any{
 		"name":        "Test Agent",
 		"description": "E2E test agent",
-		"status":      "DRAFT",
 	}
 	var created map[string]any
 	status := client.Post("/api/agents", createReq, &created)
@@ -72,109 +69,39 @@ func TestE2E_AgentCRUD(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, status, "deleted agent should return 404")
 }
 
-func TestE2E_PipelineCRUD(t *testing.T) {
-	if os.Getenv("E2E_TESTS") == "" {
-		t.Skip("set E2E_TESTS=1 to run e2e tests")
-	}
+func TestE2E_PipelineReadOnlyContract(t *testing.T) {
+	cfg := e2eConfig()
+	tenant := testutil.NewTenantFixture(t,
+		cfg.backendURL, cfg.keycloakURL,
+		cfg.keycloakAdmin, cfg.keycloakAdminPass,
+		cfg.e2eUserPassword,
+	)
+	client := tenant.Client(t, cfg.backendURL)
 
-	token := os.Getenv("AUTH_TOKEN")
-	client := testutil.NewAPIClient(t, e2eConfig().backendURL, token)
-
-	// Create pipeline
-	pipelineReq := map[string]any{"name": "Test Pipeline", "description": "E2E test pipeline"}
-	var pipeline map[string]any
-	status := client.Post("/api/pipelines", pipelineReq, &pipeline)
-	require.Equal(t, http.StatusCreated, status, "create pipeline")
-	pipelineID := pipeline["id"].(string)
-	defer client.Delete(testutil.FormatURL("/api/pipelines/%s", pipelineID))
-
-	// List pipelines
+	// Pipelines are legacy read-only compatibility routes. The agentic runner is
+	// the supported execution path, so writes must not be accepted.
 	var page testutil.Page[map[string]any]
-	status = client.Get("/api/pipelines?page=0&size=10", &page)
+	status := client.Get("/api/pipelines?page=0&size=10", &page)
 	assert.Equal(t, http.StatusOK, status, "list pipelines")
-	assert.GreaterOrEqual(t, page.TotalElements, int64(1))
 
-	// Get pipeline
-	var fetched map[string]any
-	status = client.Get(testutil.FormatURL("/api/pipelines/%s", pipelineID), &fetched)
-	assert.Equal(t, http.StatusOK, status, "get pipeline")
-	assert.Equal(t, "Test Pipeline", fetched["name"])
-
-	// Replace nodes via PUT /nodes
-	nodes := []map[string]any{
-		{"nodeType": "INPUT", "name": "Start", "config": map[string]any{}, "positionX": 0.0, "positionY": 0.0},
-		{"nodeType": "OUTPUT", "name": "End", "config": map[string]any{}, "positionX": 300.0, "positionY": 0.0},
-	}
-	var nodeResps []map[string]any
-	status = client.Put(testutil.FormatURL("/api/pipelines/%s/nodes", pipelineID), nodes, &nodeResps)
-	require.Equal(t, http.StatusOK, status, "replace nodes")
-	require.Len(t, nodeResps, 2)
-
-	startID := nodeResps[0]["id"].(string)
-	endID := nodeResps[1]["id"].(string)
-
-	// Replace edges via PUT /edges
-	edges := []map[string]any{
-		{"sourceNodeId": startID, "targetNodeId": endID, "label": ""},
-	}
-	var edgeResps []map[string]any
-	status = client.Put(testutil.FormatURL("/api/pipelines/%s/edges", pipelineID), edges, &edgeResps)
-	assert.Equal(t, http.StatusOK, status, "replace edges")
-	assert.Len(t, edgeResps, 1)
-
-	// Get graph in frontend format
-	var graph map[string]any
-	status = client.Get(testutil.FormatURL("/api/pipelines/%s/graph", pipelineID), &graph)
-	assert.Equal(t, http.StatusOK, status, "get graph")
-	graphNodes, _ := graph["nodes"].([]any)
-	graphEdges, _ := graph["edges"].([]any)
-	assert.Len(t, graphNodes, 2, "graph should have 2 nodes")
-	assert.Len(t, graphEdges, 1, "graph should have 1 edge")
-
-	// Verify graph node has frontend-compatible format (type, label, position)
-	firstNode := graphNodes[0].(map[string]any)
-	assert.NotEmpty(t, firstNode["type"], "graph node should have type field")
-	assert.NotNil(t, firstNode["position"], "graph node should have position field")
-
-	// Update graph via PUT /graph
-	graphReq := map[string]any{
-		"nodes": []map[string]any{
-			{
-				"id": startID, "type": "INPUT", "label": "Start",
-				"position": map[string]any{"x": 50.0, "y": 100.0},
-				"config":   map[string]any{},
-			},
-			{
-				"id": endID, "type": "OUTPUT", "label": "End",
-				"position": map[string]any{"x": 400.0, "y": 100.0},
-				"config":   map[string]any{},
-			},
-		},
-		"edges": []map[string]any{
-			{"id": "e1", "sourceNodeId": startID, "targetNodeId": endID},
-		},
-	}
-	var updatedGraph map[string]any
-	status = client.Put(testutil.FormatURL("/api/pipelines/%s/graph", pipelineID), graphReq, &updatedGraph)
-	assert.Equal(t, http.StatusOK, status, "update graph")
-	updatedNodes, _ := updatedGraph["nodes"].([]any)
-	assert.Len(t, updatedNodes, 2, "updated graph should have 2 nodes")
-
-	// Update pipeline metadata
-	updateReq := map[string]any{"name": "Updated Pipeline", "status": "DRAFT"}
-	var updated map[string]any
-	status = client.Put(testutil.FormatURL("/api/pipelines/%s", pipelineID), updateReq, &updated)
-	assert.Equal(t, http.StatusOK, status, "update pipeline")
-	assert.Equal(t, "Updated Pipeline", updated["name"])
+	req, err := http.NewRequest(http.MethodPost, cfg.backendURL+"/api/pipelines", strings.NewReader(`{"name":"legacy write"}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+client.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode, "pipeline writes must remain disabled")
 }
 
 func TestE2E_KnowledgeBaseCRUD(t *testing.T) {
-	if os.Getenv("E2E_TESTS") == "" {
-		t.Skip("set E2E_TESTS=1 to run e2e tests")
-	}
-
-	token := os.Getenv("AUTH_TOKEN")
-	client := testutil.NewAPIClient(t, e2eConfig().backendURL, token)
+	cfg := e2eConfig()
+	tenant := testutil.NewTenantFixture(t,
+		cfg.backendURL, cfg.keycloakURL,
+		cfg.keycloakAdmin, cfg.keycloakAdminPass,
+		cfg.e2eUserPassword,
+	)
+	client := tenant.Client(t, cfg.backendURL)
 
 	// Create KB
 	kbReq := map[string]any{"name": "Test KB", "description": "E2E test knowledge base"}

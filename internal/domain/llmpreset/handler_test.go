@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/llmpreset"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
@@ -98,17 +99,53 @@ func (m *mockLLMPresetSvc) SetDefault(_ context.Context, _ string, id uuid.UUID)
 }
 
 func setupLLMPreset() (*chi.Mux, *mockLLMPresetSvc) {
+	return setupLLMPresetWithRoles("admin")
+}
+
+func setupLLMPresetWithRoles(roles ...string) (*chi.Mux, *mockLLMPresetSvc) {
 	svc := newMockLLMPresetSvc()
 	h := llmpreset.NewHandler(svc)
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := tenant.NewContext(r.Context(), "test-tenant")
+			ctx = middleware.ContextWithRoles(ctx, roles...)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	})
 	h.RegisterProtectedRoutes(r)
 	return r, svc
+}
+
+func TestLLMPresetHandler_RequiresAdminRole(t *testing.T) {
+	r, _ := setupLLMPresetWithRoles("user")
+	id := uuid.NewString()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/llm-config-presets"},
+		{name: "create", method: http.MethodPost, path: "/api/llm-config-presets", body: `{}`},
+		{name: "list by provider", method: http.MethodGet, path: "/api/llm-config-presets/by-provider/openai"},
+		{name: "get", method: http.MethodGet, path: "/api/llm-config-presets/" + id},
+		{name: "put", method: http.MethodPut, path: "/api/llm-config-presets/" + id, body: `{}`},
+		{name: "patch", method: http.MethodPatch, path: "/api/llm-config-presets/" + id, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/llm-config-presets/" + id},
+		{name: "set default", method: http.MethodPut, path: "/api/llm-config-presets/" + id + "/default"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 func TestLLMPresetHandler_List_Success(t *testing.T) {
@@ -152,6 +189,30 @@ func TestLLMPresetHandler_Create_InvalidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestLLMPresetHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, svc := setupLLMPreset()
+		req := httptest.NewRequest(http.MethodPost, "/api/llm-config-presets", bytes.NewBufferString(`{"name":"first","provider":"openai","model":"gpt-4"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.presets)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		r, svc := setupLLMPreset()
+		id := uuid.New()
+		svc.presets[id] = llmpreset.LLMPresetResponse{ID: id, Name: "original"}
+		req := httptest.NewRequest(http.MethodPatch, "/api/llm-config-presets/"+id.String(), bytes.NewBufferString(`{"name":"changed"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, "original", svc.presets[id].Name)
+	})
 }
 
 func TestLLMPresetHandler_Get_NotFound(t *testing.T) {

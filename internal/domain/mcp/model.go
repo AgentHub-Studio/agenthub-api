@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"errors"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +15,10 @@ var ErrNotFound = errors.New("mcp: not found")
 // ErrDuplicateName é retornado quando POST tenta criar mcp-server-config
 // com nome já existente. Mapeia para 409.
 var ErrDuplicateName = errors.New("mcp: name already exists")
+
+// ErrRedirectURLNotAllowed prevents OAuth authorization codes from being sent
+// to a redirect URI outside the deployment-owned frontend origins.
+var ErrRedirectURLNotAllowed = errors.New("mcp: redirect URL is not allowed")
 
 // McpServerConfig is the domain entity (table: mcp_server_config).
 // No tenant_id field — isolation is provided via schema search_path.
@@ -70,7 +76,86 @@ type McpServerConfigBootstrapResponse struct {
 
 // ResponseFrom maps a McpServerConfig entity to a McpServerConfigResponse DTO.
 func ResponseFrom(c McpServerConfig) McpServerConfigResponse {
-	return McpServerConfigResponse(c)
+	resp := McpServerConfigResponse(c)
+	resp.Env = sanitizeEnv(c.Env)
+	return resp
+}
+
+func sanitizeEnv(env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for key, value := range env {
+		if isSensitiveEnvName(key) {
+			out[key] = "***"
+			continue
+		}
+		out[key] = redactSensitiveEnvURL(value)
+	}
+	return out
+}
+
+func redactSensitiveEnvURL(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return value
+	}
+
+	changed := false
+	if parsed.User != nil {
+		if _, hasPassword := parsed.User.Password(); hasPassword {
+			parsed.User = url.UserPassword(parsed.User.Username(), "***")
+			changed = true
+		}
+	}
+
+	query := parsed.Query()
+	for key, values := range query {
+		if !isSensitiveEnvName(key) {
+			continue
+		}
+		for i := range values {
+			values[i] = "***"
+		}
+		query[key] = values
+		changed = true
+	}
+	if changed {
+		parsed.RawQuery = query.Encode()
+		return parsed.String()
+	}
+	return value
+}
+
+func isSensitiveEnvName(name string) bool {
+	normalized := normalizeEnvName(name)
+	for _, marker := range []string{"apikey", "accesskey", "privatekey", "secretkey"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	for _, suffix := range []string{"secret", "password", "token", "credential", "credentials", "authorization"} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+
+	segments := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return r == '_' || r == '-' || r == '.'
+	})
+	for _, segment := range segments {
+		switch segment {
+		case "secret", "password", "token", "credential", "credentials", "authorization":
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeEnvName(name string) string {
+	replacer := strings.NewReplacer("_", "", "-", "", ".", "")
+	return replacer.Replace(strings.ToLower(name))
 }
 
 // BootstrapResponseFrom maps an MCP config to the runtime bootstrap DTO.

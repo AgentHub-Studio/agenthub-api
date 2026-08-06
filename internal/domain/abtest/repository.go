@@ -8,9 +8,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/database"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // Repository provides persistence for ABTest and Assignment.
@@ -37,9 +40,23 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 	return &pgRepository{pool: pool}
 }
 
+func (r *pgRepository) acquire(ctx context.Context) (*pgxpool.Conn, func(), error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return nil, nil, fmt.Errorf("abtest: acquire tenant connection: %w", err)
+	}
+	return conn, release, nil
+}
+
 func (r *pgRepository) List(ctx context.Context, agentID uuid.UUID, req pagination.PageRequest) (pagination.Page[ABTest], error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return pagination.Page[ABTest]{}, err
+	}
+	defer release()
+
 	offset := req.Page * req.Size
-	rows, err := r.pool.Query(ctx, `
+	rows, err := conn.Query(ctx, `
 		SELECT id, agent_id, name, description,
 		       control_version_id, variant_version_id,
 		       traffic_percent, status, started_at, ended_at, created_at, updated_at
@@ -67,7 +84,7 @@ func (r *pgRepository) List(ctx context.Context, agentID uuid.UUID, req paginati
 	}
 
 	var total int64
-	if err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_ab_test WHERE agent_id = $1`, agentID).Scan(&total); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT COUNT(*) FROM agent_ab_test WHERE agent_id = $1`, agentID).Scan(&total); err != nil {
 		return pagination.Page[ABTest]{}, fmt.Errorf("abtest: list count: %w", err)
 	}
 
@@ -75,7 +92,13 @@ func (r *pgRepository) List(ctx context.Context, agentID uuid.UUID, req paginati
 }
 
 func (r *pgRepository) GetByID(ctx context.Context, id uuid.UUID) (ABTest, error) {
-	row := r.pool.QueryRow(ctx, `
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return ABTest{}, err
+	}
+	defer release()
+
+	row := conn.QueryRow(ctx, `
 		SELECT id, agent_id, name, description,
 		       control_version_id, variant_version_id,
 		       traffic_percent, status, started_at, ended_at, created_at, updated_at
@@ -91,8 +114,14 @@ func (r *pgRepository) GetByID(ctx context.Context, id uuid.UUID) (ABTest, error
 }
 
 func (r *pgRepository) Create(ctx context.Context, t ABTest) (ABTest, error) {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return ABTest{}, err
+	}
+	defer release()
+
 	t.ID = uuid.New()
-	err := r.pool.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		INSERT INTO agent_ab_test
 		  (id, agent_id, name, description, control_version_id, variant_version_id,
 		   traffic_percent, status, started_at, ended_at, created_at, updated_at)
@@ -110,6 +139,9 @@ func (r *pgRepository) Create(ctx context.Context, t ABTest) (ABTest, error) {
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	if err != nil {
+		if isActiveTestUniqueViolation(err) {
+			return ABTest{}, ErrActiveTestConflict
+		}
 		if isUniqueViolation(err) {
 			return ABTest{}, ErrNameConflict
 		}
@@ -119,7 +151,13 @@ func (r *pgRepository) Create(ctx context.Context, t ABTest) (ABTest, error) {
 }
 
 func (r *pgRepository) Update(ctx context.Context, t ABTest) (ABTest, error) {
-	err := r.pool.QueryRow(ctx, `
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return ABTest{}, err
+	}
+	defer release()
+
+	err = conn.QueryRow(ctx, `
 		UPDATE agent_ab_test SET
 		  name=$2, description=$3, control_version_id=$4, variant_version_id=$5,
 		  traffic_percent=$6, status=$7, ended_at=$8, updated_at=NOW()
@@ -140,13 +178,22 @@ func (r *pgRepository) Update(ctx context.Context, t ABTest) (ABTest, error) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ABTest{}, ErrNotFound
 		}
+		if isActiveTestUniqueViolation(err) {
+			return ABTest{}, ErrActiveTestConflict
+		}
 		return ABTest{}, fmt.Errorf("abtest: update: %w", err)
 	}
 	return t, nil
 }
 
 func (r *pgRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM agent_ab_test WHERE id = $1`, id)
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	tag, err := conn.Exec(ctx, `DELETE FROM agent_ab_test WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("abtest: delete: %w", err)
 	}
@@ -157,7 +204,13 @@ func (r *pgRepository) Delete(ctx context.Context, id uuid.UUID) error {
 }
 
 func (r *pgRepository) GetActiveByAgent(ctx context.Context, agentID uuid.UUID) (ABTest, error) {
-	row := r.pool.QueryRow(ctx, `
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return ABTest{}, err
+	}
+	defer release()
+
+	row := conn.QueryRow(ctx, `
 		SELECT id, agent_id, name, description,
 		       control_version_id, variant_version_id,
 		       traffic_percent, status, started_at, ended_at, created_at, updated_at
@@ -175,8 +228,14 @@ func (r *pgRepository) GetActiveByAgent(ctx context.Context, agentID uuid.UUID) 
 }
 
 func (r *pgRepository) RecordAssignment(ctx context.Context, a Assignment) error {
+	conn, release, err := r.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	a.ID = uuid.New()
-	_, err := r.pool.Exec(ctx, `
+	_, err = conn.Exec(ctx, `
 		INSERT INTO agent_ab_assignment (id, test_id, session_id, variant, assigned_at)
 		VALUES ($1,$2,$3,$4,NOW())`,
 		a.ID, a.TestID, a.SessionID, string(a.Variant),
@@ -205,4 +264,9 @@ func scanTest(row scanner) (ABTest, error) {
 
 func isUniqueViolation(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "23505")
+}
+
+func isActiveTestUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_agent_ab_test_active_per_agent"
 }

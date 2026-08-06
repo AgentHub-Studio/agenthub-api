@@ -1,7 +1,6 @@
 package llmpreset
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
@@ -24,16 +24,19 @@ func NewHandler(svc Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-// RegisterProtectedRoutes mounts authenticated LLM preset routes onto r.
+// RegisterProtectedRoutes mounts administrator-only LLM preset routes onto r.
 func (h *Handler) RegisterProtectedRoutes(r chi.Router) {
-	r.Get("/api/llm-config-presets", h.list)
-	r.Post("/api/llm-config-presets", h.create)
-	r.Get("/api/llm-config-presets/by-provider/{provider}", h.listByProvider)
-	r.Get("/api/llm-config-presets/{id}", h.get)
-	r.Put("/api/llm-config-presets/{id}", h.update)
-	r.Patch("/api/llm-config-presets/{id}", h.update)
-	r.Delete("/api/llm-config-presets/{id}", h.delete)
-	r.Put("/api/llm-config-presets/{id}/default", h.setDefault)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/llm-config-presets", h.list)
+		r.Post("/api/llm-config-presets", h.create)
+		r.Get("/api/llm-config-presets/by-provider/{provider}", h.listByProvider)
+		r.Get("/api/llm-config-presets/{id}", h.get)
+		r.Put("/api/llm-config-presets/{id}", h.update)
+		r.Patch("/api/llm-config-presets/{id}", h.update)
+		r.Delete("/api/llm-config-presets/{id}", h.delete)
+		r.Put("/api/llm-config-presets/{id}/default", h.setDefault)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +94,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.FromContext(r.Context())
 	var req CreateLLMPresetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
 		return
 	}
@@ -126,7 +129,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateLLMPresetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		httputil.BadRequest(w, "invalid request body")
 		return
 	}

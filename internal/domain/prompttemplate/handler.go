@@ -1,13 +1,14 @@
 package prompttemplate
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -22,18 +23,21 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-// RegisterRoutes mounts prompt template routes on the given router.
+// RegisterRoutes mounts administrator-only prompt template routes on the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/prompt-templates", h.list)
-	r.Post("/api/prompt-templates", h.create)
-	r.Get("/api/prompt-templates/{id}", h.get)
-	r.Put("/api/prompt-templates/{id}", h.update)
-	r.Patch("/api/prompt-templates/{id}", h.update)
-	r.Delete("/api/prompt-templates/{id}", h.delete)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/prompt-templates", h.list)
+		r.Post("/api/prompt-templates", h.create)
+		r.Get("/api/prompt-templates/{id}", h.get)
+		r.Put("/api/prompt-templates/{id}", h.update)
+		r.Patch("/api/prompt-templates/{id}", h.update)
+		r.Delete("/api/prompt-templates/{id}", h.delete)
 
-	// Agent-scoped templates.
-	r.Get("/api/agents/{agentId}/prompt-templates", h.listByAgent)
-	r.Post("/api/agents/{agentId}/prompt-templates", h.createForAgent)
+		// Agent-scoped templates.
+		r.Get("/api/agents/{agentId}/prompt-templates", h.listByAgent)
+		r.Post("/api/agents/{agentId}/prompt-templates", h.createForAgent)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +71,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -90,7 +94,7 @@ func (h *Handler) createForAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -128,7 +132,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

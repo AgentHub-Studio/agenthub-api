@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 )
 
 // DiscordAdapter implements the Adapter interface for Discord slash commands / interaction webhooks.
@@ -113,7 +115,7 @@ func (a *DiscordAdapter) VerifyRequest(_ context.Context, ch Channel, headers ma
 // Application commands (type 2) extract the first option value as message text.
 func (a *DiscordAdapter) ParseMessage(_ context.Context, _ Channel, body []byte) (InboundMessage, error) {
 	var interaction discordInteraction
-	if err := json.Unmarshal(body, &interaction); err != nil {
+	if err := httputil.DecodeSingleJSON(bytes.NewReader(body), &interaction); err != nil {
 		return InboundMessage{}, fmt.Errorf("discord: parse error: %w", err)
 	}
 

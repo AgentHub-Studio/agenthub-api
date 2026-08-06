@@ -112,7 +112,7 @@ func (s *Service) Fail(ctx context.Context, id uuid.UUID, errMsg string) error {
 	return s.repo.Transition(ctx, id, e.Status, StatusFailed, nil, &errMsg)
 }
 
-// ListToolExecutions returns tool executions for a given node.
-func (s *Service) ListToolExecutions(ctx context.Context, nodeExecutionID uuid.UUID) ([]ToolExecution, error) {
-	return s.repo.ListToolExecutions(ctx, nodeExecutionID)
+// ListToolExecutions returns tool executions for a node within the requested execution.
+func (s *Service) ListToolExecutions(ctx context.Context, executionID uuid.UUID, nodeExecutionID uuid.UUID) ([]ToolExecution, error) {
+	return s.repo.ListToolExecutions(ctx, executionID, nodeExecutionID)
 }

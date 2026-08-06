@@ -84,9 +84,10 @@ func TestE2E_ExecutionLifecycle(t *testing.T) {
 
 	// --- List execution nodes (may be empty if execution hasn't started) ---
 	t.Run("list execution nodes returns ok", func(t *testing.T) {
-		var page testutil.Page[map[string]any]
-		s := c.Get("/api/executions/"+execID+"/nodes", &page)
+		var nodes []map[string]any
+		s := c.Get("/api/executions/"+execID+"/nodes", &nodes)
 		assert.Equal(t, http.StatusOK, s)
+		assert.NotNil(t, nodes)
 	})
 
 	// --- Cancel execution ---

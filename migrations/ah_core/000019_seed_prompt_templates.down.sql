@@ -1,1 +1,1 @@
-DROP TABLE IF EXISTS ah_core.prompt_template;
+DROP TABLE IF EXISTS ah_core.core_prompt_template;

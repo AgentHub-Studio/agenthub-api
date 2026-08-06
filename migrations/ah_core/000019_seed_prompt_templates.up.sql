@@ -7,7 +7,7 @@
 --   - Anthropic prompt engineering best practices
 --   - PDF §11 (consistent prompt structure aids reviewability)
 
-CREATE TABLE IF NOT EXISTS ah_core.prompt_template (
+CREATE TABLE IF NOT EXISTS ah_core.core_prompt_template (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     slug            VARCHAR(64)  NOT NULL UNIQUE,
     display_name    VARCHAR(255) NOT NULL,
@@ -35,14 +35,14 @@ CREATE TABLE IF NOT EXISTS ah_core.prompt_template (
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_ah_core_prompt_template_slug      ON ah_core.prompt_template (slug);
-CREATE INDEX IF NOT EXISTS idx_ah_core_prompt_template_kind      ON ah_core.prompt_template (template_kind);
-CREATE INDEX IF NOT EXISTS idx_ah_core_prompt_template_is_active ON ah_core.prompt_template (is_active);
+CREATE INDEX IF NOT EXISTS idx_ah_core_core_prompt_template_slug      ON ah_core.core_prompt_template (slug);
+CREATE INDEX IF NOT EXISTS idx_ah_core_core_prompt_template_kind      ON ah_core.core_prompt_template (template_kind);
+CREATE INDEX IF NOT EXISTS idx_ah_core_core_prompt_template_is_active ON ah_core.core_prompt_template (is_active);
 
 -- ============================
 -- 8 templates covering common agent personas
 -- ============================
-INSERT INTO ah_core.prompt_template
+INSERT INTO ah_core.core_prompt_template
     (slug, display_name, description, template_kind, system_prompt,
      recommended_temperature, recommended_max_tokens,
      requires_tools, placeholders, is_recommended, sort_order) VALUES

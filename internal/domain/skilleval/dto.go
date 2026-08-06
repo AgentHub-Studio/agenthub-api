@@ -2,6 +2,8 @@ package skilleval
 
 import (
 	"encoding/json"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -85,8 +87,61 @@ type ResultResponse struct {
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
+var sensitiveResultDiagnosticLinePattern = regexp.MustCompile(`(?im)(^|:[\t ]+)[\t ]*(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|password|api[_-]?key|secret|client[_-]?secret)[\t ]*[:=][^\r\n]*`)
+
 func ResultResponseFrom(r CaseResult) ResultResponse {
-	return ResultResponse(r)
+	response := ResultResponse(r)
+	if r.ErrorMsg != "" {
+		response.ErrorMsg = redactResultDiagnostic(r.ErrorMsg)
+	}
+	return response
+}
+
+func redactResultDiagnostic(value string) string {
+	var payload any
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return sensitiveResultDiagnosticLinePattern.ReplaceAllString(value, "$1[REDACTED]")
+	}
+
+	redacted, err := json.Marshal(redactResultDiagnosticValue(payload))
+	if err != nil {
+		return sensitiveResultDiagnosticLinePattern.ReplaceAllString(value, "$1[REDACTED]")
+	}
+	return sensitiveResultDiagnosticLinePattern.ReplaceAllString(string(redacted), "$1[REDACTED]")
+}
+
+func redactResultDiagnosticValue(value any) any {
+	switch current := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(current))
+		for key, child := range current {
+			if isSensitiveResultDiagnosticKey(key) {
+				continue
+			}
+			out[key] = redactResultDiagnosticValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(current))
+		for index, child := range current {
+			out[index] = redactResultDiagnosticValue(child)
+		}
+		return out
+	case string:
+		return sensitiveResultDiagnosticLinePattern.ReplaceAllString(current, "$1[REDACTED]")
+	default:
+		return value
+	}
+}
+
+func isSensitiveResultDiagnosticKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+	switch normalized {
+	case "authorization", "proxyauthorization", "cookie", "setcookie", "authtoken", "xauthtoken", "accesstoken", "refreshtoken", "apikey", "xapikey", "password", "secret", "clientsecret", "bearertoken":
+		return true
+	default:
+		return false
+	}
 }
 
 // --- request types ---

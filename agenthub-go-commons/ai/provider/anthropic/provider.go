@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai/internal/redirectguard"
 )
 
 const (
@@ -38,7 +39,7 @@ func New(apiKey, baseURL string) *Provider {
 	return &Provider{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  redirectguard.NewHTTPClient(120 * time.Second),
 	}
 }
 
@@ -150,6 +151,7 @@ type streamMessageData struct {
 type contentDelta struct {
 	Type        string `json:"type"`
 	Text        string `json:"text,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
 	PartialJSON string `json:"partial_json,omitempty"`
 	StopReason  string `json:"stop_reason,omitempty"`
 }
@@ -281,6 +283,8 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 				switch env.Delta.Type {
 				case "text_delta":
 					chunk.Delta = env.Delta.Text
+				case "thinking_delta":
+					chunk.ThinkingDelta = env.Delta.Thinking
 				case "input_json_delta":
 					// Partial JSON for tool call arguments.
 					chunk.ToolCallDelta = &ai.ToolCall{

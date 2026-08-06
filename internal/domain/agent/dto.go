@@ -5,24 +5,29 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/evals"
 )
 
 // AgentResponse is the JSON response envelope for an Agent.
 type AgentResponse struct {
-	ID               uuid.UUID       `json:"id"`
-	Name             string          `json:"name"`
-	Slug             string          `json:"slug"`
-	Description      string          `json:"description"`
-	Status           string          `json:"status"`
-	CurrentVersion   int             `json:"currentVersion"`
+	ID             uuid.UUID `json:"id"`
+	Name           string    `json:"name"`
+	Slug           string    `json:"slug"`
+	Description    string    `json:"description"`
+	Status         string    `json:"status"`
+	CurrentVersion int       `json:"currentVersion"`
 	// SystemPrompt is always present (may be null). P-C164-4: frontend needs this to populate the edit form.
 	// AgentManageResponse intentionally omits this field for LLM safety.
-	SystemPrompt     *string         `json:"systemPrompt"`
-	ModelConfig      json.RawMessage `json:"modelConfig,omitempty"`
-	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
-	Config           json.RawMessage `json:"config"`
-	EnableManagement bool        `json:"enableManagement"`
-	SkillIDs         []uuid.UUID `json:"skillIds,omitempty"`
+	SystemPrompt     *string          `json:"systemPrompt"`
+	ModelConfig      json.RawMessage  `json:"modelConfig,omitempty"`
+	PermissionRules  json.RawMessage  `json:"permissionRules,omitempty"`
+	Config           json.RawMessage  `json:"config"`
+	EvalConfig       evals.EvalConfig `json:"eval_config"`
+	InputProcessors  []string         `json:"input_processors"`
+	OutputProcessors []string         `json:"output_processors"`
+	EnableManagement bool             `json:"enableManagement"`
+	SkillIDs         []uuid.UUID      `json:"skillIds,omitempty"`
 	// KnowledgeBaseIDs lists the knowledge bases bound to this agent. P-C285-1.
 	KnowledgeBaseIDs []uuid.UUID `json:"knowledgeBaseIds,omitempty"`
 	// Readiness is the computed configuration quality score. Populated by GetWithReadiness.
@@ -37,6 +42,8 @@ func ResponseFrom(a Agent) AgentResponse {
 	config := a.Config
 	if len(config) == 0 {
 		config = json.RawMessage(`{}`)
+	} else {
+		config = SanitizeModelConfig(config)
 	}
 	var modelConfig json.RawMessage
 	if len(a.ModelConfig) > 0 {
@@ -57,38 +64,54 @@ func ResponseFrom(a Agent) AgentResponse {
 		ModelConfig:      modelConfig,
 		PermissionRules:  permissionRules,
 		Config:           config,
+		EvalConfig:       a.EvalConfig,
+		InputProcessors:  cloneStringSlice(a.InputProcessors),
+		OutputProcessors: cloneStringSlice(a.OutputProcessors),
 		EnableManagement: a.EnableManagement,
 		CreatedAt:        a.CreatedAt,
 		UpdatedAt:        a.UpdatedAt,
 	}
 }
 
+func cloneStringSlice(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return append([]string(nil), values...)
+}
+
 // CreateAgentRequest is the JSON body for agent creation.
 type CreateAgentRequest struct {
-	Name             string          `json:"name"`
-	Slug             string          `json:"slug"`
-	Description      string          `json:"description"`
-	SystemPrompt     *string         `json:"systemPrompt,omitempty"`
-	ModelConfig      json.RawMessage `json:"modelConfig,omitempty"`
-	PermissionRules  json.RawMessage `json:"permissionRules,omitempty"`
-	Config           json.RawMessage `json:"config,omitempty"`
-	EnableManagement    bool            `json:"enableManagement,omitempty"`
-	SkillIDs            []uuid.UUID     `json:"skillIds,omitempty"`
-	KnowledgeBaseIDs    []uuid.UUID     `json:"knowledgeBaseIds,omitempty"` // P-C285-1
+	Name             string            `json:"name"`
+	Slug             string            `json:"slug"`
+	Description      string            `json:"description"`
+	SystemPrompt     *string           `json:"systemPrompt,omitempty"`
+	ModelConfig      json.RawMessage   `json:"modelConfig,omitempty"`
+	PermissionRules  json.RawMessage   `json:"permissionRules,omitempty"`
+	Config           json.RawMessage   `json:"config,omitempty"`
+	EvalConfig       *evals.EvalConfig `json:"eval_config,omitempty"`
+	InputProcessors  []string          `json:"input_processors,omitempty"`
+	OutputProcessors []string          `json:"output_processors,omitempty"`
+	EnableManagement bool              `json:"enableManagement,omitempty"`
+	SkillIDs         []uuid.UUID       `json:"skillIds,omitempty"`
+	KnowledgeBaseIDs []uuid.UUID       `json:"knowledgeBaseIds,omitempty"` // P-C285-1
 }
 
 // UpdateAgentRequest is the JSON body for partial agent updates.
 type UpdateAgentRequest struct {
-	Name                *string         `json:"name,omitempty"`
-	Slug                *string         `json:"slug,omitempty"`
-	Description         *string         `json:"description,omitempty"`
-	SystemPrompt        *string         `json:"systemPrompt,omitempty"`
-	ModelConfig         json.RawMessage `json:"modelConfig,omitempty"`
-	PermissionRules     json.RawMessage `json:"permissionRules,omitempty"`
-	Config              json.RawMessage `json:"config,omitempty"`
-	EnableManagement    *bool           `json:"enableManagement,omitempty"`
-	SkillIDs            []uuid.UUID     `json:"skillIds,omitempty"`
-	KnowledgeBaseIDs    []uuid.UUID     `json:"knowledgeBaseIds,omitempty"` // P-C285-1
+	Name             *string           `json:"name,omitempty"`
+	Slug             *string           `json:"slug,omitempty"`
+	Description      *string           `json:"description,omitempty"`
+	SystemPrompt     *string           `json:"systemPrompt,omitempty"`
+	ModelConfig      json.RawMessage   `json:"modelConfig,omitempty"`
+	PermissionRules  json.RawMessage   `json:"permissionRules,omitempty"`
+	Config           json.RawMessage   `json:"config,omitempty"`
+	EvalConfig       *evals.EvalConfig `json:"eval_config,omitempty"`
+	InputProcessors  []string          `json:"input_processors,omitempty"`
+	OutputProcessors []string          `json:"output_processors,omitempty"`
+	EnableManagement *bool             `json:"enableManagement,omitempty"`
+	SkillIDs         []uuid.UUID       `json:"skillIds,omitempty"`
+	KnowledgeBaseIDs []uuid.UUID       `json:"knowledgeBaseIds,omitempty"` // P-C285-1
 }
 
 // CloneAgentRequest is the JSON body for cloning an agent.
@@ -119,6 +142,8 @@ func VersionResponseFrom(v AgentVersion) AgentVersionResponse {
 	cfg := v.ConfigJSON
 	if len(cfg) == 0 {
 		cfg = json.RawMessage(`{}`)
+	} else {
+		cfg = SanitizeModelConfig(cfg)
 	}
 	return AgentVersionResponse{
 		ID:             v.ID,

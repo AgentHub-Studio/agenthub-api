@@ -22,6 +22,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -68,7 +69,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 // Stores the payload behind an opaque key and returns it.
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var payload sessionPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &payload); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -114,7 +115,7 @@ func (h *Handler) refreshToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Token string `json:"token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

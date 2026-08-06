@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/audit"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/evals"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/modelconfig"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
@@ -186,6 +188,10 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 	if err := validateConfigMaxIterations(req.Config); err != nil {
 		return AgentResponse{}, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
 	}
+	evalConfig, err := normalizeEvalConfig(req.EvalConfig)
+	if err != nil {
+		return AgentResponse{}, err
+	}
 	req.Description = sanitize.StripHTML(req.Description)
 	// Bug 158: cap description em 32KB (espelha skill.instructions cap).
 	// Sem isso 200KB+ aceita silenciosamente — DoS storage e perf
@@ -222,6 +228,9 @@ func (s *service) Create(ctx context.Context, req CreateAgentRequest) (AgentResp
 		ModelConfig:      req.ModelConfig,
 		PermissionRules:  req.PermissionRules,
 		Config:           config,
+		EvalConfig:       evalConfig,
+		InputProcessors:  normalizeProcessorNames(req.InputProcessors),
+		OutputProcessors: normalizeProcessorNames(req.OutputProcessors),
 		EnableManagement: req.EnableManagement,
 	}
 	created, err := s.repo.Create(ctx, a)
@@ -328,6 +337,19 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		}
 		a.Config = req.Config
 	}
+	if req.EvalConfig != nil {
+		evalConfig, err := normalizeEvalConfig(req.EvalConfig)
+		if err != nil {
+			return AgentResponse{}, err
+		}
+		a.EvalConfig = evalConfig
+	}
+	if req.InputProcessors != nil {
+		a.InputProcessors = normalizeProcessorNames(req.InputProcessors)
+	}
+	if req.OutputProcessors != nil {
+		a.OutputProcessors = normalizeProcessorNames(req.OutputProcessors)
+	}
 	if req.EnableManagement != nil {
 		a.EnableManagement = *req.EnableManagement
 	}
@@ -369,6 +391,39 @@ func (s *service) Update(ctx context.Context, id uuid.UUID, req UpdateAgentReque
 		NewValue:   auditJSON(resp),
 	})
 	return resp, nil
+}
+
+func normalizeProcessorNames(names []string) []string {
+	if names == nil {
+		return []string{}
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if normalized == "" {
+			continue
+		}
+		out = append(out, normalized)
+	}
+	return out
+}
+
+func normalizeEvalConfig(input *evals.EvalConfig) (evals.EvalConfig, error) {
+	if input == nil {
+		return evals.EvalConfig{}, nil
+	}
+	cfg := evals.EvalConfig{SampleRate: input.SampleRate}
+	if cfg.SampleRate < 0 || cfg.SampleRate > 1 {
+		return evals.EvalConfig{}, fmt.Errorf("%w: eval_config.sample_rate must be between 0 and 1", ErrInvalidRequest)
+	}
+	for _, scorer := range input.Scorers {
+		trimmed := strings.TrimSpace(scorer)
+		if trimmed == "" {
+			continue
+		}
+		cfg.Scorers = append(cfg.Scorers, trimmed)
+	}
+	return cfg, nil
 }
 
 func (s *service) Delete(ctx context.Context, id uuid.UUID) error {
@@ -552,6 +607,7 @@ func (s *service) Clone(ctx context.Context, id uuid.UUID, req CloneAgentRequest
 		ModelConfig:     original.ModelConfig,
 		PermissionRules: original.PermissionRules,
 		Config:          original.Config,
+		EvalConfig:      original.EvalConfig,
 	}
 	created, err := s.repo.Create(ctx, clone)
 	if err != nil {
@@ -630,6 +686,9 @@ func validateModelConfig(raw json.RawMessage) error {
 	}
 	if err := json.Unmarshal(raw, &mc); err != nil {
 		return fmt.Errorf("must be a valid JSON object")
+	}
+	if err := modelconfig.ValidateFallbackChainAliases(raw); err != nil {
+		return err
 	}
 	// P-C268-1: validate provider against supported enum.
 	if mc.Provider != "" {
@@ -722,7 +781,8 @@ func NewVersionServiceWithAudit(repo Repository, verRepo VersionRepository, audi
 
 func (s *versionService) CreateDraft(ctx context.Context, agentID uuid.UUID, req CreateAgentVersionRequest) (AgentVersionResponse, error) {
 	// Ensure the agent exists.
-	if _, err := s.repo.FindByID(ctx, agentID); err != nil {
+	current, err := s.repo.FindByID(ctx, agentID)
+	if err != nil {
 		return AgentVersionResponse{}, err
 	}
 	// Ensure no existing draft.
@@ -739,8 +799,8 @@ func (s *versionService) CreateDraft(ctx context.Context, agentID uuid.UUID, req
 		VersionNumber:  num,
 		Status:         VersionStatusDraft,
 		Description:    req.Description,
-		DefinitionJSON: req.DefinitionJSON,
-		ConfigJSON:     req.ConfigJSON,
+		DefinitionJSON: versionDefinitionSnapshot(current, req.DefinitionJSON),
+		ConfigJSON:     versionConfigSnapshot(current, req.ConfigJSON),
 	}
 	created, err := s.verRepo.Create(ctx, v)
 	if err != nil {
@@ -755,6 +815,34 @@ func (s *versionService) CreateDraft(ctx context.Context, agentID uuid.UUID, req
 		Metadata:   fmt.Sprintf(`{"operation":"create_draft","agentId":"%s"}`, agentID),
 	})
 	return resp, nil
+}
+
+func versionDefinitionSnapshot(a Agent, requested json.RawMessage) json.RawMessage {
+	if len(requested) > 0 {
+		return append(json.RawMessage(nil), requested...)
+	}
+	var snapshot struct {
+		SystemPrompt *string `json:"systemPrompt,omitempty"`
+	}
+	if a.SystemPrompt != nil {
+		prompt := *a.SystemPrompt
+		snapshot.SystemPrompt = &prompt
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
+func versionConfigSnapshot(a Agent, requested json.RawMessage) json.RawMessage {
+	if len(requested) > 0 {
+		return append(json.RawMessage(nil), requested...)
+	}
+	if len(a.ModelConfig) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return append(json.RawMessage(nil), a.ModelConfig...)
 }
 
 func (s *versionService) UpdateDraft(ctx context.Context, versionID uuid.UUID, req UpdateAgentVersionRequest) (AgentVersionResponse, error) {
@@ -887,21 +975,28 @@ func (s *versionService) Rollback(ctx context.Context, agentID, versionID uuid.U
 		return AgentVersionResponse{}, fmt.Errorf("rollback: publish version entry: %w", err)
 	}
 
-	// 4. Apply snapshot to the live agent — extract systemPrompt from definitionJson.
+	// 4. Apply snapshot to the live agent.
 	var def struct {
-		SystemPrompt string `json:"systemPrompt"`
+		SystemPrompt *string `json:"systemPrompt"`
 	}
 	if len(target.DefinitionJSON) > 0 {
 		_ = json.Unmarshal(target.DefinitionJSON, &def)
 	}
-	if def.SystemPrompt != "" {
+	shouldUpdateAgent := def.SystemPrompt != nil || len(target.ConfigJSON) > 0
+	if shouldUpdateAgent {
 		current, err := s.repo.FindByID(ctx, agentID)
 		if err != nil {
 			return AgentVersionResponse{}, fmt.Errorf("rollback: load agent: %w", err)
 		}
-		current.SystemPrompt = &def.SystemPrompt
+		if def.SystemPrompt != nil {
+			prompt := *def.SystemPrompt
+			current.SystemPrompt = &prompt
+		}
+		if len(target.ConfigJSON) > 0 {
+			current.ModelConfig = append(json.RawMessage(nil), target.ConfigJSON...)
+		}
 		if _, err := s.repo.Update(ctx, current); err != nil {
-			return AgentVersionResponse{}, fmt.Errorf("rollback: apply system prompt: %w", err)
+			return AgentVersionResponse{}, fmt.Errorf("rollback: apply agent snapshot: %w", err)
 		}
 	}
 

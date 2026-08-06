@@ -22,6 +22,8 @@ type roleClaims struct {
 	jwt.RegisteredClaims
 	RealmAccess    accessRoles            `json:"realm_access"`
 	ResourceAccess map[string]accessRoles `json:"resource_access"`
+	Email          string                 `json:"email"`
+	Username       string                 `json:"preferred_username"`
 }
 
 func (c *roleClaims) HasRole(role string) bool {
@@ -47,6 +49,32 @@ func contextWithClaims(ctx context.Context, claims roleChecker) context.Context 
 	return context.WithValue(ctx, roleContextKey{}, claims)
 }
 
+type staticRoleChecker struct {
+	roles map[string]struct{}
+}
+
+func (c staticRoleChecker) HasRole(role string) bool {
+	if c.roles == nil || role == "" {
+		return false
+	}
+	_, ok := c.roles[role]
+	return ok
+}
+
+// ContextWithRoles stores a static role set in ctx.
+// It is useful for focused handler tests that mount role-protected routes
+// without the full JWT authentication stack.
+func ContextWithRoles(ctx context.Context, roles ...string) context.Context {
+	set := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		if role == "" {
+			continue
+		}
+		set[role] = struct{}{}
+	}
+	return contextWithClaims(ctx, staticRoleChecker{roles: set})
+}
+
 // claimsFromContext extracts a roleChecker from ctx, if present.
 func claimsFromContext(ctx context.Context) roleChecker {
 	claims, _ := ctx.Value(roleContextKey{}).(roleChecker)
@@ -61,6 +89,15 @@ func SubjectFromContext(ctx context.Context) string {
 		return ""
 	}
 	return claims.Subject
+}
+
+// UserIdentityFromContext returns the JWT-backed user identity when available.
+func UserIdentityFromContext(ctx context.Context) (id, email, username string) {
+	claims, ok := ctx.Value(roleContextKey{}).(*roleClaims)
+	if !ok || claims == nil {
+		return "", "", ""
+	}
+	return claims.Subject, claims.Email, claims.Username
 }
 
 // RolesFromContext returns the deduplicated union of realm + resource roles

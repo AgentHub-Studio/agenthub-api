@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -15,9 +19,9 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
-	"github.com/AgentHub-Studio/agenthub-api/internal/redact"
 	"github.com/AgentHub-Studio/agenthub-api/internal/sanitize"
 	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 // SettingsReader is a minimal interface for reading tenant settings.
@@ -35,6 +39,10 @@ type KBExister interface {
 	GetByID(ctx context.Context, id uuid.UUID) error
 }
 
+type skillInstructionReferenceLister interface {
+	ListSkillInstructionReferencesByTool(ctx context.Context, toolID uuid.UUID) ([]SkillInstructionReference, error)
+}
+
 // DatasourceCreds holds the connection parameters for a datasource.
 type DatasourceCreds struct {
 	Type     string
@@ -47,16 +55,22 @@ type DatasourceCreds struct {
 
 // Service holds business logic for tools.
 type Service struct {
-	repo        ToolRepository
-	settingsRdr SettingsReader
-	dsRdr       DatasourceReader
-	kbRdr       KBExister
-	tenantIDFn  func(ctx context.Context) string
+	repo             ToolRepository
+	settingsRdr      SettingsReader
+	dsRdr            DatasourceReader
+	sqlTestExecutor  SQLTestExecutor
+	kbRdr            KBExister
+	tenantIDFn       func(ctx context.Context) string
+	httpURLValidator func(string) error
+	httpBackendBase  string
 }
 
 // NewService creates a new Service.
 func NewService(repo ToolRepository) *Service {
-	return &Service{repo: repo}
+	return &Service{
+		repo:            repo,
+		httpBackendBase: normalizeHTTPBaseURL(os.Getenv("BACKEND_BASE_URL")),
+	}
 }
 
 // WithSettings attaches a settings reader for LLM generation features.
@@ -72,9 +86,30 @@ func (s *Service) WithDatasource(r DatasourceReader, tenantIDFn func(ctx context
 	return s
 }
 
+// WithSQLTestExecutor replaces the SQL test executor. It is intended for
+// isolated tests; production uses the PostgreSQL executor by default.
+func (s *Service) WithSQLTestExecutor(executor SQLTestExecutor) *Service {
+	s.sqlTestExecutor = executor
+	return s
+}
+
 // WithKBExister attaches a KB existence checker (bug 231).
 func (s *Service) WithKBExister(r KBExister) *Service {
 	s.kbRdr = r
+	return s
+}
+
+// WithHTTPURLValidator overrides runtime HTTP URL validation. It is intended
+// for local unit tests that use httptest servers; production uses ssrf.ValidateURL.
+func (s *Service) WithHTTPURLValidator(fn func(string) error) *Service {
+	s.httpURLValidator = fn
+	return s
+}
+
+// WithHTTPBackendBaseURL sets the trusted backend base URL used to resolve
+// relative HTTP tool URLs, matching the skill-runtime BACKEND_BASE_URL behavior.
+func (s *Service) WithHTTPBackendBaseURL(baseURL string) *Service {
+	s.httpBackendBase = normalizeHTTPBaseURL(baseURL)
 	return s
 }
 
@@ -118,7 +153,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		if u == "" {
 			return Response{}, fmt.Errorf("%w: url is required for HTTP tools", ErrValidation)
 		}
-		if err := ssrf.ValidateURL(u); err != nil {
+		if err := s.validateHTTPToolURL(httpURLForValidationFromConfig(req.Config, u, s.httpBackendBase)); err != nil {
 			return Response{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
 		}
 		if err := validateHTTPURLTemplates(req.Config); err != nil {
@@ -130,7 +165,13 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	}
 	// P-C249-1: normalize SQL tool config — accept both datasourceId and datasource_id.
 	config := req.Config
+	if req.Type == ToolTypeHTTP {
+		config = normalizeHTTPMethodConfig(config)
+	}
 	if isSQLToolType(req.Type) {
+		if err := validateSQLDataSourceAliasContract(config); err != nil {
+			return Response{}, err
+		}
 		config = normalizeDataSourceID(config)
 		var cfgMap map[string]any
 		_ = json.Unmarshal(config, &cfgMap)
@@ -320,6 +361,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 
 	// P-C249-1: normalize SQL tool config on update as well.
 	if isSQLToolType(existing.Type) {
+		if err := validateSQLDataSourceAliasContract(existing.Config); err != nil {
+			return Response{}, err
+		}
 		existing.Config = normalizeDataSourceID(existing.Config)
 		var cfgMap map[string]any
 		_ = json.Unmarshal(existing.Config, &cfgMap)
@@ -376,7 +420,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if u == "" {
 			return Response{}, fmt.Errorf("%w: url is required for HTTP tools", ErrValidation)
 		}
-		if err := ssrf.ValidateURL(u); err != nil {
+		if err := s.validateHTTPToolURL(httpURLForValidationFromConfig(existing.Config, u, s.httpBackendBase)); err != nil {
 			return Response{}, fmt.Errorf("%w: invalid URL (%v)", ErrValidation, err)
 		}
 		if err := validateHTTPURLTemplates(existing.Config); err != nil {
@@ -389,6 +433,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		if err := validateHTTPMethodAndTimeout(existing.Config); err != nil {
 			return Response{}, err
 		}
+		existing.Config = normalizeHTTPMethodConfig(existing.Config)
 	}
 
 	t, err := s.repo.Update(ctx, id, existing)
@@ -438,9 +483,14 @@ func containsUnsafeURLPathToken(raw string) bool {
 	return false
 }
 
-// validateHTTPMethodAndTimeout checks the optional "method" and
-// "timeoutSeconds" fields of an HTTP tool config. Bug 95/97/108: same
-// rules used by both Create and Update so PATCH can't bypass.
+const (
+	httpToolMaxURLLength          = 2048
+	httpToolMaxBodyTemplateLength = 32000
+	httpToolMaxHeaderCount        = 50
+)
+
+// validateHTTPMethodAndTimeout checks optional HTTP runtime fields. Bug
+// 95/97/108: same rules used by both Create and Update so PATCH can't bypass.
 func validateHTTPMethodAndTimeout(raw json.RawMessage) error {
 	if len(raw) == 0 {
 		return nil
@@ -449,35 +499,326 @@ func validateHTTPMethodAndTimeout(raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil
 	}
-	if m, ok := cfg["method"].(string); ok && m != "" {
-		switch strings.ToUpper(strings.TrimSpace(m)) {
-		case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS":
-		default:
-			return fmt.Errorf("%w: method must be one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS (got %q)", ErrValidation, m)
-		}
+	return validateHTTPRuntimeConfigFields(cfg)
+}
+
+func validateHTTPRuntimeConfigFields(cfg map[string]any) error {
+	if err := validateHTTPMethodField(cfg); err != nil {
+		return err
 	}
-	if v, ok := cfg["timeoutSeconds"]; ok {
-		n, isNum := v.(float64)
-		if !isNum {
-			return fmt.Errorf("%w: timeoutSeconds must be a number", ErrValidation)
-		}
-		if n < 1 || n > 600 {
-			return fmt.Errorf("%w: timeoutSeconds must be between 1 and 600 (got %d)", ErrValidation, int(n))
-		}
+	if err := validateHTTPTimeoutFields(cfg); err != nil {
+		return err
 	}
-	// Bug 251: validar header names (cluster XSS via map key — bugs 248/249/250).
-	// Mesmo pattern do integration.httpHeaderNamePattern: RFC 7230 token subset.
-	if hdrs, ok := cfg["headers"].(map[string]any); ok {
-		for k := range hdrs {
-			if !toolHTTPHeaderNamePattern.MatchString(k) {
-				return fmt.Errorf("%w: header name %q invalid — must match RFC 7230 token (alphanumeric + -_)", ErrValidation, k)
-			}
-		}
+	if err := validateHTTPRuntimeScalarFields(cfg); err != nil {
+		return err
 	}
-	if err := validateHTTPBodyTemplate(raw); err != nil {
+	if err := validateHTTPRuntimeAliasContract(cfg); err != nil {
+		return err
+	}
+	if err := validateHTTPConfigSizeLimits(cfg); err != nil {
+		return err
+	}
+	if err := validateHTTPBodyTemplatePlaceholders(cfg); err != nil {
+		return err
+	}
+	if err := validateHTTPHeadersConfig(cfg); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validateHTTPConfigSizeLimits(cfg map[string]any) error {
+	for _, key := range []string{"url", "urlTemplate"} {
+		rawValue, ok := cfg[key]
+		if !ok || rawValue == nil {
+			continue
+		}
+		value, ok := rawValue.(string)
+		if !ok {
+			return fmt.Errorf("%w: %s must be a string", ErrValidation, key)
+		}
+		if len(value) > httpToolMaxURLLength {
+			return fmt.Errorf("%w: %s exceeds maximum length of %d chars (got %d)", ErrValidation, key, httpToolMaxURLLength, len(value))
+		}
+	}
+	for _, key := range []string{"bodyTemplate", "body_template", "body"} {
+		rawValue, ok := cfg[key]
+		if !ok || rawValue == nil {
+			continue
+		}
+		value := httpBodyTemplateValue(rawValue)
+		if len(value) > httpToolMaxBodyTemplateLength {
+			return fmt.Errorf("%w: %s exceeds maximum length of %d chars (got %d)", ErrValidation, key, httpToolMaxBodyTemplateLength, len(value))
+		}
+	}
+	return nil
+}
+
+func validateHTTPBodyTemplatePlaceholders(cfg map[string]any) error {
+	for _, key := range []string{"bodyTemplate", "body_template", "body"} {
+		rawValue, ok := cfg[key]
+		if !ok || rawValue == nil {
+			continue
+		}
+		bodyTemplate := httpBodyTemplateValue(rawValue)
+		if placeholder, ok := sensitiveHTTPBodyTemplatePlaceholder(bodyTemplate); ok {
+			return fmt.Errorf("%w: %s contains sensitive placeholder %q", ErrValidation, key, placeholder)
+		}
+	}
+	return nil
+}
+
+func validateHTTPHeadersConfig(cfg map[string]any) error {
+	// Bug 251: validar header names (cluster XSS via map key — bugs 248/249/250).
+	// Mesmo pattern do integration.httpHeaderNamePattern: RFC 7230 token subset.
+	if rawHeaders, ok := cfg["headers"]; ok && rawHeaders != nil {
+		hdrs, ok := rawHeaders.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%w: headers must be an object", ErrValidation)
+		}
+		if len(hdrs) > httpToolMaxHeaderCount {
+			return fmt.Errorf("%w: headers exceeds maximum of %d entries (got %d)", ErrValidation, httpToolMaxHeaderCount, len(hdrs))
+		}
+		for k, v := range hdrs {
+			if !toolHTTPHeaderNamePattern.MatchString(k) {
+				return fmt.Errorf("%w: header name %q invalid — must match RFC 7230 token (alphanumeric + -_)", ErrValidation, k)
+			}
+			if _, ok := v.(string); !ok {
+				return fmt.Errorf("%w: header value for %q must be a string", ErrValidation, k)
+			}
+		}
+	}
+	return nil
+}
+
+func validateHTTPRuntimeScalarFields(cfg map[string]any) error {
+	for _, key := range []string{"authType", "auth_type", "authToken", "auth_token", "baseUrl"} {
+		rawValue, ok := cfg[key]
+		if !ok || rawValue == nil {
+			continue
+		}
+		if _, ok := rawValue.(string); !ok {
+			return fmt.Errorf("%w: %s must be a string", ErrValidation, key)
+		}
+	}
+	for _, key := range []string{"authType", "auth_type"} {
+		rawValue, ok := cfg[key]
+		if !ok || rawValue == nil {
+			continue
+		}
+		authType, _ := rawValue.(string)
+		if authType == "" {
+			continue
+		}
+		if strings.TrimSpace(authType) != authType {
+			return fmt.Errorf("%w: %s must be one of none, bearer, basic (got %q)", ErrValidation, key, authType)
+		}
+		switch strings.ToLower(authType) {
+		case "none", "bearer", "basic":
+		default:
+			return fmt.Errorf("%w: %s must be one of none, bearer, basic (got %q)", ErrValidation, key, authType)
+		}
+	}
+	for _, key := range []string{"useCallerToken", "use_caller_token"} {
+		rawValue, ok := cfg[key]
+		if !ok || rawValue == nil {
+			continue
+		}
+		if _, ok := rawValue.(bool); !ok {
+			return fmt.Errorf("%w: %s must be a bool", ErrValidation, key)
+		}
+	}
+	return nil
+}
+
+// validateHTTPRuntimeAliasContract rejects ambiguous aliases before the config
+// reaches the executor. Legacy aliases remain supported when they produce the
+// same effective runtime value; an order-dependent winner is never selected.
+func validateHTTPRuntimeAliasContract(cfg map[string]any) error {
+	if err := validateHTTPStringAliases(cfg, "url", "urlTemplate", func(value string) string { return value }); err != nil {
+		return err
+	}
+	if err := validateHTTPBodyTemplateAliases(cfg); err != nil {
+		return err
+	}
+	if err := validateHTTPTimeoutAliases(cfg); err != nil {
+		return err
+	}
+	if err := validateHTTPStringAliases(cfg, "authType", "auth_type", strings.ToLower); err != nil {
+		return err
+	}
+	if err := validateHTTPStringAliases(cfg, "authToken", "auth_token", func(value string) string { return value }); err != nil {
+		return err
+	}
+	if err := validateHTTPBoolAliases(cfg, "useCallerToken", "use_caller_token"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateHTTPBodyTemplateAliases(cfg map[string]any) error {
+	return validateHTTPAliases(cfg, []string{"bodyTemplate", "body_template", "body"}, canonicalHTTPBodyTemplateAlias)
+}
+
+func validateHTTPTimeoutAliases(cfg map[string]any) error {
+	canonical := 0
+	canonicalField := ""
+	for _, field := range []struct {
+		key      string
+		toSecond func(int) int
+	}{
+		{key: "timeoutSeconds", toSecond: func(value int) int { return value }},
+		{key: "timeout_seconds", toSecond: func(value int) int { return value }},
+		{key: "timeoutMs", toSecond: func(value int) int { return (value + 999) / 1000 }},
+	} {
+		value, ok := positiveHTTPConfigInt(cfg[field.key]), cfg[field.key] != nil
+		if !ok || value == 0 {
+			continue
+		}
+		value = field.toSecond(value)
+		if canonicalField != "" && canonical != value {
+			return conflictingHTTPAliasError(canonicalField, field.key)
+		}
+		canonical = value
+		canonicalField = field.key
+	}
+	return nil
+}
+
+func validateHTTPStringAliases(cfg map[string]any, camelKey, snakeKey string, normalize func(string) string) error {
+	camel, camelSet := cfg[camelKey].(string)
+	snake, snakeSet := cfg[snakeKey].(string)
+	if !camelSet || camel == "" || !snakeSet || snake == "" {
+		return nil
+	}
+	if normalize(camel) != normalize(snake) {
+		return conflictingHTTPAliasError(camelKey, snakeKey)
+	}
+	return nil
+}
+
+func validateHTTPBoolAliases(cfg map[string]any, camelKey, snakeKey string) error {
+	camel, camelSet := cfg[camelKey].(bool)
+	snake, snakeSet := cfg[snakeKey].(bool)
+	if !camelSet || !snakeSet || camel == snake {
+		return nil
+	}
+	return conflictingHTTPAliasError(camelKey, snakeKey)
+}
+
+func validateHTTPAliases(cfg map[string]any, keys []string, canonicalize func(any) string) error {
+	canonical := ""
+	canonicalField := ""
+	for _, key := range keys {
+		value, ok := cfg[key]
+		if !ok || value == nil {
+			continue
+		}
+		valueCanonical := canonicalize(value)
+		if canonicalField != "" && canonical != valueCanonical {
+			return conflictingHTTPAliasError(canonicalField, key)
+		}
+		canonical = valueCanonical
+		canonicalField = key
+	}
+	return nil
+}
+
+func canonicalHTTPBodyTemplateAlias(value any) string {
+	body := httpBodyTemplateValue(value)
+	var decoded any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		return body
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return body
+	}
+	return string(canonical)
+}
+
+func conflictingHTTPAliasError(first, second string) error {
+	return fmt.Errorf("%w: conflicting HTTP config aliases %s and %s", ErrValidation, first, second)
+}
+
+func validateHTTPMethodField(cfg map[string]any) error {
+	rawMethod, ok := cfg["method"]
+	if !ok || rawMethod == nil {
+		return nil
+	}
+	m, ok := rawMethod.(string)
+	if !ok {
+		return fmt.Errorf("%w: method must be a string", ErrValidation)
+	}
+	if m == "" {
+		return nil
+	}
+	switch strings.ToUpper(strings.TrimSpace(m)) {
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS":
+		return nil
+	default:
+		return fmt.Errorf("%w: method must be one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS (got %q)", ErrValidation, m)
+	}
+}
+
+func validateHTTPTimeoutFields(cfg map[string]any) error {
+	fields := []struct {
+		key string
+		max float64
+	}{
+		{key: "timeoutSeconds", max: 600},
+		{key: "timeout_seconds", max: 600},
+		{key: "timeoutMs", max: 600000},
+	}
+	for _, field := range fields {
+		v, ok := cfg[field.key]
+		if !ok || v == nil {
+			continue
+		}
+		n, ok := v.(float64)
+		if !ok {
+			return fmt.Errorf("%w: %s must be a number", ErrValidation, field.key)
+		}
+		if math.Trunc(n) != n {
+			return fmt.Errorf("%w: %s must be an integer", ErrValidation, field.key)
+		}
+		if n < 1 || n > field.max {
+			return fmt.Errorf("%w: %s must be between 1 and %.0f (got %.0f)", ErrValidation, field.key, field.max, n)
+		}
+	}
+	return nil
+}
+
+func normalizeHTTPMethodConfig(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return raw
+	}
+	methodRaw, ok := cfg["method"]
+	if !ok {
+		return raw
+	}
+	var method string
+	if err := json.Unmarshal(methodRaw, &method); err != nil {
+		return raw
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(method))
+	if normalized == "" || normalized == method {
+		return raw
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return raw
+	}
+	cfg["method"] = encoded
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // toolHTTPHeaderNamePattern subset prático do RFC 7230 token. Bug 251:
@@ -485,32 +826,30 @@ func validateHTTPMethodAndTimeout(raw json.RawMessage) error {
 // e enviadas como header HTTP inválido para o upstream.
 var toolHTTPHeaderNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
-var bodyTemplateVarPattern = regexp.MustCompile(`\{\{\s*(?:input\.)?([A-Za-z0-9_.-]+)\s*\}\}|\{([A-Za-z0-9_.-]+)\}`)
+var httpBodyTemplatePlaceholderPattern = regexp.MustCompile(`\{\{\s*(?:input|args)\.([A-Za-z0-9_-]+)\s*\}\}|\{\{\s*([A-Za-z0-9_-]+)\s*\}\}|\{\s*([A-Za-z0-9_-]+)\s*\}`)
 
-func validateHTTPBodyTemplate(raw json.RawMessage) error {
-	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return nil
-	}
-	for _, field := range []string{"body_template", "bodyTemplate"} {
-		template, ok := cfg[field].(string)
-		if !ok || strings.TrimSpace(template) == "" {
-			continue
-		}
-		if strings.Contains(template, "${") {
-			return fmt.Errorf("%w: %s must not contain environment variable placeholders", ErrValidation, field)
-		}
-		for _, match := range bodyTemplateVarPattern.FindAllStringSubmatch(template, -1) {
-			name := match[1]
-			if name == "" {
-				name = match[2]
+var sensitiveHTTPBodyTemplatePlaceholderKeys = map[string]bool{
+	"api_key":    true,
+	"apikey":     true,
+	"auth_token": true,
+	"authtoken":  true,
+	"password":   true,
+	"secret":     true,
+}
+
+func sensitiveHTTPBodyTemplatePlaceholder(tmpl string) (string, bool) {
+	for _, match := range httpBodyTemplatePlaceholderPattern.FindAllStringSubmatch(tmpl, -1) {
+		for _, candidate := range match[1:] {
+			if candidate == "" {
+				continue
 			}
-			if redact.IsSensitiveKey(name) {
-				return fmt.Errorf("%w: %s placeholder %q is not allowed for credential-like fields", ErrValidation, field, name)
+			key := strings.ToLower(strings.ReplaceAll(candidate, "-", "_"))
+			if sensitiveHTTPBodyTemplatePlaceholderKeys[key] {
+				return candidate, true
 			}
 		}
 	}
-	return nil
+	return "", false
 }
 
 // extractURLFromConfig extracts the "url" or "urlTemplate" field from a JSON config blob.
@@ -532,12 +871,23 @@ func extractURLFromConfig(raw json.RawMessage) string {
 	return strings.TrimSpace(cfg.URLTemplate)
 }
 
+func httpURLForValidationFromConfig(raw json.RawMessage, rawURL, backendBaseURL string) string {
+	if len(raw) == 0 {
+		return rawURL
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return rawURL
+	}
+	return httpURLWithBaseFromConfig(cfg, rawURL, backendBaseURL)
+}
+
 // isSQLToolType returns true for SQL / DATABASE tool types.
 func isSQLToolType(t ToolType) bool {
 	return t == ToolTypeSQL || t == ToolTypeDatabase
 }
 
-// normalizeDataSourceID normalises camelCase `datasourceId` to snake_case `datasource_id`
+// normalizeDataSourceID normalises camelCase `dataSourceId` to snake_case `datasource_id`
 // in a SQL tool config blob. P-C249-1: the skill-runtime SQL executor expects
 // datasource_id; frontend / integrations may produce datasourceId.
 // Returns the original slice unchanged when the key is already absent or the
@@ -550,13 +900,17 @@ func normalizeDataSourceID(raw json.RawMessage) json.RawMessage {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return raw
 	}
-	val, hasCamel := cfg["datasourceId"]
+	val, hasCamel := cfg["dataSourceId"]
 	if !hasCamel {
 		return raw // nothing to do
 	}
-	// Move camelCase key to snake_case (keep both for compatibility).
-	cfg["datasource_id"] = val
-	delete(cfg, "datasourceId")
+	// Preserve the canonical field when both are present. Callers validate that
+	// the aliases agree before normalizing, so this can never change the target
+	// datasource by field order.
+	if _, hasSnake := cfg["datasource_id"]; !hasSnake {
+		cfg["datasource_id"] = val
+	}
+	delete(cfg, "dataSourceId")
 	normalized, err := json.Marshal(cfg)
 	if err != nil {
 		return raw
@@ -564,9 +918,118 @@ func normalizeDataSourceID(raw json.RawMessage) json.RawMessage {
 	return normalized
 }
 
+func validateSQLDataSourceAliasContract(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	snake, hasSnake := cfg["datasource_id"]
+	camel, hasCamel := cfg["dataSourceId"]
+	if !hasSnake || !hasCamel {
+		return nil
+	}
+
+	var snakeID, camelID string
+	if err := json.Unmarshal(snake, &snakeID); err != nil {
+		return conflictingSQLDataSourceAliasesError()
+	}
+	if err := json.Unmarshal(camel, &camelID); err != nil {
+		return conflictingSQLDataSourceAliasesError()
+	}
+	snakeUUID, snakeErr := uuid.Parse(strings.TrimSpace(snakeID))
+	camelUUID, camelErr := uuid.Parse(strings.TrimSpace(camelID))
+	if snakeErr == nil && camelErr == nil && snakeUUID == camelUUID {
+		return nil
+	}
+	if strings.TrimSpace(snakeID) == strings.TrimSpace(camelID) {
+		return nil
+	}
+	return conflictingSQLDataSourceAliasesError()
+}
+
+func conflictingSQLDataSourceAliasesError() error {
+	return fmt.Errorf("%w: conflicting SQL config aliases datasource_id and dataSourceId", ErrValidation)
+}
+
 // Delete deletes a tool.
 func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
-	return s.repo.Delete(ctx, id)
+	existing, getErr := s.repo.GetByID(ctx, id)
+	if getErr != nil {
+		return s.repo.Delete(ctx, id)
+	}
+
+	refs, refsErr := s.listSkillInstructionReferencesByTool(ctx, id)
+	err := s.repo.Delete(ctx, id)
+	if err != nil {
+		return err
+	}
+	if refsErr != nil {
+		slog.WarnContext(ctx, "tool: failed to inspect skill instruction references before delete",
+			"tool_id", id,
+			"err", refsErr,
+		)
+		return nil
+	}
+	warnDeletedToolInstructionReferences(ctx, existing, refs)
+	return nil
+}
+
+func (s *Service) listSkillInstructionReferencesByTool(ctx context.Context, toolID uuid.UUID) ([]SkillInstructionReference, error) {
+	lister, ok := s.repo.(skillInstructionReferenceLister)
+	if !ok {
+		return nil, nil
+	}
+	return lister.ListSkillInstructionReferencesByTool(ctx, toolID)
+}
+
+func warnDeletedToolInstructionReferences(ctx context.Context, t Tool, refs []SkillInstructionReference) {
+	for _, ref := range refs {
+		if !instructionsReferenceTool(ref.Instructions, t) {
+			continue
+		}
+		slog.WarnContext(ctx, "tool: deleted tool referenced by skill instructions",
+			"tool_id", t.ID,
+			"tool_name", t.Name,
+			"tool_slug", t.Slug,
+			"skill_id", ref.SkillID,
+			"skill_name", ref.SkillName,
+		)
+	}
+}
+
+func instructionsReferenceTool(instructions string, t Tool) bool {
+	lowerInstructions := strings.ToLower(instructions)
+	for _, candidate := range toolReferenceCandidates(t) {
+		if strings.Contains(lowerInstructions, strings.ToLower(candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+func toolReferenceCandidates(t Tool) []string {
+	candidates := make([]string, 0, 5)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if strings.EqualFold(existing, value) {
+				return
+			}
+		}
+		candidates = append(candidates, value)
+	}
+	add(t.Slug)
+	add(strings.ReplaceAll(t.Slug, "-", "_"))
+	add(strings.ReplaceAll(t.Slug, "_", "-"))
+	add(t.Name)
+	add(ToSlug(t.Name))
+	return candidates
 }
 
 // BindToSkill binds a tool to a skill.
@@ -614,8 +1077,7 @@ func (s *Service) ListBySkill(ctx context.Context, skillID uuid.UUID) ([]SkillTo
 	return resp, nil
 }
 
-// TestTool executes a tool with the given inputs and returns the result as a string.
-// Currently supports HTTP tool type; other types return a not-implemented error.
+// TestTool executes a supported tool with the given inputs and returns the result as a string.
 func (s *Service) TestTool(ctx context.Context, id uuid.UUID, inputs map[string]any) (string, error) {
 	t, err := s.repo.GetByID(ctx, id)
 	if err != nil {
@@ -629,15 +1091,15 @@ func (s *Service) TestTool(ctx context.Context, id uuid.UUID, inputs map[string]
 
 	switch t.Type {
 	case ToolTypeHTTP:
-		return s.testHTTPTool(ctx, cfg, inputs)
+		return s.testHTTPTool(ctx, cfg, t.InputSchema, inputs)
 	case ToolTypeSQL, ToolTypeDatabase:
-		return "", fmt.Errorf("tool: SQL test requires a running datasource connection — coming soon")
+		return s.testSQLTool(ctx, cfg, inputs)
 	default:
 		return "", fmt.Errorf("tool: test not supported for type %s", t.Type)
 	}
 }
 
-func (s *Service) testHTTPTool(ctx context.Context, cfg, inputs map[string]any) (string, error) {
+func (s *Service) testHTTPTool(ctx context.Context, cfg map[string]any, inputSchema json.RawMessage, inputs map[string]any) (string, error) {
 	rawURL, _ := cfg["url"].(string)
 	if rawURL == "" {
 		rawURL, _ = cfg["urlTemplate"].(string)
@@ -645,32 +1107,78 @@ func (s *Service) testHTTPTool(ctx context.Context, cfg, inputs map[string]any) 
 	if rawURL == "" {
 		return "", fmt.Errorf("tool: HTTP tool has no url configured")
 	}
+	if err := validateHTTPRuntimeConfigFields(cfg); err != nil {
+		return "", fmt.Errorf("tool: %w", err)
+	}
 	method, _ := cfg["method"].(string)
+	method = strings.ToUpper(strings.TrimSpace(method))
 	if method == "" {
-		method = "GET"
+		method = http.MethodGet
 	}
 
-	// Render {key} and {{input.key}} placeholders in the URL from the test input.
-	rawURL = renderPlaceholders(rawURL, inputs)
+	// Render URL placeholders with the same aliases accepted by the
+	// skill-runtime HTTP executor so the admin test endpoint matches runtime.
+	rawURL = httpURLWithBaseFromConfig(cfg, rawURL, s.httpBackendBase)
+	rawTemplate := rawURL
+	rawURL = renderURLPlaceholders(rawURL, inputs)
+	if shouldAppendUnusedHTTPInput(method) {
+		rawURL = appendUnusedHTTPInputAsQuery(rawTemplate, rawURL, inputs, httpInputSchemaKeys(cfg, inputSchema))
+	}
+	if containsUnsafeURLPathToken(rawURL) {
+		return "", fmt.Errorf("tool: path traversal blocked in URL")
+	}
+	if err := s.validateHTTPToolURL(rawURL); err != nil {
+		return "", fmt.Errorf("tool: blocked URL (%w)", err)
+	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
+	var reqBody io.Reader
+	hasBody := false
+	if bodyTemplate := httpBodyTemplateFromConfig(cfg); bodyTemplate != "" {
+		reqBody = strings.NewReader(renderPlaceholders(bodyTemplate, inputs))
+		hasBody = true
+	}
+
+	timeoutSeconds := httpTimeoutSecondsFromConfig(cfg)
+	reqCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+
+	client := &http.Client{
+		CheckRedirect: func(redirect *http.Request, _ []*http.Request) error {
+			rawRedirectURL := redirect.URL.String()
+			if containsUnsafeURLPathToken(rawRedirectURL) {
+				return errBlockedHTTPToolRedirect
+			}
+			if err := s.validateHTTPToolURL(rawRedirectURL); err != nil {
+				return errBlockedHTTPToolRedirect
+			}
+			return nil
+		},
+	}
+	// #nosec G704 -- rawURL was checked by containsUnsafeURLPathToken and validateHTTPToolURL before request creation.
+	req, err := http.NewRequestWithContext(reqCtx, method, rawURL, reqBody)
 	if err != nil {
 		return "", fmt.Errorf("tool: create HTTP request: %w", err)
 	}
 
-	if headers, ok := cfg["headers"].(map[string]any); ok {
+	if rawHeaders, ok := cfg["headers"]; ok && rawHeaders != nil {
+		headers, ok := rawHeaders.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("tool: headers must be an object")
+		}
 		for k, v := range headers {
 			if vs, ok := v.(string); ok {
 				req.Header.Set(k, renderPlaceholders(vs, inputs))
+				continue
 			}
+			return "", fmt.Errorf("tool: header value for %q must be a string", k)
 		}
 	}
+	if hasBody && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
-	// Apply static auth from config (authType + authToken) so the test endpoint
-	// mirrors what the skill-runtime executor does at runtime. P-C239-1:
-	// authToken is never returned to the client, only sent on the outbound
-	// request.
+	// Apply runtime-compatible authentication. P-C239-1: authToken is never
+	// returned to the client, only sent on the outbound request.
 	authType, _ := cfg["authType"].(string)
 	if authType == "" {
 		authType, _ = cfg["auth_type"].(string)
@@ -679,54 +1187,401 @@ func (s *Service) testHTTPTool(ctx context.Context, cfg, inputs map[string]any) 
 	if authToken == "" {
 		authToken, _ = cfg["auth_token"].(string)
 	}
-	switch strings.ToLower(strings.TrimSpace(authType)) {
-	case "bearer":
+	callerToken := tenant.TokenFromContext(ctx)
+	useCallerToken, _ := cfg["useCallerToken"].(bool)
+	if _, hasPreferred := cfg["useCallerToken"]; !hasPreferred {
+		useCallerToken, _ = cfg["use_caller_token"].(bool)
+	}
+	switch {
+	case useCallerToken && callerToken != "":
+		req.Header.Set("Authorization", "Bearer "+callerToken)
+	case strings.EqualFold(authType, "bearer"):
 		if authToken != "" {
 			req.Header.Set("Authorization", "Bearer "+authToken)
 		}
-	case "basic":
+	case strings.EqualFold(authType, "basic"):
 		if authToken != "" {
 			req.Header.Set("Authorization", "Basic "+authToken)
 		}
 	}
 
+	// #nosec G704 -- request URL was validated for HTTP tool SSRF constraints before this call.
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("tool: HTTP request failed: %w", err)
+		if errors.Is(err, errBlockedHTTPToolRedirect) {
+			return "", fmt.Errorf("tool: blocked redirect URL")
+		}
+		return "", fmt.Errorf("%w: HTTP request failed", ErrUpstream)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("%w: read HTTP response body", ErrUpstream)
+	}
+	if resp.StatusCode >= 400 {
+		msg := fmt.Sprintf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		if body := strings.TrimSpace(redactHTTPToolTestResponseBody(string(respBytes), cfg, inputs, req.Header)); body != "" {
+			msg = fmt.Sprintf("%s: %s", msg, body)
+		}
+		return "", fmt.Errorf("%w: %s", ErrUpstream, msg)
+	}
+
 	var buf strings.Builder
 	fmt.Fprintf(&buf, "Status: %d %s\n\n", resp.StatusCode, resp.Status)
-	respBody := make([]byte, 4096)
-	n, _ := resp.Body.Read(respBody)
-	buf.Write(respBody[:n])
+	buf.WriteString(redactHTTPToolTestResponseBody(string(respBytes), cfg, inputs, req.Header))
 
 	return buf.String(), nil
 }
 
-// renderPlaceholders substitutes {key} and {{input.key}} occurrences in s with
-// the corresponding string value from inputs. Missing keys are left untouched
-// so the caller can see the failure in the outbound URL/header.
+var sensitiveToolTestResponseHeaderPattern = regexp.MustCompile(`(?im)\b(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-api-token|x-auth-token|x-access-token|x-secret)\s*:\s*[^\r\n]*`)
+
+var sensitiveToolTestResponsePairPattern = regexp.MustCompile(`(?i)\b((?:api[-_]?key|api[-_]?token|auth(?:orization)?|access[-_]?token|password|secret|token)\s*=\s*)[^\s&;,]+`)
+
+var errBlockedHTTPToolRedirect = errors.New("blocked HTTP tool redirect")
+
+func redactHTTPToolTestResponseBody(raw string, cfg map[string]any, inputs map[string]any, headers http.Header) string {
+	redacted := raw
+	secrets := make(map[string]struct{})
+	collectSensitiveToolTestValues(cfg, secrets)
+	collectSensitiveToolTestValues(inputs, secrets)
+	for name, values := range headers {
+		if !sensitiveHeaderKeys[strings.ToLower(name)] {
+			continue
+		}
+		for _, value := range values {
+			if value != "" {
+				secrets[value] = struct{}{}
+			}
+		}
+	}
+	for secret := range secrets {
+		redacted = strings.ReplaceAll(redacted, secret, "***")
+	}
+
+	var body any
+	if err := json.Unmarshal([]byte(redacted), &body); err == nil {
+		if encoded, err := json.Marshal(redactSensitiveToolTestValue(body)); err == nil {
+			redacted = string(encoded)
+		}
+	}
+	redacted = sensitiveToolTestResponseHeaderPattern.ReplaceAllString(redacted, "[REDACTED]")
+	return sensitiveToolTestResponsePairPattern.ReplaceAllString(redacted, "${1}***")
+}
+
+func collectSensitiveToolTestValues(value any, secrets map[string]struct{}) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if isSensitiveToolConfigKey(key) {
+				collectToolTestSecretStrings(child, secrets)
+				continue
+			}
+			if isToolConfigURLKey(key) {
+				collectSensitiveToolTestURLValues(child, secrets)
+				continue
+			}
+			collectSensitiveToolTestValues(child, secrets)
+		}
+	case []any:
+		for _, child := range v {
+			collectSensitiveToolTestValues(child, secrets)
+		}
+	}
+}
+
+func collectSensitiveToolTestURLValues(value any, secrets map[string]struct{}) {
+	rawURL, ok := value.(string)
+	if !ok || rawURL == "" {
+		return
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return
+	}
+	if parsed.User != nil {
+		if username := parsed.User.Username(); username != "" {
+			secrets[username] = struct{}{}
+		}
+		if password, ok := parsed.User.Password(); ok && password != "" {
+			secrets[password] = struct{}{}
+		}
+	}
+
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return
+	}
+	for key, values := range query {
+		if !isSensitiveToolConfigKey(key) {
+			continue
+		}
+		for _, value := range values {
+			if value != "" {
+				secrets[value] = struct{}{}
+			}
+		}
+	}
+}
+
+func collectToolTestSecretStrings(value any, secrets map[string]struct{}) {
+	switch v := value.(type) {
+	case string:
+		if v != "" {
+			secrets[v] = struct{}{}
+		}
+	case map[string]any:
+		for _, child := range v {
+			collectToolTestSecretStrings(child, secrets)
+		}
+	case []any:
+		for _, child := range v {
+			collectToolTestSecretStrings(child, secrets)
+		}
+	}
+}
+
+func redactSensitiveToolTestValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if isSensitiveToolConfigKey(key) {
+				out[key] = "***"
+				continue
+			}
+			out[key] = redactSensitiveToolTestValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = redactSensitiveToolTestValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func (s *Service) validateHTTPToolURL(rawURL string) error {
+	if isTrustedHTTPBackendURL(rawURL, s.httpBackendBase) {
+		return nil
+	}
+	validator := ssrf.ValidateURL
+	if s.httpURLValidator != nil {
+		validator = s.httpURLValidator
+	}
+	return validator(rawURL)
+}
+
+func normalizeHTTPBaseURL(baseURL string) string {
+	return strings.TrimRight(strings.TrimSpace(baseURL), "/")
+}
+
+func httpBodyTemplateFromConfig(cfg map[string]any) string {
+	for _, key := range []string{"bodyTemplate", "body_template", "body"} {
+		v, ok := cfg[key]
+		if !ok || v == nil {
+			continue
+		}
+		return httpBodyTemplateValue(v)
+	}
+	return ""
+}
+
+func httpBodyTemplateValue(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
+}
+
+func httpURLWithBaseFromConfig(cfg map[string]any, rawURL, backendBaseURL string) string {
+	if strings.HasPrefix(rawURL, "http") {
+		return rawURL
+	}
+	baseURL, _ := cfg["baseUrl"].(string)
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = backendBaseURL
+	}
+	if strings.TrimSpace(baseURL) == "" {
+		return rawURL
+	}
+	return strings.TrimRight(baseURL, "/") + rawURL
+}
+
+func isTrustedHTTPBackendURL(rawURL, backendBaseURL string) bool {
+	trustedBase := normalizeHTTPBaseURL(backendBaseURL)
+	if trustedBase == "" {
+		return false
+	}
+	return rawURL == trustedBase || strings.HasPrefix(rawURL, trustedBase+"/")
+}
+
+func httpTimeoutSecondsFromConfig(cfg map[string]any) int {
+	if seconds := positiveHTTPConfigInt(cfg["timeoutSeconds"]); seconds > 0 {
+		return seconds
+	}
+	if seconds := positiveHTTPConfigInt(cfg["timeout_seconds"]); seconds > 0 {
+		return seconds
+	}
+	if timeoutMs := positiveHTTPConfigInt(cfg["timeoutMs"]); timeoutMs > 0 {
+		seconds := (timeoutMs + 999) / 1000
+		if seconds < 1 {
+			return 1
+		}
+		return seconds
+	}
+	return 30
+}
+
+func positiveHTTPConfigInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		if n > 0 {
+			return n
+		}
+	case int64:
+		if n > 0 {
+			return int(n)
+		}
+	case float64:
+		if n > 0 {
+			return int(n)
+		}
+	case json.Number:
+		i, err := n.Int64()
+		if err == nil && i > 0 {
+			return int(i)
+		}
+	}
+	return 0
+}
+
+func shouldAppendUnusedHTTPInput(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodDelete, http.MethodHead:
+		return true
+	default:
+		return false
+	}
+}
+
+func appendUnusedHTTPInputAsQuery(rawTemplate, renderedURL string, input map[string]any, allowedKeys map[string]bool) string {
+	if len(input) == 0 {
+		return renderedURL
+	}
+
+	used := usedHTTPTemplateKeys(rawTemplate, input)
+	query := url.Values{}
+	for key, value := range input {
+		if used[key] {
+			continue
+		}
+		if allowedKeys != nil && !allowedKeys[key] {
+			continue
+		}
+		query.Set(key, fmt.Sprintf("%v", value))
+	}
+	if len(query) == 0 {
+		return renderedURL
+	}
+
+	separator := "?"
+	if strings.Contains(renderedURL, "?") {
+		separator = "&"
+	}
+	return renderedURL + separator + query.Encode()
+}
+
+func usedHTTPTemplateKeys(rawTemplate string, input map[string]any) map[string]bool {
+	used := make(map[string]bool, len(input))
+	for key := range input {
+		if strings.Contains(rawTemplate, "{"+key+"}") ||
+			strings.Contains(rawTemplate, "{{"+key+"}}") ||
+			strings.Contains(rawTemplate, "{{input."+key+"}}") ||
+			strings.Contains(rawTemplate, "{{args."+key+"}}") {
+			used[key] = true
+		}
+	}
+	return used
+}
+
+func httpInputSchemaKeys(cfg map[string]any, inputSchema json.RawMessage) map[string]bool {
+	raw := []byte(inputSchema)
+	if len(raw) == 0 {
+		v, ok := cfg["inputSchema"]
+		if !ok || v == nil {
+			return nil
+		}
+		data, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		raw = data
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return nil
+	}
+	if len(schema.Properties) == 0 {
+		return nil
+	}
+
+	keys := make(map[string]bool, len(schema.Properties))
+	for key := range schema.Properties {
+		keys[key] = true
+	}
+	return keys
+}
+
+// renderPlaceholders substitutes HTTP tool template aliases in s with the
+// corresponding string value from inputs. Missing keys are left untouched so
+// the caller can see the failure in the outbound header/body.
 func renderPlaceholders(s string, inputs map[string]any) string {
 	if len(inputs) == 0 {
 		return s
 	}
-	out := s
+	pairs := make([]string, 0, len(inputs)*8)
 	for k, v := range inputs {
-		var val string
-		switch t := v.(type) {
-		case string:
-			val = t
-		case fmt.Stringer:
-			val = t.String()
-		default:
-			val = fmt.Sprintf("%v", t)
-		}
-		out = strings.ReplaceAll(out, "{"+k+"}", val)
-		out = strings.ReplaceAll(out, "{{input."+k+"}}", val)
+		val := fmt.Sprintf("%v", v)
+		pairs = append(pairs,
+			"{{"+k+"}}", val,
+			"{"+k+"}", val,
+			"{{input."+k+"}}", val,
+			"{{args."+k+"}}", val,
+		)
 	}
-	return out
+	return strings.NewReplacer(pairs...).Replace(s)
+}
+
+func renderURLPlaceholders(s string, inputs map[string]any) string {
+	if len(inputs) == 0 {
+		return s
+	}
+	pairs := make([]string, 0, len(inputs)*8)
+	for k, v := range inputs {
+		val := url.QueryEscape(fmt.Sprintf("%v", v))
+		pairs = append(pairs,
+			"{{"+k+"}}", val,
+			"{"+k+"}", val,
+			"{{input."+k+"}}", val,
+			"{{args."+k+"}}", val,
+		)
+	}
+	return strings.NewReplacer(pairs...).Replace(s)
 }
 
 // GenerateCode uses the configured LLM to generate code for a tool.

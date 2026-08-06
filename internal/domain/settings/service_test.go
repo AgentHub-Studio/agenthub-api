@@ -3,6 +3,7 @@ package settings_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,6 +74,16 @@ func TestSettingsService_Get_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, settings.ErrNotFound)
 }
 
+func TestSettingsService_Get_DefaultsMissingSystemPrompt(t *testing.T) {
+	svc := settings.NewService(newMockRepo())
+	resp, err := svc.Get(context.Background(), "system.prompt")
+	require.NoError(t, err)
+
+	assert.Equal(t, "system.prompt", resp.Key)
+	assert.JSONEq(t, `""`, string(resp.Value))
+	assert.Contains(t, resp.Description, "Global system prompt")
+}
+
 func TestSettingsService_Delete_Success(t *testing.T) {
 	svc := settings.NewService(newMockRepo())
 	val, _ := json.Marshal(true)
@@ -98,9 +109,9 @@ func TestSettingsService_List(t *testing.T) {
 // masked in the SettingResponse returned from ResponseFrom.
 func TestResponseFrom_MasksSensitiveKeys(t *testing.T) {
 	tests := []struct {
-		key       string
-		value     string
-		wantMask  bool
+		key      string
+		value    string
+		wantMask bool
 	}{
 		{"openrouter.apiKey", "sk-or-v1-supersecrettoken123456", true},
 		{"openai.apiKey", "sk-proj-verysecret", true},
@@ -126,4 +137,43 @@ func TestResponseFrom_MasksSensitiveKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResponseFrom_RedactsNestedSensitiveValueKeys(t *testing.T) {
+	raw := json.RawMessage(`{
+		"provider":"custom",
+		"credentials":{
+			"apiKey":"nested-api-key-secret",
+			"clientSecret":"nested-client-secret",
+			"headers":{
+				"Authorization":"Bearer nested-authorization-token",
+				"X-Trace":"trace-id"
+			}
+		},
+		"fallbacks":[
+			{"refreshToken":"nested-refresh-token"},
+			{"safe":"kept"}
+		]
+	}`)
+
+	resp := settings.ResponseFrom(settings.Setting{Key: "provider.bundle", Value: raw})
+	body := string(resp.Value)
+
+	for _, secret := range []string{
+		"nested-api-key-secret",
+		"nested-client-secret",
+		"nested-authorization-token",
+		"nested-refresh-token",
+	} {
+		assert.NotContains(t, body, secret)
+	}
+	assert.Contains(t, body, `"apiKey":"***"`)
+	assert.Contains(t, body, `"clientSecret":"***"`)
+	assert.Contains(t, body, `"Authorization":"***"`)
+	assert.Contains(t, body, `"refreshToken":"***"`)
+	assert.Contains(t, body, `"provider":"custom"`)
+	assert.Contains(t, body, `"X-Trace":"trace-id"`)
+	assert.Contains(t, body, `"safe":"kept"`)
+	assert.True(t, json.Valid(resp.Value), "sanitized setting response must remain valid JSON")
+	assert.False(t, strings.Contains(body, `nested-`), "no nested secret marker should remain")
 }

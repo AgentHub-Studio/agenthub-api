@@ -69,7 +69,7 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 // imported via realm initdata) may carry NULL until they are explicitly
 // published; without the COALESCE, scanAgent fails when listing agents
 // in any tenant whose seed batch left the column unset.
-const agentColumns = `id, name, slug, description, status, COALESCE(current_version, 0) AS current_version, system_prompt, model_config, permission_rules, config, enable_management, created_at, updated_at`
+const agentColumns = `id, name, slug, description, status, COALESCE(current_version, 0) AS current_version, system_prompt, model_config, permission_rules, config, COALESCE(eval_config, '{}'::jsonb) AS eval_config, COALESCE(input_processors, '[]'::jsonb) AS input_processors, COALESCE(output_processors, '[]'::jsonb) AS output_processors, enable_management, created_at, updated_at`
 
 func scanAgent(row pgx.Row) (Agent, error) {
 	var a Agent
@@ -77,10 +77,14 @@ func scanAgent(row pgx.Row) (Agent, error) {
 	var configBytes []byte
 	var modelConfigBytes []byte
 	var permissionRulesBytes []byte
+	var evalConfigBytes []byte
+	var inputProcessorsBytes []byte
+	var outputProcessorsBytes []byte
 	err := row.Scan(
 		&a.ID, &a.Name, &a.Slug, &a.Description, &status,
 		&a.CurrentVersion, &a.SystemPrompt, &modelConfigBytes,
-		&permissionRulesBytes, &configBytes, &a.EnableManagement, &a.CreatedAt, &a.UpdatedAt,
+		&permissionRulesBytes, &configBytes, &evalConfigBytes, &inputProcessorsBytes, &outputProcessorsBytes,
+		&a.EnableManagement, &a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
 		return Agent{}, err
@@ -95,7 +99,42 @@ func scanAgent(row pgx.Row) (Agent, error) {
 	if len(permissionRulesBytes) > 0 {
 		a.PermissionRules = json.RawMessage(permissionRulesBytes)
 	}
+	if len(evalConfigBytes) > 0 {
+		_ = json.Unmarshal(evalConfigBytes, &a.EvalConfig)
+	}
+	a.InputProcessors = decodeProcessorNames(inputProcessorsBytes)
+	a.OutputProcessors = decodeProcessorNames(outputProcessorsBytes)
 	return a, nil
+}
+
+func decodeProcessorNames(raw []byte) []string {
+	if len(raw) == 0 {
+		return []string{}
+	}
+	var names []string
+	if err := json.Unmarshal(raw, &names); err != nil || names == nil {
+		return []string{}
+	}
+	return names
+}
+
+func encodeProcessorNames(names []string) []byte {
+	if names == nil {
+		names = []string{}
+	}
+	raw, err := json.Marshal(names)
+	if err != nil {
+		return []byte(`[]`)
+	}
+	return raw
+}
+
+func encodeEvalConfig(a Agent) []byte {
+	raw, err := json.Marshal(a.EvalConfig)
+	if err != nil || len(raw) == 0 {
+		return []byte(`{}`)
+	}
+	return raw
 }
 
 func (r *pgRepository) acquire(ctx context.Context) (*pgxpool.Conn, func(), error) {
@@ -215,12 +254,13 @@ func (r *pgRepository) Create(ctx context.Context, a Agent) (Agent, error) {
 	}
 
 	query := fmt.Sprintf(`
-		INSERT INTO agent (id, name, slug, description, status, current_version, system_prompt, model_config, permission_rules, config, enable_management, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+		INSERT INTO agent (id, name, slug, description, status, current_version, system_prompt, model_config, permission_rules, config, eval_config, input_processors, output_processors, enable_management, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
 		RETURNING %s`, agentColumns)
 	row := conn.QueryRow(ctx, query,
 		a.ID, a.Name, a.Slug, a.Description, string(a.Status),
-		a.CurrentVersion, a.SystemPrompt, modelConfig, permissionRules, []byte(config), a.EnableManagement,
+		a.CurrentVersion, a.SystemPrompt, modelConfig, permissionRules, []byte(config),
+		encodeEvalConfig(a), encodeProcessorNames(a.InputProcessors), encodeProcessorNames(a.OutputProcessors), a.EnableManagement,
 	)
 	created, err := scanAgent(row)
 	if err != nil {
@@ -256,11 +296,12 @@ func (r *pgRepository) Update(ctx context.Context, a Agent) (Agent, error) {
 
 	query := fmt.Sprintf(`
 		UPDATE agent
-		SET name=$2, slug=$3, description=$4, system_prompt=$5, model_config=$6, permission_rules=$7, config=$8, enable_management=$9, updated_at=NOW()
+		SET name=$2, slug=$3, description=$4, system_prompt=$5, model_config=$6, permission_rules=$7, config=$8, eval_config=$9, input_processors=$10, output_processors=$11, enable_management=$12, updated_at=NOW()
 		WHERE id=$1
 		RETURNING %s`, agentColumns)
 	row := conn.QueryRow(ctx, query,
-		a.ID, a.Name, a.Slug, a.Description, a.SystemPrompt, modelConfig, permissionRules, []byte(config), a.EnableManagement,
+		a.ID, a.Name, a.Slug, a.Description, a.SystemPrompt, modelConfig, permissionRules, []byte(config),
+		encodeEvalConfig(a), encodeProcessorNames(a.InputProcessors), encodeProcessorNames(a.OutputProcessors), a.EnableManagement,
 	)
 	updated, err := scanAgent(row)
 	if errors.Is(err, pgx.ErrNoRows) {

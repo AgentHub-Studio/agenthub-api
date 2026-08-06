@@ -2,9 +2,10 @@ package agentic
 
 import (
 	"math"
-	"math/rand"
 	"sort"
 	"sync"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/randutil"
 )
 
 // Metrics store with reservoir sampling for streaming histograms.
@@ -86,7 +87,7 @@ func (m *MetricsStore) Observe(name string, value float64) {
 	if len(h.reservoir) < MetricsReservoirSize {
 		h.reservoir = append(h.reservoir, value)
 	} else {
-		j := rand.Intn(h.count)
+		j := randutil.Intn(h.count)
 		if j < MetricsReservoirSize {
 			h.reservoir[j] = value
 		}

@@ -21,7 +21,7 @@ import (
 //     unbounded disk growth.
 //
 // AgentHub maps file checkpoints to filehistory.go FileHistory:
-//   - FileSnapshot — Path + ContentHash (MD5) + Content + TurnIndex +
+//   - FileSnapshot — Path + ContentHash (SHA-256) + Content + TurnIndex +
 //     Timestamp + Size — the per-version record.
 //   - FileHistoryConfig — MaxSnapshots per file (default 50) +
 //     MaxTotalSnapshots global (default 500) — bounded retention.

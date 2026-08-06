@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,12 +69,13 @@ type SubtaskResult struct {
 // summarizeResult generates a concise summary from the result content or error.
 func summarizeResult(content string, err *string) string {
 	if err != nil {
-		msg := *err
+		msg := sanitizeToolError(*err)
 		if len(msg) > 200 {
 			return msg[:197] + "..."
 		}
 		return "Error: " + msg
 	}
+	content = sanitizeSSEMessage(content)
 	if content == "" {
 		return "(no output)"
 	}
@@ -100,6 +102,9 @@ type SubtaskExecutor struct {
 	runnerFactory RunnerFactory
 	// mailbox is the shared inter-agent mailbox for sub-agent communication.
 	agentMailbox *AgentMailbox
+	// coordinator persists delegated work when task persistence is configured
+	// for the parent chat session.
+	coordinator *CoordinatorState
 }
 
 // RunnerFactory builds a Runner with the given configuration.
@@ -117,6 +122,14 @@ func NewSubtaskExecutor(factory RunnerFactory) *SubtaskExecutor {
 // WithMailbox attaches a shared mailbox for inter-agent messaging.
 func (s *SubtaskExecutor) WithAgentMailbox(m *AgentMailbox) *SubtaskExecutor {
 	s.agentMailbox = m
+	return s
+}
+
+// WithCoordinatorState wires task lifecycle persistence for delegated work.
+// A nil coordinator preserves the in-memory-only behavior used by isolated
+// runners and tests that do not own a persisted chat session.
+func (s *SubtaskExecutor) WithCoordinatorState(coordinator *CoordinatorState) *SubtaskExecutor {
+	s.coordinator = coordinator
 	return s
 }
 
@@ -157,6 +170,12 @@ func (s *SubtaskExecutor) Execute(
 	}
 
 	subtaskID := uuid.New().String()
+	if s.coordinator != nil {
+		subtaskID = s.coordinator.CreateTask(input.Prompt, PhaseImplementation, nil)
+		if err := s.coordinator.AssignTask(subtaskID, "subagent-"+subtaskID); err != nil {
+			slog.Warn("agentic: failed to assign persisted subtask", "taskID", subtaskID, "error", err)
+		}
+	}
 
 	// Emit subtask_start.
 	parentCh <- NewRunEvent(EventSubtaskStart, SubtaskStartData{
@@ -175,6 +194,7 @@ func (s *SubtaskExecutor) Execute(
 		remainingBudget = effectiveBudget - totalCostSoFar
 		if remainingBudget <= 0 {
 			errMsg := "no budget remaining for sub-agent"
+			s.recordTaskCompletion(subtaskID, summarizeResult("", &errMsg), &errMsg)
 			parentCh <- NewRunEvent(EventSubtaskComplete, SubtaskCompleteData{
 				ID:    subtaskID,
 				Error: &errMsg,
@@ -286,6 +306,7 @@ func (s *SubtaskExecutor) Execute(
 		CostUSD:     childCost,
 		DurationMs:  latency,
 	}
+	s.recordTaskCompletion(subtaskID, subtaskResult.Summary, childErr)
 
 	// Emit subtask_complete with summary.
 	parentCh <- NewRunEvent(EventSubtaskComplete, SubtaskCompleteData{
@@ -300,9 +321,9 @@ func (s *SubtaskExecutor) Execute(
 	output, _ := json.Marshal(subtaskResult)
 	if childErr != nil {
 		return ToolExecResult{
-			Output:         output,
-			Error:          childErr,
-			LatencyMs:      latency,
+			Output:    output,
+			Error:     childErr,
+			LatencyMs: latency,
 			// P-C336-1 (ACT-F3-13): propagate sub-agent metrics to parent runner.
 			SubtaskTokens:  totalTokens,
 			SubtaskCostUSD: childCost,
@@ -310,12 +331,38 @@ func (s *SubtaskExecutor) Execute(
 	}
 
 	return ToolExecResult{
-		Output:         output,
-		LatencyMs:      latency,
+		Output:    output,
+		LatencyMs: latency,
 		// P-C336-1 (ACT-F3-13): propagate sub-agent metrics to parent runner.
 		SubtaskTokens:  totalTokens,
 		SubtaskCostUSD: childCost,
 	}
+}
+
+func (s *SubtaskExecutor) recordTaskCompletion(taskID, summary string, runErr *string) {
+	if s.coordinator == nil {
+		return
+	}
+
+	status := TaskStatusCompleted
+	if runErr != nil {
+		status = TaskStatusFailed
+		if err := s.coordinator.FailTask(taskID); err != nil {
+			slog.Warn("agentic: failed to mark persisted subtask as failed", "taskID", taskID, "error", err)
+		}
+	} else if err := s.coordinator.CompleteTask(taskID); err != nil {
+		slog.Warn("agentic: failed to mark persisted subtask as completed", "taskID", taskID, "error", err)
+	}
+
+	s.coordinator.AddNotification(TaskNotification{
+		WorkerID:   "subagent-" + taskID,
+		WorkerName: "sub-agent",
+		TaskID:     taskID,
+		Status:     status,
+		Summary:    summary,
+		Error:      runErr,
+		Timestamp:  time.Now(),
+	})
 }
 
 // ExecuteParallel runs multiple sub-agent tool calls concurrently with a shared

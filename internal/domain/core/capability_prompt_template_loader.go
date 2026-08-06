@@ -9,7 +9,7 @@ import (
 )
 
 // CoreCapabilityPromptTemplateLoader loads capability-specific prompt templates
-// from ah_core.prompt_template. These 5 templates (kind="capability") are
+// from ah_core.core_prompt_template. These 5 templates (kind="capability") are
 // user-facing starters that help users compose requests to the three capability
 // agents introduced in migration 000091 (core-researcher, core-analyst,
 // core-planner). Seeded by migration 000094.
@@ -19,7 +19,7 @@ import (
 // the capability-kind templates and provides sub-group accessors grouped by the
 // underlying skill they require (web research, doc analysis, task workflow).
 //
-// Non-fatal when the ah_core schema or prompt_template table is missing —
+// Non-fatal when the ah_core schema or core_prompt_template table is missing —
 // supports fresh deployments where 000019 has not yet run.
 type CoreCapabilityPromptTemplateLoader struct {
 	pool *pgxpool.Pool
@@ -32,7 +32,7 @@ func NewCoreCapabilityPromptTemplateLoader(pool *pgxpool.Pool) *CoreCapabilityPr
 }
 
 // LoadCapabilityTemplates returns all recommended capability-kind prompt templates
-// from ah_core.prompt_template, ordered by slug.
+// from ah_core.core_prompt_template, ordered by slug.
 // Returns nil, nil when the table is not accessible (non-fatal).
 func (l *CoreCapabilityPromptTemplateLoader) LoadCapabilityTemplates(ctx context.Context) ([]CorePromptTemplate, error) {
 	conn, err := l.pool.Acquire(ctx)
@@ -46,7 +46,7 @@ func (l *CoreCapabilityPromptTemplateLoader) LoadCapabilityTemplates(ctx context
 		       system_prompt, recommended_temperature, recommended_max_tokens,
 		       requires_tools, placeholders,
 		       is_recommended, is_active, sort_order
-		  FROM ah_core.prompt_template
+		  FROM ah_core.core_prompt_template
 		 WHERE template_kind = 'capability'
 		   AND is_recommended = true
 		 ORDER BY slug`
@@ -54,7 +54,7 @@ func (l *CoreCapabilityPromptTemplateLoader) LoadCapabilityTemplates(ctx context
 	rows, err := conn.Query(ctx, query)
 	if err != nil {
 		if isUndefinedRelation(err) {
-			slog.WarnContext(ctx, "core: ah_core.prompt_template not accessible, capability templates unavailable", "err", err)
+			slog.WarnContext(ctx, "core: ah_core.core_prompt_template not accessible, capability templates unavailable", "err", err)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("core: query capability prompt templates: %w", err)
@@ -76,7 +76,7 @@ func (l *CoreCapabilityPromptTemplateLoader) LoadCapabilityTemplates(ctx context
 	}
 	if err := rows.Err(); err != nil {
 		if isUndefinedRelation(err) {
-			slog.WarnContext(ctx, "core: ah_core.prompt_template not accessible (post-iter), capability templates unavailable", "err", err)
+			slog.WarnContext(ctx, "core: ah_core.core_prompt_template not accessible (post-iter), capability templates unavailable", "err", err)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("core: iterate capability prompt templates: %w", err)

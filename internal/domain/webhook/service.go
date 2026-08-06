@@ -68,6 +68,8 @@ func (s *Service) lookupConfigByToken(ctx context.Context, token string) (Webhoo
 		if w, err := s.repo.GetByToken(ctx, token); err == nil {
 			return w, tid, nil
 		}
+	} else if w, err := s.repo.GetByToken(ctx, token); err == nil {
+		return w, "", nil
 	}
 	if s.tenantLister == nil {
 		return WebhookConfig{}, "", ErrNotFound
@@ -336,29 +338,27 @@ func (s *Service) IngestWebhook(ctx context.Context, token, sourceType string, p
 		return WebhookDeliveryLog{}, err
 	}
 
-	// Dispatch asynchronously with retry. Bug 236: usa Ctx variant
-	// para preservar tenant — sem isso UpdateDelivery falha por
-	// search_path errado e delivery fica eternamente PENDING.
+	// Dispatch asynchronously with retry. Bug 236: use the context-aware
+	// variant to preserve tenant values. Without this, UpdateDelivery uses the
+	// wrong search_path and the delivery remains PENDING.
 	go s.dispatchWithRetryCtx(ctx, w, log)
 
 	return log, nil
 }
 
-// dispatchWithRetryCtx forwards the payload with exponential backoff and preserves
-// the original request tenant context; otherwise UpdateDelivery cannot resolve
-// the ah_{tenantId} schema and the delivery remains PENDING.
+// dispatchWithRetryCtx mirrors dispatchWithRetry but preserves request context
+// values, including tenant, while detaching from request cancellation.
 func (s *Service) dispatchWithRetryCtx(parentCtx context.Context, w WebhookConfig, d WebhookDeliveryLog) {
 	maxAttempts := w.RetryCount
 	if maxAttempts <= 0 || maxAttempts > ingestMaxRetries {
 		maxAttempts = ingestMaxRetries
 	}
 
-	// Preserva tenantID do parent para o goroutine não perder schema.
-	ctx := context.Background()
-	if tid := tenantctx.FromContext(parentCtx); tid != "" {
+	ctx := detachedContext(parentCtx)
+	if tid := tenantctx.FromContext(parentCtx); tid != "" && tenantctx.FromContext(ctx) == "" {
 		ctx = tenantctx.NewContext(ctx, tid)
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := newWebhookHTTPClient()
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
@@ -385,6 +385,25 @@ func (s *Service) dispatchWithRetryCtx(parentCtx context.Context, w WebhookConfi
 
 	d.Status = "FAILED"
 	_, _ = s.repo.UpdateDelivery(ctx, d)
+}
+
+func detachedContext(parent context.Context) context.Context {
+	if parent == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(parent)
+}
+
+func newWebhookHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(redirect *http.Request, _ []*http.Request) error {
+			if err := ssrf.ValidateURL(redirect.URL.String()); err != nil {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
 }
 
 // doHTTPPost sends a POST request with the given payload and returns status code, body, error.
@@ -462,7 +481,7 @@ func (s *Service) Ingest(ctx context.Context, token, eventType, signature string
 		return WebhookDeliveryLog{}, err
 	}
 
-	// Bug 236: Ctx variant preserva tenant para o goroutine.
+	// Bug 236: preserve tenant context for the goroutine.
 	go s.dispatchWithRetryCtx(ctx, w, log)
 	return log, nil
 }
@@ -503,9 +522,8 @@ func (s *Service) SendTest(ctx context.Context, webhookID uuid.UUID) (WebhookDel
 	if err != nil {
 		return WebhookDeliveryLog{}, err
 	}
-	// Bug 236: SendTest criava delivery em PENDING mas nunca firava o
-	// dispatch — todas test deliveries ficavam paradas. Mesmo padrão
-	// do Ingest (linha 405) com Ctx variant para preservar tenant.
+	// Bug 236: SendTest used to create a PENDING delivery without dispatching
+	// it. Keep the same context-preserving dispatch pattern used by Ingest.
 	go s.dispatchWithRetryCtx(ctx, w, log)
 	return log, nil
 }

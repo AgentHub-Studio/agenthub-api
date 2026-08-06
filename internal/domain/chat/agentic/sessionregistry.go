@@ -51,11 +51,11 @@ type SessionInfo struct {
 
 // SessionRegistry manages PID-based session tracking in a directory.
 type SessionRegistry struct {
-	mu          sync.Mutex
-	dir         string
-	pid         int
-	registered  bool
-	isRunning   func(pid int) bool // customizable process liveness check
+	mu         sync.Mutex
+	dir        string
+	pid        int
+	registered bool
+	isRunning  func(pid int) bool // customizable process liveness check
 }
 
 // NewSessionRegistry creates a registry using the given directory.
@@ -105,7 +105,7 @@ func (r *SessionRegistry) Update(patch map[string]interface{}) error {
 	defer r.mu.Unlock()
 
 	path := r.pidFilePath(r.pid)
-	data, err := os.ReadFile(path)
+	data, err := r.readPIDFile(r.pid)
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,7 @@ func (r *SessionRegistry) List() []SessionInfo {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(r.dir, name))
+		data, err := r.readPIDFile(pid)
 		if err != nil {
 			continue
 		}
@@ -220,6 +220,10 @@ func (r *SessionRegistry) Dir() string {
 
 func (r *SessionRegistry) pidFilePath(pid int) string {
 	return filepath.Join(r.dir, strconv.Itoa(pid)+".json")
+}
+
+func (r *SessionRegistry) readPIDFile(pid int) ([]byte, error) {
+	return readFileFromRoot(r.dir, strconv.Itoa(pid)+".json")
 }
 
 func isValidPIDFile(name string) bool {

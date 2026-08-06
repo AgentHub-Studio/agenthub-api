@@ -4,18 +4,79 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/AgentHub-Studio/agenthub-api/internal/redact"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/evals"
 )
+
+// sensitiveModelConfigKeys lists normalized model config keys that must not be
+// returned in API responses or tool results. P-C211-1: apiKey must not appear
+// in any response body.
+var sensitiveModelConfigKeys = map[string]bool{
+	"apikey":             true,
+	"apisecret":          true,
+	"clientsecret":       true,
+	"secret":             true,
+	"password":           true,
+	"authtoken":          true,
+	"accesstoken":        true,
+	"refreshtoken":       true,
+	"bearertoken":        true,
+	"authorization":      true,
+	"proxyauthorization": true,
+	"xapikey":            true,
+	"xapitoken":          true,
+	"xauthtoken":         true,
+	"xaccesstoken":       true,
+	"xsecret":            true,
+}
 
 // SanitizeModelConfig removes credential keys from a raw model config JSON blob.
 // Returns the sanitized JSON; on parse error returns an empty JSON object.
 // Safe to call on nil or empty input.
 func SanitizeModelConfig(raw json.RawMessage) json.RawMessage {
-	return redact.RemoveSensitiveJSONFields(raw)
+	if len(raw) == 0 {
+		return raw
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return raw
+	}
+	sanitized, err := json.Marshal(sanitizeModelConfigValue(value))
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return sanitized
+}
+
+func sanitizeModelConfigValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if isSensitiveModelConfigKey(key) {
+				continue
+			}
+			out[key] = sanitizeModelConfigValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = sanitizeModelConfigValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func isSensitiveModelConfigKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+	return sensitiveModelConfigKeys[normalized]
 }
 
 // AgentManageResponse is the redacted DTO exposed by the agenthub_manage tool.
@@ -66,16 +127,19 @@ const (
 // Agent is the domain entity for a tenant-scoped agent.
 // Stored in ah_{tenantID}.agent — no tenant_id column.
 type Agent struct {
-	ID              uuid.UUID
-	Name            string
-	Slug            string
-	Description     string
-	Status          AgentStatus
-	CurrentVersion  int
-	SystemPrompt    *string
-	ModelConfig     json.RawMessage
-	PermissionRules json.RawMessage
-	Config          json.RawMessage
+	ID               uuid.UUID
+	Name             string
+	Slug             string
+	Description      string
+	Status           AgentStatus
+	CurrentVersion   int
+	SystemPrompt     *string
+	ModelConfig      json.RawMessage
+	PermissionRules  json.RawMessage
+	Config           json.RawMessage
+	EvalConfig       evals.EvalConfig
+	InputProcessors  []string
+	OutputProcessors []string
 	// EnableManagement controls whether the agenthub_manage builtin tool is included
 	// in this agent's toolset. Default false — requires explicit opt-in.
 	// P-C184-2: prevents agents from managing other agents without explicit authorization.

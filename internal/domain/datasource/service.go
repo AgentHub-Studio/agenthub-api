@@ -162,6 +162,16 @@ func (s *Service) Create(ctx context.Context, tenantID string, req CreateRequest
 // Backlog #186: handler PATCH delega para Update; sem este merge,
 // PATCH {"name":"x"} falhava por type/host required.
 func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (DataSource, error) {
+	return s.update(ctx, tenantID, id, req, true)
+}
+
+// UpdateReplacingVPNResource updates a datasource while treating VpnResourceID
+// as a replacement field. A nil VpnResourceID clears the association.
+func (s *Service) UpdateReplacingVPNResource(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest) (DataSource, error) {
+	return s.update(ctx, tenantID, id, req, false)
+}
+
+func (s *Service) update(ctx context.Context, tenantID string, id uuid.UUID, req CreateRequest, preserveVPNResourceID bool) (DataSource, error) {
 	existing, err := s.repo.GetByID(ctx, tenantID, id)
 	if err != nil {
 		return DataSource{}, err
@@ -192,7 +202,7 @@ func (s *Service) Update(ctx context.Context, tenantID string, id uuid.UUID, req
 	if password == "" {
 		password = existing.DBPassword
 	}
-	if req.VpnResourceID == nil {
+	if preserveVPNResourceID && req.VpnResourceID == nil {
 		req.VpnResourceID = existing.VpnResourceID
 	}
 	if err := validateRequest(req); err != nil {

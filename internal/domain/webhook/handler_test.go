@@ -14,18 +14,21 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/webhook"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
 // mockWebhookSvc satisfies the private webhookService interface in webhook.Handler.
 type mockWebhookSvc struct {
-	webhooks  map[uuid.UUID]webhook.WebhookConfig
-	deliveries map[uuid.UUID][]webhook.WebhookDeliveryLog
+	webhooks    map[uuid.UUID]webhook.WebhookConfig
+	deliveries  map[uuid.UUID][]webhook.WebhookDeliveryLog
+	ingestCalls int
+	lastPayload []byte
 }
 
 func newMockWebhookSvc() *mockWebhookSvc {
 	return &mockWebhookSvc{
-		webhooks:  make(map[uuid.UUID]webhook.WebhookConfig),
+		webhooks:   make(map[uuid.UUID]webhook.WebhookConfig),
 		deliveries: make(map[uuid.UUID][]webhook.WebhookDeliveryLog),
 	}
 }
@@ -88,7 +91,9 @@ func (m *mockWebhookSvc) ListDeliveries(_ context.Context, webhookID uuid.UUID, 
 	return pagination.NewPage(logs, int64(len(logs)), req), nil
 }
 
-func (m *mockWebhookSvc) IngestWebhook(_ context.Context, token, _ string, _ []byte, _, eventType string) (webhook.WebhookDeliveryLog, error) {
+func (m *mockWebhookSvc) IngestWebhook(_ context.Context, token, _ string, payload []byte, _, eventType string) (webhook.WebhookDeliveryLog, error) {
+	m.ingestCalls++
+	m.lastPayload = append([]byte(nil), payload...)
 	// Simulate not-found when token starts with "unknown-"
 	if len(token) >= 8 && token[:8] == "unknown-" {
 		return webhook.WebhookDeliveryLog{}, webhook.ErrNotFound
@@ -116,9 +121,18 @@ func (m *mockWebhookSvc) SendTest(_ context.Context, id uuid.UUID) (webhook.Webh
 }
 
 func setupWebhook() (*chi.Mux, *mockWebhookSvc) {
+	return setupWebhookWithRoles("admin")
+}
+
+func setupWebhookWithRoles(roles ...string) (*chi.Mux, *mockWebhookSvc) {
 	svc := newMockWebhookSvc()
 	h := webhook.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(middleware.ContextWithRoles(r.Context(), roles...)))
+		})
+	})
 	h.RegisterRoutes(r)
 	return r, svc
 }
@@ -175,6 +189,30 @@ func TestWebhookHandler_Create_InvalidBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestWebhookHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, svc := setupWebhook()
+		req := httptest.NewRequest(http.MethodPost, "/api/webhooks", bytes.NewBufferString(`{"name":"first","url":"https://example.com","events":["push"]}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.webhooks)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		r, svc := setupWebhook()
+		id := uuid.New()
+		svc.webhooks[id] = webhook.WebhookConfig{ID: id, Name: "original", URL: "https://example.com"}
+		req := httptest.NewRequest(http.MethodPatch, "/api/webhooks/"+id.String(), bytes.NewBufferString(`{"name":"changed"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, "original", svc.webhooks[id].Name)
+	})
+}
+
 func TestWebhookHandler_GetByID_NotFound(t *testing.T) {
 	r, _ := setupWebhook()
 	req := httptest.NewRequest(http.MethodGet, "/api/webhooks/"+uuid.New().String(), nil)
@@ -203,6 +241,40 @@ func TestWebhookHandler_Delete_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestWebhookHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupWebhookWithRoles("user")
+	id := uuid.NewString()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/webhooks"},
+		{name: "create", method: http.MethodPost, path: "/api/webhooks", body: `{"name":"webhook","url":"https://example.com","events":["test"]}`},
+		{name: "get", method: http.MethodGet, path: "/api/webhooks/" + id},
+		{name: "put", method: http.MethodPut, path: "/api/webhooks/" + id, body: `{}`},
+		{name: "patch", method: http.MethodPatch, path: "/api/webhooks/" + id, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/webhooks/" + id},
+		{name: "deliveries", method: http.MethodGet, path: "/api/webhooks/" + id + "/deliveries"},
+		{name: "test", method: http.MethodPost, path: "/api/webhooks/" + id + "/test"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 func TestWebhookHandler_SendTest_Success(t *testing.T) {
@@ -271,6 +343,32 @@ func TestWebhookHandler_Ingest_GitLabSource(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.Equal(t, "Push Hook", resp["eventType"])
+}
+
+func TestWebhookHandler_Ingest_RejectsBodyAboveOneMiBBeforeService(t *testing.T) {
+	r, svc := setupWebhookWithPublic()
+	body := bytes.Repeat([]byte("x"), 1<<20+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/valid-token/ingest", bytes.NewReader(body))
+	req.Header.Set("X-Gitlab-Token", "mysecret")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, w.Body.String())
+	assert.Zero(t, svc.ingestCalls)
+	assert.Empty(t, svc.lastPayload)
+}
+
+func TestWebhookHandler_Ingest_AcceptsExactOneMiBWithoutTruncation(t *testing.T) {
+	r, svc := setupWebhookWithPublic()
+	body := bytes.Repeat([]byte("x"), 1<<20)
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/valid-token/ingest", bytes.NewReader(body))
+	req.Header.Set("X-Gitlab-Token", "mysecret")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	require.Equal(t, 1, svc.ingestCalls)
+	assert.Equal(t, body, svc.lastPayload)
 }
 
 func TestWebhookHandler_Ingest_UnknownToken(t *testing.T) {

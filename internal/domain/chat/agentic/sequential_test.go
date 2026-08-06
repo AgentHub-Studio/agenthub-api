@@ -34,15 +34,19 @@ func TestSequentialFunc_SerializesConcurrentCalls(t *testing.T) {
 	})
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 10)
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(v int) {
 			defer wg.Done()
-			err := fn(context.Background(), v)
-			assert.NoError(t, err)
+			errs <- fn(context.Background(), v)
 		}(i)
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&maxRunning), "should never run more than 1 at a time")
 }
@@ -104,15 +108,20 @@ func TestSequentialFuncResult_Serializes(t *testing.T) {
 	})
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 5)
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(v int) {
 			defer wg.Done()
 			_, err := fn(context.Background(), v)
-			assert.NoError(t, err)
+			errs <- err
 		}(i)
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&maxRunning))
 }
@@ -125,20 +134,25 @@ func TestSequentialQueue_EnqueueWait(t *testing.T) {
 	var mu sync.Mutex
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 5)
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(v int) {
 			defer wg.Done()
-			assert.NoError(t, sq.EnqueueWait(context.Background(), func(_ context.Context) error {
+			errs <- sq.EnqueueWait(context.Background(), func(_ context.Context) error {
 				time.Sleep(5 * time.Millisecond)
 				mu.Lock()
 				order = append(order, v)
 				mu.Unlock()
 				return nil
-			}))
+			})
 		}(i)
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -171,11 +185,12 @@ func TestSequentialQueue_SerializesExecution(t *testing.T) {
 	var maxRunning int32
 
 	var wg sync.WaitGroup
+	errs := make(chan error, 10)
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			assert.NoError(t, sq.EnqueueWait(context.Background(), func(_ context.Context) error {
+			errs <- sq.EnqueueWait(context.Background(), func(_ context.Context) error {
 				cur := atomic.AddInt32(&running, 1)
 				for {
 					old := atomic.LoadInt32(&maxRunning)
@@ -186,10 +201,14 @@ func TestSequentialQueue_SerializesExecution(t *testing.T) {
 				time.Sleep(5 * time.Millisecond)
 				atomic.AddInt32(&running, -1)
 				return nil
-			}))
+			})
 		}()
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&maxRunning))
 }

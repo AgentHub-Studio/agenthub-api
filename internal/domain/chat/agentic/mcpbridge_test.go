@@ -18,10 +18,12 @@ import (
 // --- mock MCPClientService ---
 
 type mockMCPClient struct {
-	tools    []agentic.MCPToolInfo
-	listErr  error
-	callResp json.RawMessage
-	callErr  error
+	tools              []agentic.MCPToolInfo
+	listErr            error
+	callResp           json.RawMessage
+	callErr            error
+	callErrorsByTenant map[string]error
+	callCount          int
 
 	// Captures for assertions.
 	lastCallServer string
@@ -36,10 +38,14 @@ func (m *mockMCPClient) ListTools(_ context.Context, _ string) ([]agentic.MCPToo
 	return m.tools, nil
 }
 
-func (m *mockMCPClient) CallTool(_ context.Context, _, serverName, toolName string, input json.RawMessage) (json.RawMessage, error) {
+func (m *mockMCPClient) CallTool(_ context.Context, tenantID, serverName, toolName string, input json.RawMessage) (json.RawMessage, error) {
+	m.callCount++
 	m.lastCallServer = serverName
 	m.lastCallTool = toolName
 	m.lastCallInput = input
+	if err, ok := m.callErrorsByTenant[tenantID]; ok {
+		return nil, err
+	}
 	if m.callErr != nil {
 		return nil, m.callErr
 	}
@@ -211,6 +217,43 @@ func TestMCPToolBridge_Execute_InvalidToolName(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid MCP tool name")
 }
 
+func TestMCPToolBridge_Execute_RejectsUnboundServer(t *testing.T) {
+	client := &mockMCPClient{callResp: json.RawMessage(`{"sent":true}`)}
+	bridge := agentic.NewMCPToolBridge(client, "t")
+	bridge.WithAllowedServerNames([]string{"github"})
+
+	_, err := bridge.Execute(context.Background(), "mcp__slack__send_message", json.RawMessage(`{}`))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not allowed")
+	assert.Empty(t, client.lastCallServer, "an unbound server must not reach the MCP runtime")
+}
+
+func TestMCPToolBridge_Execute_AllowsBoundServer(t *testing.T) {
+	client := &mockMCPClient{callResp: json.RawMessage(`{"repos":[]}`)}
+	bridge := agentic.NewMCPToolBridge(client, "t")
+	bridge.WithAllowedServerNames([]string{"github"})
+
+	result, err := bridge.Execute(context.Background(), "mcp__github__list_repos", json.RawMessage(`{}`))
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "github", client.lastCallServer)
+	assert.Equal(t, "list_repos", client.lastCallTool)
+}
+
+func TestMCPToolBridge_Execute_RejectsAllWhenBindingsAreEmpty(t *testing.T) {
+	client := &mockMCPClient{callResp: json.RawMessage(`{"sent":true}`)}
+	bridge := agentic.NewMCPToolBridge(client, "t")
+	bridge.WithAllowedServerNames([]string{})
+
+	_, err := bridge.Execute(context.Background(), "mcp__slack__send_message", json.RawMessage(`{}`))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not allowed")
+	assert.Empty(t, client.lastCallServer, "an empty explicit binding set must not reach the MCP runtime")
+}
+
 func TestMCPToolBridge_Execute_LatencyTracked(t *testing.T) {
 	client := &mockMCPClient{
 		callResp: json.RawMessage(`"ok"`),
@@ -220,6 +263,26 @@ func TestMCPToolBridge_Execute_LatencyTracked(t *testing.T) {
 	result, err := bridge.Execute(context.Background(), "mcp__fs__pwd", json.RawMessage(`{}`))
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, result.LatencyMs, int64(0))
+}
+
+func TestHTTPMCPClient_CallToolRejectsMalformedRuntimeEnvelope(t *testing.T) {
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/tools/call", r.URL.Path)
+		assert.Empty(t, r.URL.RawQuery)
+		assert.Equal(t, "Bearer workload-token", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`runtime restarting`))
+	}))
+	t.Cleanup(runtime.Close)
+
+	client := agentic.NewAuthenticatedHTTPMCPClient(runtime.URL, staticTokenProvider{})
+	output, err := client.CallTool(context.Background(), "tenant-a", "github", "list_issues", json.RawMessage(`{}`))
+
+	require.Error(t, err)
+	assert.Nil(t, output)
+	assert.Contains(t, err.Error(), "decode tool response")
+	assert.NotContains(t, err.Error(), "runtime restarting")
 }
 
 // --- TR-01-TASK-34: MCPToolBridge server-level filtering (P-C253-1) ---
@@ -444,31 +507,51 @@ func TestCircuitBreaker_Reset_ReEnablesServer(t *testing.T) {
 	assert.False(t, cb.IsDisabled("flaky"), "Reset should re-enable the server")
 }
 
-func TestHTTPMCPClient_SendsTenantHeader(t *testing.T) {
-	var listTenant string
-	var callTenant string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/tools":
-			listTenant = r.Header.Get("X-Tenant-ID")
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"tools":[]}`))
-		case "/api/tools/call":
-			callTenant = r.Header.Get("X-Tenant-ID")
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"output":{"ok":true},"isError":false}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
+func TestCircuitBreaker_IsolatesSameNamedServersByTenant(t *testing.T) {
+	inner := &mockMCPClient{
+		tools: []agentic.MCPToolInfo{{ServerName: "github", Name: "list_issues"}},
+		callErrorsByTenant: map[string]error{
+			"tenant-a": fmt.Errorf("tenant-a runtime disconnected"),
+		},
+	}
+	breaker := agentic.NewCircuitBreakerMCPClient(inner, 3)
 
-	client := agentic.NewHTTPMCPClient(srv.URL)
-	_, err := client.ListTools(context.Background(), "tenant-a")
-	require.NoError(t, err)
-	_, err = client.CallTool(context.Background(), "tenant-a", "github", "list_repos", json.RawMessage(`{}`))
-	require.NoError(t, err)
+	for range 3 {
+		_, err := breaker.CallTool(context.Background(), "tenant-a", "github", "list_issues", nil)
+		require.Error(t, err)
+	}
 
-	assert.Equal(t, "tenant-a", listTenant)
-	assert.Equal(t, "tenant-a", callTenant)
+	require.True(t, breaker.IsDisabledForTenant("tenant-a", "github"))
+	require.False(t, breaker.IsDisabledForTenant("tenant-b", "github"))
+
+	tenantATools, err := breaker.ListTools(context.Background(), "tenant-a")
+	require.NoError(t, err)
+	assert.Empty(t, tenantATools)
+
+	tenantBTools, err := breaker.ListTools(context.Background(), "tenant-b")
+	require.NoError(t, err)
+	require.Len(t, tenantBTools, 1)
+	assert.Equal(t, "github", tenantBTools[0].ServerName)
+
+	_, err = breaker.CallTool(context.Background(), "tenant-a", "github", "list_issues", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "disabled")
+	assert.Equal(t, 3, inner.callCount, "a tripped server must not be called again")
+}
+
+func TestCircuitBreaker_ResetForTenantDoesNotReenableAnotherTenant(t *testing.T) {
+	inner := &mockMCPClient{
+		tools:   []agentic.MCPToolInfo{{ServerName: "github", Name: "list_issues"}},
+		callErr: fmt.Errorf("runtime disconnected"),
+	}
+	breaker := agentic.NewCircuitBreakerMCPClient(inner, 1)
+
+	_, err := breaker.CallTool(context.Background(), "tenant-a", "github", "list_issues", nil)
+	require.Error(t, err)
+	_, err = breaker.CallTool(context.Background(), "tenant-b", "github", "list_issues", nil)
+	require.Error(t, err)
+
+	breaker.ResetForTenant("tenant-a", "github")
+	assert.False(t, breaker.IsDisabledForTenant("tenant-a", "github"))
+	assert.True(t, breaker.IsDisabledForTenant("tenant-b", "github"))
 }

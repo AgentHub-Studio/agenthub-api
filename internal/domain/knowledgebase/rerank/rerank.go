@@ -109,3 +109,29 @@ func (r LLMReranker) Rerank(ctx context.Context, query string, cands []Candidate
 	}
 	return out, nil
 }
+
+// CrossEncoderReranker delegates pair scoring to a cross-encoder-like scorer.
+// The scorer receives the query and candidate content and returns a comparable
+// relevance score where higher is better.
+type CrossEncoderReranker struct {
+	Scorer func(ctx context.Context, query, content string) (float64, error)
+}
+
+func (CrossEncoderReranker) Name() string { return "cross_encoder" }
+
+func (r CrossEncoderReranker) Rerank(ctx context.Context, query string, cands []Candidate, topN int) ([]Candidate, error) {
+	out := make([]Candidate, len(cands))
+	copy(out, cands)
+	for i := range out {
+		s, err := r.Scorer(ctx, query, out[i].Content)
+		if err != nil {
+			return nil, err
+		}
+		out[i].RerankedScore = s
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].RerankedScore > out[j].RerankedScore })
+	if topN > 0 && topN < len(out) {
+		out = out[:topN]
+	}
+	return out, nil
+}

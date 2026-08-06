@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -112,4 +113,41 @@ func TestHTTPEmbedder_Embed_ContextCancellation(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "context deadline") {
 		t.Errorf("error=%q should reflect context cancellation", err.Error())
 	}
+}
+
+func TestHTTPEmbedder_BlocksRedirectToPrivateEndpoint(t *testing.T) {
+	embedder := NewHTTPEmbedder("https://1.1.1.1")
+	requests := 0
+	embedder.httpClient = &http.Client{Transport: httpEmbedderRoundTripper(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"http://169.254.169.254/latest/meta-data"}},
+				Body:       io.NopCloser(strings.NewReader("redirect")),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"embedding":[0.1]}`)),
+			Request:    req,
+		}, nil
+	})}
+
+	_, err := embedder.Embed(context.Background(), "hello")
+
+	if err == nil {
+		t.Fatal("expected redirect to metadata to be blocked")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+}
+
+type httpEmbedderRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f httpEmbedderRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

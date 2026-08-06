@@ -27,6 +27,38 @@ func TestIntegration_CorePromptTemplate_LoadAll_AfterSeed(t *testing.T) {
 	assert.Equal(t, len(core.SeedExpectedPromptTemplateSlugs), len(got))
 }
 
+func TestIntegration_CorePromptTemplate_SeedKeepsTenantTableIntact(t *testing.T) {
+	pool := testutil.NewPostgresContainer(t)
+	migDir := ah_coreMigrationsDir(t)
+	applyMigration(t, pool, migDir, "000001_ah_core_schema.up.sql")
+
+	_, err := pool.Exec(context.Background(), `
+		CREATE TABLE ah_core.prompt_template (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			slug TEXT NOT NULL
+		);
+		INSERT INTO ah_core.prompt_template (slug) VALUES ('tenant-template');
+	`)
+	require.NoError(t, err)
+
+	applyMigration(t, pool, migDir, "000019_seed_prompt_templates.up.sql")
+
+	loader := core.NewCorePromptTemplateLoader(pool)
+	platform, err := loader.LoadAll(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, platform, len(core.SeedExpectedPromptTemplateSlugs))
+
+	var tenantCount int
+	err = pool.QueryRow(context.Background(), `SELECT count(*) FROM ah_core.prompt_template`).Scan(&tenantCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, tenantCount)
+
+	applyMigration(t, pool, migDir, "000019_seed_prompt_templates.down.sql")
+	err = pool.QueryRow(context.Background(), `SELECT count(*) FROM ah_core.prompt_template`).Scan(&tenantCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, tenantCount)
+}
+
 func TestIntegration_CorePromptTemplate_LoadAll_ReturnsEmptyWhenSchemaMissing(t *testing.T) {
 	pool := testutil.NewPostgresContainer(t)
 	loader := core.NewCorePromptTemplateLoader(pool)

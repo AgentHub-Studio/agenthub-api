@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai/internal/redirectguard"
 )
 
 const defaultBaseURL = "https://api.openai.com/v1"
@@ -50,7 +51,7 @@ func NewWithTimeout(apiKey, baseURL string, timeout time.Duration) *Provider {
 	return &Provider{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: timeout},
+		client:  redirectguard.NewHTTPClient(timeout),
 	}
 }
 
@@ -61,8 +62,7 @@ func (p *Provider) WithTransport(rt http.RoundTripper) *Provider {
 	if rt == nil {
 		return p
 	}
-	timeout := p.client.Timeout
-	p.client = &http.Client{Transport: rt, Timeout: timeout}
+	p.client = redirectguard.WithTransport(p.client, rt)
 	return p
 }
 
@@ -78,6 +78,7 @@ type chatRequest struct {
 	Temperature float64   `json:"temperature,omitempty"`
 	TopP        float64   `json:"top_p,omitempty"`
 	Tools       []tool    `json:"tools,omitempty"`
+	ToolChoice  any       `json:"tool_choice,omitempty"`
 	Stream      bool      `json:"stream,omitempty"`
 	// Options is an opaque passthrough reserved for OpenAI-compatible backends
 	// that accept extra parameters. Ollama uses this to receive `num_ctx`,
@@ -142,9 +143,46 @@ type streamChoice struct {
 }
 
 type streamDelta struct {
-	Role      string     `json:"role"`
-	Content   *string    `json:"content"`
-	ToolCalls []toolCall `json:"tool_calls"`
+	Role             string          `json:"role"`
+	Content          *string         `json:"content"`
+	ReasoningContent *string         `json:"reasoning_content"`
+	Reasoning        *string         `json:"reasoning"`
+	Thinking         json.RawMessage `json:"thinking,omitempty"`
+	ToolCalls        []toolCall      `json:"tool_calls"`
+}
+
+func (d streamDelta) thinkingDelta() string {
+	if d.ReasoningContent != nil {
+		return *d.ReasoningContent
+	}
+	if d.Reasoning != nil {
+		return *d.Reasoning
+	}
+	if len(d.Thinking) == 0 || bytes.Equal(d.Thinking, []byte("null")) {
+		return ""
+	}
+
+	var text string
+	if err := json.Unmarshal(d.Thinking, &text); err == nil {
+		return text
+	}
+
+	var object struct {
+		Content string `json:"content"`
+		Text    string `json:"text"`
+		Delta   string `json:"delta"`
+	}
+	if err := json.Unmarshal(d.Thinking, &object); err != nil {
+		return ""
+	}
+	switch {
+	case object.Content != "":
+		return object.Content
+	case object.Text != "":
+		return object.Text
+	default:
+		return object.Delta
+	}
 }
 
 type streamEvent struct {
@@ -276,6 +314,9 @@ func (p *Provider) ChatStream(ctx context.Context, messages []ai.Message, opts a
 				if choice.Delta.Content != nil {
 					chunk.Delta = *choice.Delta.Content
 				}
+				if thinkingDelta := choice.Delta.thinkingDelta(); thinkingDelta != "" {
+					chunk.ThinkingDelta = thinkingDelta
+				}
 
 				if len(choice.Delta.ToolCalls) > 0 {
 					tc := choice.Delta.ToolCalls[0]
@@ -367,8 +408,40 @@ func (p *Provider) buildRequest(messages []ai.Message, opts ai.ChatOptions, stre
 		Temperature: opts.Temperature,
 		TopP:        opts.TopP,
 		Tools:       tools,
+		ToolChoice:  openAIToolChoice(opts.ToolChoice),
 		Stream:      stream,
 		Options:     opts.ProviderOptions,
+	}
+}
+
+// openAIToolChoice translates the provider-neutral option to the Chat
+// Completions wire contract. OpenAI-compatible providers expect "required"
+// rather than the internal "any" name, while a named selection is an object.
+func openAIToolChoice(choice *ai.ToolChoice) any {
+	if choice == nil {
+		return nil
+	}
+
+	switch choice.Type {
+	case ai.ToolChoiceAuto:
+		return "auto"
+	case ai.ToolChoiceNone:
+		return "none"
+	case ai.ToolChoiceAny:
+		return "required"
+	case ai.ToolChoiceTool:
+		name := strings.TrimSpace(choice.Name)
+		if name == "" {
+			return nil
+		}
+		return map[string]any{
+			"type": "function",
+			"function": map[string]string{
+				"name": name,
+			},
+		}
+	default:
+		return nil
 	}
 }
 

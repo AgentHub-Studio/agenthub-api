@@ -8,10 +8,12 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/prompttemplate"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 )
 
 // stubService wraps a real service backed by a stub repo for unit tests.
@@ -19,7 +21,17 @@ import (
 // We test the handler layer by verifying HTTP status codes and response format.
 
 func setupRouter(handler *prompttemplate.Handler) *chi.Mux {
+	return setupRouterWithRoles(handler, "admin")
+}
+
+func setupRouterWithRoles(handler *prompttemplate.Handler, roles ...string) *chi.Mux {
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	handler.RegisterRoutes(r)
 	return r
 }
@@ -38,6 +50,42 @@ func TestHandler_Get_InvalidID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	handler := prompttemplate.NewHandler(prompttemplate.NewService(nil))
+	r := setupRouterWithRoles(handler, "user")
+	id := "00000000-0000-0000-0000-000000000001"
+	agentID := "00000000-0000-0000-0000-000000000002"
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/prompt-templates"},
+		{name: "create", method: http.MethodPost, path: "/api/prompt-templates", body: `{"name":"template"}`},
+		{name: "get", method: http.MethodGet, path: "/api/prompt-templates/" + id},
+		{name: "put", method: http.MethodPut, path: "/api/prompt-templates/" + id, body: `{}`},
+		{name: "patch", method: http.MethodPatch, path: "/api/prompt-templates/" + id, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/prompt-templates/" + id},
+		{name: "list by agent", method: http.MethodGet, path: "/api/agents/" + agentID + "/prompt-templates"},
+		{name: "create for agent", method: http.MethodPost, path: "/api/agents/" + agentID + "/prompt-templates", body: `{"name":"template"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
+}
+
 func TestHandler_Create_InvalidBody(t *testing.T) {
 	handler := prompttemplate.NewHandler(prompttemplate.NewService(nil))
 	r := setupRouter(handler)
@@ -47,6 +95,30 @@ func TestHandler_Create_InvalidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandlerRejectsTrailingJSONBeforeRepository(t *testing.T) {
+	handler := prompttemplate.NewHandler(prompttemplate.NewService(nil))
+	r := setupRouter(handler)
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create global", method: http.MethodPost, path: "/api/prompt-templates", body: `{"name":"first","slug":"first","content":"content"}{"name":"ignored"}`},
+		{name: "create for agent", method: http.MethodPost, path: "/api/agents/" + uuid.NewString() + "/prompt-templates", body: `{"name":"first","slug":"first","content":"content"}{"name":"ignored"}`},
+		{name: "update", method: http.MethodPatch, path: "/api/prompt-templates/" + uuid.NewString(), body: `{"name":"changed"}{"name":"ignored"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		})
+	}
 }
 
 func TestHandler_Create_MissingRequiredFields(t *testing.T) {

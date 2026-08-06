@@ -100,11 +100,14 @@ func (s *Service) UploadAsset(
 	return ResponseFrom(created), nil
 }
 
-// DownloadURL returns a presigned URL for downloading the asset.
-func (s *Service) DownloadURL(ctx context.Context, assetID uuid.UUID) (AssetDownloadResponse, error) {
+// DownloadURL returns a presigned URL for an asset belonging to packageID.
+func (s *Service) DownloadURL(ctx context.Context, packageID, assetID uuid.UUID) (AssetDownloadResponse, error) {
 	asset, err := s.repo.GetByID(ctx, assetID)
 	if err != nil {
 		return AssetDownloadResponse{}, err
+	}
+	if asset.PackageID != packageID {
+		return AssetDownloadResponse{}, ErrNotFound
 	}
 
 	url, err := s.storage.PresignedURL(ctx, asset.StoragePath, asset.Filename, 15*time.Minute)

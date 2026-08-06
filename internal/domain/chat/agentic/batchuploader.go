@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/randutil"
 )
 
 // Serial batch event uploader with backpressure.
@@ -266,7 +267,7 @@ func (u *BatchUploader) IsClosed() bool {
 // retryDelay calculates backoff with jitter, respecting server hints.
 func (u *BatchUploader) retryDelay(attempt int, serverHint time.Duration) time.Duration {
 	base := float64(u.config.BaseRetryDelay) * math.Pow(2, float64(attempt))
-	jitter := base * 0.1 * rand.Float64()
+	jitter := base * 0.1 * randutil.Float64()
 	delay := time.Duration(base + jitter)
 
 	if delay > u.config.MaxRetryDelay {

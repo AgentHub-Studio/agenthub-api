@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/analytics"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 )
 
 // --- mock service ---
@@ -21,12 +22,12 @@ type mockSvc struct{}
 
 func (m *mockSvc) AgentUsage(_ context.Context, agentID uuid.UUID, _ analytics.TimeRange) (analytics.UsageSummary, error) {
 	return analytics.UsageSummary{
-		AgentID:     agentID,
-		TotalRuns:   42,
-		TotalTokens: 100000,
-		TotalCostUSD: 5.50,
+		AgentID:       agentID,
+		TotalRuns:     42,
+		TotalTokens:   100000,
+		TotalCostUSD:  5.50,
 		AvgDurationMs: 2300,
-		AvgTurns: 3.5,
+		AvgTurns:      3.5,
 	}, nil
 }
 
@@ -49,11 +50,38 @@ func (m *mockSvc) TopTools(_ context.Context, _ analytics.TimeRange, limit int) 
 }
 
 func setupAnalytics() *chi.Mux {
+	return setupAnalyticsWithRoles("admin")
+}
+
+func setupAnalyticsWithRoles(roles ...string) *chi.Mux {
 	svc := &mockSvc{}
 	h := analytics.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterRoutes(r)
 	return r
+}
+
+func TestAnalyticsHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r := setupAnalyticsWithRoles("user")
+	agentID := uuid.NewString()
+	for _, path := range []string{
+		"/api/analytics/agents/" + agentID + "/usage",
+		"/api/analytics/agents/" + agentID + "/costs",
+		"/api/analytics/tools/top",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusForbidden, w.Code, path)
+		assert.Contains(t, w.Body.String(), "missing required role", path)
+	}
 }
 
 func TestAnalyticsHandler_AgentUsage(t *testing.T) {

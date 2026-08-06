@@ -10,6 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -26,6 +28,7 @@ func NewHandler(svc Service) *Handler {
 // RegisterRoutes mounts protected CRUD endpoints under /api/channels.
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Route("/api/channels", func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
 		r.Get("/", h.list)
 		r.Post("/", h.create)
 		r.Get("/{id}", h.getByID)
@@ -57,7 +60,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 // create handles POST /api/channels.
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateChannelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -108,7 +111,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateChannelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -176,6 +179,10 @@ func (h *Handler) inbound(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "channel not found")
 			return
 		}
+		if errors.Is(err, ErrInvalidInboundPayload) {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 		// Bug 187: nunca expor `err.Error()` em endpoint público —
 		// pode vazar SQL state, file paths, internal details. Endpoint
 		// de inbound é não-autenticado, qualquer atacante chama com
@@ -203,9 +210,7 @@ func (h *Handler) inbound(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		slog.Error("channel: encode response", "err", err)
-	}
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

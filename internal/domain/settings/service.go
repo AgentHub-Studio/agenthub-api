@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -14,6 +15,16 @@ import (
 // sem este gate, keys com HTML/espaços/slash eram aceitas e renderizadas
 // na UI Settings, virando vetor de XSS.
 var settingsKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_\-.]{1,255}$`)
+
+const systemPromptKey = "system.prompt"
+
+func defaultSystemPromptSetting() Setting {
+	return Setting{
+		Key:         systemPromptKey,
+		Value:       json.RawMessage(`""`),
+		Description: "Global system prompt applied to all agent conversations (empty means no global override).",
+	}
+}
 
 // Service defines business logic operations for Setting.
 type Service interface {
@@ -46,6 +57,9 @@ func (s *service) List(ctx context.Context) ([]SettingResponse, error) {
 
 func (s *service) Get(ctx context.Context, key string) (SettingResponse, error) {
 	setting, err := s.repo.FindByKey(ctx, key)
+	if errors.Is(err, ErrNotFound) && key == systemPromptKey {
+		return ResponseFrom(defaultSystemPromptSetting()), nil
+	}
 	if err != nil {
 		return SettingResponse{}, err
 	}

@@ -2,13 +2,13 @@ package installation
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -33,6 +33,11 @@ func NewHandler(svc installationService) *Handler {
 
 // RegisterRoutes mounts installation routes on the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
+	h.RegisterWriteRoutes(r)
+}
+
+// RegisterWriteRoutes mounts tenant-scoped installation routes.
+func (h *Handler) RegisterWriteRoutes(r chi.Router) {
 	r.Get("/api/marketplace/installations", h.list)
 	r.Post("/api/marketplace/installations", h.install)
 	r.Delete("/api/marketplace/installations/{id}", h.uninstall)
@@ -52,12 +57,16 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) install(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenant.FromContext(r.Context())
 	var req InstallRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	resp, err := h.svc.Install(r.Context(), tenantID, req)
 	if err != nil {
+		if errors.Is(err, ErrPackageUnavailable) {
+			respond.Error(w, http.StatusNotFound, "package not found")
+			return
+		}
 		respond.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}

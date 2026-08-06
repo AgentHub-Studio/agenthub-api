@@ -68,6 +68,33 @@ func (c *Chain) Protected() []func(http.Handler) http.Handler {
 	)
 }
 
+// OptionalAuth returns middleware for routes that are public by default but
+// may return tenant-owned data when a valid Bearer token is present. Responses
+// are never cached because the same URL can produce a different result for an
+// authenticated owner than for an anonymous request.
+func (c *Chain) OptionalAuth() []func(http.Handler) http.Handler {
+	return append(c.Public(),
+		NoStoreCache,
+		optionalAuthMiddleware(c.keycloakBaseURL, c.keycloakIssuerURL),
+	)
+}
+
+// optionalAuthMiddleware leaves requests without an Authorization header
+// anonymous. If the caller presents credentials, it validates them exactly as
+// protected routes do and stores the tenant in the request context.
+func optionalAuthMiddleware(keycloakBaseURL, expectedIssuerPrefix string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		authenticated := authMiddleware(keycloakBaseURL, expectedIssuerPrefix)(tenantMiddleware()(next))
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			authenticated.ServeHTTP(w, r)
+		})
+	}
+}
+
 // authMiddleware validates the Bearer JWT signature against the Keycloak JWKS endpoint.
 // The issuer realm is extracted from the token's unverified payload to locate the correct
 // JWKS URL, then the signature is verified with the matching RSA public key. Keys are

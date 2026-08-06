@@ -1,4 +1,4 @@
--- Seed capability-specific prompt templates in ah_core.prompt_template (migration 000094).
+-- Seed capability-specific prompt templates in ah_core.core_prompt_template (migration 000094).
 -- These 5 templates are user-facing starters that help users compose requests to
 -- the capability agents seeded in migration 000091 (core-researcher, core-analyst,
 -- core-planner). They complement the 8 generic platform templates in migration 000019.
@@ -7,9 +7,9 @@
 -- templates (assistant, coder, analyst, etc.) and enables the capability layer to
 -- be queried independently. All 5 are marked is_recommended = TRUE.
 --
--- The prompt_template table is created by migration 000019_seed_prompt_templates.up.sql.
+-- The core_prompt_template table is created by migration 000019_seed_prompt_templates.up.sql.
 
-INSERT INTO ah_core.prompt_template (slug, display_name, description, template_kind,
+INSERT INTO ah_core.core_prompt_template (slug, display_name, description, template_kind,
     system_prompt, recommended_temperature, recommended_max_tokens,
     requires_tools, placeholders, is_recommended)
 VALUES

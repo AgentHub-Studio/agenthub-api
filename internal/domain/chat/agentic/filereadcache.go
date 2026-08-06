@@ -67,7 +67,7 @@ func (c *FileReadCache) ReadFile(path string) (string, error) {
 	c.mu.RUnlock()
 
 	// Cache miss — read the file
-	data, err := os.ReadFile(path)
+	data, err := readFileScopedToParent(path)
 	if err != nil {
 		c.Invalidate(path)
 		return "", err

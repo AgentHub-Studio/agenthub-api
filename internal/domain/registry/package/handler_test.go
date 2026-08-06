@@ -54,6 +54,23 @@ func (m *mockPkgSvc) GetBySlug(_ context.Context, slug string) (pkg.PackageRespo
 	return pkg.PackageResponse{}, pkg.ErrNotFound
 }
 
+func (m *mockPkgSvc) GetAccessibleByID(_ context.Context, id uuid.UUID, tenantID string) (pkg.PackageResponse, error) {
+	p, ok := m.data[id]
+	if !ok || (p.Visibility != pkg.PackageVisibilityPublic && (tenantID == "" || p.AuthorTenantID != tenantID)) {
+		return pkg.PackageResponse{}, pkg.ErrNotFound
+	}
+	return pkg.ResponseFrom(p), nil
+}
+
+func (m *mockPkgSvc) GetAccessibleBySlug(_ context.Context, slug, tenantID string) (pkg.PackageResponse, error) {
+	for _, p := range m.data {
+		if p.Slug == slug && (p.Visibility == pkg.PackageVisibilityPublic || (tenantID != "" && p.AuthorTenantID == tenantID)) {
+			return pkg.ResponseFrom(p), nil
+		}
+	}
+	return pkg.PackageResponse{}, pkg.ErrNotFound
+}
+
 func (m *mockPkgSvc) ListByTenant(_ context.Context, tenantID string, req pagination.PageRequest) (pagination.Page[pkg.PackageResponse], error) {
 	var items []pkg.PackageResponse
 	for _, p := range m.data {
@@ -125,6 +142,7 @@ func setupPkgHandler() (*chi.Mux, *mockPkgSvc) {
 	h := pkg.NewHandler(svc)
 	r := chi.NewRouter()
 	h.RegisterPublicRoutes(r)
+	h.RegisterReadRoutes(r)
 	h.RegisterProtectedRoutes(r)
 	return r, svc
 }
@@ -154,13 +172,50 @@ func TestPkgHandler_ListPublic_OK(t *testing.T) {
 func TestPkgHandler_GetByID_OK(t *testing.T) {
 	r, svc := setupPkgHandler()
 	id := uuid.New()
-	svc.data[id] = pkg.Package{ID: id, Name: "B", AuthorTenantID: "t1"}
+	svc.data[id] = pkg.Package{ID: id, Name: "B", Visibility: pkg.PackageVisibilityPublic, AuthorTenantID: "t1"}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/packages/"+id.String(), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestPkgHandler_GetPrivatePackageRequiresOwner(t *testing.T) {
+	r, svc := setupPkgHandler()
+	id := uuid.New()
+	svc.data[id] = pkg.Package{
+		ID:             id,
+		Name:           "Private package",
+		Slug:           "private-package",
+		Visibility:     pkg.PackageVisibilityPrivate,
+		AuthorTenantID: "owner",
+	}
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		tenantID string
+		want     int
+	}{
+		{name: "anonymous ID", path: "/api/packages/" + id.String(), want: http.StatusNotFound},
+		{name: "other tenant ID", path: "/api/packages/" + id.String(), tenantID: "other", want: http.StatusNotFound},
+		{name: "owner ID", path: "/api/packages/" + id.String(), tenantID: "owner", want: http.StatusOK},
+		{name: "anonymous slug", path: "/api/packages/slug/private-package", want: http.StatusNotFound},
+		{name: "owner slug", path: "/api/packages/slug/private-package", tenantID: "owner", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.tenantID != "" {
+				req = withTenantCtx(req, tc.tenantID)
+			}
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, tc.want, w.Code)
+		})
+	}
 }
 
 func TestPkgHandler_GetByID_NotFound(t *testing.T) {
@@ -179,6 +234,26 @@ func TestPkgHandler_GetByID_InvalidID(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestPkgHandler_Search_CanonicalRegistryRoute(t *testing.T) {
+	r, svc := setupPkgHandler()
+	id := uuid.New()
+	svc.data[id] = pkg.Package{
+		ID:             id,
+		Name:           "Document Search",
+		Visibility:     pkg.PackageVisibilityPublic,
+		AuthorTenantID: "t1",
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/registry/search?q=document", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var page pagination.Page[pkg.PackageResponse]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	assert.Equal(t, int64(1), page.TotalElements)
 }
 
 func TestPkgHandler_Create_Success(t *testing.T) {
@@ -222,6 +297,37 @@ func TestPkgHandler_Create_BadBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestPkgHandler_CreateAndUpdateRejectTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, svc := setupPkgHandler()
+		req := httptest.NewRequest(http.MethodPost, "/api/packages", bytes.NewBufferString(`{"name":"first","slug":"first","type":"AGENT"} {"name":"ignored"}`))
+		req = withTenantCtx(req, "tenant-1")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Empty(t, svc.data)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		r, svc := setupPkgHandler()
+		id := uuid.New()
+		original := pkg.Package{ID: id, Name: "unchanged", AuthorTenantID: "tenant-1"}
+		svc.data[id] = original
+		req := httptest.NewRequest(http.MethodPatch, "/api/packages/"+id.String(), bytes.NewBufferString(`{"name":"changed"} {"name":"ignored"}`))
+		req = withTenantCtx(req, "tenant-1")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Equal(t, original, svc.data[id])
+	})
 }
 
 func TestPkgHandler_Delete_NoContent(t *testing.T) {

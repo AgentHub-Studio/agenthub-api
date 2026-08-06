@@ -27,32 +27,36 @@ const (
 
 // Package is the domain entity for a registry package.
 type Package struct {
-	ID              uuid.UUID
-	Name            string
-	Slug            string
-	Description     string
-	Type            PackageType
-	Visibility      PackageVisibility
-	AuthorTenantID  string
-	DownloadCount   int
-	LatestVersion   string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID             uuid.UUID
+	Name           string
+	Slug           string
+	Description    string
+	Tags           []string
+	Type           PackageType
+	Visibility     PackageVisibility
+	AuthorTenantID string
+	DownloadCount  int
+	LatestVersion  string
+	Relevance      float64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // PackageResponse is the DTO returned to clients.
 type PackageResponse struct {
-	ID              uuid.UUID `json:"id"`
-	Name            string    `json:"name"`
-	Slug            string    `json:"slug"`
-	Description     string    `json:"description"`
-	Type            string    `json:"type"`
-	Visibility      string    `json:"visibility"`
-	AuthorTenantID  string    `json:"authorTenantId"`
-	DownloadCount   int       `json:"downloadCount"`
-	LatestVersion   string    `json:"latestVersion"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID             uuid.UUID `json:"id"`
+	Name           string    `json:"name"`
+	Slug           string    `json:"slug"`
+	Description    string    `json:"description"`
+	Tags           []string  `json:"tags"`
+	Type           string    `json:"type"`
+	Visibility     string    `json:"visibility"`
+	AuthorTenantID string    `json:"authorTenantId"`
+	DownloadCount  int       `json:"downloadCount"`
+	LatestVersion  string    `json:"latestVersion"`
+	Relevance      float64   `json:"relevance,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // ResponseFrom converts a Package entity to PackageResponse.
@@ -62,11 +66,13 @@ func ResponseFrom(p Package) PackageResponse {
 		Name:           p.Name,
 		Slug:           p.Slug,
 		Description:    p.Description,
+		Tags:           p.Tags,
 		Type:           string(p.Type),
 		Visibility:     string(p.Visibility),
 		AuthorTenantID: p.AuthorTenantID,
 		DownloadCount:  p.DownloadCount,
 		LatestVersion:  p.LatestVersion,
+		Relevance:      p.Relevance,
 		CreatedAt:      p.CreatedAt,
 		UpdatedAt:      p.UpdatedAt,
 	}
@@ -74,16 +80,18 @@ func ResponseFrom(p Package) PackageResponse {
 
 // CreatePackageRequest is the DTO for creating a new package.
 type CreatePackageRequest struct {
-	Name        string `json:"name"`
-	Slug        string `json:"slug"`
-	Description string `json:"description"`
-	Type        string `json:"type"`
-	Visibility  string `json:"visibility"`
+	Name        string   `json:"name"`
+	Slug        string   `json:"slug"`
+	Description string   `json:"description"`
+	Tags        []string `json:"tags"`
+	Type        string   `json:"type"`
+	Visibility  string   `json:"visibility"`
 }
 
 // UpdatePackageRequest is the DTO for updating a package.
 type UpdatePackageRequest struct {
-	Name        *string `json:"name"`
-	Description *string `json:"description"`
-	Visibility  *string `json:"visibility"`
+	Name        *string   `json:"name"`
+	Description *string   `json:"description"`
+	Tags        *[]string `json:"tags"`
+	Visibility  *string   `json:"visibility"`
 }

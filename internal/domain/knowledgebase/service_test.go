@@ -27,9 +27,16 @@ func newMockRepository() *mockRepository {
 	return &mockRepository{items: make(map[uuid.UUID]knowledgebase.KnowledgeBase)}
 }
 
-func (m *mockRepository) List(_ context.Context, req pagination.PageRequest) ([]knowledgebase.KnowledgeBase, int64, error) {
+func (m *mockRepository) List(ctx context.Context, req pagination.PageRequest) ([]knowledgebase.KnowledgeBase, int64, error) {
+	return m.ListFiltered(ctx, req, knowledgebase.ListFilters{})
+}
+
+func (m *mockRepository) ListFiltered(_ context.Context, req pagination.PageRequest, filters knowledgebase.ListFilters) ([]knowledgebase.KnowledgeBase, int64, error) {
 	var result []knowledgebase.KnowledgeBase
 	for _, v := range m.items {
+		if filters.Status != nil && v.Status != *filters.Status {
+			continue
+		}
 		result = append(result, v)
 	}
 	return result, int64(len(result)), nil
@@ -124,6 +131,73 @@ func TestService_Create_Success(t *testing.T) {
 	assert.Equal(t, "My KB", resp.Name)
 	assert.Equal(t, "Test description", resp.Description)
 	assert.Equal(t, knowledgebase.StatusActive, resp.Status)
+	assert.Equal(t, knowledgebase.RerankStrategyNone, resp.RerankStrategy)
+}
+
+func TestService_Create_AcceptsRerankStrategy(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+
+	resp, err := svc.Create(context.Background(), knowledgebase.CreateRequest{
+		Name:           "Rerank KB",
+		RerankStrategy: "llm",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, knowledgebase.RerankStrategyLLM, resp.RerankStrategy)
+}
+
+func TestService_Create_AcceptsSnakeRerankStrategy(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+
+	resp, err := svc.Create(context.Background(), knowledgebase.CreateRequest{
+		Name:                "Snake Rerank KB",
+		RerankStrategySnake: "cross_encoder",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, knowledgebase.RerankStrategyCrossEncoder, resp.RerankStrategy)
+}
+
+func TestService_Create_AcceptsGraphEnabled(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+
+	resp, err := svc.Create(context.Background(), knowledgebase.CreateRequest{
+		Name:         "Graph KB",
+		GraphEnabled: true,
+	})
+
+	require.NoError(t, err)
+	assert.True(t, resp.GraphEnabled)
+}
+
+func TestService_Create_AcceptsSnakeGraphEnabled(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+
+	resp, err := svc.Create(context.Background(), knowledgebase.CreateRequest{
+		Name:              "Snake Graph KB",
+		GraphEnabledSnake: true,
+	})
+
+	require.NoError(t, err)
+	assert.True(t, resp.GraphEnabled)
+}
+
+func TestService_Create_RejectsInvalidRerankStrategy(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+
+	_, err := svc.Create(context.Background(), knowledgebase.CreateRequest{
+		Name:           "Bad Rerank KB",
+		RerankStrategy: "invalid",
+	})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, knowledgebase.ErrValidation)
+	assert.Contains(t, err.Error(), "rerankStrategy")
 }
 
 func TestService_Create_MissingName(t *testing.T) {
@@ -159,6 +233,32 @@ func TestService_Update_RejectsHTMLName(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, knowledgebase.ErrValidation)
 	assert.Contains(t, err.Error(), "HTML")
+}
+
+func TestService_Update_RerankStrategy(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+	created, err := svc.Create(context.Background(), knowledgebase.CreateRequest{Name: "KB"})
+	require.NoError(t, err)
+
+	strategy := "rrf"
+	updated, err := svc.Update(context.Background(), created.ID, knowledgebase.UpdateRequest{RerankStrategy: &strategy})
+
+	require.NoError(t, err)
+	assert.Equal(t, knowledgebase.RerankStrategyRRF, updated.RerankStrategy)
+}
+
+func TestService_Update_GraphEnabled(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+	created, err := svc.Create(context.Background(), knowledgebase.CreateRequest{Name: "KB"})
+	require.NoError(t, err)
+
+	enabled := true
+	updated, err := svc.Update(context.Background(), created.ID, knowledgebase.UpdateRequest{GraphEnabled: &enabled})
+
+	require.NoError(t, err)
+	assert.True(t, updated.GraphEnabled)
 }
 
 func TestService_Create_RepositoryError(t *testing.T) {
@@ -264,8 +364,30 @@ func TestService_List_Success(t *testing.T) {
 	_, err = svc.Create(context.Background(), knowledgebase.CreateRequest{Name: "KB 2"})
 	require.NoError(t, err)
 
-	page, err := svc.List(context.Background(), pagination.PageRequest{Page: 0, Size: 20})
+	page, err := svc.List(context.Background(), pagination.PageRequest{Page: 0, Size: 20}, knowledgebase.ListFilters{})
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), page.TotalElements)
 	assert.Len(t, page.Content, 2)
+}
+
+func TestService_List_FiltersByStatus(t *testing.T) {
+	repo := newMockRepository()
+	svc := knowledgebase.NewService(repo)
+
+	active, err := svc.Create(context.Background(), knowledgebase.CreateRequest{Name: "Active KB"})
+	require.NoError(t, err)
+	paused, err := svc.Create(context.Background(), knowledgebase.CreateRequest{Name: "Paused KB"})
+	require.NoError(t, err)
+	_, err = svc.Pause(context.Background(), paused.ID)
+	require.NoError(t, err)
+
+	filter := knowledgebase.StatusPaused
+	page, err := svc.List(context.Background(), pagination.PageRequest{Page: 0, Size: 20}, knowledgebase.ListFilters{Status: &filter})
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(1), page.TotalElements)
+	require.Len(t, page.Content, 1)
+	assert.Equal(t, paused.ID, page.Content[0].ID)
+	assert.NotEqual(t, active.ID, page.Content[0].ID)
+	assert.Equal(t, knowledgebase.StatusPaused, page.Content[0].Status)
 }

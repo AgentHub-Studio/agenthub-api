@@ -3,6 +3,7 @@ package agentic_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -101,26 +102,275 @@ func TestToolSchemaBuilder_Build_WithSkills(t *testing.T) {
 	assert.Contains(t, string(tools[9].InputSchema), `"query"`)
 }
 
-func TestToolSchemaBuilder_ExplicitEmptySnapshotDoesNotFallBackToAgentSkills(t *testing.T) {
+func TestToolSchemaBuilder_ContextModeForkPropagated(t *testing.T) {
 	skillID := uuid.New()
 	toolID := uuid.New()
-	skills := &mockSkillLister{skills: []skill.Skill{{ID: skillID, Name: "Hidden", Slug: "hidden"}}}
+	skills := &mockSkillLister{skills: []skill.Skill{{
+		ID:           skillID,
+		Name:         "Deep Research",
+		Slug:         "deep-research",
+		Description:  "Perform long-running research",
+		Instructions: "Investigate independently and summarize findings.",
+		ContextMode:  "fork",
+	}}}
 	toolsMock := newMockToolsBySkill()
 	toolsMock.bySkill[skillID] = struct {
 		bindings []tool.SkillTool
 		tools    []tool.Tool
 	}{
-		bindings: []tool.SkillTool{{SkillID: skillID, ToolID: toolID, IsActive: true}},
-		tools:    []tool.Tool{{ID: toolID, Name: "Hidden Tool", Type: "HTTP", Config: json.RawMessage(`{"inputSchema":{"type":"object"}}`)}},
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID:          toolID,
+			Name:        "Research Tool",
+			Type:        "HTTP",
+			Config:      json.RawMessage(`{"inputSchema":{"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}`),
+		}},
 	}
 
-	result, err := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
-		WithSkillIDsSnapshot([]uuid.UUID{}).
-		Build(context.Background(), uuid.Nil)
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{})
+	tools, err := builder.Build(context.Background(), uuid.New())
 	require.NoError(t, err)
-	for _, item := range result {
-		assert.NotEqual(t, "hidden", item.Name)
+
+	var found agentic.LLMTool
+	for _, llmTool := range tools {
+		if llmTool.Name == "deep-research" {
+			found = llmTool
+			break
+		}
 	}
+	require.Equal(t, "deep-research", found.Name)
+	assert.Equal(t, "fork", found.ContextMode)
+	assert.Equal(t, "fork", agentic.BuildContextModeIndex(tools)["deep-research"])
+}
+
+func TestToolSchemaBuilder_Build_FiltersSkillsByRequiredRoles(t *testing.T) {
+	adminSkillID := uuid.New()
+	viewerSkillID := uuid.New()
+	adminToolID := uuid.New()
+	viewerToolID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{
+			ID:            adminSkillID,
+			Name:          "Admin Skill",
+			Slug:          "admin-skill",
+			RequiredRoles: []string{"admin"},
+		},
+		{
+			ID:   viewerSkillID,
+			Name: "Viewer Skill",
+			Slug: "viewer-skill",
+		},
+	}}
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[adminSkillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: adminSkillID, ToolID: adminToolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID:     adminToolID,
+			Name:   "Admin Tool",
+			Slug:   "admin-tool",
+			Type:   "HTTP",
+			Config: json.RawMessage(`{"inputSchema":{"type":"object"}}`),
+		}},
+	}
+	toolsMock.bySkill[viewerSkillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: viewerSkillID, ToolID: viewerToolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID:     viewerToolID,
+			Name:   "Viewer Tool",
+			Slug:   "viewer-tool",
+			Type:   "HTTP",
+			Config: json.RawMessage(`{"inputSchema":{"type":"object"}}`),
+		}},
+	}
+
+	viewerTools, err := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+		WithRequestRoles([]string{"user"}).
+		Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	var viewerNames []string
+	for _, tool := range viewerTools {
+		viewerNames = append(viewerNames, tool.Name)
+	}
+	assert.NotContains(t, viewerNames, "admin-skill")
+	assert.Contains(t, viewerNames, "viewer-skill")
+
+	adminTools, err := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+		WithRequestRoles([]string{"user", "admin"}).
+		Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	var adminNames []string
+	for _, tool := range adminTools {
+		adminNames = append(adminNames, tool.Name)
+	}
+	assert.Contains(t, adminNames, "admin-skill")
+	assert.Contains(t, adminNames, "viewer-skill")
+}
+
+func TestToolSchemaBuilder_ClonePreservesRequestRolesForRequiredRoleFilter(t *testing.T) {
+	adminSkillID := uuid.New()
+	viewerSkillID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{
+		{
+			ID:            adminSkillID,
+			Name:          "Admin Skill",
+			Slug:          "admin-skill",
+			RequiredRoles: []string{"admin"},
+		},
+		{
+			ID:   viewerSkillID,
+			Name: "Viewer Skill",
+			Slug: "viewer-skill",
+		},
+	}}
+	toolsMock := newMockToolsBySkill()
+	registerRoleFilterTool(toolsMock, adminSkillID, "admin-tool")
+	registerRoleFilterTool(toolsMock, viewerSkillID, "viewer-tool")
+
+	builder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+		WithRequestRoles([]string{"admin"})
+	cloned := builder.Clone()
+
+	tools, err := cloned.Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	names := toolNames(tools)
+	assert.Contains(t, names, "admin-skill",
+		"cloned builders must preserve request roles before filtering protected skills")
+	assert.Contains(t, names, "viewer-skill")
+}
+
+func FuzzToolSchemaBuilderRequiredRolesFilter(f *testing.F) {
+	f.Add("admin", "auditor", "admin", "viewer", false, true, false, true, true)
+	f.Add("admin", "auditor", "viewer", "operator", false, true, true, true, false)
+	f.Add("admin", "auditor", "viewer", "auditor", true, true, true, false, true)
+	f.Add("admin", "auditor", "viewer", "operator", true, false, false, false, false)
+
+	f.Fuzz(func(t *testing.T, requiredRaw string, requiredAltRaw string, requestRaw string, requestAltRaw string, includeRequiredAlt bool, includeRequestPrimary bool, includeRequestAlt bool, padRequired bool, padRequest bool) {
+		requiredPrimary := roleToken(requiredRaw, "admin")
+		requiredSecondary := roleToken(requiredAltRaw, "auditor")
+		if requiredSecondary == requiredPrimary {
+			requiredSecondary += "-alt"
+		}
+		requestPrimary := roleToken(requestRaw, "viewer")
+		requestSecondary := roleToken(requestAltRaw, "operator")
+		if requestSecondary == requestPrimary {
+			requestSecondary += "-alt"
+		}
+
+		requiredRoles := []string{maybePadRole(requiredPrimary, padRequired)}
+		expectedMatches := map[string]struct{}{requiredPrimary: {}}
+		if includeRequiredAlt {
+			requiredRoles = append(requiredRoles, maybePadRole(requiredSecondary, !padRequired))
+			expectedMatches[requiredSecondary] = struct{}{}
+		}
+
+		var requestRoles []string
+		expectedProtectedVisible := false
+		if includeRequestPrimary {
+			requestRoles = append(requestRoles, maybePadRole(requestPrimary, padRequest))
+			if _, ok := expectedMatches[requestPrimary]; ok {
+				expectedProtectedVisible = true
+			}
+		}
+		if includeRequestAlt {
+			requestRoles = append(requestRoles, maybePadRole(requestSecondary, !padRequest))
+			if _, ok := expectedMatches[requestSecondary]; ok {
+				expectedProtectedVisible = true
+			}
+		}
+
+		protectedSkillID := uuid.New()
+		publicSkillID := uuid.New()
+		skills := &mockSkillLister{skills: []skill.Skill{
+			{
+				ID:            protectedSkillID,
+				Name:          "Protected Skill",
+				Slug:          "protected-skill",
+				RequiredRoles: requiredRoles,
+			},
+			{
+				ID:   publicSkillID,
+				Name: "Public Skill",
+				Slug: "public-skill",
+			},
+		}}
+		toolsMock := newMockToolsBySkill()
+		registerRoleFilterTool(toolsMock, protectedSkillID, "protected-tool")
+		registerRoleFilterTool(toolsMock, publicSkillID, "public-tool")
+
+		tools, err := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).
+			WithRequestRoles(requestRoles).
+			Build(context.Background(), uuid.New())
+		require.NoError(t, err)
+
+		names := toolNames(tools)
+		assert.Contains(t, names, "public-skill",
+			"skills without required_roles must remain visible")
+		if expectedProtectedVisible {
+			assert.Contains(t, names, "protected-skill",
+				"protected skill must be visible when any request role matches")
+		} else {
+			assert.NotContains(t, names, "protected-skill",
+				"protected skill must be hidden when no request role matches")
+		}
+	})
+}
+
+func registerRoleFilterTool(toolsMock *mockToolsBySkill, skillID uuid.UUID, toolSlug string) {
+	toolID := uuid.New()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID:     toolID,
+			Name:   toolSlug,
+			Slug:   toolSlug,
+			Type:   "HTTP",
+			Config: json.RawMessage(`{"inputSchema":{"type":"object"}}`),
+		}},
+	}
+}
+
+func roleToken(raw string, fallback string) string {
+	raw = strings.TrimSpace(raw)
+	var builder strings.Builder
+	for _, r := range raw {
+		if builder.Len() >= 32 {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r + ('a' - 'A'))
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '-' || r == '_':
+			builder.WriteRune(r)
+		}
+	}
+	if builder.Len() == 0 {
+		return fallback
+	}
+	return builder.String()
+}
+
+func maybePadRole(role string, pad bool) string {
+	if !pad {
+		return role
+	}
+	return " \t" + role + "\n "
 }
 
 func TestToolSchemaBuilder_Build_WithKnowledgeBases(t *testing.T) {
@@ -278,9 +528,9 @@ func TestToolSchemaBuilder_Build_InvalidInputSchema(t *testing.T) {
 
 // --- TR-01-TASK-20: all active tools exposed, no premature break (P-C175-2) ---
 
-// TestToolSchemaBuilder_Build_SkillWithMultipleTools_ExposesEachToolFlags verifies that
-// skills with multiple active tools expose each tool under its own stable slug.
-func TestToolSchemaBuilder_Build_SkillWithMultipleTools_ExposesEachToolFlags(t *testing.T) {
+// TestToolSchemaBuilder_Build_SkillWithMultipleTools_AllFlagsAggregated verifies that
+// for 2+ active bound tools, both tools are exposed and keep distinct metadata.
+func TestToolSchemaBuilder_Build_SkillWithMultipleTools_AllFlagsAggregated(t *testing.T) {
 	skillID := uuid.New()
 	tool1ID := uuid.New()
 	tool2ID := uuid.New()
@@ -309,15 +559,20 @@ func TestToolSchemaBuilder_Build_SkillWithMultipleTools_ExposesEachToolFlags(t *
 	llmTools, err := builder.Build(context.Background(), uuid.New())
 
 	require.NoError(t, err)
-	var destructiveTool *agentic.LLMTool
+	var toolA *agentic.LLMTool
+	var toolB *agentic.LLMTool
 	for i := range llmTools {
+		if llmTools[i].Name == "tool-a" {
+			toolA = &llmTools[i]
+		}
 		if llmTools[i].Name == "tool-b" {
-			destructiveTool = &llmTools[i]
-			break
+			toolB = &llmTools[i]
 		}
 	}
-	require.NotNil(t, destructiveTool, "the destructive bound tool must appear in tools[]")
-	assert.True(t, destructiveTool.IsDestructive)
+	require.NotNil(t, toolA, "tool-a must appear in tools[]")
+	require.NotNil(t, toolB, "tool-b must appear in tools[]")
+	assert.True(t, toolA.ReadOnly, "tool-a should keep ReadOnly=true")
+	assert.True(t, toolB.IsDestructive, "tool-b should keep IsDestructive=true")
 }
 
 // TestToolSchemaBuilder_Build_SkillWithMixedActiveInactive_OnlyActiveCount verifies
@@ -958,6 +1213,63 @@ func TestBuildTools_ActiveKB_DocumentSearchPresent(t *testing.T) {
 	assert.Contains(t, toolNames(tools), "document_search")
 }
 
+func TestBuildTools_ActiveKB_DocumentSearchSchemaIncludesMetadataFilter(t *testing.T) {
+	kbs := &mockKBLister{kbs: []knowledgebase.KnowledgeBase{
+		{Name: "Active KB", Status: knowledgebase.StatusActive},
+	}}
+	builder := agentic.NewToolSchemaBuilder(&mockSkillLister{}, newMockToolsBySkill(), kbs)
+	tools, err := builder.Build(context.Background(), uuid.New())
+	require.NoError(t, err)
+
+	var documentSearch agentic.LLMTool
+	for _, candidate := range tools {
+		if candidate.Name == "document_search" {
+			documentSearch = candidate
+			break
+		}
+	}
+	require.Equal(t, "document_search", documentSearch.Name)
+
+	var schema map[string]any
+	require.NoError(t, json.Unmarshal(documentSearch.InputSchema, &schema))
+	properties, ok := schema["properties"].(map[string]any)
+	require.True(t, ok)
+	metadataFilter, ok := properties["metadataFilter"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", metadataFilter["type"])
+	assert.Equal(t, "#/$defs/metadataFilter", metadataFilter["$ref"])
+	assert.Contains(t, metadataFilter["description"], "containsAll")
+	assert.Contains(t, metadataFilter["description"], "ilike")
+	assert.Contains(t, metadataFilter["description"], "customer.region")
+	assert.Contains(t, metadataFilter["description"], "16 KiB")
+
+	defs, ok := schema["$defs"].(map[string]any)
+	require.True(t, ok)
+	filterDefinition, ok := defs["metadataFilter"].(map[string]any)
+	require.True(t, ok)
+	filterForms, ok := filterDefinition["oneOf"].([]any)
+	require.True(t, ok)
+	assert.Len(t, filterForms, 4, "the tool contract exposes predicate, all, any, and not forms")
+
+	predicate, ok := defs["metadataPredicate"].(map[string]any)
+	require.True(t, ok)
+	predicateForms, ok := predicate["oneOf"].([]any)
+	require.True(t, ok)
+	assert.Len(t, predicateForms, 6, "the tool contract distinguishes equality, membership, existence, numeric, pattern, and tag operators")
+	metadataField, ok := defs["metadataField"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, metadataField["description"], "customer.region")
+	stringArray, ok := defs["metadataStringArray"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, float64(64), stringArray["maxItems"], "eq string arrays follow the metadata value limit")
+
+	for _, groupName := range []string{"metadataAllGroup", "metadataAnyGroup", "metadataNotGroup"} {
+		group, ok := defs[groupName].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, false, group["additionalProperties"], "%s must have one group operator", groupName)
+	}
+}
+
 // --- TR-01-TASK-10: InputSchema preference over derived schema (P-C175-1/P-C175-2) ---
 
 // TestBuildTools_ExplicitInputSchema_UsedOverDerived verifies that when a bound tool
@@ -1036,6 +1348,38 @@ func TestBuildTools_NoInputSchema_DerivedFromConfig(t *testing.T) {
 	require.GreaterOrEqual(t, idx, 0, "fetch-skill must be in tools")
 	// Derived schema should contain "city" from URL template.
 	assert.Contains(t, string(tools[idx].InputSchema), `"city"`, "schema must be derived from URL template")
+}
+
+func TestBuildTools_DerivesTemplateVariablesFromAllHTTPBodyAliases(t *testing.T) {
+	for name, config := range map[string]json.RawMessage{
+		"bodyTemplate":  json.RawMessage(`{"bodyTemplate":"{city}"}`),
+		"body_template": json.RawMessage(`{"body_template":"{city}"}`),
+		"body":          json.RawMessage(`{"body":"{city}"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			skillID := uuid.New()
+			toolID := uuid.New()
+			skills := &mockSkillLister{skills: []skill.Skill{{ID: skillID, Name: "Fetch", Slug: "fetch-skill"}}}
+			toolsMock := newMockToolsBySkill()
+			toolsMock.bySkill[skillID] = struct {
+				bindings []tool.SkillTool
+				tools    []tool.Tool
+			}{
+				bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+				tools:    []tool.Tool{{ID: toolID, Name: "fetch_http", Type: tool.ToolTypeHTTP, Config: config}},
+			}
+
+			tools, err := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}).Build(context.Background(), uuid.New())
+			require.NoError(t, err)
+			for _, built := range tools {
+				if built.Name == "fetch-skill" {
+					assert.Contains(t, string(built.InputSchema), `"city"`)
+					return
+				}
+			}
+			t.Fatal("fetch-skill must be built")
+		})
+	}
 }
 
 // TestMemoryStoreTool_DescriptionContainsDisclaimer verifies the TTL/hallucination

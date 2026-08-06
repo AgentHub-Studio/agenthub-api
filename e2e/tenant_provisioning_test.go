@@ -22,22 +22,27 @@ func TestE2E_TenantProvisioning(t *testing.T) {
 		cfg.keycloakAdmin, cfg.keycloakAdminPass,
 		cfg.e2eUserPassword,
 	)
+	t.Logf("e2e tenant provisioning tenant: %s", tenant.Slug)
 
 	client := tenant.Client(t, cfg.backendURL)
 
 	t.Run("exists endpoint returns true", func(t *testing.T) {
-		var result bool
+		var result struct {
+			Exists bool `json:"exists"`
+		}
 		status := client.Get("/public/tenants/"+tenant.Slug+"/exists", &result)
 		assert.Equal(t, http.StatusOK, status)
-		assert.True(t, result, "newly created tenant must exist")
+		assert.True(t, result.Exists, "newly created tenant must exist")
 	})
 
 	t.Run("exists endpoint returns false for unknown slug", func(t *testing.T) {
 		noAuth := testutil.NewAPIClient(t, cfg.backendURL, "")
-		var result bool
+		var result struct {
+			Exists bool `json:"exists"`
+		}
 		status := noAuth.Get("/public/tenants/non-existent-slug-xyz-99999/exists", &result)
 		assert.Equal(t, http.StatusOK, status)
-		assert.False(t, result)
+		assert.False(t, result.Exists)
 	})
 
 	t.Run("JWT accepted by protected endpoint", func(t *testing.T) {
@@ -51,7 +56,7 @@ func TestE2E_TenantProvisioning(t *testing.T) {
 		noAuth := testutil.NewAPIClient(t, cfg.backendURL, "")
 		var resp map[string]any
 		status := noAuth.Post("/public/tenants",
-			map[string]any{"name": "Bad", "slug": "INVALID SLUG WITH SPACES"},
+			map[string]any{"name": "Bad", "id": "INVALID SLUG WITH SPACES"},
 			&resp)
 		assert.Equal(t, http.StatusBadRequest, status)
 	})

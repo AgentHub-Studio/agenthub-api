@@ -7,6 +7,7 @@ import "time"
 type Status string
 
 const (
+	StatusProvisioning       Status = "PROVISIONING"
 	StatusActive             Status = "ACTIVE"
 	StatusProvisioningFailed Status = "PROVISIONING_FAILED"
 )
@@ -14,7 +15,7 @@ const (
 // Tenant is the domain entity for a platform tenant.
 // The ID field doubles as the Keycloak realm name (kebab-case slug).
 type Tenant struct {
-	ID        string    // slug, e.g. "my-company"
+	ID        string // slug, e.g. "my-company"
 	Name      string
 	Status    Status
 	CreatedAt time.Time

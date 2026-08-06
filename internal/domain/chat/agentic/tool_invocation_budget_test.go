@@ -170,14 +170,19 @@ func TestToolInvocationBudget_ConcurrentSafe(t *testing.T) {
 		Policy:   ToolBudgetPolicyWarn,
 	})
 	var wg sync.WaitGroup
+	errs := make(chan error, 50)
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			assert.NoError(t, b.Record(ToolCategoryRead))
+			errs <- b.Record(ToolCategoryRead)
 		}()
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 	assert.Equal(t, 50, b.Snapshot().TotalCalled)
 }
 

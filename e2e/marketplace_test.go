@@ -21,14 +21,17 @@ func TestE2E_MarketplaceListingLifecycle(t *testing.T) {
 		cfg.e2eUserPassword,
 	)
 	c := tenant.Client(t, cfg.backendURL)
+	packageSlug := "marketplace-pkg-" + tenant.Slug
+	listingSlug := "marketplace-listing-" + tenant.Slug
 
 	// First create a registry package so the listing can reference it
 	var pkg map[string]any
-	status := c.Post("/api/registry/packages", map[string]any{
-		"name":        "e2e-test-pkg",
-		"slug":        "e2e-test-pkg",
+	status := c.Post("/api/packages", map[string]any{
+		"name":        packageSlug,
+		"slug":        packageSlug,
 		"description": "Package for marketplace E2E",
 		"type":        "AGENT",
+		"visibility":  "PUBLIC",
 	}, &pkg)
 	require.Equal(t, http.StatusCreated, status)
 	pkgID := pkg["id"].(string)
@@ -38,7 +41,7 @@ func TestE2E_MarketplaceListingLifecycle(t *testing.T) {
 	status = c.Post("/api/marketplace/listings", map[string]any{
 		"packageId":   pkgID,
 		"name":        "E2E Test Agent",
-		"slug":        "e2e-test-agent",
+		"slug":        listingSlug,
 		"description": "A test agent listing for E2E",
 		"type":        "AGENT",
 		"category":    "productivity",
@@ -71,9 +74,10 @@ func TestE2E_MarketplaceListingLifecycle(t *testing.T) {
 	status = c.Delete("/api/marketplace/listings/" + listingID)
 	assert.Equal(t, http.StatusNoContent, status)
 
-	var notFound map[string]any
-	status = c.Get("/api/marketplace/listings/"+listingID, &notFound)
-	assert.Equal(t, http.StatusNotFound, status)
+	var removed map[string]any
+	status = c.Get("/api/marketplace/listings/"+listingID, &removed)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "REMOVED", removed["status"])
 }
 
 // TestE2E_MarketplaceReviewLifecycle validates review CRUD under a listing.
@@ -85,18 +89,21 @@ func TestE2E_MarketplaceReviewLifecycle(t *testing.T) {
 		cfg.e2eUserPassword,
 	)
 	c := tenant.Client(t, cfg.backendURL)
+	packageSlug := "marketplace-review-pkg-" + tenant.Slug
+	listingSlug := "marketplace-review-listing-" + tenant.Slug
 
-	// Setup: package + listing
+	// Setup: installable package
 	var pkg map[string]any
-	c.Post("/api/registry/packages", map[string]any{
-		"name": "e2e-review-pkg", "slug": "e2e-review-pkg",
-		"description": "pkg", "type": "AGENT",
+	status := c.Post("/api/packages", map[string]any{
+		"name": packageSlug, "slug": packageSlug,
+		"description": "pkg", "type": "AGENT", "visibility": "PUBLIC",
 	}, &pkg)
+	require.Equal(t, http.StatusCreated, status)
 	pkgID := pkg["id"].(string)
 
 	var listing map[string]any
-	status := c.Post("/api/marketplace/listings", map[string]any{
-		"packageId": pkgID, "name": "Reviewed Agent", "slug": "reviewed-agent",
+	status = c.Post("/api/marketplace/listings", map[string]any{
+		"packageId": pkgID, "name": "Reviewed Agent", "slug": listingSlug,
 		"description": "d", "type": "AGENT", "category": "test",
 	}, &listing)
 	require.Equal(t, http.StatusCreated, status)
@@ -117,7 +124,7 @@ func TestE2E_MarketplaceReviewLifecycle(t *testing.T) {
 	var reviewPage testutil.Page[map[string]any]
 	status = c.Get(reviewBase+"?page=0&size=10", &reviewPage)
 	assert.Equal(t, http.StatusOK, status)
-	assert.GreaterOrEqual(t, reviewPage.TotalElements, int64(1))
+	assert.GreaterOrEqual(t, reviewPage.TotalElements, 1)
 
 	// --- Delete review ---
 	status = c.Delete(reviewBase + "/" + reviewID)
@@ -133,27 +140,22 @@ func TestE2E_MarketplaceInstallationLifecycle(t *testing.T) {
 		cfg.e2eUserPassword,
 	)
 	c := tenant.Client(t, cfg.backendURL)
+	packageSlug := "marketplace-install-pkg-" + tenant.Slug
 
-	// Setup: package + listing
+	// Setup: installable package
 	var pkg map[string]any
-	c.Post("/api/registry/packages", map[string]any{
-		"name": "e2e-install-pkg", "slug": "e2e-install-pkg",
-		"description": "pkg", "type": "AGENT",
+	status := c.Post("/api/packages", map[string]any{
+		"name": packageSlug, "slug": packageSlug,
+		"description": "pkg", "type": "AGENT", "visibility": "PUBLIC",
 	}, &pkg)
-	pkgID := pkg["id"].(string)
-
-	var listing map[string]any
-	status := c.Post("/api/marketplace/listings", map[string]any{
-		"packageId": pkgID, "name": "Installable Agent", "slug": "installable-agent",
-		"description": "d", "type": "AGENT", "category": "test",
-	}, &listing)
 	require.Equal(t, http.StatusCreated, status)
-	listingID := listing["id"].(string)
+	pkgID := pkg["id"].(string)
 
 	// --- Install ---
 	var installation map[string]any
 	status = c.Post("/api/marketplace/installations", map[string]any{
-		"listingId": listingID,
+		"packageId":      pkgID,
+		"packageVersion": "1.0.0",
 	}, &installation)
 	require.Equal(t, http.StatusCreated, status)
 	installID := installation["id"].(string)
@@ -162,7 +164,7 @@ func TestE2E_MarketplaceInstallationLifecycle(t *testing.T) {
 	var installPage testutil.Page[map[string]any]
 	status = c.Get("/api/marketplace/installations?page=0&size=10", &installPage)
 	assert.Equal(t, http.StatusOK, status)
-	assert.GreaterOrEqual(t, installPage.TotalElements, int64(1))
+	assert.GreaterOrEqual(t, installPage.TotalElements, 1)
 
 	// --- Uninstall ---
 	status = c.Delete("/api/marketplace/installations/" + installID)

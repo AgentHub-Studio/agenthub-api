@@ -28,13 +28,17 @@ func newMockRepo() *mockRepo {
 
 func (m *mockRepo) ListAll(_ context.Context, _ string, _ pagination.PageRequest) ([]oauth.OAuthCredential, int, error) {
 	out := make([]oauth.OAuthCredential, 0, len(m.creds))
-	for _, c := range m.creds { out = append(out, c) }
+	for _, c := range m.creds {
+		out = append(out, c)
+	}
 	return out, len(out), nil
 }
 
 func (m *mockRepo) GetByID(_ context.Context, _ string, id uuid.UUID) (oauth.OAuthCredential, error) {
 	c, ok := m.creds[id]
-	if !ok { return oauth.OAuthCredential{}, oauth.ErrNotFound }
+	if !ok {
+		return oauth.OAuthCredential{}, oauth.ErrNotFound
+	}
 	return c, nil
 }
 
@@ -54,33 +58,45 @@ func (m *mockRepo) ExistsByName(_ context.Context, _ string, name string) (bool,
 }
 
 func (m *mockRepo) Update(_ context.Context, _ string, id uuid.UUID, c oauth.OAuthCredential) (oauth.OAuthCredential, error) {
-	if _, ok := m.creds[id]; !ok { return oauth.OAuthCredential{}, oauth.ErrNotFound }
+	if _, ok := m.creds[id]; !ok {
+		return oauth.OAuthCredential{}, oauth.ErrNotFound
+	}
 	c.ID = id
 	m.creds[id] = c
 	return c, nil
 }
 
 func (m *mockRepo) Delete(_ context.Context, _ string, id uuid.UUID) error {
-	if _, ok := m.creds[id]; !ok { return oauth.ErrNotFound }
+	if _, ok := m.creds[id]; !ok {
+		return oauth.ErrNotFound
+	}
 	delete(m.creds, id)
 	return nil
 }
 
 // mockHTTPClient captures requests and returns a configurable response.
 type mockHTTPClient struct {
-	calls    int
-	body     string
-	status   int
+	calls  int
+	body   string
+	status int
 }
 
 func (c *mockHTTPClient) Do(_ *http.Request) (*http.Response, error) {
 	c.calls++
 	statusCode := c.status
-	if statusCode == 0 { statusCode = http.StatusOK }
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
 	return &http.Response{
 		StatusCode: statusCode,
 		Body:       io.NopCloser(bytes.NewBufferString(c.body)),
 	}, nil
+}
+
+type oauthRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f oauthRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 const tenantID = "test-tenant"
@@ -122,7 +138,8 @@ func TestOAuthService_ListAll(t *testing.T) {
 	}
 	items, total, err := svc.ListAll(context.Background(), tenantID, pagination.PageRequest{Page: 0, Size: 20})
 	require.NoError(t, err)
-	assert.Equal(t, 3, total); assert.Len(t, items, 3)
+	assert.Equal(t, 3, total)
+	assert.Len(t, items, 3)
 }
 
 // ---- ResolveAuthHeader tests (non-OAuth2) ----
@@ -236,6 +253,70 @@ func TestOAuthService_ResolveAuthHeader_OAuth2_TokenEndpointError(t *testing.T) 
 	_, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "401")
+}
+
+func TestOAuthService_ResolveAuthHeader_BlocksLegacySSRFTokenURL(t *testing.T) {
+	repo := newMockRepo()
+	client := &mockHTTPClient{body: `{"access_token":"unexpected","expires_in":3600}`}
+	svc := oauth.NewServiceWithClient(repo, client)
+	credentialID := uuid.New()
+	repo.creds[credentialID] = oauth.OAuthCredential{
+		ID:           credentialID,
+		AuthType:     oauth.AuthTypeOAuth2ClientCredentials,
+		TokenURL:     strPtr("http://localhost/token"),
+		ClientID:     strPtr("client-id"),
+		ClientSecret: strPtr("client-secret"),
+	}
+
+	got, err := svc.ResolveAuthHeader(context.Background(), tenantID, credentialID)
+
+	require.Error(t, err)
+	assert.Empty(t, got.Value)
+	assert.Zero(t, client.calls)
+	assert.Contains(t, err.Error(), "token URL is not allowed")
+}
+
+func TestOAuthService_ResolveAuthHeader_BlocksRedirectToSSRFTokenURL(t *testing.T) {
+	const originURL = "https://1.1.1.1/token"
+	const blockedURL = "http://localhost/token"
+
+	var blockedTargetReached bool
+	repo := newMockRepo()
+	svc := oauth.NewServiceWithClient(repo, &http.Client{
+		Transport: oauthRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.String() {
+			case originURL:
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{blockedURL}},
+					Body:       io.NopCloser(bytes.NewBufferString("")),
+				}, nil
+			case blockedURL:
+				blockedTargetReached = true
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewBufferString(`{"access_token":"unexpected","expires_in":3600}`)),
+				}, nil
+			default:
+				return nil, fmt.Errorf("unexpected request")
+			}
+		}),
+	})
+
+	c := createCred(t, svc, oauth.CreateRequest{
+		Name:         "redirect-token",
+		AuthType:     oauth.AuthTypeOAuth2ClientCredentials,
+		TokenURL:     strPtr(originURL),
+		ClientID:     strPtr("client-id"),
+		ClientSecret: strPtr("client-secret"),
+	})
+
+	got, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
+
+	require.Error(t, err)
+	assert.Empty(t, got.Value)
+	assert.False(t, blockedTargetReached)
+	assert.Contains(t, err.Error(), "token URL is not allowed")
 }
 
 // ---- ResponseFrom masking tests ----
@@ -353,4 +434,40 @@ func TestOAuthService_Update_ClearsTokenCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer new-token", res.Value)
 	assert.Equal(t, calls+1, httpClient.calls, "should have fetched a new token after update")
+}
+
+func TestOAuthService_Update_PreservesMaskedAndBlankBearerToken(t *testing.T) {
+	svc := oauth.NewServiceWithEncryption(newMockRepo(), aesKey)
+
+	c := createCred(t, svc, oauth.CreateRequest{
+		Name:        "bearer",
+		AuthType:    oauth.AuthTypeBearerToken,
+		BearerToken: strPtr("original-token"),
+	})
+
+	masked, err := svc.Update(context.Background(), tenantID, c.ID, oauth.CreateRequest{
+		Name:        "bearer-masked",
+		AuthType:    oauth.AuthTypeBearerToken,
+		BearerToken: strPtr("***"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, masked.BearerToken)
+	assert.Equal(t, *c.BearerToken, *masked.BearerToken)
+
+	res, err := svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer original-token", res.Value)
+
+	blank, err := svc.Update(context.Background(), tenantID, c.ID, oauth.CreateRequest{
+		Name:        "bearer-blank",
+		AuthType:    oauth.AuthTypeBearerToken,
+		BearerToken: strPtr(""),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, blank.BearerToken)
+	assert.Equal(t, *c.BearerToken, *blank.BearerToken)
+
+	res, err = svc.ResolveAuthHeader(context.Background(), tenantID, c.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer original-token", res.Value)
 }

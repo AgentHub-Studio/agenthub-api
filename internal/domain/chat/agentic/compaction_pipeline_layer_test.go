@@ -253,9 +253,8 @@ func TestCompactionPipelineLayerRegistry_Descriptions_NonEmpty(t *testing.T) {
 func TestCompactStage_PipelineRegistryHasTwoLayersWithNoCompactStagePeer(t *testing.T) {
 	// CompactStage covers 4 reactive stages (tool_result_truncation, history_snip,
 	// microcompact, full_summarization). The five-layer pipeline profile registry
-	// covers 5 layers. Two pipeline layers — budget_reduction and context_collapse —
-	// have no equivalent in the CompactStage enum, confirming the registries are
-	// not identical.
+	// covers 5 layers with different canonical names. Only microcompact currently
+	// has an exact CompactStage peer, confirming the registries are not identical.
 	r := NewCompactionPipelineLayerRegistry()
 
 	existingStageStrings := map[string]bool{
@@ -272,7 +271,7 @@ func TestCompactStage_PipelineRegistryHasTwoLayersWithNoCompactStagePeer(t *test
 		}
 	}
 	assert.Equal(t, 4, noCompactStagePeer,
-		"pipeline layers without CompactStage peer (budget_reduction, context_collapse + additional) must match current registry")
+		"exactly four pipeline layers must have no exact CompactStage peer")
 }
 
 func TestCompactStage_PipelineRegistryCoversAdditionalLayer_BudgetReduction(t *testing.T) {

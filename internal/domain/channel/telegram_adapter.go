@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 )
 
 // TelegramAdapter implements the Adapter interface for Telegram Bot API.
@@ -65,7 +67,7 @@ func (a *TelegramAdapter) VerifyRequest(_ context.Context, _ Channel, _ map[stri
 // ParseMessage extracts text and routing from a Telegram Update.
 func (a *TelegramAdapter) ParseMessage(_ context.Context, ch Channel, body []byte) (InboundMessage, error) {
 	var update telegramUpdate
-	if err := json.Unmarshal(body, &update); err != nil {
+	if err := httputil.DecodeSingleJSON(bytes.NewReader(body), &update); err != nil {
 		return InboundMessage{}, fmt.Errorf("telegram: parse error: %w", err)
 	}
 

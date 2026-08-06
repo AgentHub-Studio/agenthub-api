@@ -94,7 +94,7 @@ func TestBDD_AuditTrailGovernance(t *testing.T) {
 	t.Run("Scenario_AuditChannelsHaveBoundedListAPIsForQueryability", func(t *testing.T) {
 		// Given an operator needs to retrieve audit entries for a session
 		//       (PDF Section 11: governance APIs must be queryable),
-		var repo = &PermissionAuditRepository{} // zero value, just for shape inspection
+		repo := &PermissionAuditRepository{} // zero value, just for shape inspection
 		typ := reflect.TypeOf(repo)
 
 		// When the runtime exposes the query API,
@@ -116,7 +116,7 @@ func TestBDD_AuditTrailGovernance(t *testing.T) {
 		// Given the audit log must be immutable post-write (PDF Section 11:
 		//       "audit trail legível" — and credible audit cannot allow
 		//       silent rewrites),
-		var repo = &PermissionAuditRepository{}
+		repo := &PermissionAuditRepository{}
 		typ := reflect.TypeOf(repo)
 
 		// When we inspect the repository surface,

@@ -88,6 +88,33 @@ func TestAnthropicProvider_ChatStream_Tokens(t *testing.T) {
 	assert.Equal(t, "Hi there", got)
 }
 
+func TestAnthropicProvider_ChatStream_ThinkingDelta(t *testing.T) {
+	sse := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"step one \"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"final answer\"}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer srv.Close()
+
+	p := anthropic.New("key", srv.URL)
+	ch, err := p.ChatStream(context.Background(), []ai.Message{{Role: ai.RoleUser, Content: "Hi"}},
+		ai.ChatOptions{Model: "claude-3-5-sonnet-20241022", MaxTokens: 256})
+	require.NoError(t, err)
+
+	var gotThinking, gotText string
+	for chunk := range ch {
+		require.NoError(t, chunk.Error)
+		gotThinking += chunk.ThinkingDelta
+		gotText += chunk.Delta
+	}
+
+	assert.Equal(t, "step one ", gotThinking)
+	assert.Equal(t, "final answer", gotText)
+}
+
 func TestAnthropicProvider_ChatStream_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

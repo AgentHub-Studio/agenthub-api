@@ -93,6 +93,12 @@ func TestSerializeSkillMD_RoundTrip(t *testing.T) {
 		ContextMode:  "fork",
 		ShouldDefer:  true,
 		AllowedTools: []string{"tool_a", "tool_b"},
+		ModelOverrides: map[string]string{
+			"default": "claude-sonnet-4-6",
+		},
+		EffortLevel:      "high",
+		AssociatedAgents: []string{"research-agent"},
+		DynamicHooks:     []string{"pre_tool_use", "run_end"},
 	}
 
 	serialized := skill.SerializeSkillMD(original)
@@ -110,6 +116,10 @@ func TestSerializeSkillMD_RoundTrip(t *testing.T) {
 	assert.Equal(t, original.ShouldDefer, req.ShouldDefer)
 	assert.Equal(t, original.ContextMode, req.ContextMode)
 	assert.Equal(t, original.Instructions, req.Instructions)
+	assert.Equal(t, original.ModelOverrides, req.ModelOverrides)
+	assert.Equal(t, original.EffortLevel, req.EffortLevel)
+	assert.Equal(t, original.AssociatedAgents, req.AssociatedAgents)
+	assert.Equal(t, original.DynamicHooks, req.DynamicHooks)
 }
 
 // TestSerializeSkillMD_EmptyInstructions verifies no trailing newline for empty body.

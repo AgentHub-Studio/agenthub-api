@@ -18,6 +18,9 @@ import (
 type mockRepo struct {
 	tests       map[uuid.UUID]abtest.ABTest
 	assignments []abtest.Assignment
+	createCalls int
+	updateCalls int
+	deleteCalls int
 }
 
 func newMockRepo() *mockRepo {
@@ -43,6 +46,7 @@ func (m *mockRepo) GetByID(_ context.Context, id uuid.UUID) (abtest.ABTest, erro
 }
 
 func (m *mockRepo) Create(_ context.Context, t abtest.ABTest) (abtest.ABTest, error) {
+	m.createCalls++
 	t.ID = uuid.New()
 	t.CreatedAt = time.Now()
 	t.UpdatedAt = time.Now()
@@ -51,6 +55,7 @@ func (m *mockRepo) Create(_ context.Context, t abtest.ABTest) (abtest.ABTest, er
 }
 
 func (m *mockRepo) Update(_ context.Context, t abtest.ABTest) (abtest.ABTest, error) {
+	m.updateCalls++
 	if _, ok := m.tests[t.ID]; !ok {
 		return abtest.ABTest{}, abtest.ErrNotFound
 	}
@@ -60,6 +65,7 @@ func (m *mockRepo) Update(_ context.Context, t abtest.ABTest) (abtest.ABTest, er
 }
 
 func (m *mockRepo) Delete(_ context.Context, id uuid.UUID) error {
+	m.deleteCalls++
 	if _, ok := m.tests[id]; !ok {
 		return abtest.ErrNotFound
 	}
@@ -113,6 +119,18 @@ func TestService_Create_ValidationError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestService_Create_RejectsMissingAgentBeforeRepository(t *testing.T) {
+	svc, repo := setup()
+	_, err := svc.Create(context.Background(), abtest.CreateABTestRequest{
+		Name:             "Missing agent",
+		VariantVersionID: uuid.New(),
+		TrafficPercent:   50,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, abtest.ErrValidation)
+	assert.Zero(t, repo.createCalls)
+}
+
 func TestService_Create_TrafficPercentOutOfRange(t *testing.T) {
 	svc, _ := setup()
 	_, err := svc.Create(context.Background(), abtest.CreateABTestRequest{
@@ -122,6 +140,57 @@ func TestService_Create_TrafficPercentOutOfRange(t *testing.T) {
 		TrafficPercent:   101,
 	})
 	require.Error(t, err)
+}
+
+func TestService_Create_RejectsSecondActiveTestForAgent(t *testing.T) {
+	svc, repo := setup()
+	agentID := uuid.New()
+
+	_, err := svc.Create(context.Background(), abtest.CreateABTestRequest{
+		AgentID:          agentID,
+		Name:             "First active test",
+		VariantVersionID: uuid.New(),
+		TrafficPercent:   10,
+	})
+	require.NoError(t, err)
+
+	_, err = svc.Create(context.Background(), abtest.CreateABTestRequest{
+		AgentID:          agentID,
+		Name:             "Second active test",
+		VariantVersionID: uuid.New(),
+		TrafficPercent:   20,
+	})
+	require.ErrorIs(t, err, abtest.ErrActiveTestConflict)
+	assert.Equal(t, 1, repo.createCalls)
+}
+
+func TestService_Update_RejectsActivatingSecondTestForAgent(t *testing.T) {
+	svc, repo := setup()
+	agentID := uuid.New()
+	first, err := svc.Create(context.Background(), abtest.CreateABTestRequest{
+		AgentID:          agentID,
+		Name:             "Paused test",
+		VariantVersionID: uuid.New(),
+		TrafficPercent:   10,
+	})
+	require.NoError(t, err)
+	paused := "PAUSED"
+	_, err = svc.Update(context.Background(), first.ID, abtest.UpdateABTestRequest{Status: &paused})
+	require.NoError(t, err)
+
+	_, err = svc.Create(context.Background(), abtest.CreateABTestRequest{
+		AgentID:          agentID,
+		Name:             "Current active test",
+		VariantVersionID: uuid.New(),
+		TrafficPercent:   20,
+	})
+	require.NoError(t, err)
+
+	active := "ACTIVE"
+	_, err = svc.Update(context.Background(), first.ID, abtest.UpdateABTestRequest{Status: &active})
+	require.ErrorIs(t, err, abtest.ErrActiveTestConflict)
+	assert.Equal(t, 1, repo.updateCalls)
+	assert.Equal(t, abtest.TestStatusPaused, repo.tests[first.ID].Status)
 }
 
 func TestService_GetByID_NotFound(t *testing.T) {
@@ -149,6 +218,48 @@ func TestService_Update_Status_Concluded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "CONCLUDED", updated.Status)
 	assert.NotNil(t, updated.EndedAt)
+}
+
+func TestService_Update_RejectsStatusOutsideLifecycleWithoutPersisting(t *testing.T) {
+	svc, repo := setup()
+	created, err := svc.Create(context.Background(), abtest.CreateABTestRequest{
+		AgentID:          uuid.New(),
+		Name:             "Lifecycle",
+		VariantVersionID: uuid.New(),
+		TrafficPercent:   10,
+	})
+	require.NoError(t, err)
+
+	invalid := "DRAFT"
+	_, err = svc.Update(context.Background(), created.ID, abtest.UpdateABTestRequest{Status: &invalid})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, abtest.ErrValidation)
+	assert.Zero(t, repo.updateCalls)
+	assert.Equal(t, abtest.TestStatusActive, repo.tests[created.ID].Status)
+}
+
+func TestService_Update_AcceptsEveryDefinedLifecycleStatus(t *testing.T) {
+	for _, status := range []string{"ACTIVE", "PAUSED", "CONCLUDED"} {
+		t.Run(status, func(t *testing.T) {
+			svc, _ := setup()
+			created, err := svc.Create(context.Background(), abtest.CreateABTestRequest{
+				AgentID:          uuid.New(),
+				Name:             "Lifecycle " + status,
+				VariantVersionID: uuid.New(),
+				TrafficPercent:   10,
+			})
+			require.NoError(t, err)
+
+			updated, err := svc.Update(context.Background(), created.ID, abtest.UpdateABTestRequest{Status: &status})
+			require.NoError(t, err)
+			assert.Equal(t, status, string(updated.Status))
+			if status == "CONCLUDED" {
+				assert.NotNil(t, updated.EndedAt)
+			} else {
+				assert.Nil(t, updated.EndedAt)
+			}
+		})
+	}
 }
 
 func TestService_Delete(t *testing.T) {

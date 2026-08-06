@@ -1,14 +1,15 @@
 package tenantsignup
 
 import (
-	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -32,7 +33,7 @@ func (h *Handler) RegisterPublicRoutes(r chi.Router) {
 
 func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 	var req SignupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -43,7 +44,7 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, tenant.ErrAlreadyExists) {
-			respond.Error(w, http.StatusConflict, "tenant already exists")
+			respond.Error(w, http.StatusUnprocessableEntity, "tenant already exists")
 			return
 		}
 		// Bug 188: endpoint público — nunca expor err.Error() em failure
@@ -54,4 +55,8 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusCreated, resp)
+}
+
+func decodeSingleJSON(body io.Reader, dst any) error {
+	return httputil.DecodeSingleJSON(body, dst)
 }

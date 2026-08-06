@@ -21,7 +21,8 @@ import (
 
 // mockInstallSvc is an in-memory implementation of the installationService interface.
 type mockInstallSvc struct {
-	data map[uuid.UUID]installation.Installation
+	data       map[uuid.UUID]installation.Installation
+	installErr error
 }
 
 func newMockInstallSvc() *mockInstallSvc {
@@ -39,6 +40,9 @@ func (m *mockInstallSvc) ListByTenant(_ context.Context, tenantID string, req pa
 }
 
 func (m *mockInstallSvc) Install(_ context.Context, tenantID string, req installation.InstallRequest) (installation.InstallResponse, error) {
+	if m.installErr != nil {
+		return installation.InstallResponse{}, m.installErr
+	}
 	if req.PackageID == uuid.Nil {
 		return installation.InstallResponse{}, installation.ErrNotFound
 	}
@@ -138,6 +142,38 @@ func TestInstallHandler_Install_BadBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestInstallHandler_Install_HidesPrivatePackage(t *testing.T) {
+	r, svc := setupInstallationHandler()
+	svc.installErr = installation.ErrPackageUnavailable
+	body, err := json.Marshal(installation.InstallRequest{PackageID: uuid.New(), PackageVersion: "1.0.0"})
+	require.NoError(t, err)
+	req := withTenant(httptest.NewRequest(http.MethodPost, "/api/marketplace/installations", bytes.NewReader(body)), "other-tenant")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Empty(t, svc.data)
+}
+
+func TestInstallHandler_InstallRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	r, svc := setupInstallationHandler()
+	body, err := json.Marshal(installation.InstallRequest{
+		PackageID:      uuid.New(),
+		PackageVersion: "1.0.0",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/marketplace/installations", bytes.NewReader(append(body, []byte(` {"packageVersion":"ignored"}`)...)))
+	req = withTenant(req, "t1")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, svc.data)
 }
 
 func TestInstallHandler_Uninstall_NoContent(t *testing.T) {

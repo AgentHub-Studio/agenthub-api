@@ -2,7 +2,6 @@ package version
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -10,6 +9,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/apierror"
+	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
@@ -21,15 +22,15 @@ type versionService interface {
 	Delete(ctx context.Context, packageID uuid.UUID, versionStr string, tenantID string) error
 }
 
-// packageExister verifies parent package existence (bug 210 batch).
-type packageExister interface {
-	GetByID(ctx context.Context, id uuid.UUID) error
+// packageReader verifies parent visibility before serving package resources.
+type packageReader interface {
+	GetAccessibleByID(ctx context.Context, id uuid.UUID, tenantID string) (pkg.PackageResponse, error)
 }
 
 // Handler exposes the HTTP interface for package versions.
 type Handler struct {
 	svc versionService
-	pkg packageExister
+	pkg packageReader
 }
 
 // NewHandler creates a new version Handler.
@@ -37,8 +38,8 @@ func NewHandler(svc versionService) *Handler {
 	return &Handler{svc: svc}
 }
 
-// WithPackageExister wires the parent-package existence checker.
-func (h *Handler) WithPackageExister(p packageExister) *Handler {
+// WithPackageReader wires the parent-package visibility checker.
+func (h *Handler) WithPackageReader(p packageReader) *Handler {
 	h.pkg = p
 	return h
 }
@@ -59,11 +60,8 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
-	if h.pkg != nil {
-		if err := h.pkg.GetByID(r.Context(), packageID); err != nil {
-			apierror.Write(w, http.StatusNotFound, "package not found")
-			return
-		}
+	if !h.ensurePackageReadable(w, r, packageID) {
+		return
 	}
 	versions, err := h.svc.ListByPackage(r.Context(), packageID)
 	if err != nil {
@@ -78,6 +76,9 @@ func (h *Handler) getByVersion(w http.ResponseWriter, r *http.Request) {
 	packageID, err := uuid.Parse(chi.URLParam(r, "packageId"))
 	if err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
+		return
+	}
+	if !h.ensurePackageReadable(w, r, packageID) {
 		return
 	}
 	versionStr := chi.URLParam(r, "version")
@@ -105,16 +106,13 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
-	// Bug 214: valida package antes de tentar publicar version (evita 500
-	// genérico quando packageId não existe).
-	if h.pkg != nil {
-		if err := h.pkg.GetByID(r.Context(), packageID); err != nil {
-			apierror.Write(w, http.StatusNotFound, "package not found")
-			return
-		}
+	// Validates package visibility before publishing, avoiding a generic error
+	// for missing parents and hiding PRIVATE parents from other tenants.
+	if !h.ensurePackageReadable(w, r, packageID) {
+		return
 	}
 	var req PublishVersionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -152,6 +150,9 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
+	if !h.ensurePackageReadable(w, r, packageID) {
+		return
+	}
 	versionStr := chi.URLParam(r, "version")
 	if err := h.svc.Delete(r.Context(), packageID, versionStr, tenantID); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -171,4 +172,15 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 
 func tenantFromContext(ctx context.Context) string {
 	return tenant.FromContext(ctx)
+}
+
+func (h *Handler) ensurePackageReadable(w http.ResponseWriter, r *http.Request, packageID uuid.UUID) bool {
+	if h.pkg == nil {
+		return true
+	}
+	if _, err := h.pkg.GetAccessibleByID(r.Context(), packageID, tenantFromContext(r.Context())); err != nil {
+		apierror.Write(w, http.StatusNotFound, "package not found")
+		return false
+	}
+	return true
 }

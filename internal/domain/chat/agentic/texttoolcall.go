@@ -1,12 +1,16 @@
 package agentic
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
+
+const syntheticTextToolCallIDMaxLen = 64
 
 // parseTextToolCalls extracts tool calls emitted as raw JSON text by LLMs
 // that fail to use the provider's structured tool_calls channel.
@@ -101,7 +105,7 @@ func decodeOneToolCall(raw json.RawMessage, index int) (ai.ToolCall, bool) {
 
 	id := stringFieldOrEmpty(m, "id", "call_id")
 	if id == "" {
-		id = fmt.Sprintf("call_txt_%d_%s", index, name)
+		id = syntheticTextToolCallID(index, name)
 	}
 
 	return ai.ToolCall{
@@ -112,6 +116,15 @@ func decodeOneToolCall(raw json.RawMessage, index int) (ai.ToolCall, bool) {
 			Arguments: string(argsRaw),
 		},
 	}, true
+}
+
+func syntheticTextToolCallID(index int, name string) string {
+	id := fmt.Sprintf("call_txt_%d_%s", index, name)
+	if len(id) <= syntheticTextToolCallIDMaxLen {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return fmt.Sprintf("call_txt_%d_%s", index, hex.EncodeToString(sum[:])[:24])
 }
 
 func stringField(m map[string]json.RawMessage, keys ...string) (string, bool) {

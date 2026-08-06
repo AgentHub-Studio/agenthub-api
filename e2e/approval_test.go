@@ -79,7 +79,7 @@ func TestE2E_ApprovalCRUD(t *testing.T) {
 		var page testutil.Page[map[string]any]
 		s := c.Get("/api/approvals?page=0&size=20", &page)
 		assert.Equal(t, http.StatusOK, s)
-		assert.GreaterOrEqual(t, int64(page.TotalElements), int64(1))
+		assert.GreaterOrEqual(t, page.TotalElements, 1)
 		found := false
 		for _, a := range page.Content {
 			if a["id"] == approvalID {
@@ -259,7 +259,7 @@ func TestE2E_ApprovalPagination(t *testing.T) {
 	s := c.Get("/api/approvals?page=0&size=3", &page1)
 	assert.Equal(t, http.StatusOK, s)
 	assert.Equal(t, 3, len(page1.Content))
-	assert.GreaterOrEqual(t, int64(page1.TotalElements), int64(5))
+	assert.GreaterOrEqual(t, page1.TotalElements, 5)
 
 	// Page 1 size 3 → remaining items
 	var page2 testutil.Page[map[string]any]

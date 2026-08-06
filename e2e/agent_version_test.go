@@ -13,7 +13,7 @@ import (
 )
 
 // TestE2E_AgentVersionLifecycle validates the full agent version workflow:
-// list empty → create draft → get draft → update draft → publish → conflict guard.
+// list empty → create draft → publish → conflict guard → rollback.
 func TestE2E_AgentVersionLifecycle(t *testing.T) {
 	cfg := e2eConfig()
 	tenant := testutil.NewTenantFixture(t,
@@ -59,8 +59,8 @@ func TestE2E_AgentVersionLifecycle(t *testing.T) {
 	t.Run("create draft version", func(t *testing.T) {
 		s := c.Post("/api/agents/"+agentID+"/versions", map[string]any{
 			"description":    "Initial draft",
-			"definitionJson": map[string]any{"nodes": []any{}, "edges": []any{}},
-			"configJson":     map[string]any{},
+			"definitionJson": map[string]any{"systemPrompt": "Version one system prompt"},
+			"configJson":     map[string]any{"provider": "openrouter", "model": "baseline-model"},
 		}, &draftVersion)
 		require.Equal(t, http.StatusCreated, s, "create draft must return 201")
 		require.NotNil(t, draftVersion["id"], "draft must have id")
@@ -145,6 +145,39 @@ func TestE2E_AgentVersionLifecycle(t *testing.T) {
 		var errResp testutil.ErrorResponse
 		s := c.Post("/api/agents/"+agentID+"/versions/"+versionID+"/publish", nil, &errResp)
 		assert.Equal(t, http.StatusConflict, s)
+	})
+
+	// --- Create and publish a later version before rolling back to version 1. ---
+	var secondVersion map[string]any
+	t.Run("create and publish second version", func(t *testing.T) {
+		s := c.Post("/api/agents/"+agentID+"/versions", map[string]any{
+			"description":    "Second published version",
+			"definitionJson": map[string]any{"systemPrompt": "Version two system prompt"},
+			"configJson":     map[string]any{"provider": "openrouter", "model": "later-model"},
+		}, &secondVersion)
+		require.Equal(t, http.StatusCreated, s)
+		secondVersionID := secondVersion["id"].(string)
+
+		var published map[string]any
+		s = c.Post("/api/agents/"+agentID+"/versions/"+secondVersionID+"/publish", nil, &published)
+		require.Equal(t, http.StatusOK, s)
+		assert.Equal(t, "PUBLISHED", published["status"])
+	})
+
+	t.Run("rollback restores first published snapshot", func(t *testing.T) {
+		var rollback map[string]any
+		s := c.Post("/api/agents/"+agentID+"/versions/"+versionID+"/rollback", nil, &rollback)
+		require.Equal(t, http.StatusOK, s)
+		assert.Equal(t, "PUBLISHED", rollback["status"])
+		assert.Equal(t, "Rollback to version 1", rollback["description"])
+
+		var restored map[string]any
+		require.Equal(t, http.StatusOK, c.Get("/api/agents/"+agentID, &restored))
+		assert.Equal(t, "Version one system prompt", restored["systemPrompt"])
+		modelConfig, ok := restored["modelConfig"].(map[string]any)
+		require.True(t, ok, "restored modelConfig must be an object")
+		assert.Equal(t, "baseline-model", modelConfig["model"])
+		assert.EqualValues(t, 3, restored["currentVersion"])
 	})
 }
 

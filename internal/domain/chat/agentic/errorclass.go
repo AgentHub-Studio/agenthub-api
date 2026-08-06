@@ -13,18 +13,18 @@ import (
 // Inspired by Claude Code's errorIds.ts.
 
 const (
-	ErrIDToolUseSummaryFailed  = 344
-	ErrIDStreamFallbackFailed  = 345
-	ErrIDCompactFailed         = 346
-	ErrIDContextOverflow       = 347
-	ErrIDMaxTokensExhausted    = 348
-	ErrIDHookExecutionFailed   = 349
-	ErrIDSkillExecutionFailed  = 350
-	ErrIDPromptTooLong         = 351
-	ErrIDSessionPersistFailed  = 352
-	ErrIDModelFallbackFailed   = 353
-	ErrIDPermissionDenied      = 354
-	ErrIDTaskExecutionFailed   = 355
+	ErrIDToolUseSummaryFailed = 344
+	ErrIDStreamFallbackFailed = 345
+	ErrIDCompactFailed        = 346
+	ErrIDContextOverflow      = 347
+	ErrIDMaxTokensExhausted   = 348
+	ErrIDHookExecutionFailed  = 349
+	ErrIDSkillExecutionFailed = 350
+	ErrIDPromptTooLong        = 351
+	ErrIDSessionPersistFailed = 352
+	ErrIDModelFallbackFailed  = 353
+	ErrIDPermissionDenied     = 354
+	ErrIDTaskExecutionFailed  = 355
 )
 
 // --- Error types ---
@@ -250,17 +250,13 @@ func HasExactMessage(err error, msg string) bool {
 	return err.Error() == msg
 }
 
-// sanitizeToolError scrubs internal infrastructure details (hostnames, ports,
-// internal error codes) from a tool error message before emitting it to the
-// LLM or to the SSE stream. P-C65-2.
-//
-// Bug 285: também remove URLs internas, IPs privados de cluster e hostnames
-// de service k8s. Sem isso, tool_result error vazava topologia interna do
-// cluster (ex: "http://agenthub-embedding:8092/embed" + IPs 10.42.x).
+// sanitizeToolError removes credentials and internal infrastructure details
+// before a tool error reaches model context, persistence, or SSE. P-C65-2.
 func sanitizeToolError(msg string) string {
 	if msg == "" {
 		return msg
 	}
+	msg = redactSensitiveToolResultString(msg)
 	// Remove stack traces and internal Go package paths.
 	if idx := strings.Index(msg, "\ngoroutine "); idx > 0 {
 		msg = msg[:idx]
@@ -273,6 +269,22 @@ func sanitizeToolError(msg string) string {
 		msg = msg[:maxLen] + "…"
 	}
 	return strings.TrimSpace(msg)
+}
+
+// sanitizeSSEMessage removes credentials and infrastructure details from data
+// that crosses the SSE boundary. Errors and warnings can include raw provider,
+// transport, hook, or persistence diagnostics, so they need the same defense
+// in depth as tool results.
+func sanitizeSSEMessage(msg string) string {
+	return sanitizeToolError(msg)
+}
+
+func sanitizeSSEMessagePtr(msg *string) *string {
+	if msg == nil {
+		return nil
+	}
+	safe := sanitizeSSEMessage(*msg)
+	return &safe
 }
 
 // scrubInternalNetwork redacts URLs, IPs and hostnames that hint at internal

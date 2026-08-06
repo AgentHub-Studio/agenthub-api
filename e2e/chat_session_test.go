@@ -3,7 +3,9 @@
 package e2e
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -92,29 +94,28 @@ func TestE2E_ChatSessionLifecycle(t *testing.T) {
 		assert.NotEmpty(t, userMsg["id"])
 	})
 
-	t.Run("add assistant message", func(t *testing.T) {
-		var assistantMsg map[string]any
+	t.Run("reject assistant message from client", func(t *testing.T) {
+		var errResp testutil.ErrorResponse
 		status := c.Post("/api/chat/sessions/"+sessionID+"/messages", map[string]any{
 			"role":    "assistant",
 			"content": "I can help you with many tasks.",
-		}, &assistantMsg)
-		assert.Equal(t, http.StatusCreated, status)
-		assert.Equal(t, "assistant", assistantMsg["role"])
+		}, &errResp)
+		assert.Equal(t, http.StatusUnprocessableEntity, status)
 	})
 
 	// --- List Messages ---
-	t.Run("list messages returns both messages in order", func(t *testing.T) {
+	t.Run("list messages returns only client-authored messages", func(t *testing.T) {
 		var page testutil.Page[map[string]any]
 		status := c.Get("/api/chat/sessions/"+sessionID+"/messages?size=50", &page)
 		assert.Equal(t, http.StatusOK, status)
-		require.GreaterOrEqual(t, len(page.Content), 2)
+		require.Len(t, page.Content, 1)
 
 		roles := make([]string, len(page.Content))
 		for i, m := range page.Content {
 			roles[i] = m["role"].(string)
 		}
 		assert.Contains(t, roles, "user")
-		assert.Contains(t, roles, "assistant")
+		assert.NotContains(t, roles, "assistant")
 	})
 
 	// --- Add Message with missing role returns 422 ---
@@ -189,8 +190,7 @@ func TestE2E_ChatSessionDelete(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, status)
 }
 
-// TestE2E_ChatSessionStream verifies the SSE stream endpoint returns the correct headers
-// and sends an SSE [DONE] event when no assistant reply is found within the poll window.
+// TestE2E_ChatSessionStream verifies that starting a configured chat session streams SSE events.
 func TestE2E_ChatSessionStream(t *testing.T) {
 	cfg := e2eConfig()
 	tenant := testutil.NewTenantFixture(t,
@@ -200,37 +200,52 @@ func TestE2E_ChatSessionStream(t *testing.T) {
 	)
 	c := tenant.Client(t, cfg.backendURL)
 
-	// Create a session to stream from
+	var agent map[string]any
+	status := c.Post("/api/agents", map[string]any{
+		"name":         "E2E Streaming Agent",
+		"description":  "Agent used to validate the chat SSE contract",
+		"systemPrompt": "Reply concisely to the user.",
+		"modelConfig": map[string]any{
+			"provider": "ollama",
+			"model":    "agenthub-e2e-fake",
+		},
+	}, &agent)
+	require.Equal(t, http.StatusCreated, status)
+	agentID := agent["id"].(string)
+	t.Cleanup(func() { c.Delete("/api/agents/" + agentID) })
+	require.Equal(t, http.StatusOK, c.Post("/api/agents/"+agentID+"/publish", nil, nil))
+
+	// Create a session bound to the published agent so the run has a real model path.
 	var session map[string]any
-	status := c.Post("/api/chat/sessions", map[string]any{"title": "SSE Stream Test"}, &session)
+	status = c.Post("/api/chat/sessions", map[string]any{
+		"title":   "SSE Stream Test",
+		"agentId": agentID,
+	}, &session)
 	require.Equal(t, http.StatusCreated, status)
 	sessionID := session["id"].(string)
 	t.Cleanup(func() { c.Delete("/api/chat/sessions/" + sessionID) })
 
-	// Open SSE stream with a short client timeout so the test does not block 120 s
-	streamURL := cfg.backendURL + "/api/chat/sessions/" + sessionID + "/stream"
-	streamReq, err := http.NewRequest(http.MethodGet, streamURL, nil)
+	streamReq, err := http.NewRequest(
+		http.MethodPost,
+		cfg.backendURL+"/api/chat/sessions/"+sessionID+"/run",
+		bytes.NewBufferString(`{"message":"stream this E2E response"}`),
+	)
 	require.NoError(t, err)
 	streamReq.Header.Set("Authorization", "Bearer "+c.Token)
 	streamReq.Header.Set("Accept", "text/event-stream")
+	streamReq.Header.Set("Content-Type", "application/json")
 
-	// Use a short timeout — the handler will close after 120 s, but we only wait a few
-	// seconds to verify headers and partial body.
-	httpClient := &http.Client{Timeout: 5 * time.Second}
+	httpClient := &http.Client{Timeout: 30 * time.Second}
 	resp, err := httpClient.Do(streamReq)
-	// A timeout here is acceptable because the server keeps the connection open;
-	// we only need to verify headers were set correctly before the timeout fires.
-	if err != nil {
-		// If the request timed out the client-side, we still got the headers in the
-		// initial response — net/http surfaces them even on read-timeout.
-		t.Logf("stream request ended (expected on short timeout): %v", err)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
+	require.NoError(t, err)
+	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")
-	assert.Equal(t, "no-cache", resp.Header.Get("Cache-Control"))
+	assert.Contains(t, resp.Header.Get("Cache-Control"), "no-cache")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "event: run_complete")
 }
 
 // TestE2E_ChatSessionTenantIsolation verifies sessions are isolated per tenant.

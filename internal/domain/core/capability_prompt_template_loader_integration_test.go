@@ -19,9 +19,9 @@ import (
 // Postgres (testcontainers pgvector:pg16). Build tag `integration`.
 //
 // Migration chain applied per test:
-//   000001 schema → 000019 prompt_template table + 8 platform rows → 000094 5 capability rows
+//   000001 schema → 000019 core_prompt_template table + 8 platform rows → 000094 5 capability rows
 //
-// The ah_core.prompt_template table is created by migration 000019, not 000001.
+// The ah_core.core_prompt_template table is created by migration 000019, not 000001.
 // Migration 000094 depends on that table existing.
 
 const capabilityPromptMigration = "000094_seed_capability_prompt_templates.up.sql"

@@ -1,14 +1,18 @@
 package document
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/knowledgebase/graph"
 	"github.com/AgentHub-Studio/agenthub-api/internal/metadata"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -21,6 +25,11 @@ type Service struct {
 	publisher EventPublisher
 	bucket    string
 }
+
+const (
+	maxInlineTextIndexBytes = 1 << 20
+	maxPlainTextChunkBytes  = 1600
+)
 
 // NewService creates a new Service backed by the given Repository, StorageClient, and EventPublisher.
 // Pass &NoopEventPublisher{} when RabbitMQ is not configured.
@@ -80,6 +89,19 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentRespon
 	}
 	req.Metadata = parsedMetadata
 
+	var inlineText []byte
+	if shouldInlineIndexText(req.ContentType, req.FileName, req.FileSize) {
+		text, err := readInlineText(req.Content, req.FileSize)
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		inlineText = text
+		req.Content = bytes.NewReader(inlineText)
+		if req.FileSize <= 0 {
+			req.FileSize = int64(len(inlineText))
+		}
+	}
+
 	// Derive a stable storage key before uploading so the DB record and the object share the same path.
 	docID := uuid.New()
 	storagePath := fmt.Sprintf("documents/%s/%s/%s", req.KnowledgeBaseID, docID, req.FileName)
@@ -104,6 +126,21 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentRespon
 		return DocumentResponse{}, fmt.Errorf("document service: upload: %w", err)
 	}
 
+	if len(inlineText) > 0 {
+		chunks := splitPlainTextChunks(string(inlineText))
+		if len(chunks) > 0 {
+			if err := s.repo.ReplaceTextChunks(ctx, created.ID, chunks); err != nil {
+				return DocumentResponse{}, fmt.Errorf("document service: index text chunks: %w", err)
+			}
+		}
+		graphSnapshot := graph.Extract(string(inlineText))
+		if len(graphSnapshot.Entities) > 0 || len(graphSnapshot.Edges) > 0 {
+			if err := s.repo.ReplaceTextGraph(ctx, created.ID, created.KnowledgeBaseID, graphSnapshot); err != nil {
+				return DocumentResponse{}, fmt.Errorf("document service: index text graph: %w", err)
+			}
+		}
+	}
+
 	// Publish event so the extractor picks up the document.
 	// A publish failure is logged but does not roll back the upload — the document
 	// remains in PENDING status and can be re-triggered manually if needed.
@@ -123,6 +160,82 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (DocumentRespon
 	}
 
 	return ResponseFrom(created), nil
+}
+
+func shouldInlineIndexText(contentType, fileName string, fileSize int64) bool {
+	if fileSize > maxInlineTextIndexBytes {
+		return false
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	if strings.HasPrefix(mediaType, "text/") {
+		return true
+	}
+	switch mediaType {
+	case "application/json", "application/x-ndjson", "application/xml":
+		return true
+	}
+	name := strings.ToLower(fileName)
+	return strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".markdown") || strings.HasSuffix(name, ".txt")
+}
+
+func readInlineText(r io.Reader, fileSize int64) ([]byte, error) {
+	if fileSize > maxInlineTextIndexBytes {
+		return nil, fmt.Errorf("document service: text file exceeds inline indexing limit of %d bytes", maxInlineTextIndexBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxInlineTextIndexBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("document service: read text file: %w", err)
+	}
+	if len(data) > maxInlineTextIndexBytes {
+		return nil, fmt.Errorf("document service: text file exceeds inline indexing limit of %d bytes", maxInlineTextIndexBytes)
+	}
+	return data, nil
+}
+
+func splitPlainTextChunks(text string) []string {
+	normalized := strings.ToValidUTF8(strings.ReplaceAll(text, "\r\n", "\n"), "")
+	paragraphs := strings.Split(normalized, "\n\n")
+	chunks := make([]string, 0, len(paragraphs))
+	for _, paragraph := range paragraphs {
+		paragraph = strings.TrimSpace(paragraph)
+		if paragraph == "" {
+			continue
+		}
+		for len(paragraph) > maxPlainTextChunkBytes {
+			cut := plainTextChunkCut(paragraph, maxPlainTextChunkBytes)
+			chunk := strings.TrimSpace(paragraph[:cut])
+			if chunk != "" {
+				chunks = append(chunks, chunk)
+			}
+			paragraph = strings.TrimSpace(paragraph[cut:])
+		}
+		if paragraph != "" {
+			chunks = append(chunks, paragraph)
+		}
+	}
+	return chunks
+}
+
+func plainTextChunkCut(paragraph string, maxBytes int) int {
+	window := paragraph[:maxBytes]
+	if cut := strings.LastIndex(window, "\n"); cut > 0 {
+		return cut
+	}
+	if cut := strings.LastIndex(window, " "); cut > 0 {
+		return cut
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.ValidString(paragraph[:cut]) {
+		cut--
+	}
+	if cut > 0 {
+		return cut
+	}
+	_, size := utf8.DecodeRuneInString(paragraph)
+	if size > 0 {
+		return size
+	}
+	return maxBytes
 }
 
 // Delete removes a document by ID.

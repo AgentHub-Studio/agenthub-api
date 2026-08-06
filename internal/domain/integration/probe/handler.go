@@ -1,11 +1,11 @@
 package probe
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -28,7 +28,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 func (h *Handler) testHTTP(w http.ResponseWriter, r *http.Request) {
 	var req HTTPRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -37,7 +37,7 @@ func (h *Handler) testHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) testDatabase(w http.ResponseWriter, r *http.Request) {
 	var req DatabaseRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -46,7 +46,7 @@ func (h *Handler) testDatabase(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) testMCP(w http.ResponseWriter, r *http.Request) {
 	var req MCPRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

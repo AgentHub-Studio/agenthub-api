@@ -25,7 +25,7 @@ func TestStopHooksOrchestrator_NilDeps(t *testing.T) {
 	ch := make(chan agentic.RunEvent, 10)
 	orch := agentic.NewStopHooksOrchestrator(nil, nil, nil, ch)
 
-	result := orch.HandleStopHooks(context.TODO(), agentic.StopHookContext{
+	result := orch.HandleStopHooks(context.Background(), agentic.StopHookContext{
 		QuerySource: agentic.SourceMainLoop,
 	})
 
@@ -41,7 +41,7 @@ func TestStopHooksOrchestrator_SavesCacheSafeParams(t *testing.T) {
 
 	params := agentic.NewCacheSafeParams("prompt", nil, "anthropic", "model", true)
 
-	orch.HandleStopHooks(context.TODO(), agentic.StopHookContext{
+	orch.HandleStopHooks(context.Background(), agentic.StopHookContext{
 		QuerySource:     agentic.SourceMainLoop,
 		CurrentDepth:    0, // Root agent.
 		CacheSafeParams: params,
@@ -58,7 +58,7 @@ func TestStopHooksOrchestrator_DoesNotSaveForSubAgents(t *testing.T) {
 
 	params := agentic.NewCacheSafeParams("prompt", nil, "anthropic", "model", true)
 
-	orch.HandleStopHooks(context.TODO(), agentic.StopHookContext{
+	orch.HandleStopHooks(context.Background(), agentic.StopHookContext{
 		QuerySource:     agentic.SourceSubtask,
 		CurrentDepth:    1, // Sub-agent — must NOT overwrite parent snapshot.
 		CacheSafeParams: params,
@@ -83,7 +83,7 @@ func TestStopHooksOrchestrator_SkipsBackgroundTasksForSubAgents(t *testing.T) {
 
 	orch := agentic.NewStopHooksOrchestrator(nil, extractor, nil, ch)
 
-	result := orch.HandleStopHooks(context.TODO(), agentic.StopHookContext{
+	result := orch.HandleStopHooks(context.Background(), agentic.StopHookContext{
 		QuerySource:   agentic.SourceSubtask,
 		CurrentDepth:  1, // Sub-agent.
 		CurrentTokens: 10000,

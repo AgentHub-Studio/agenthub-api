@@ -2,6 +2,7 @@ package channel
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,35 +48,62 @@ func ResponseFrom(ch Channel) ChannelResponse {
 // (Slack signing secrets, Telegram bot tokens, custom webhook secrets);
 // without masking, GET /api/channels exposes them to anyone with read access.
 func maskSensitiveConfigKeys(raw json.RawMessage) json.RawMessage {
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
 		return raw
 	}
-	for k, v := range m {
-		if isSensitiveConfigKey(k) {
-			if s, ok := v.(string); ok && s != "" {
-				m[k] = "***"
-			}
-		}
-	}
-	out, err := json.Marshal(m)
+	out, err := json.Marshal(maskSensitiveConfigValue(value))
 	if err != nil {
 		return raw
 	}
 	return out
 }
 
+func maskSensitiveConfigValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if isSensitiveConfigKey(key) {
+				out[key] = maskedSensitiveValue(child)
+				continue
+			}
+			out[key] = maskSensitiveConfigValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = maskSensitiveConfigValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func maskedSensitiveValue(value any) any {
+	if s, ok := value.(string); ok && s == "" {
+		return s
+	}
+	if value == nil {
+		return nil
+	}
+	return "***"
+}
+
 // isSensitiveConfigKey returns true for config keys that hold credentials
 // and must be masked in API responses.
 func isSensitiveConfigKey(k string) bool {
-	switch k {
-	case "token", "secret", "apiKey", "apikey", "password",
-		"signingSecret", "signing_secret",
-		"botToken", "bot_token", "accessToken", "access_token",
-		"refreshToken", "refresh_token", "clientSecret", "client_secret":
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(k))
+	switch normalized {
+	case "token", "secret", "apikey", "password",
+		"signingsecret", "bottoken", "accesstoken",
+		"refreshtoken", "clientsecret":
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // CreateChannelRequest is the JSON body for creating a channel.

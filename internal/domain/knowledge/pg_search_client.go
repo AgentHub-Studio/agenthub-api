@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/database"
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
@@ -24,6 +28,8 @@ type PgDocumentSearchClient struct {
 	embeddingURL string
 	httpClient   *http.Client
 }
+
+var errDocumentSearchEmbeddingRedirectNotAllowed = errors.New("knowledge: embedding redirect target is not allowed")
 
 // NewPgDocumentSearchClient creates a PgDocumentSearchClient.
 // embeddingURL is the base URL of the embedding service (e.g. "http://agenthub-embedding:8092").
@@ -56,7 +62,8 @@ func (c *PgDocumentSearchClient) embed(ctx context.Context, text string) ([]floa
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	// #nosec G704 -- the configured embedding service is infrastructure-owned and every redirect is checked against the SSRF policy.
+	resp, err := c.validatedHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("knowledge: embed request failed: %w", err)
 	}
@@ -76,13 +83,34 @@ func (c *PgDocumentSearchClient) embed(ctx context.Context, text string) ([]floa
 	return result.Embedding, nil
 }
 
+func (c *PgDocumentSearchClient) validatedHTTPClient() *http.Client {
+	client := c.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+
+	protected := *client
+	previousCheckRedirect := client.CheckRedirect
+	protected.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := ssrf.ValidateURL(req.URL.String()); err != nil {
+			return errDocumentSearchEmbeddingRedirectNotAllowed
+		}
+		if previousCheckRedirect != nil {
+			return previousCheckRedirect(req, via)
+		}
+		return nil
+	}
+	return &protected
+}
+
 // pgQuerier is a minimal interface satisfied by both *pgxpool.Pool and *pgxpool.Conn.
 type pgQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// Search embeds the query and returns the top-K most similar chunks filtered by kbIDs.
-// If kbIDs is empty all active KBs in the current tenant schema are searched.
+// Search embeds the query and returns the top-K most similar chunks filtered by options.
+// If options.KBIDs is empty all active KBs in the current tenant schema are searched.
 // When ctx carries a tenant ID (via tenant.FromContext) a dedicated connection is
 // acquired with the correct search_path so the per-tenant schema tables are visible.
 func (c *PgDocumentSearchClient) Search(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
@@ -109,6 +137,14 @@ func (c *PgDocumentSearchClient) Search(ctx context.Context, query string, opts 
 // searchWithQuerier performs the actual vector search using the given querier.
 // The querier must already have the correct search_path set if per-tenant isolation is required.
 func (c *PgDocumentSearchClient) searchWithQuerier(ctx context.Context, db pgQuerier, query string, opts SearchOptions) ([]SearchResult, error) {
+	hasEmbeddings, err := hasSearchableEmbeddings(ctx, db, opts.KBIDs)
+	if err != nil {
+		return nil, err
+	}
+	if !hasEmbeddings {
+		return c.textSearchWithQuerier(ctx, db, query, opts)
+	}
+
 	queryVec, err := c.embed(ctx, query)
 	if err != nil {
 		return nil, err
@@ -116,13 +152,6 @@ func (c *PgDocumentSearchClient) searchWithQuerier(ctx context.Context, db pgQue
 
 	// Build a pgvector-compatible string representation: '[f1,f2,...]'
 	vecStr := floatSliceToVector(queryVec)
-	metadataWhere := ""
-	metadataArgs := []any(nil)
-	if opts.MetadataFilter != nil {
-		clause, args := opts.MetadataFilter.SQL(2)
-		metadataWhere = " AND " + clause
-		metadataArgs = args
-	}
 
 	// P-E1-2: search document_chunk_embedding (per-tenant schema) using cosine distance.
 	// Join with document_chunk to get content, document_id, and knowledge_base_id.
@@ -138,6 +167,12 @@ func (c *PgDocumentSearchClient) searchWithQuerier(ctx context.Context, db pgQue
 
 	// knowledge_base_id lives on the document table, not document_chunk.
 	// The join path is: document_chunk_embedding → document_chunk → document.
+	metadataClause, metadataArgs := opts.MetadataFilter.SQL(2)
+	metadataWhere := ""
+	if metadataClause != "" {
+		metadataWhere = " AND " + metadataClause
+	}
+
 	if len(opts.KBIDs) > 0 {
 		// Build IN clause manually — pgx doesn't support uuid[] binding for this shape.
 		inClause := "("
@@ -196,7 +231,7 @@ LIMIT $2`, inClause, metadataWhere)
 		// No kbID filter — search all document chunks in the tenant schema.
 		// P-KB1-1: always exclude chunks from PAUSED KBs regardless of whether
 		// the caller specified kbIDs — pause means no search results.
-		sqlQuery := `
+		sqlQuery := fmt.Sprintf(`
 SELECT
     dc.id                  AS chunk_id,
     dc.document_id,
@@ -210,8 +245,7 @@ JOIN document d ON d.id = dc.document_id
 JOIN knowledge_base kb ON kb.id = d.knowledge_base_id
 WHERE kb.status = 'ACTIVE'%s
 ORDER BY dce.embedding <=> $1::vector
-LIMIT $2`
-		sqlQuery = fmt.Sprintf(sqlQuery, metadataWhere)
+LIMIT $2`, metadataWhere)
 
 		args := append([]any{vecStr, opts.TopK}, metadataArgs...)
 		dbRows, err := db.Query(ctx, sqlQuery, args...)
@@ -251,6 +285,150 @@ LIMIT $2`
 		}
 	}
 	return results, nil
+}
+
+func (c *PgDocumentSearchClient) textSearchWithQuerier(ctx context.Context, db pgQuerier, query string, opts SearchOptions) ([]SearchResult, error) {
+	tokens := queryTokens(query)
+	if len(tokens) == 0 {
+		return []SearchResult{}, nil
+	}
+	if len(tokens) > 8 {
+		tokens = tokens[:8]
+	}
+
+	var conditions []string
+	args := make([]any, 0, len(tokens)+1)
+	for _, token := range tokens {
+		args = append(args, "%"+token+"%")
+		conditions = append(conditions, fmt.Sprintf("LOWER(dc.content) LIKE $%d", len(args)))
+	}
+
+	kbFilter := ""
+	if len(opts.KBIDs) > 0 {
+		inClause := "("
+		for i, id := range opts.KBIDs {
+			if i > 0 {
+				inClause += ","
+			}
+			inClause += "'" + id.String() + "'"
+		}
+		inClause += ")"
+		kbFilter = "AND d.knowledge_base_id IN " + inClause
+	}
+	metadataFilter := ""
+	if opts.MetadataFilter != nil {
+		clause, metadataArgs := opts.MetadataFilter.SQL(len(args))
+		args = append(args, metadataArgs...)
+		metadataFilter = "AND " + clause
+	}
+
+	args = append(args, opts.TopK)
+	limitArg := len(args)
+	sqlQuery := fmt.Sprintf(`
+SELECT
+    dc.id,
+    dc.document_id,
+    dc.content,
+    d.file_name,
+    d.knowledge_base_id,
+    dc.chunk_index
+FROM document_chunk dc
+JOIN document d ON d.id = dc.document_id
+JOIN knowledge_base kb ON kb.id = d.knowledge_base_id
+WHERE kb.status = 'ACTIVE'
+  %s
+  %s
+  AND (%s)
+ORDER BY d.created_at ASC, dc.chunk_index ASC, dc.id ASC
+LIMIT $%d`, kbFilter, metadataFilter, strings.Join(conditions, " OR "), limitArg)
+
+	rows, err := db.Query(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge: text search query: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]SearchResult, 0, opts.TopK)
+	for rows.Next() {
+		var result SearchResult
+		var chunkIndex int
+		if err := rows.Scan(
+			&result.ChunkID,
+			&result.DocumentID,
+			&result.Content,
+			&result.DocumentName,
+			&result.KnowledgeBaseID,
+			&chunkIndex,
+		); err != nil {
+			return nil, fmt.Errorf("knowledge: scan text search row: %w", err)
+		}
+		result.Score = 1.0 / float64(chunkIndex+1)
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("knowledge: iterate text search rows: %w", err)
+	}
+
+	return results, nil
+}
+
+func queryTokens(query string) []string {
+	seen := map[string]bool{}
+	tokens := []string{}
+	for _, token := range strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if token == "" || seen[token] {
+			continue
+		}
+		seen[token] = true
+		tokens = append(tokens, token)
+	}
+	return tokens
+}
+
+func hasSearchableEmbeddings(ctx context.Context, db pgQuerier, kbIDs []uuid.UUID) (bool, error) {
+	if len(kbIDs) > 0 {
+		inClause := "("
+		for i, id := range kbIDs {
+			if i > 0 {
+				inClause += ","
+			}
+			inClause += "'" + id.String() + "'"
+		}
+		inClause += ")"
+
+		sqlQuery := fmt.Sprintf(`
+SELECT EXISTS (
+	SELECT 1
+	FROM document_chunk_embedding dce
+	JOIN document_chunk dc ON dc.id = dce.chunk_id
+	JOIN document d ON d.id = dc.document_id
+	JOIN knowledge_base kb ON kb.id = d.knowledge_base_id
+	WHERE d.knowledge_base_id IN %s AND kb.status = 'ACTIVE'
+)`, inClause)
+
+		var exists bool
+		if err := db.QueryRow(ctx, sqlQuery).Scan(&exists); err != nil {
+			return false, fmt.Errorf("knowledge: check searchable embeddings: %w", err)
+		}
+		return exists, nil
+	}
+
+	const sqlQuery = `
+SELECT EXISTS (
+	SELECT 1
+	FROM document_chunk_embedding dce
+	JOIN document_chunk dc ON dc.id = dce.chunk_id
+	JOIN document d ON d.id = dc.document_id
+	JOIN knowledge_base kb ON kb.id = d.knowledge_base_id
+	WHERE kb.status = 'ACTIVE'
+)`
+	var exists bool
+	if err := db.QueryRow(ctx, sqlQuery).Scan(&exists); err != nil {
+		return false, fmt.Errorf("knowledge: check searchable embeddings: %w", err)
+	}
+	return exists, nil
 }
 
 // floatSliceToVector converts a float32 slice to a pgvector-compatible string.

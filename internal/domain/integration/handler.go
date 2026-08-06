@@ -1,9 +1,11 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/datasource"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/mcp"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -124,7 +127,7 @@ func (e *filterError) Error() string { return "invalid " + e.name + " filter" }
 
 func (h *Handler) createHTTP(w http.ResponseWriter, r *http.Request) {
 	var req HTTPCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -165,7 +168,7 @@ func (h *Handler) updateHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req HTTPCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -200,7 +203,7 @@ func (h *Handler) deleteHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) createDatabase(w http.ResponseWriter, r *http.Request) {
 	var req DatabaseCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -236,10 +239,32 @@ func (h *Handler) updateDatabase(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	var req DatabaseCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+	var req DatabaseCreateRequest
+	if err := httputil.DecodeSingleJSON(bytes.NewReader(body), &req); err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if r.Method == http.MethodPatch {
+		var fields map[string]json.RawMessage
+		if err := httputil.DecodeSingleJSON(bytes.NewReader(body), &fields); err != nil {
+			respond.Error(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		current, err := h.svc.GetDatabase(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, datasource.ErrNotFound) || errors.Is(err, tool.ErrNotFound) {
+				respond.Error(w, http.StatusNotFound, "integration not found")
+				return
+			}
+			respond.Error(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		mergeDatabasePatch(&req, current, fields)
 	}
 	resp, err := h.svc.UpdateDatabase(r.Context(), id, req)
 	if err != nil {
@@ -251,6 +276,39 @@ func (h *Handler) updateDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond.JSON(w, http.StatusOK, resp)
+}
+
+func mergeDatabasePatch(req *DatabaseCreateRequest, current DatabaseResponse, fields map[string]json.RawMessage) {
+	if _, ok := fields["name"]; !ok {
+		req.Name = current.Name
+	}
+	if _, ok := fields["description"]; !ok {
+		req.Description = current.Description
+	}
+	if _, ok := fields["type"]; !ok {
+		req.Type = current.Type
+	}
+	if _, ok := fields["host"]; !ok {
+		req.Host = current.Host
+	}
+	if _, ok := fields["port"]; !ok {
+		req.Port = current.Port
+	}
+	if _, ok := fields["database"]; !ok {
+		req.Database = current.Database
+	}
+	if _, ok := fields["dbUser"]; !ok {
+		req.DBUser = current.DBUser
+	}
+	if _, ok := fields["vpnResourceId"]; !ok {
+		req.VpnResourceID = current.VpnResourceID
+	}
+	if _, ok := fields["query"]; !ok {
+		req.Query = current.Query
+	}
+	if _, ok := fields["allowWrite"]; !ok {
+		req.AllowWrite = current.AllowWrite
+	}
 }
 
 func (h *Handler) deleteDatabase(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +330,7 @@ func (h *Handler) deleteDatabase(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) createMCP(w http.ResponseWriter, r *http.Request) {
 	var req mcp.CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -309,7 +367,7 @@ func (h *Handler) updateMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req mcp.UpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

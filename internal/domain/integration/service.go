@@ -38,6 +38,10 @@ type datasourceCatalog interface {
 	Delete(ctx context.Context, tenantID string, id uuid.UUID) error
 }
 
+type datasourceVPNReplacingUpdater interface {
+	UpdateReplacingVPNResource(ctx context.Context, tenantID string, id uuid.UUID, req datasource.CreateRequest) (datasource.DataSource, error)
+}
+
 type mcpCatalog interface {
 	List(ctx context.Context) ([]mcp.McpServerConfigResponse, error)
 	Create(ctx context.Context, req mcp.CreateRequest) (mcp.McpServerConfigResponse, error)
@@ -148,7 +152,16 @@ func (s *Service) List(ctx context.Context, req pagination.PageRequest, filters 
 		if item.VpnResourceID != nil {
 			linkedVPNs[*item.VpnResourceID] = struct{}{}
 		}
-		items = append(items, buildDatabaseIntegration(item, dbToolsByDataSource[item.ID], vpnByID))
+		linkedTools := dbToolsByDataSource[item.ID]
+		advanced := len(linkedTools) != 1
+		if len(linkedTools) == 1 && s.repo != nil {
+			_, simple, err := s.simpleGeneratedDatabaseSkill(ctx, linkedTools[0].ID)
+			if err != nil {
+				return pagination.Page[Response]{}, err
+			}
+			advanced = !simple
+		}
+		items = append(items, buildDatabaseIntegration(item, linkedTools, vpnByID, advanced))
 	}
 
 	for _, item := range orphanDBTools {
@@ -220,6 +233,9 @@ func (s *Service) GetDatabase(ctx context.Context, id uuid.UUID) (DatabaseRespon
 	if err != nil {
 		return DatabaseResponse{}, err
 	}
+	if _, err := s.requireSimpleGeneratedDatabaseSkill(ctx, linkedTool.ID); err != nil {
+		return DatabaseResponse{}, err
+	}
 	return databaseResponseFromDatasource(ds, linkedTool, description), nil
 }
 
@@ -239,7 +255,7 @@ func (s *Service) CreateHTTP(ctx context.Context, req HTTPCreateRequest) (HTTPRe
 	skillResp, err := s.skillMgmt.Create(ctx, skill.CreateRequest{
 		Name:         req.Name,
 		Description:  req.Description,
-		Instructions: fmt.Sprintf("Use this skill to interact with the %s API. Describe the endpoint purpose and parameters here.", req.Name),
+		Instructions: httpSkillInstructions(req),
 		Category:     generatedHTTPSkillCategory,
 	})
 	if err != nil {
@@ -335,7 +351,7 @@ func (s *Service) UpdateHTTP(ctx context.Context, id uuid.UUID, req HTTPCreateRe
 		if sk.Category != generatedHTTPSkillCategory {
 			continue
 		}
-		if err := s.repo.UpdateSkillMetadata(ctx, sk.ID, req.Name, req.Description); err != nil {
+		if err := s.repo.UpdateSkillMetadata(ctx, sk.ID, req.Name, req.Description, httpSkillInstructions(req)); err != nil {
 			return HTTPResponse{}, fmt.Errorf("integration service: update generated skill: %w", err)
 		}
 	}
@@ -418,11 +434,14 @@ func validateHTTPRequest(req HTTPCreateRequest) error {
 	return nil
 }
 
+func httpSkillInstructions(req HTTPCreateRequest) string {
+	return fmt.Sprintf("Use this skill to interact with the %s API. Describe the endpoint purpose and parameters here.", req.Name)
+}
+
 // httpHeaderNamePattern é um subset prático do RFC 7230 token:
 // alphanumeric + hyphen + underscore. Cobre 99% dos headers reais
 // (Authorization, X-Custom-Header, etc) sem permitir XSS chars.
 var httpHeaderNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
-
 
 func buildHTTPConfig(req HTTPCreateRequest) json.RawMessage {
 	payload := map[string]any{
@@ -525,8 +544,7 @@ func buildHTTPIntegration(item tool.Response) Integration {
 	}
 }
 
-func buildDatabaseIntegration(item datasource.DataSource, linkedTools []tool.Response, vpnByID map[uuid.UUID]vpnresource.VpnResource) Integration {
-	advanced := len(linkedTools) != 1
+func buildDatabaseIntegration(item datasource.DataSource, linkedTools []tool.Response, vpnByID map[uuid.UUID]vpnresource.VpnResource, advanced bool) Integration {
 	vpnSummary := "direct"
 	enabled := true
 	if item.VpnResourceID != nil {
@@ -691,13 +709,39 @@ func validateDatabaseRequest(req DatabaseCreateRequest) error {
 	if strings.TrimSpace(req.Name) == "" {
 		return fmt.Errorf("integration service: name is required")
 	}
+	switch req.Type {
+	case datasource.DataSourceTypePostgreSQL, datasource.DataSourceTypeMySQL, datasource.DataSourceTypeSQLServer:
+	default:
+		return fmt.Errorf("integration service: unsupported type: %s", req.Type)
+	}
 	if strings.TrimSpace(req.Host) == "" {
 		return fmt.Errorf("integration service: host is required")
+	}
+	if req.Port < 1 || req.Port > 65535 {
+		return fmt.Errorf("integration service: port must be between 1 and 65535 (got %d)", req.Port)
+	}
+	if strings.TrimSpace(req.Database) == "" {
+		return fmt.Errorf("integration service: database is required")
+	}
+	if strings.TrimSpace(req.DBUser) == "" {
+		return fmt.Errorf("integration service: dbUser is required")
 	}
 	if strings.TrimSpace(req.Query) == "" {
 		return fmt.Errorf("integration service: query is required")
 	}
 	return nil
+}
+
+func databaseSkillInstructions(req DatabaseCreateRequest) string {
+	operation := "read"
+	if req.AllowWrite {
+		operation = "execute"
+	}
+	return fmt.Sprintf("Use the generated SQL tool to %s the configured %s database. Default query: %s",
+		operation,
+		strings.ToLower(string(req.Type)),
+		strings.TrimSpace(req.Query),
+	)
 }
 
 func databaseResponseFromDatasource(ds datasource.DataSource, sqlTool tool.Response, description string) DatabaseResponse {
@@ -736,14 +780,58 @@ func (s *Service) findDatabaseToolForDatasource(ctx context.Context, datasourceI
 	if err != nil {
 		return tool.Response{}, "", fmt.Errorf("integration service: list DATABASE tools: %w", err)
 	}
+	matches := make([]tool.Response, 0, 2)
 	for _, item := range append(sqlTools.Content, databaseTools.Content...) {
 		id, ok := extractDataSourceID(item.Config)
 		if !ok || id != datasourceID {
 			continue
 		}
-		return item, item.Description, nil
+		matches = append(matches, item)
 	}
-	return tool.Response{}, "", tool.ErrNotFound
+	switch len(matches) {
+	case 0:
+		return tool.Response{}, "", tool.ErrNotFound
+	case 1:
+		return matches[0], matches[0].Description, nil
+	default:
+		return tool.Response{}, "", fmt.Errorf("integration service: multiple database tools linked to datasource %s", datasourceID)
+	}
+}
+
+func (s *Service) updateDatabaseDatasource(ctx context.Context, tenantID string, id uuid.UUID, req datasource.CreateRequest) (datasource.DataSource, error) {
+	if updater, ok := s.datasources.(datasourceVPNReplacingUpdater); ok {
+		return updater.UpdateReplacingVPNResource(ctx, tenantID, id, req)
+	}
+	return s.datasources.Update(ctx, tenantID, id, req)
+}
+
+func errMissingDatabaseTool(datasourceID uuid.UUID) error {
+	return fmt.Errorf("integration service: no linked database tool for datasource %s", datasourceID)
+}
+
+func (s *Service) simpleGeneratedDatabaseSkill(ctx context.Context, toolID uuid.UUID) (GeneratedSkill, bool, error) {
+	if s.repo == nil {
+		return GeneratedSkill{}, true, nil
+	}
+	linkedSkills, err := s.repo.ListSkillsByToolID(ctx, toolID)
+	if err != nil {
+		return GeneratedSkill{}, false, fmt.Errorf("integration service: load linked skills: %w", err)
+	}
+	if len(linkedSkills) != 1 || linkedSkills[0].Category != generatedDatabaseSkillCategory {
+		return GeneratedSkill{}, false, nil
+	}
+	return linkedSkills[0], true, nil
+}
+
+func (s *Service) requireSimpleGeneratedDatabaseSkill(ctx context.Context, toolID uuid.UUID) (GeneratedSkill, error) {
+	generatedSkill, simple, err := s.simpleGeneratedDatabaseSkill(ctx, toolID)
+	if err != nil {
+		return GeneratedSkill{}, err
+	}
+	if !simple {
+		return GeneratedSkill{}, fmt.Errorf("integration service: database tool %s is not linked to exactly one generated database skill", toolID)
+	}
+	return generatedSkill, nil
 }
 
 func buildSlug(name string, id uuid.UUID) string {
@@ -821,9 +909,10 @@ func (s *Service) CreateDatabase(ctx context.Context, req DatabaseCreateRequest)
 	}
 
 	skillResp, err := s.skillMgmt.Create(ctx, skill.CreateRequest{
-		Name:        req.Name,
-		Description: req.Description,
-		Category:    generatedDatabaseSkillCategory,
+		Name:         req.Name,
+		Description:  req.Description,
+		Instructions: databaseSkillInstructions(req),
+		Category:     generatedDatabaseSkillCategory,
 	})
 	if err != nil {
 		_ = s.datasources.Delete(ctx, tenantID, ds.ID)
@@ -855,12 +944,32 @@ func (s *Service) CreateDatabase(ctx context.Context, req DatabaseCreateRequest)
 
 // UpdateDatabase updates the datasource and its generated SQL tool and skill metadata.
 func (s *Service) UpdateDatabase(ctx context.Context, id uuid.UUID, req DatabaseCreateRequest) (DatabaseResponse, error) {
+	if err := validateDatabaseRequest(req); err != nil {
+		return DatabaseResponse{}, err
+	}
 	if s.httpTools == nil || s.repo == nil {
 		return DatabaseResponse{}, errors.New("integration service: HTTP management not configured")
 	}
 
 	tenantID := tenant.FromContext(ctx)
-	_, err := s.datasources.Update(ctx, tenantID, id, datasource.CreateRequest{
+
+	if _, err := s.datasources.GetByID(ctx, tenantID, id); err != nil {
+		return DatabaseResponse{}, fmt.Errorf("integration service: load datasource: %w", err)
+	}
+
+	linkedTool, description, findErr := s.findDatabaseToolForDatasource(ctx, id)
+	if errors.Is(findErr, tool.ErrNotFound) {
+		return DatabaseResponse{}, errMissingDatabaseTool(id)
+	}
+	if findErr != nil && !errors.Is(findErr, tool.ErrNotFound) {
+		return DatabaseResponse{}, fmt.Errorf("integration service: find database tool: %w", findErr)
+	}
+	generatedSkill, err := s.requireSimpleGeneratedDatabaseSkill(ctx, linkedTool.ID)
+	if err != nil {
+		return DatabaseResponse{}, err
+	}
+
+	_, err = s.updateDatabaseDatasource(ctx, tenantID, id, datasource.CreateRequest{
 		Name:          req.Name,
 		Type:          req.Type,
 		Host:          req.Host,
@@ -874,12 +983,7 @@ func (s *Service) UpdateDatabase(ctx context.Context, id uuid.UUID, req Database
 		return DatabaseResponse{}, fmt.Errorf("integration service: update datasource: %w", err)
 	}
 
-	linkedTool, description, err := s.findDatabaseToolForDatasource(ctx, id)
-	if err != nil && !errors.Is(err, tool.ErrNotFound) {
-		return DatabaseResponse{}, fmt.Errorf("integration service: find database tool: %w", err)
-	}
-
-	if err == nil {
+	if findErr == nil {
 		sqlType := tool.ToolType(tool.ToolTypeSQL)
 		updated, err := s.httpTools.Update(ctx, linkedTool.ID, tool.UpdateRequest{
 			Name:        &req.Name,
@@ -893,17 +997,8 @@ func (s *Service) UpdateDatabase(ctx context.Context, id uuid.UUID, req Database
 		linkedTool = updated
 		description = req.Description
 
-		linkedSkills, err := s.repo.ListSkillsByToolID(ctx, linkedTool.ID)
-		if err != nil {
-			return DatabaseResponse{}, fmt.Errorf("integration service: load linked skills: %w", err)
-		}
-		for _, sk := range linkedSkills {
-			if sk.Category != generatedDatabaseSkillCategory {
-				continue
-			}
-			if err := s.repo.UpdateSkillMetadata(ctx, sk.ID, req.Name, req.Description); err != nil {
-				return DatabaseResponse{}, fmt.Errorf("integration service: update generated skill: %w", err)
-			}
+		if err := s.repo.UpdateSkillMetadata(ctx, generatedSkill.ID, req.Name, req.Description, databaseSkillInstructions(req)); err != nil {
+			return DatabaseResponse{}, fmt.Errorf("integration service: update generated skill: %w", err)
 		}
 	}
 
@@ -923,36 +1018,36 @@ func (s *Service) DeleteDatabase(ctx context.Context, id uuid.UUID) error {
 
 	tenantID := tenant.FromContext(ctx)
 
+	if _, err := s.datasources.GetByID(ctx, tenantID, id); err != nil {
+		return fmt.Errorf("integration service: load datasource: %w", err)
+	}
+
 	linkedTool, _, err := s.findDatabaseToolForDatasource(ctx, id)
+	if errors.Is(err, tool.ErrNotFound) {
+		return errMissingDatabaseTool(id)
+	}
 	if err != nil && !errors.Is(err, tool.ErrNotFound) {
 		return fmt.Errorf("integration service: find database tool: %w", err)
 	}
+	generatedSkill, err := s.requireSimpleGeneratedDatabaseSkill(ctx, linkedTool.ID)
+	if err != nil {
+		return err
+	}
 
 	if err == nil {
-		linkedSkills, err := s.repo.ListSkillsByToolID(ctx, linkedTool.ID)
-		if err != nil {
-			return fmt.Errorf("integration service: load linked skills: %w", err)
-		}
-		for _, sk := range linkedSkills {
-			if err := s.httpTools.UnbindFromSkill(ctx, sk.ID, linkedTool.ID); err != nil && !errors.Is(err, tool.ErrNotFound) {
-				return fmt.Errorf("integration service: unbind SQL tool from skill: %w", err)
-			}
+		if err := s.httpTools.UnbindFromSkill(ctx, generatedSkill.ID, linkedTool.ID); err != nil && !errors.Is(err, tool.ErrNotFound) {
+			return fmt.Errorf("integration service: unbind SQL tool from skill: %w", err)
 		}
 		if err := s.httpTools.Delete(ctx, linkedTool.ID); err != nil {
 			return fmt.Errorf("integration service: delete SQL tool: %w", err)
 		}
-		for _, sk := range linkedSkills {
-			if sk.Category != generatedDatabaseSkillCategory {
-				continue
-			}
-			bindings, err := s.repo.CountToolBindings(ctx, sk.ID)
-			if err != nil {
-				return fmt.Errorf("integration service: count generated skill bindings: %w", err)
-			}
-			if bindings == 0 {
-				if err := s.repo.DeleteSkill(ctx, sk.ID); err != nil {
-					return fmt.Errorf("integration service: delete generated skill: %w", err)
-				}
+		bindings, err := s.repo.CountToolBindings(ctx, generatedSkill.ID)
+		if err != nil {
+			return fmt.Errorf("integration service: count generated skill bindings: %w", err)
+		}
+		if bindings == 0 {
+			if err := s.repo.DeleteSkill(ctx, generatedSkill.ID); err != nil {
+				return fmt.Errorf("integration service: delete generated skill: %w", err)
 			}
 		}
 	}

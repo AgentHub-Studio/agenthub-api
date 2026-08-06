@@ -92,6 +92,27 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 	}
 	// Bug 179: strip HTML do description (XSS prevention cross-cutting).
 	req.Description = sanitize.StripHTML(req.Description)
+	var err error
+	req.RequiredRoles, err = normalizeRequiredRoles(req.RequiredRoles)
+	if err != nil {
+		return Response{}, err
+	}
+	req.ModelOverrides, err = normalizeModelOverrides(req.ModelOverrides)
+	if err != nil {
+		return Response{}, err
+	}
+	req.EffortLevel, err = normalizeEffortLevel(req.EffortLevel)
+	if err != nil {
+		return Response{}, err
+	}
+	req.AssociatedAgents, err = normalizeSkillSlugs(req.AssociatedAgents, "associatedAgents")
+	if err != nil {
+		return Response{}, err
+	}
+	req.DynamicHooks, err = normalizeHookEvents(req.DynamicHooks)
+	if err != nil {
+		return Response{}, err
+	}
 
 	// DX-01-J (ACT-F3-04): reject skills that are completely inert — no instructions
 	// AND no tool restrictions means binding this skill to an agent has no effect.
@@ -146,11 +167,16 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Response, erro
 		Instructions:           req.Instructions,
 		Category:               req.Category,
 		AllowedTools:           req.AllowedTools,
+		RequiredRoles:          req.RequiredRoles,
 		DisableModelInvocation: req.DisableModelInvocation,
 		ContextMode:            req.ContextMode,
 		WhenToUse:              req.WhenToUse,
 		ArgumentHint:           req.ArgumentHint,
 		ShouldDefer:            req.ShouldDefer,
+		ModelOverrides:         req.ModelOverrides,
+		EffortLevel:            req.EffortLevel,
+		AssociatedAgents:       req.AssociatedAgents,
+		DynamicHooks:           req.DynamicHooks,
 	}
 	created, err := s.repo.Create(ctx, sk)
 	if err != nil {
@@ -234,6 +260,51 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		// Bug 171: cap em Update (cross-cutting com Create — bug 169).
 		return Response{}, fmt.Errorf("%w: allowedTools exceeds maximum of 100 entries (got %d)", ErrValidation, len(req.AllowedTools))
 	}
+	if len(req.RequiredRoles) == 0 {
+		req.RequiredRoles = existing.RequiredRoles
+	} else {
+		normalized, err := normalizeRequiredRoles(req.RequiredRoles)
+		if err != nil {
+			return Response{}, err
+		}
+		req.RequiredRoles = normalized
+	}
+	if len(req.ModelOverrides) == 0 {
+		req.ModelOverrides = existing.ModelOverrides
+	} else {
+		normalized, err := normalizeModelOverrides(req.ModelOverrides)
+		if err != nil {
+			return Response{}, err
+		}
+		req.ModelOverrides = normalized
+	}
+	if req.EffortLevel == "" {
+		req.EffortLevel = existing.EffortLevel
+	} else {
+		normalized, err := normalizeEffortLevel(req.EffortLevel)
+		if err != nil {
+			return Response{}, err
+		}
+		req.EffortLevel = normalized
+	}
+	if len(req.AssociatedAgents) == 0 {
+		req.AssociatedAgents = existing.AssociatedAgents
+	} else {
+		normalized, err := normalizeSkillSlugs(req.AssociatedAgents, "associatedAgents")
+		if err != nil {
+			return Response{}, err
+		}
+		req.AssociatedAgents = normalized
+	}
+	if len(req.DynamicHooks) == 0 {
+		req.DynamicHooks = existing.DynamicHooks
+	} else {
+		normalized, err := normalizeHookEvents(req.DynamicHooks)
+		if err != nil {
+			return Response{}, err
+		}
+		req.DynamicHooks = normalized
+	}
 
 	// DX-01-H: normalize whitespace-only instructions.
 	req.Instructions = strings.TrimSpace(req.Instructions)
@@ -282,4 +353,110 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 // "Document Search" → "document-search", "My  Tool!" → "my-tool"
 func toSlug(name string) string {
 	return sanitize.ToSlug(name, "skill")
+}
+
+func normalizeRequiredRoles(roles []string) ([]string, error) {
+	if len(roles) == 0 {
+		return []string{}, nil
+	}
+	if len(roles) > 100 {
+		return nil, fmt.Errorf("%w: requiredRoles exceeds maximum of 100 entries (got %d)", ErrValidation, len(roles))
+	}
+	seen := make(map[string]struct{}, len(roles))
+	out := make([]string, 0, len(roles))
+	for _, role := range roles {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			return nil, fmt.Errorf("%w: requiredRoles must not contain empty values", ErrValidation)
+		}
+		if len(role) > 128 {
+			return nil, fmt.Errorf("%w: requiredRoles entry exceeds maximum length of 128 chars (got %d)", ErrValidation, len(role))
+		}
+		if _, ok := seen[role]; ok {
+			continue
+		}
+		seen[role] = struct{}{}
+		out = append(out, role)
+	}
+	return out, nil
+}
+
+func normalizeModelOverrides(overrides map[string]string) (map[string]string, error) {
+	if len(overrides) == 0 {
+		return map[string]string{}, nil
+	}
+	if len(overrides) > 20 {
+		return nil, fmt.Errorf("%w: modelOverrides exceeds maximum of 20 entries", ErrValidation)
+	}
+	normalized := make(map[string]string, len(overrides))
+	for contextName, model := range overrides {
+		contextName = strings.TrimSpace(contextName)
+		model = strings.TrimSpace(model)
+		if contextName == "" || model == "" || len(contextName) > 64 || len(model) > 255 {
+			return nil, fmt.Errorf("%w: modelOverrides contains an invalid entry", ErrValidation)
+		}
+		normalized[contextName] = model
+	}
+	return normalized, nil
+}
+
+func normalizeEffortLevel(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "lowest", "low", "medium", "high", "highest":
+		return value, nil
+	default:
+		return "", fmt.Errorf("%w: effortLevel must be lowest|low|medium|high|highest", ErrValidation)
+	}
+}
+
+func normalizeSkillSlugs(values []string, field string) ([]string, error) {
+	if len(values) == 0 {
+		return []string{}, nil
+	}
+	if len(values) > 100 {
+		return nil, fmt.Errorf("%w: %s exceeds maximum of 100 entries", ErrValidation, field)
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if !sanitize.ValidSlug(value) {
+			return nil, fmt.Errorf("%w: %s must contain canonical slugs", ErrValidation, field)
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
+}
+
+func normalizeHookEvents(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return []string{}, nil
+	}
+	if len(values) > 100 {
+		return nil, fmt.Errorf("%w: dynamicHooks exceeds maximum of 100 entries", ErrValidation)
+	}
+	allowed := map[string]struct{}{
+		"pre_tool_use": {}, "post_tool_use": {}, "post_tool_failure": {},
+		"session_start": {}, "session_end": {}, "notification": {},
+		"turn_end": {}, "run_end": {},
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if _, ok := allowed[value]; !ok {
+			return nil, fmt.Errorf("%w: dynamicHooks contains unsupported hook event %q", ErrValidation, value)
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
 }

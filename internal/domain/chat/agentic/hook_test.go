@@ -3,14 +3,28 @@ package agentic
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/ssrf"
 )
+
+func init() {
+	// httptest binds to loopback; production keeps loopback blocked.
+	ssrf.AllowHost("127.0.0.1")
+}
+
+type hookRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f hookRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestMatchesToolName_EmptyMatcher(t *testing.T) {
 	assert.True(t, matchesToolName("", "execute-sql"))
@@ -90,6 +104,34 @@ func TestHookExecutor_PromptHook(t *testing.T) {
 	assert.Nil(t, results[0].Error)
 }
 
+func TestHookExecutor_PromptHookRejectsConflictingConfigAliases(t *testing.T) {
+	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	repo := &stubHookRepo{
+		hooks: []AgentHook{
+			{
+				ID:       uuid.New(),
+				AgentID:  agentID,
+				Event:    HookPreToolUse,
+				HookType: HookTypePrompt,
+				Config:   json.RawMessage(`{"template":"Prefer this","inject":"Use this instead"}`),
+				Enabled:  true,
+			},
+		},
+	}
+	exec := NewHookExecutor(repo)
+
+	results := exec.Execute(context.Background(), HookPayload{
+		Event:   HookPreToolUse,
+		AgentID: agentID.String(),
+	})
+
+	require.Len(t, results, 1)
+	assert.Empty(t, results[0].Inject)
+	require.NotNil(t, results[0].Error)
+	assert.Contains(t, *results[0].Error, "template")
+	assert.Contains(t, *results[0].Error, "inject")
+}
+
 func TestHookExecutor_MatcherFilters(t *testing.T) {
 	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	repo := &stubHookRepo{
@@ -149,107 +191,63 @@ func TestHookExecutor_HTTPHookInvalidURL(t *testing.T) {
 	assert.NotNil(t, results[0].Error) // should fail — unreachable
 }
 
-func TestHookExecutor_WebhookHookParsesStructuredResult(t *testing.T) {
-	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"continue":true,"modified":{"query":"select 1"},"inject":"webhook noted"}`))
-	}))
-	defer ts.Close()
-
-	repo := &stubHookRepo{hooks: []AgentHook{{
-		ID:       uuid.New(),
-		AgentID:  agentID,
-		Event:    HookPreToolUse,
-		HookType: HookTypeWebhook,
-		Config:   json.RawMessage(`{"url":"` + ts.URL + `"}`),
-		Enabled:  true,
-	}}}
-	exec := NewHookExecutor(repo)
-
-	results := exec.Execute(context.Background(), HookPayload{
-		Event:    HookPreToolUse,
-		AgentID:  agentID.String(),
-		ToolName: "execute-sql",
+func TestHookExecutor_HTTPHook_BlocksSSRFURLBeforeRequest(t *testing.T) {
+	targetReached := false
+	exec := NewHookExecutor(nil)
+	exec.client.Transport = hookRoundTripper(func(req *http.Request) (*http.Response, error) {
+		targetReached = true
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}, nil
 	})
 
-	require.Len(t, results, 1)
-	assert.True(t, results[0].Continue)
-	assert.JSONEq(t, `{"query":"select 1"}`, string(results[0].Modified))
-	assert.Equal(t, "webhook noted", results[0].Inject)
+	result := exec.executeHTTPHook(context.Background(), AgentHook{
+		HookType: HookTypeHTTP,
+		Config:   json.RawMessage(`{"url":"http://169.254.169.254/latest/meta-data"}`),
+	}, HookPayload{})
+
+	require.NotNil(t, result.Error)
+	assert.Equal(t, "hook URL is not allowed", *result.Error)
+	assert.False(t, targetReached, "blocked hook URL must not be requested")
 }
 
-func TestHookExecutor_TransformHookReturnsModifiedPayload(t *testing.T) {
-	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-	repo := &stubHookRepo{hooks: []AgentHook{{
-		ID:       uuid.New(),
-		AgentID:  agentID,
-		Event:    HookPreToolUse,
-		HookType: HookTypeTransform,
-		Config:   json.RawMessage(`{"toolInput":{"query":"select safe"}}`),
-		Enabled:  true,
-	}}}
-	exec := NewHookExecutor(repo)
+func TestHookExecutor_HTTPHook_BlocksRedirectToSSRFURL(t *testing.T) {
+	const originURL = "https://hooks.example.test/events"
+	const blockedURL = "http://169.254.169.254/latest/meta-data"
 
-	results := exec.Execute(context.Background(), HookPayload{
-		Event:     HookPreToolUse,
-		AgentID:   agentID.String(),
-		ToolName:  "execute-sql",
-		ToolInput: json.RawMessage(`{"query":"drop table users"}`),
+	targetReached := false
+	exec := NewHookExecutor(nil)
+	exec.client.Transport = hookRoundTripper(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case originURL:
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{blockedURL}},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		case blockedURL:
+			targetReached = true
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		default:
+			return nil, assert.AnError
+		}
 	})
 
-	require.Len(t, results, 1)
-	assert.True(t, results[0].Continue)
-	assert.JSONEq(t, `{"query":"select safe"}`, string(results[0].Modified))
-}
+	result := exec.executeHTTPHook(context.Background(), AgentHook{
+		HookType: HookTypeHTTP,
+		Config:   json.RawMessage(`{"url":"https://hooks.example.test/events"}`),
+	}, HookPayload{})
 
-func TestHookExecutor_ScriptHookCanBlockExecution(t *testing.T) {
-	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-	repo := &stubHookRepo{hooks: []AgentHook{{
-		ID:       uuid.New(),
-		AgentID:  agentID,
-		Event:    HookPreToolUse,
-		HookType: HookTypeScript,
-		Config:   json.RawMessage(`{"continue":false,"reason":"SQL denied by policy"}`),
-		Enabled:  true,
-	}}}
-	exec := NewHookExecutor(repo)
-
-	results := exec.Execute(context.Background(), HookPayload{
-		Event:    HookPreToolUse,
-		AgentID:  agentID.String(),
-		ToolName: "execute-sql",
-	})
-
-	require.Len(t, results, 1)
-	assert.False(t, results[0].Continue)
-	require.NotNil(t, results[0].Error)
-	assert.Equal(t, "SQL denied by policy", *results[0].Error)
-}
-
-func TestApplyPreToolHookResults_ModifiesAndBlocks(t *testing.T) {
-	errMsg := "blocked by hook"
-	next, blocked := applyPreToolHookResults([]HookResult{
-		{Continue: true, Modified: json.RawMessage(`{"query":"select 1"}`)},
-		{Continue: false, Error: &errMsg},
-	}, json.RawMessage(`{"query":"drop table users"}`))
-
-	assert.JSONEq(t, `{"query":"select 1"}`, string(next))
-	require.NotNil(t, blocked)
-	assert.Equal(t, "blocked by hook", *blocked)
-}
-
-func TestApplyPostToolHookResults_ModifiesOutputAndInjects(t *testing.T) {
-	result := ToolExecResult{Output: json.RawMessage(`{"ok":false}`)}
-
-	applyPostToolHookResults([]HookResult{
-		{Continue: true, Modified: json.RawMessage(`{"ok":true}`), Inject: "first"},
-		{Continue: true, Inject: "second"},
-	}, &result)
-
-	assert.JSONEq(t, `{"ok":true}`, string(result.Output))
-	assert.Equal(t, "first\nsecond", result.InjectText)
+	require.NotNil(t, result.Error)
+	assert.Equal(t, "hook redirect is not allowed", *result.Error)
+	assert.False(t, targetReached, "redirect target must not be requested")
 }
 
 func TestHookExecutor_UnknownHookType(t *testing.T) {
@@ -451,10 +449,6 @@ func TestHookEventConstants(t *testing.T) {
 	// Verify the new hook events are defined.
 	assert.Equal(t, HookEvent("turn_end"), HookTurnEnd)
 	assert.Equal(t, HookEvent("run_end"), HookRunEnd)
-	assert.Equal(t, HookEvent("pre_llm_call"), HookPreLLMCall)
-	assert.Equal(t, HookEvent("post_llm_call"), HookPostLLMCall)
-	assert.Equal(t, HookEvent("on_error"), HookOnError)
-	assert.Equal(t, HookEvent("on_complete"), HookOnComplete)
 }
 
 // TestPromptHook_TemplateSubstitution verifies that {{.ToolName}}, {{.AgentID}},
@@ -586,29 +580,6 @@ func TestExecuteRunEnd_ReturnsInjectTexts(t *testing.T) {
 	require.Len(t, injects, 1)
 	assert.Contains(t, injects[0], "5 turns")
 	assert.Contains(t, injects[0], "2500 tokens")
-}
-
-func TestExecuteRunEnd_RunsOnCompleteAlias(t *testing.T) {
-	agentID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-	repo := &stubHookRepo{hooks: []AgentHook{{
-		ID:       uuid.New(),
-		AgentID:  agentID,
-		Event:    HookOnComplete,
-		HookType: HookTypePrompt,
-		Config:   json.RawMessage(`{"template":"ON-COMPLETE: {{.TotalTurns}}"}`),
-		Enabled:  true,
-	}}}
-	exec := NewHookExecutor(repo)
-
-	injects := exec.ExecuteRunEnd(context.Background(), RunEndPayload{
-		Event:      HookRunEnd,
-		AgentID:    agentID.String(),
-		SessionID:  uuid.New().String(),
-		TotalTurns: 7,
-	}, nil)
-
-	require.Len(t, injects, 1)
-	assert.Equal(t, "ON-COMPLETE: 7", injects[0])
 }
 
 // --- stubs ---

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -32,9 +31,7 @@ func NewRabbitMQEventPublisher(url string) (*RabbitMQEventPublisher, error) {
 
 	ch, err := conn.Channel()
 	if err != nil {
-		if closeErr := conn.Close(); closeErr != nil {
-			log.Printf("document publisher: close connection after channel failure: %v", closeErr)
-		}
+		_ = conn.Close()
 		return nil, fmt.Errorf("document publisher: open channel: %w", err)
 	}
 
@@ -53,12 +50,8 @@ func NewRabbitMQEventPublisher(url string) (*RabbitMQEventPublisher, error) {
 		},
 	)
 	if err != nil {
-		if closeErr := ch.Close(); closeErr != nil {
-			log.Printf("document publisher: close channel after queue declaration failure: %v", closeErr)
-		}
-		if closeErr := conn.Close(); closeErr != nil {
-			log.Printf("document publisher: close connection after queue declaration failure: %v", closeErr)
-		}
+		_ = ch.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("document publisher: declare queue: %w", err)
 	}
 
@@ -89,13 +82,9 @@ func (p *RabbitMQEventPublisher) PublishUploaded(ctx context.Context, event Docu
 // Close releases the AMQP channel and connection.
 func (p *RabbitMQEventPublisher) Close() {
 	if p.ch != nil {
-		if err := p.ch.Close(); err != nil {
-			log.Printf("document publisher: close channel: %v", err)
-		}
+		_ = p.ch.Close()
 	}
 	if p.conn != nil {
-		if err := p.conn.Close(); err != nil {
-			log.Printf("document publisher: close connection: %v", err)
-		}
+		_ = p.conn.Close()
 	}
 }

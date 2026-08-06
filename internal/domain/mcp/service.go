@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -26,6 +27,57 @@ import (
 // MCP — XSS via UI Settings + processos quebrados.
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+const (
+	maxMCPArgs        = 100
+	maxMCPEnvEntries  = 50
+	maxMCPHTTPURLLen  = 2048
+	maxRedirectURLLen = 2048
+)
+
+// validateMCPConfig validates the complete transport-specific configuration.
+// It is intentionally shared by Create and Update so a partial PATCH cannot
+// persist a configuration that the MCP runtime cannot start.
+func validateMCPConfig(config McpServerConfig) error {
+	if len(config.Args) > maxMCPArgs {
+		return fmt.Errorf("mcp service: args exceeds maximum of %d entries (got %d)", maxMCPArgs, len(config.Args))
+	}
+	if len(config.Env) > maxMCPEnvEntries {
+		return fmt.Errorf("mcp service: env exceeds maximum of %d entries (got %d)", maxMCPEnvEntries, len(config.Env))
+	}
+	for name := range config.Env {
+		if !envNamePattern.MatchString(name) {
+			return fmt.Errorf("mcp service: env name %q invalid — must match POSIX env pattern [A-Za-z_][A-Za-z0-9_]*", name)
+		}
+	}
+
+	switch config.TransportType {
+	case "stdio":
+		if config.Command == nil || strings.TrimSpace(*config.Command) == "" {
+			return fmt.Errorf("mcp service: command is required for stdio transport")
+		}
+		if config.HTTPBaseURL != nil && strings.TrimSpace(*config.HTTPBaseURL) != "" {
+			return fmt.Errorf("mcp service: httpBaseUrl is only supported for http transport")
+		}
+		if config.OAuthCredentialID != nil {
+			return fmt.Errorf("mcp service: oauthCredentialId is only supported for http transport")
+		}
+	case "http":
+		if config.HTTPBaseURL == nil || strings.TrimSpace(*config.HTTPBaseURL) == "" {
+			return fmt.Errorf("mcp service: httpBaseUrl is required for http transport")
+		}
+		if len(*config.HTTPBaseURL) > maxMCPHTTPURLLen {
+			return fmt.Errorf("mcp service: httpBaseUrl exceeds maximum length of %d chars (got %d)", maxMCPHTTPURLLen, len(*config.HTTPBaseURL))
+		}
+		if err := ssrf.ValidateURL(*config.HTTPBaseURL); err != nil {
+			return fmt.Errorf("mcp service: httpBaseUrl invalid (%v)", err)
+		}
+	default:
+		return fmt.Errorf("mcp service: transport type must be 'stdio' or 'http' (got %q)", config.TransportType)
+	}
+
+	return nil
+}
+
 // oauthService defines methods needed from oauth domain.
 type oauthService interface {
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (oauth.OAuthCredential, error)
@@ -38,11 +90,16 @@ type oauthService interface {
 
 // Service provides business logic for McpServerConfig operations.
 type Service struct {
-	repo     Repository
-	oauthSvc oauthService
+	repo                   Repository
+	oauthSvc               oauthService
+	allowedRedirectOrigins []string
 	// Discovery from runtime
 	mcpRuntimeURL string
 }
+
+var mcpRuntimeHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+var errMCPURLNotAllowed = errors.New("mcp service: URL is not allowed")
 
 // AuthServerMetadata represents OAuth 2.0 Authorization Server Metadata (RFC 8414).
 // Mirrors the structure used by mcp-go for spec compliance.
@@ -73,6 +130,14 @@ func NewService(repo Repository) *Service {
 // WithRuntimeURL attaches the MCP runtime URL to the service.
 func (s *Service) WithRuntimeURL(url string) *Service {
 	s.mcpRuntimeURL = url
+	return s
+}
+
+// WithAllowedRedirectOrigins restricts browser OAuth callbacks to deployment-
+// owned frontend origins. Callers must supply the same explicit allowlist used
+// for browser CORS; a missing or wildcard-only list rejects every redirect.
+func (s *Service) WithAllowedRedirectOrigins(origins []string) *Service {
+	s.allowedRedirectOrigins = append([]string(nil), origins...)
 	return s
 }
 
@@ -122,40 +187,32 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (McpServerConfi
 	if len(req.Name) > 255 {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: name exceeds maximum length of 255 chars (got %d)", len(req.Name))
 	}
+	req.TransportType = strings.TrimSpace(req.TransportType)
 	if req.TransportType == "" {
 		return McpServerConfigResponse{}, fmt.Errorf("mcp service: transport type is required")
 	}
+	if req.Command != nil {
+		command := strings.TrimSpace(*req.Command)
+		req.Command = &command
+	}
+	if req.HTTPBaseURL != nil {
+		baseURL := strings.TrimSpace(*req.HTTPBaseURL)
+		req.HTTPBaseURL = &baseURL
+	}
+	if err := validateMCPConfig(McpServerConfig{
+		TransportType:     req.TransportType,
+		HTTPBaseURL:       req.HTTPBaseURL,
+		Command:           req.Command,
+		Args:              req.Args,
+		Env:               req.Env,
+		OAuthCredentialID: req.OAuthCredentialID,
+	}); err != nil {
+		return McpServerConfigResponse{}, err
+	}
 	if req.TransportType == "stdio" {
-		return McpServerConfigResponse{}, fmt.Errorf("mcp service: stdio transport is no longer supported, use http")
-	}
-	if req.TransportType != "http" {
-		return McpServerConfigResponse{}, fmt.Errorf("mcp service: transport type must be 'http' (got %q)", req.TransportType)
-	}
-	if req.HTTPBaseURL == nil || strings.TrimSpace(*req.HTTPBaseURL) == "" {
-		return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl is required for http transport")
-	}
-	// Bug 165: cap URL em 2048 chars (RFC standard). Cross-cutting com bug 164.
-	if len(*req.HTTPBaseURL) > 2048 {
-		return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl exceeds maximum length of 2048 chars (got %d)", len(*req.HTTPBaseURL))
-	}
-	if err := ssrf.ValidateURL(*req.HTTPBaseURL); err != nil {
-		return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl invalid (%v)", err)
-	}
-	// Bug 168: cap env map em 50 entries. MCP env real usa <10 vars;
-	// 1000+ é storage waste e perf hit ao montar processos do client.
-	if len(req.Env) > 50 {
-		return McpServerConfigResponse{}, fmt.Errorf("mcp service: env exceeds maximum of 50 entries (got %d)", len(req.Env))
-	}
-	// Bug 252: validar env names (POSIX env name pattern). Sem este gate,
-	// keys como "<script>", "" ou "foo bar" eram persistidas e enviadas
-	// para o subprocesso/HTTP — XSS via UI Settings + processos quebrados.
-	for k := range req.Env {
-		if !envNamePattern.MatchString(k) {
-			return McpServerConfigResponse{}, fmt.Errorf("mcp service: env name %q invalid — must match POSIX env pattern [A-Za-z_][A-Za-z0-9_]*", k)
-		}
-	}
-	if len(req.Args) > 100 {
-		return McpServerConfigResponse{}, fmt.Errorf("mcp service: args exceeds maximum of 100 entries (got %d)", len(req.Args))
+		// Empty HTTP values are not meaningful for stdio and must not leak into
+		// bootstrap payloads when a form sends an optional empty field.
+		req.HTTPBaseURL = nil
 	}
 
 	c := McpServerConfig{
@@ -207,54 +264,35 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 		existing.Name = sanitize.StripHTML(*req.Name)
 	}
 	if req.TransportType != nil {
-		// Bug 119a: aceita só "http" (stdio foi removido). Sem este
-		// gate, admin podia salvar transportType="INVALID" e o
-		// runtime do MCP client falharia ao montar o transporte.
-		if *req.TransportType != "http" {
-			if *req.TransportType == "stdio" {
-				return McpServerConfigResponse{}, fmt.Errorf("mcp service: stdio transport is no longer supported, use http")
-			}
-			return McpServerConfigResponse{}, fmt.Errorf("mcp service: transport type must be 'http' (got %q)", *req.TransportType)
+		existing.TransportType = strings.TrimSpace(*req.TransportType)
+		if existing.TransportType == "stdio" {
+			// OAuth and HTTP-only state must not be carried into a local process
+			// configuration, including the privileged bootstrap payload.
+			existing.HTTPBaseURL = nil
+			existing.OAuthCredentialID = nil
 		}
-		existing.TransportType = *req.TransportType
 	}
 	if req.HTTPBaseURL != nil {
-		// Bug 119b: httpBaseUrl="" deixa config inválido para http
-		// transport. Se admin quer manter o valor anterior, deve omitir
-		// o campo (PATCH true-partial) — não enviar string vazia.
-		if strings.TrimSpace(*req.HTTPBaseURL) == "" {
-			return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl cannot be empty for http transport")
+		if existing.TransportType != "http" {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl is only supported for http transport")
 		}
-		// Bug 165: cap URL em 2048 chars (cross-cutting com Create).
-		if len(*req.HTTPBaseURL) > 2048 {
-			return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl exceeds maximum length of 2048 chars (got %d)", len(*req.HTTPBaseURL))
-		}
-		// Bug 104: Update precisa do mesmo gate SSRF que Create —
-		// senão admin malicioso podia criar config benigno e depois
-		// PATCH para http://localhost:9000/mcp.
-		if err := ssrf.ValidateURL(*req.HTTPBaseURL); err != nil {
-			return McpServerConfigResponse{}, fmt.Errorf("mcp service: httpBaseUrl invalid (%v)", err)
-		}
-		existing.HTTPBaseURL = req.HTTPBaseURL
+		baseURL := strings.TrimSpace(*req.HTTPBaseURL)
+		existing.HTTPBaseURL = &baseURL
 	}
 	if req.Command != nil {
-		existing.Command = req.Command
+		command := strings.TrimSpace(*req.Command)
+		existing.Command = &command
 	}
 	if req.Args != nil {
-		// Bug 168: cap args 100 (cross-cutting com Create).
-		if len(*req.Args) > 100 {
-			return McpServerConfigResponse{}, fmt.Errorf("mcp service: args exceeds maximum of 100 entries (got %d)", len(*req.Args))
-		}
 		existing.Args = *req.Args
 	}
 	if req.Env != nil {
-		// Bug 168: cap env 50 (cross-cutting com Create).
-		if len(*req.Env) > 50 {
-			return McpServerConfigResponse{}, fmt.Errorf("mcp service: env exceeds maximum of 50 entries (got %d)", len(*req.Env))
-		}
 		existing.Env = *req.Env
 	}
 	if req.OAuthCredentialID != nil {
+		if existing.TransportType != "http" {
+			return McpServerConfigResponse{}, fmt.Errorf("mcp service: oauthCredentialId is only supported for http transport")
+		}
 		existing.OAuthCredentialID = req.OAuthCredentialID
 	}
 	if req.AutoStart != nil {
@@ -262,6 +300,9 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 	}
 	if req.Enabled != nil {
 		existing.Enabled = *req.Enabled
+	}
+	if err := validateMCPConfig(existing); err != nil {
+		return McpServerConfigResponse{}, err
 	}
 
 	updated, err := s.repo.Update(ctx, existing)
@@ -323,7 +364,7 @@ func (s *Service) ListBootstrap(ctx context.Context) ([]McpServerConfigBootstrap
 	responses := make([]McpServerConfigBootstrapResponse, len(items))
 	for i, item := range items {
 		resp := BootstrapResponseFrom(item)
-		if item.OAuthCredentialID != nil {
+		if item.TransportType == "http" && item.OAuthCredentialID != nil {
 			if err := s.attachOAuthBootstrap(ctx, &resp, *item.OAuthCredentialID); err != nil {
 				return nil, err
 			}
@@ -420,6 +461,9 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	if err != nil {
 		return ConnectURLResponse{}, err
 	}
+	if err := validateRedirectURL(redirectURL, s.allowedRedirectOrigins); err != nil {
+		return ConnectURLResponse{}, err
+	}
 
 	mcpURL := ""
 	if config.HTTPBaseURL != nil {
@@ -428,11 +472,17 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	if mcpURL == "" {
 		return ConnectURLResponse{}, fmt.Errorf("mcp service: HTTP base URL is required for MCP %s", id)
 	}
+	if err := validateMCPOutboundURL(mcpURL); err != nil {
+		return ConnectURLResponse{}, err
+	}
 
 	// --- Step 1: Discover auth server metadata (following mcp-go oauth.go logic) ---
 	metadata, err := s.discoverAuthServerMetadata(ctx, mcpURL)
 	if err != nil {
 		return ConnectURLResponse{}, fmt.Errorf("mcp service: OAuth discovery failed for %s: %w", mcpURL, err)
+	}
+	if err := validateOAuthMetadataURLs(*metadata); err != nil {
+		return ConnectURLResponse{}, err
 	}
 
 	log.Printf("mcp service: discovered metadata for %s: auth=%s token=%s reg=%s",
@@ -497,7 +547,7 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 		return ConnectURLResponse{}, fmt.Errorf(
 			"mcp service: could not obtain clientID for MCP %s (URL: %s). "+
 				"OAuth discovery succeeded (auth=%s) but Dynamic Client Registration failed or is not supported. "+
-				"You may need to manually register an OAuth app and link the credential",
+				"you may need to manually register an OAuth app and link the credential",
 			id, mcpURL, metadata.AuthorizationEndpoint)
 	}
 
@@ -554,6 +604,60 @@ func (s *Service) GetConnectURL(ctx context.Context, id uuid.UUID, redirectURL s
 	return ConnectURLResponse{URL: finalURL}, nil
 }
 
+func validateRedirectURL(rawURL string, allowedOrigins []string) error {
+	if len(rawURL) > maxRedirectURLLen {
+		return ErrRedirectURLNotAllowed
+	}
+	redirect, err := url.Parse(rawURL)
+	if err != nil {
+		return ErrRedirectURLNotAllowed
+	}
+	redirectScheme := strings.ToLower(redirect.Scheme)
+	if (redirectScheme != "https" && redirectScheme != "http") || redirect.Host == "" || redirect.User != nil || redirect.Fragment != "" {
+		return ErrRedirectURLNotAllowed
+	}
+
+	for _, rawOrigin := range allowedOrigins {
+		origin, err := url.Parse(strings.TrimSpace(rawOrigin))
+		if err != nil || origin.Scheme == "" || origin.Host == "" || origin.User != nil || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" {
+			continue
+		}
+		if !strings.EqualFold(redirect.Scheme, origin.Scheme) || effectivePort(redirect) != effectivePort(origin) {
+			continue
+		}
+
+		redirectHost := strings.ToLower(redirect.Hostname())
+		originHost := strings.ToLower(origin.Hostname())
+		if strings.HasPrefix(originHost, "*.") {
+			suffix := strings.TrimPrefix(originHost, "*.")
+			label := strings.TrimSuffix(redirectHost, "."+suffix)
+			if label != redirectHost && label != "" && !strings.Contains(label, ".") {
+				return nil
+			}
+			continue
+		}
+		if redirectHost == originHost {
+			return nil
+		}
+	}
+
+	return ErrRedirectURLNotAllowed
+}
+
+func effectivePort(parsed *url.URL) string {
+	if port := parsed.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
 // HandleOAuthCallback processes the authorization code returned by the OAuth provider.
 // The MCP server ID is used as the OAuth state parameter. This method looks up the
 // linked OAuthCredential and delegates the code-for-token exchange to the oauth service.
@@ -561,6 +665,10 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, mcpServerID uuid.UUID
 	tenantID := tenant.FromContext(ctx)
 	if tenantID == "" {
 		return fmt.Errorf("mcp service: tenant context is required")
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return errors.New("mcp service: callback: authorization code is required")
 	}
 
 	config, err := s.repo.GetByID(ctx, mcpServerID)
@@ -584,13 +692,17 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, mcpServerID uuid.UUID
 
 	// Unregister the server from the runtime so that the next request forces a reload of the new tokens
 	if s.mcpRuntimeURL != "" {
-		req, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/servers/%s", s.mcpRuntimeURL, config.Name), nil)
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			defer func() { _ = resp.Body.Close() }()
-			log.Printf("mcp service: unregistered server %s from runtime to force token reload", config.Name)
+		endpoint, endpointErr := s.mcpRuntimeEndpoint("servers", config.Name)
+		if endpointErr != nil {
+			log.Printf("mcp service: failed to build runtime unregister endpoint for server %s: %v", config.Name, endpointErr)
 		} else {
-			log.Printf("mcp service: failed to unregister server %s: %v", config.Name, err)
+			resp, err := s.doMCPRuntimeRequest(ctx, http.MethodDelete, endpoint, "", nil)
+			if err == nil {
+				defer func() { _ = resp.Body.Close() }()
+				log.Printf("mcp service: unregistered server %s from runtime to force token reload", config.Name)
+			} else {
+				log.Printf("mcp service: failed to unregister server %s: %v", config.Name, err)
+			}
 		}
 	}
 
@@ -609,15 +721,18 @@ func (s *Service) ListTools(ctx context.Context, id uuid.UUID) ([]ToolResponse, 
 		return nil, fmt.Errorf("mcp service: tools: MCP runtime URL not configured")
 	}
 
-	url := fmt.Sprintf("%s/servers/%s/tools", s.mcpRuntimeURL, config.Name)
-	log.Printf("mcp service: fetching tools from %s", url)
+	toolsURL, err := s.mcpRuntimeEndpoint("servers", config.Name, "tools")
+	if err != nil {
+		return nil, fmt.Errorf("mcp service: tools: %w", err)
+	}
+	log.Print(runtimeToolsFetchLogMessage())
 
 	// Ensure server is registered in runtime before fetching tools
 	if err := s.ensureServerRegistered(ctx, config); err != nil {
 		log.Printf("mcp service: failed to ensure server registration for %s: %v", config.Name, err)
 	}
 
-	resp, err := http.Get(url)
+	resp, err := s.doMCPRuntimeRequest(ctx, http.MethodGet, toolsURL, "", nil)
 	if err != nil {
 		return nil, fmt.Errorf("mcp service: tools: failed to contact runtime: %w", err)
 	}
@@ -649,6 +764,10 @@ func (s *Service) ListTools(ctx context.Context, id uuid.UUID) ([]ToolResponse, 
 	return result.Tools, nil
 }
 
+func runtimeToolsFetchLogMessage() string {
+	return "mcp service: fetching tools from configured runtime"
+}
+
 // ensureServerRegistered checks if an MCP server is registered in the runtime and registers it if missing.
 func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerConfig) error {
 	if s.mcpRuntimeURL == "" {
@@ -656,9 +775,12 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 	}
 
 	// 1. Check if registered
-	statusURL := fmt.Sprintf("%s/servers/%s/status", s.mcpRuntimeURL, config.Name)
+	statusURL, err := s.mcpRuntimeEndpoint("servers", config.Name, "status")
+	if err != nil {
+		return err
+	}
 	for i := 0; i < 5; i++ {
-		resp, err := http.Get(statusURL)
+		resp, err := s.doMCPRuntimeRequest(ctx, http.MethodGet, statusURL, "", nil)
 		if err == nil {
 			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode == http.StatusOK {
@@ -673,8 +795,11 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 					log.Printf("mcp service: server %s registered but status is %s, starting...", config.Name, status.Status)
 
 					// Try to start explicitly
-					startURL := fmt.Sprintf("%s/servers/%s/start", s.mcpRuntimeURL, config.Name)
-					startResp, startErr := http.Post(startURL, "application/json", nil)
+					startURL, urlErr := s.mcpRuntimeEndpoint("servers", config.Name, "start")
+					if urlErr != nil {
+						return urlErr
+					}
+					startResp, startErr := s.doMCPRuntimeRequest(ctx, http.MethodPost, startURL, "application/json", nil)
 					if startErr == nil {
 						defer func() { _ = startResp.Body.Close() }()
 						if startResp.StatusCode == http.StatusUnauthorized {
@@ -688,22 +813,32 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 	}
 
 	// 2. Not registered or not running, register/start it
-	mcpURL := ""
-	if config.HTTPBaseURL != nil {
-		mcpURL = *config.HTTPBaseURL
-	}
-
 	regReq := map[string]interface{}{
 		"name":          config.Name,
 		"transportType": config.TransportType,
-		"httpBaseUrl":   mcpURL,
 		"autoStart":     true,
 		"enabled":       true,
+	}
+	switch config.TransportType {
+	case "stdio":
+		if config.Command == nil || strings.TrimSpace(*config.Command) == "" {
+			return fmt.Errorf("stdio MCP server %q has no command", config.Name)
+		}
+		regReq["command"] = *config.Command
+		regReq["args"] = config.Args
+		regReq["env"] = config.Env
+	case "http":
+		if config.HTTPBaseURL == nil || strings.TrimSpace(*config.HTTPBaseURL) == "" {
+			return fmt.Errorf("HTTP MCP server %q has no base URL", config.Name)
+		}
+		regReq["httpBaseUrl"] = *config.HTTPBaseURL
+	default:
+		return fmt.Errorf("MCP server %q has unsupported transport %q", config.Name, config.TransportType)
 	}
 
 	// Add OAuth credentials if available
 	tenantID := tenant.FromContext(ctx)
-	if tenantID != "" && config.OAuthCredentialID != nil && s.oauthSvc != nil {
+	if config.TransportType == "http" && tenantID != "" && config.OAuthCredentialID != nil && s.oauthSvc != nil {
 		cred, credErr := s.oauthSvc.GetByID(ctx, tenantID, *config.OAuthCredentialID)
 		if credErr == nil {
 			if cred.TokenURL != nil {
@@ -732,8 +867,11 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 	}
 
 	body, _ := json.Marshal(regReq)
-	regURL := fmt.Sprintf("%s/servers", s.mcpRuntimeURL)
-	resp, err := http.Post(regURL, "application/json", bytes.NewReader(body))
+	regURL, err := s.mcpRuntimeEndpoint("servers")
+	if err != nil {
+		return err
+	}
+	resp, err := s.doMCPRuntimeRequest(ctx, http.MethodPost, regURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to register server in runtime: %w", err)
 	}
@@ -749,6 +887,84 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 	return nil
 }
 
+func (s *Service) mcpRuntimeEndpoint(segments ...string) (string, error) {
+	return buildMCPRuntimeEndpoint(s.mcpRuntimeURL, segments...)
+}
+
+func buildMCPRuntimeEndpoint(rawBase string, segments ...string) (string, error) {
+	parsed, err := parseMCPRuntimeBaseURL(rawBase)
+	if err != nil {
+		return "", err
+	}
+
+	escapedPath := strings.TrimSuffix(parsed.EscapedPath(), "/")
+	for _, segment := range segments {
+		if segment == "" || containsRuntimeURLControlChar(segment) {
+			return "", fmt.Errorf("invalid MCP runtime path segment")
+		}
+		escapedPath += "/" + url.PathEscape(segment)
+	}
+	if escapedPath == "" {
+		escapedPath = "/"
+	}
+	unescapedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return "", err
+	}
+
+	next := *parsed
+	next.Path = unescapedPath
+	next.RawPath = escapedPath
+	return next.String(), nil
+}
+
+func parseMCPRuntimeBaseURL(rawBase string) (*url.URL, error) {
+	if rawBase == "" || containsRuntimeURLControlChar(rawBase) {
+		return nil, fmt.Errorf("invalid MCP runtime URL: empty or unsafe base URL")
+	}
+	parsed, err := url.Parse(strings.TrimRight(rawBase, "/"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid MCP runtime URL: %w", err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("invalid MCP runtime URL: unsupported scheme %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("invalid MCP runtime URL: missing host")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("invalid MCP runtime URL: userinfo, query and fragment are not allowed")
+	}
+	return parsed, nil
+}
+
+func (s *Service) doMCPRuntimeRequest(ctx context.Context, method, endpoint, contentType string, body io.Reader) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// #nosec G704 -- endpoint is built from a trusted MCP runtime base URL and escaped path segments.
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	req.Header.Set("Accept", "application/json")
+	// #nosec G704 -- req URL is built by buildMCPRuntimeEndpoint from a trusted base URL and escaped path segments.
+	return mcpRuntimeHTTPClient.Do(req)
+}
+
+func containsRuntimeURLControlChar(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // discoverAuthServerMetadata implements the MCP spec discovery flow (mirrors mcp-go oauth.go getServerMetadata):
 // 1. Try /.well-known/oauth-protected-resource on the MCP server (RFC 9728)
 // 2. If that returns authorization_servers, fetch metadata from the first one
@@ -756,7 +972,7 @@ func (s *Service) ensureServerRegistered(ctx context.Context, config McpServerCo
 // 4. Fallback to /.well-known/openid-configuration on the auth server
 // 5. Last resort: default endpoints based on the MCP server URL
 func (s *Service) discoverAuthServerMetadata(ctx context.Context, mcpURL string) (*AuthServerMetadata, error) {
-	httpClient := &http.Client{Timeout: 15 * time.Second}
+	httpClient := protectedMCPHTTPClient(&http.Client{Timeout: 15 * time.Second})
 
 	// Step 1: Try RFC 9728 Protected Resource Metadata
 	prURL, err := buildWellKnownURL(mcpURL, "oauth-protected-resource")
@@ -765,6 +981,9 @@ func (s *Service) discoverAuthServerMetadata(ctx context.Context, mcpURL string)
 		pr, prErr := fetchJSON[OAuthProtectedResource](ctx, httpClient, prURL)
 		if prErr == nil && len(pr.AuthorizationServers) > 0 {
 			authServerURL := pr.AuthorizationServers[0]
+			if err := validateMCPOutboundURL(authServerURL); err != nil {
+				return nil, err
+			}
 			log.Printf("mcp service: found auth server %s via protected resource metadata", authServerURL)
 
 			// Fetch metadata from the discovered auth server
@@ -809,6 +1028,10 @@ func (s *Service) discoverAuthServerMetadata(ctx context.Context, mcpURL string)
 
 // fetchAuthServerMetadata tries RFC 8414 and OIDC Discovery on a given auth server URL.
 func (s *Service) fetchAuthServerMetadata(ctx context.Context, httpClient *http.Client, authServerURL string) *AuthServerMetadata {
+	if err := validateMCPOutboundURL(authServerURL); err != nil {
+		return nil
+	}
+
 	// Try RFC 8414 first
 	asMetaURL, err := buildWellKnownURL(authServerURL, "oauth-authorization-server")
 	if err == nil {
@@ -855,6 +1078,10 @@ func buildWellKnownURL(baseURL string, suffix string) (string, error) {
 
 // performDCR performs Dynamic Client Registration (RFC 7591).
 func (s *Service) performDCR(ctx context.Context, registrationEndpoint, redirectURI, scopes string) (*DCRResponse, error) {
+	if err := validateMCPOutboundURL(registrationEndpoint); err != nil {
+		return nil, err
+	}
+
 	regRequest := map[string]interface{}{
 		"client_name":                "AgentHub MCP Client",
 		"redirect_uris":              []string{redirectURI},
@@ -878,9 +1105,12 @@ func (s *Service) performDCR(ctx context.Context, registrationEndpoint, redirect
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
+	httpClient := protectedMCPHTTPClient(&http.Client{Timeout: 15 * time.Second})
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		if errors.Is(err, errMCPURLNotAllowed) {
+			return nil, errMCPURLNotAllowed
+		}
 		return nil, fmt.Errorf("DCR request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -904,6 +1134,9 @@ func (s *Service) performDCR(ctx context.Context, registrationEndpoint, redirect
 // fetchJSON is a generic helper to GET a URL and decode JSON.
 func fetchJSON[T any](ctx context.Context, httpClient *http.Client, targetURL string) (T, error) {
 	var zero T
+	if err := validateMCPOutboundURL(targetURL); err != nil {
+		return zero, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return zero, err
@@ -913,6 +1146,9 @@ func fetchJSON[T any](ctx context.Context, httpClient *http.Client, targetURL st
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		if errors.Is(err, errMCPURLNotAllowed) {
+			return zero, errMCPURLNotAllowed
+		}
 		return zero, err
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -926,4 +1162,46 @@ func fetchJSON[T any](ctx context.Context, httpClient *http.Client, targetURL st
 		return zero, err
 	}
 	return result, nil
+}
+
+func validateMCPOutboundURL(rawURL string) error {
+	if err := ssrf.ValidateURL(rawURL); err != nil {
+		return errMCPURLNotAllowed
+	}
+	return nil
+}
+
+func validateOAuthMetadataURLs(metadata AuthServerMetadata) error {
+	for _, endpoint := range []string{
+		metadata.AuthorizationEndpoint,
+		metadata.TokenEndpoint,
+		metadata.RegistrationEndpoint,
+	} {
+		if endpoint == "" {
+			continue
+		}
+		if err := validateMCPOutboundURL(endpoint); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func protectedMCPHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+
+	protected := *client
+	previousCheckRedirect := client.CheckRedirect
+	protected.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := validateMCPOutboundURL(req.URL.String()); err != nil {
+			return err
+		}
+		if previousCheckRedirect != nil {
+			return previousCheckRedirect(req, via)
+		}
+		return nil
+	}
+	return &protected
 }

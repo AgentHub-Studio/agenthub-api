@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +18,8 @@ import (
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat"
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/chat/agentic"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/skill"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
 )
 
@@ -22,13 +27,22 @@ import (
 
 // mockChatModel implements ai.ChatModel for testing.
 type mockChatModel struct {
-	mu        sync.Mutex
-	callCount int
+	mu            sync.Mutex
+	callCount     int
+	chatCallCount int
+	chatFn        func(ctx context.Context, messages []ai.Message, opts ai.ChatOptions) (*ai.ChatResponse, error)
 	// streamFn returns the stream channel for each call. Index is the call number (0-based).
 	streamFn func(callIndex int, messages []ai.Message, opts ai.ChatOptions) (<-chan ai.StreamChunk, error)
 }
 
-func (m *mockChatModel) Chat(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (*ai.ChatResponse, error) {
+func (m *mockChatModel) Chat(ctx context.Context, messages []ai.Message, opts ai.ChatOptions) (*ai.ChatResponse, error) {
+	m.mu.Lock()
+	m.chatCallCount++
+	chatFn := m.chatFn
+	m.mu.Unlock()
+	if chatFn != nil {
+		return chatFn(ctx, messages, opts)
+	}
 	return nil, fmt.Errorf("Chat not implemented in mock")
 }
 
@@ -47,6 +61,12 @@ func (m *mockChatModel) CallCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.callCount
+}
+
+func (m *mockChatModel) ChatCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.chatCallCount
 }
 
 // mockPersister records all persisted messages.
@@ -70,6 +90,34 @@ func (m *mockPersister) Messages() []chat.ChatMessage {
 	result := make([]chat.ChatMessage, len(m.messages))
 	copy(result, m.messages)
 	return result
+}
+
+type interruptAwarePersister struct {
+	mockPersister
+	toolResultContextErr error
+	toolResultPersisted  bool
+}
+
+func (m *interruptAwarePersister) CreateMessage(ctx context.Context, msg chat.ChatMessage) (chat.ChatMessage, error) {
+	if msg.MessageType == chat.MessageTypeToolResult {
+		m.mu.Lock()
+		m.toolResultContextErr = ctx.Err()
+		m.toolResultPersisted = true
+		m.mu.Unlock()
+	}
+	return m.mockPersister.CreateMessage(ctx, msg)
+}
+
+func (m *interruptAwarePersister) ToolResultContextErr() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.toolResultContextErr
+}
+
+func (m *interruptAwarePersister) ToolResultPersisted() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.toolResultPersisted
 }
 
 // mockHistoryLoader returns pre-defined messages.
@@ -205,6 +253,118 @@ func newTestRunner(
 	)
 }
 
+type testElicitationSubmitter struct {
+	action     agentic.ElicitationAction
+	mu         sync.Mutex
+	requestIDs []string
+	params     []agentic.ElicitationParams
+}
+
+func (s *testElicitationSubmitter) Submit(_ context.Context, _ string, requestID string, params agentic.ElicitationParams) agentic.ElicitationResult {
+	s.mu.Lock()
+	s.requestIDs = append(s.requestIDs, requestID)
+	s.params = append(s.params, params)
+	s.mu.Unlock()
+	return agentic.ElicitationResult{Action: s.action}
+}
+
+func (s *testElicitationSubmitter) Requests() ([]string, []agentic.ElicitationParams) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	requestIDs := append([]string(nil), s.requestIDs...)
+	params := append([]agentic.ElicitationParams(nil), s.params...)
+	return requestIDs, params
+}
+
+func newRunnerWithBoundSQLTool(t *testing.T, model ai.ChatModel, config agentic.RunConfig) (*agentic.Runner, *atomic.Int32) {
+	t.Helper()
+
+	var executeRequests atomic.Int32
+	skillRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		executeRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"output":{"executed":true},"latencyMs":1}`))
+	}))
+	t.Cleanup(skillRuntime.Close)
+
+	skillID := uuid.New()
+	toolID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{{
+		ID:          skillID,
+		Name:        "Execute SQL",
+		Slug:        "execute-sql",
+		Description: "Execute SQL queries",
+	}}}
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID:          toolID,
+			Name:        "SQL Tool",
+			Type:        "SQL",
+			Config:      json.RawMessage(`{"inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+		}},
+	}
+
+	prompt := agentic.NewPromptBuilder(skills, &mockKBLister{}, nil, agentic.DefaultPromptConfig())
+	toolBuilder := agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{})
+	skillClient := agentic.NewSkillRuntimeClient(skillRuntime.URL)
+
+	runner := agentic.NewRunner(
+		model, skillClient, prompt, toolBuilder,
+		nil, nil,
+		&mockPersister{}, &mockHistoryLoader{},
+		nil,
+		config,
+	)
+	return runner, &executeRequests
+}
+
+func containsMessage(messages []ai.Message, want string) bool {
+	for _, message := range messages {
+		if message.Content == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPersistedMessage(messages []chat.ChatMessage, want string) bool {
+	for _, message := range messages {
+		if message.Content == want {
+			return true
+		}
+	}
+	return false
+}
+
+type postToolHTTPHookRepository struct {
+	hooks []agentic.AgentHook
+}
+
+func (r *postToolHTTPHookRepository) FindByAgentAndEvent(_ context.Context, agentID uuid.UUID, event agentic.HookEvent) ([]agentic.AgentHook, error) {
+	var matching []agentic.AgentHook
+	for _, hook := range r.hooks {
+		if hook.AgentID == agentID && hook.Event == event && hook.Enabled {
+			matching = append(matching, hook)
+		}
+	}
+	return matching, nil
+}
+
+func (r *postToolHTTPHookRepository) DisableHook(_ context.Context, hookID uuid.UUID) error {
+	for index, hook := range r.hooks {
+		if hook.ID == hookID {
+			r.hooks[index].Enabled = false
+		}
+	}
+	return nil
+}
+
 // --- tests ---
 
 func TestRunner_SimpleTextResponse(t *testing.T) {
@@ -248,6 +408,9 @@ func TestRunner_SimpleTextResponse(t *testing.T) {
 	var runComplete agentic.RunCompleteData
 	require.NoError(t, json.Unmarshal(rc.Data, &runComplete))
 	assert.Equal(t, 1, runComplete.TotalTurns)
+	require.NotNil(t, runComplete.Timing)
+	assert.GreaterOrEqual(t, runComplete.Timing.TotalMS, runComplete.Timing.FirstOutputMS)
+	assert.GreaterOrEqual(t, runComplete.Timing.TotalMS, runComplete.Timing.StreamCompleteMS)
 
 	// Should have persisted user + assistant messages.
 	msgs := persister.Messages()
@@ -255,6 +418,77 @@ func TestRunner_SimpleTextResponse(t *testing.T) {
 	assert.Equal(t, "user", msgs[0].Role)
 	assert.Equal(t, "assistant", msgs[1].Role)
 	assert.Equal(t, "Hello, world!", msgs[1].Content)
+}
+
+func TestRunner_StreamingEndpoint404RecoversAsSSEEvents(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			return nil, fmt.Errorf("provider returned HTTP 404 for streaming endpoint")
+		},
+		chatFn: func(_ context.Context, _ []ai.Message, _ ai.ChatOptions) (*ai.ChatResponse, error) {
+			return &ai.ChatResponse{
+				Content:      "recovered as SSE",
+				FinishReason: "stop",
+				Usage:        ai.Usage{TotalTokens: 7},
+			}, nil
+		},
+	}
+	config := agentic.DefaultRunConfig()
+	config.RetryMaxAttempts = 1
+	config.MaxIterations = 1
+
+	events := collectEvents(newTestRunner(model, &mockPersister{}, &mockHistoryLoader{}, config).Run(context.Background(), agentic.RunInput{
+		SessionID:    uuid.New(),
+		AgentID:      uuid.New(),
+		UserMessage:  "hello",
+		SystemPrompt: "test",
+		TenantID:     "test-tenant",
+	}))
+
+	assert.Equal(t, 1, model.CallCount())
+	assert.Equal(t, 1, model.ChatCallCount())
+	assert.True(t, hasEventType(events, agentic.EventTextDelta))
+	assert.True(t, hasEventType(events, agentic.EventRunComplete))
+	assert.False(t, hasEventType(events, agentic.EventError))
+
+	textDelta := findEvent(t, events, agentic.EventTextDelta)
+	var textData agentic.TextDeltaData
+	require.NoError(t, json.Unmarshal(textDelta.Data, &textData))
+	assert.Equal(t, "recovered as SSE", textData.Content)
+}
+
+func TestRunner_OutputProcessorsRedactTextDeltasAndPersistedAssistantMessage(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			return makeTextStream("Contact user@example.com"), nil
+		},
+	}
+
+	persister := &mockPersister{}
+	config := agentic.DefaultRunConfig()
+	config.MaxIterations = 5
+	runner := newTestRunner(model, persister, &mockHistoryLoader{}, config)
+
+	events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		SessionID:        uuid.New(),
+		AgentID:          uuid.New(),
+		UserMessage:      "Hi",
+		SystemPrompt:     "You are a test assistant.",
+		TenantID:         "test-tenant",
+		OutputProcessors: []string{"pii_redactor"},
+	}))
+
+	textEvents := filterEvents(events, agentic.EventTextDelta)
+	require.Len(t, textEvents, 1)
+	var textData agentic.TextDeltaData
+	require.NoError(t, json.Unmarshal(textEvents[0].Data, &textData))
+	assert.Equal(t, "Contact [REDACTED:EMAIL]", textData.Content)
+	assert.NotContains(t, textData.Content, "user@example.com")
+
+	msgs := persister.Messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "Contact [REDACTED:EMAIL]", msgs[1].Content)
+	assert.NotContains(t, msgs[1].Content, "user@example.com")
 }
 
 func TestRunner_ToolCallThenStop(t *testing.T) {
@@ -312,6 +546,226 @@ func TestRunner_ToolCallThenStop(t *testing.T) {
 	assert.Equal(t, chat.MessageTypeToolUse, msgs[1].MessageType)
 	assert.Equal(t, "tool", msgs[2].Role)
 	assert.Equal(t, chat.MessageTypeToolResult, msgs[2].MessageType)
+}
+
+func TestRunner_BlockInterruptCompletesAndPersistsToolResult(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runtimeCancelled := make(chan struct{})
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-release:
+			_, _ = w.Write([]byte(`{"output":{"status":"completed"}}`))
+		case <-r.Context().Done():
+			close(runtimeCancelled)
+		}
+	}))
+	t.Cleanup(runtime.Close)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	block := "block"
+	skillID := uuid.New()
+	toolID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{{
+		ID: skillID, Name: "Destructive Write", Slug: "destructive_write",
+	}}}
+	toolsBySkill := newMockToolsBySkill()
+	toolsBySkill.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID: toolID, Name: "Destructive Write", Slug: "destructive_write", Type: "HTTP",
+			InputSchema:       json.RawMessage(`{"type":"object","properties":{}}`),
+			InterruptBehavior: &block,
+		}},
+	}
+	prompt := agentic.NewPromptBuilder(skills, &mockKBLister{}, nil, agentic.DefaultPromptConfig())
+	model := &mockChatModel{streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+		if idx == 0 {
+			return makeToolCallStream("block-call", "destructive_write", `{}`), nil
+		}
+		return makeTextStream("the runner must not make a second model call"), nil
+	}}
+	persister := &interruptAwarePersister{}
+	config := agentic.DefaultRunConfig()
+	config.ToolTimeout = time.Second
+	config.TotalTimeout = 2 * time.Second
+	runner := agentic.NewRunner(
+		model,
+		agentic.NewSkillRuntimeClient(runtime.URL),
+		prompt,
+		agentic.NewToolSchemaBuilder(skills, toolsBySkill, &mockKBLister{}),
+		nil,
+		nil,
+		persister,
+		&mockHistoryLoader{},
+		nil,
+		config,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := runner.Run(ctx, agentic.RunInput{
+		SessionID: uuid.New(), AgentID: uuid.New(), TenantID: "interrupt-test",
+		UserMessage: "perform the write", SystemPrompt: "Use the provided tool.",
+	})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("tool request did not start")
+	}
+	cancel()
+	select {
+	case <-runtimeCancelled:
+		t.Fatal("block interrupt cancelled the in-flight tool request")
+	case <-time.After(75 * time.Millisecond):
+	}
+	close(release)
+	collected := collectEvents(events)
+
+	assert.True(t, hasEventType(collected, agentic.EventToolResult))
+	assert.Equal(t, 1, model.CallCount())
+	assert.True(t, persister.ToolResultPersisted())
+	assert.NoError(t, persister.ToolResultContextErr())
+}
+
+func TestRunner_PostToolHTTPHookInjectsResponseIntoNextTurn(t *testing.T) {
+	agentID := uuid.New()
+	sessionID := uuid.New()
+
+	type hookRequest struct {
+		Method string
+		Header string
+		Body   agentic.HookPayload
+	}
+	hookRequests := make(chan hookRequest, 1)
+	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload agentic.HookPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		hookRequests <- hookRequest{
+			Method: r.Method,
+			Header: r.Header.Get("X-Hook-Key"),
+			Body:   payload,
+		}
+		_, _ = w.Write([]byte("post-tool policy accepted"))
+	}))
+	t.Cleanup(hookServer.Close)
+
+	skillRuntime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/skills/execute-sql/execute", r.URL.Path)
+		_, _ = w.Write([]byte(`{"output":{"executed":true},"latencyMs":1}`))
+	}))
+	t.Cleanup(skillRuntime.Close)
+
+	skillID := uuid.New()
+	toolID := uuid.New()
+	skills := &mockSkillLister{skills: []skill.Skill{{
+		ID:          skillID,
+		Name:        "Execute SQL",
+		Slug:        "execute-sql",
+		Description: "Execute SQL queries",
+	}}}
+	toolsMock := newMockToolsBySkill()
+	toolsMock.bySkill[skillID] = struct {
+		bindings []tool.SkillTool
+		tools    []tool.Tool
+	}{
+		bindings: []tool.SkillTool{{ID: uuid.New(), SkillID: skillID, ToolID: toolID, IsActive: true}},
+		tools: []tool.Tool{{
+			ID:          toolID,
+			Name:        "SQL Tool",
+			Type:        "SQL",
+			Config:      json.RawMessage(`{"inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+		}},
+	}
+
+	hooks := &postToolHTTPHookRepository{hooks: []agentic.AgentHook{{
+		ID:       uuid.New(),
+		AgentID:  agentID,
+		Event:    agentic.HookPostToolUse,
+		Matcher:  "execute-*",
+		HookType: agentic.HookTypeHTTP,
+		Config: json.RawMessage(`{
+			"url": "` + hookServer.URL + `",
+			"method": "POST",
+			"headers": {"X-Hook-Key": "hook-secret"}
+		}`),
+		Enabled: true,
+	}}}
+
+	var secondTurnMessages []ai.Message
+	model := &mockChatModel{
+		streamFn: func(idx int, messages []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			switch idx {
+			case 0:
+				return makeToolCallStream("hook-call", "execute-sql", `{"query":"SELECT 42"}`), nil
+			case 1:
+				secondTurnMessages = append([]ai.Message(nil), messages...)
+				return makeTextStream("hook observed"), nil
+			default:
+				return nil, fmt.Errorf("unexpected model call %d", idx)
+			}
+		},
+	}
+	persister := &mockPersister{}
+	config := agentic.DefaultRunConfig()
+	config.MaxIterations = 3
+	runner := agentic.NewRunner(
+		model,
+		agentic.NewSkillRuntimeClient(skillRuntime.URL),
+		agentic.NewPromptBuilder(skills, &mockKBLister{}, nil, agentic.DefaultPromptConfig()),
+		agentic.NewToolSchemaBuilder(skills, toolsMock, &mockKBLister{}),
+		nil,
+		nil,
+		persister,
+		&mockHistoryLoader{},
+		agentic.NewHookExecutor(hooks),
+		config,
+	)
+
+	events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		SessionID:    sessionID,
+		AgentID:      agentID,
+		UserMessage:  "Run the SQL tool",
+		SystemPrompt: "Use the available tool.",
+		TenantID:     "hook-integration",
+	}))
+
+	select {
+	case request := <-hookRequests:
+		assert.Equal(t, http.MethodPost, request.Method)
+		assert.Equal(t, "hook-secret", request.Header)
+		assert.Equal(t, agentic.HookPostToolUse, request.Body.Event)
+		assert.Equal(t, agentID.String(), request.Body.AgentID)
+		assert.Equal(t, sessionID.String(), request.Body.SessionID)
+		assert.Equal(t, "execute-sql", request.Body.ToolName)
+		assert.JSONEq(t, `{"query":"SELECT 42"}`, string(request.Body.ToolInput))
+		assert.JSONEq(t, `{"executed":true}`, string(request.Body.ToolOutput))
+	case <-time.After(time.Second):
+		t.Fatal("post_tool_use HTTP hook was not called")
+	}
+
+	require.Equal(t, 2, model.CallCount())
+	require.NotEmpty(t, secondTurnMessages)
+	assert.True(t, containsMessage(secondTurnMessages, "[SYSTEM NOTE from hook]\npost-tool policy accepted"))
+	assert.True(t, hasEventType(events, agentic.EventToolResult))
+	assert.True(t, hasEventType(events, agentic.EventRunComplete))
+	assert.True(t, containsPersistedMessage(persister.Messages(), "[SYSTEM NOTE from hook]\npost-tool policy accepted"))
 }
 
 func TestRunner_EmitsToolUseSummaryWhenGeneratorConfigured(t *testing.T) {
@@ -500,6 +954,36 @@ func TestRunner_LLMError(t *testing.T) {
 	require.NoError(t, json.Unmarshal(errEv.Data, &errData))
 	assert.Equal(t, "llm_call", errData.Code)
 	assert.Contains(t, errData.Message, "API key expired")
+}
+
+func TestRunner_LLMErrorRedactsSecretsBeforeSSE(t *testing.T) {
+	const bearerSecret = "sk-ant-abcdefghijklmnopqrstuvwxyz123456"
+	const cookieSecret = "session=very-sensitive-session-value"
+	const basicSecret = "dXNlcjphLWZha2Utc2VjcmV0"
+	const internalURL = "http://agenthub-provider:8080/v1/chat"
+
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			return nil, fmt.Errorf("provider rejected request\nAuthorization: Basic %s\nCookie: %s\nupstream: %s\nkey: %s", basicSecret, cookieSecret, internalURL, bearerSecret)
+		},
+	}
+
+	runner := newTestRunner(model, &mockPersister{}, &mockHistoryLoader{}, agentic.DefaultRunConfig())
+	events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		SessionID: uuid.New(),
+		AgentID:   uuid.New(),
+		TenantID:  "test-tenant",
+	}))
+
+	errEvent := findEvent(t, events, agentic.EventError)
+	var errData agentic.ErrorData
+	require.NoError(t, json.Unmarshal(errEvent.Data, &errData))
+	assert.NotContains(t, errData.Message, bearerSecret)
+	assert.NotContains(t, errData.Message, cookieSecret)
+	assert.NotContains(t, errData.Message, basicSecret)
+	assert.NotContains(t, errData.Message, internalURL)
+	assert.Contains(t, errData.Message, "[REDACTED]")
+	assert.Contains(t, errData.Message, "<upstream>")
 }
 
 func TestRunner_StreamError(t *testing.T) {
@@ -831,7 +1315,8 @@ func TestRunner_EventSequence(t *testing.T) {
 }
 
 func TestRunner_PermissionDeny(t *testing.T) {
-	// LLM calls a denied tool. The runner should return error result without executing.
+	// LLM calls a bound but denied tool. The runner should emit a permission
+	// denial and must not execute the skill-runtime side effect.
 	model := &mockChatModel{
 		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
 			if idx == 0 {
@@ -844,7 +1329,7 @@ func TestRunner_PermissionDeny(t *testing.T) {
 
 	config := agentic.DefaultRunConfig()
 	config.ToolTimeout = 2 * time.Second
-	runner := newTestRunner(model, &mockPersister{}, &mockHistoryLoader{}, config)
+	runner, executeRequests := newRunnerWithBoundSQLTool(t, model, config)
 
 	ch := runner.Run(context.Background(), agentic.RunInput{
 		SessionID:   uuid.New(),
@@ -858,24 +1343,27 @@ func TestRunner_PermissionDeny(t *testing.T) {
 
 	events := collectEvents(ch)
 
-	// Find tool result with error.
-	// Note: "not available" fires when the tool is not in the agent's bound tool set
-	// (allowedToolsIndex check); "not permitted" fires when the tool IS bound but
-	// blocked by PermissionRules. Both represent valid denial of execution.
-	var foundDenied bool
-	for _, ev := range events {
-		if ev.Type == agentic.EventToolResult {
-			var data agentic.ToolResultData
-			require.NoError(t, json.Unmarshal(ev.Data, &data))
-			if data.Error != nil && data.Name == "execute-sql" {
-				errMsg := *data.Error
-				isDenied := strings.Contains(errMsg, "not permitted") || strings.Contains(errMsg, "not available")
-				assert.True(t, isDenied, "expected denial message, got: %s", errMsg)
-				foundDenied = true
-			}
-		}
-	}
-	assert.True(t, foundDenied, "should have a denied tool result")
+	assert.Equal(t, int32(0), executeRequests.Load(), "denied tool must not call skill-runtime")
+	assert.False(t, hasEventType(events, agentic.EventToolCallStart), "permission deny must stop before tool execution starts")
+
+	deniedEvents := filterEvents(events, agentic.EventToolDenied)
+	require.Len(t, deniedEvents, 1, "should emit one tool_denied event")
+	var denied agentic.ToolDeniedData
+	require.NoError(t, json.Unmarshal(deniedEvents[0].Data, &denied))
+	assert.Equal(t, "tc_1", denied.ID)
+	assert.Equal(t, "execute-sql", denied.Name)
+	assert.Contains(t, denied.Reason, "not permitted")
+	assert.Equal(t, 1, denied.DenialCount)
+
+	resultEvents := filterEvents(events, agentic.EventToolResult)
+	require.Len(t, resultEvents, 1, "denied tool still needs one tool_result for the LLM turn")
+	var result agentic.ToolResultData
+	require.NoError(t, json.Unmarshal(resultEvents[0].Data, &result))
+	require.NotNil(t, result.Error)
+	assert.Equal(t, "tc_1", result.ID)
+	assert.Equal(t, "execute-sql", result.Name)
+	assert.Contains(t, *result.Error, "not permitted")
+	assert.NotContains(t, *result.Error, "not available")
 
 	// Should still reach run_complete (LLM generates text after denial).
 	types := make([]agentic.RunEventType, len(events))
@@ -883,6 +1371,246 @@ func TestRunner_PermissionDeny(t *testing.T) {
 		types[i] = ev.Type
 	}
 	assert.Contains(t, types, agentic.EventRunComplete)
+}
+
+func TestRunner_PermissionDeny_HidesToolFromLLMAdvertisement(t *testing.T) {
+	var advertisedToolNames []string
+	model := &mockChatModel{
+		streamFn: func(_ int, _ []ai.Message, opts ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			advertisedToolNames = make([]string, 0, len(opts.Tools))
+			for _, tool := range opts.Tools {
+				advertisedToolNames = append(advertisedToolNames, tool.Function.Name)
+			}
+			return makeTextStream("I will not attempt a denied tool."), nil
+		},
+	}
+
+	config := agentic.DefaultRunConfig()
+	runner, _ := newRunnerWithBoundSQLTool(t, model, config)
+
+	events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		SessionID:   uuid.New(),
+		AgentID:     uuid.New(),
+		UserMessage: "hello",
+		TenantID:    "test-tenant",
+		PermissionRules: &agentic.PermissionRules{
+			Deny: []string{"execute-sql"},
+		},
+	}))
+
+	assert.NotContains(t, advertisedToolNames, "execute-sql",
+		"a blanket-denied tool must not be advertised to the LLM")
+	assert.True(t, hasEventType(events, agentic.EventRunComplete))
+	assert.False(t, hasEventType(events, agentic.EventError))
+}
+
+func TestRunner_PermissionConfirmBlocksWithoutApproval(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		elicitation      *testElicitationSubmitter
+		expectedReason   string
+		expectedDecision agentic.PermissionAuditDecision
+	}{
+		{
+			name:             "automated mode escalates confirm to deny",
+			expectedReason:   "requires confirmation but running in automated mode",
+			expectedDecision: agentic.AuditDecisionConfirmEscalated,
+		},
+		{
+			name: "user declines confirm prompt",
+			elicitation: &testElicitationSubmitter{
+				action: agentic.ElicitationDecline,
+			},
+			expectedReason:   "was not approved by the user",
+			expectedDecision: agentic.AuditDecisionConfirmDenied,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &mockChatModel{
+				streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+					if idx == 0 {
+						return makeToolCallStream("tc_1", "execute-sql", `{"query":"DROP TABLE users"}`), nil
+					}
+					return makeTextStream("The query was not approved."), nil
+				},
+			}
+
+			config := agentic.DefaultRunConfig()
+			config.ToolTimeout = 2 * time.Second
+			runner, executeRequests := newRunnerWithBoundSQLTool(t, model, config)
+			audit := agentic.NewInMemoryPermissionAuditStore()
+			runID := uuid.New()
+			var elicitation agentic.ElicitationSubmitter
+			if tt.elicitation != nil {
+				elicitation = tt.elicitation
+			}
+
+			events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+				RunID:       runID,
+				SessionID:   uuid.New(),
+				AgentID:     uuid.New(),
+				UserMessage: "drop users table",
+				TenantID:    "test-tenant",
+				PermissionRules: &agentic.PermissionRules{
+					Confirm: []string{"execute-sql"},
+				},
+				Elicitation:     elicitation,
+				PermissionAudit: audit,
+			}))
+
+			assert.Equal(t, int32(0), executeRequests.Load(), "unapproved confirm tool must not call skill-runtime")
+			assert.False(t, hasEventType(events, agentic.EventToolCallStart), "unapproved confirm must stop before tool execution starts")
+
+			deniedEvents := filterEvents(events, agentic.EventToolDenied)
+			require.Len(t, deniedEvents, 1, "unapproved confirm should emit one tool_denied event")
+			var denied agentic.ToolDeniedData
+			require.NoError(t, json.Unmarshal(deniedEvents[0].Data, &denied))
+			assert.Equal(t, "tc_1", denied.ID)
+			assert.Equal(t, "execute-sql", denied.Name)
+			assert.Contains(t, denied.Reason, tt.expectedReason)
+
+			resultEvents := filterEvents(events, agentic.EventToolResult)
+			require.Len(t, resultEvents, 1, "unapproved confirm still needs one tool_result for the LLM turn")
+			var result agentic.ToolResultData
+			require.NoError(t, json.Unmarshal(resultEvents[0].Data, &result))
+			require.NotNil(t, result.Error)
+			assert.Equal(t, "execute-sql", result.Name)
+			assert.Contains(t, *result.Error, tt.expectedReason)
+
+			entries := audit.Snapshot()
+			require.Len(t, entries, 1)
+			assert.Equal(t, "execute-sql", entries[0].ToolName)
+			assert.Equal(t, tt.expectedDecision, entries[0].Decision)
+			assert.Equal(t, runID, *entries[0].RunID)
+			assert.Contains(t, entries[0].InputSnippet, "DROP TABLE users")
+
+			if tt.elicitation != nil {
+				requestIDs, params := tt.elicitation.Requests()
+				require.Len(t, requestIDs, 1)
+				require.Len(t, params, 1)
+				assert.Contains(t, requestIDs[0], "consent-execute-sql-")
+				assert.Equal(t, agentic.ElicitationModeForm, params[0].Mode)
+				assert.Contains(t, params[0].Message, "requires your approval")
+				require.Len(t, params[0].Questions, 1)
+				assert.Equal(t, "consent", params[0].Questions[0].ID)
+				assert.Equal(t, "confirm", params[0].Questions[0].Type)
+				assert.Contains(t, params[0].Questions[0].Question, "execute-sql")
+				assert.Contains(t, params[0].Questions[0].Question, "DROP TABLE users")
+			}
+		})
+	}
+}
+
+func TestRunner_PermissionConfirmAcceptExecutesBoundTool(t *testing.T) {
+	model := &mockChatModel{
+		streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+			if idx == 0 {
+				return makeToolCallStream("tc_1", "execute-sql", `{"query":"DROP TABLE users"}`), nil
+			}
+			return makeTextStream("The approved query completed."), nil
+		},
+	}
+
+	config := agentic.DefaultRunConfig()
+	config.ToolTimeout = 2 * time.Second
+	runner, executeRequests := newRunnerWithBoundSQLTool(t, model, config)
+	elicitation := &testElicitationSubmitter{action: agentic.ElicitationAccept}
+	audit := agentic.NewInMemoryPermissionAuditStore()
+	runID := uuid.New()
+
+	events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+		RunID:       runID,
+		SessionID:   uuid.New(),
+		AgentID:     uuid.New(),
+		UserMessage: "drop users table",
+		TenantID:    "test-tenant",
+		PermissionRules: &agentic.PermissionRules{
+			Confirm: []string{"execute-sql"},
+		},
+		Elicitation:     elicitation,
+		PermissionAudit: audit,
+	}))
+
+	assert.Equal(t, int32(1), executeRequests.Load(), "approved confirm tool should call skill-runtime exactly once")
+	assert.True(t, hasEventType(events, agentic.EventToolCallStart), "approved confirm should reach tool execution")
+	assert.False(t, hasEventType(events, agentic.EventToolDenied), "approved confirm must not emit tool_denied")
+
+	resultEvents := filterEvents(events, agentic.EventToolResult)
+	require.Len(t, resultEvents, 1)
+	var result agentic.ToolResultData
+	require.NoError(t, json.Unmarshal(resultEvents[0].Data, &result))
+	require.Nil(t, result.Error)
+	assert.Equal(t, "tc_1", result.ID)
+	assert.Equal(t, "execute-sql", result.Name)
+	assert.JSONEq(t, `{"executed":true}`, string(result.Output))
+
+	entries := audit.Snapshot()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "execute-sql", entries[0].ToolName)
+	assert.Equal(t, agentic.AuditDecisionConfirmApproved, entries[0].Decision)
+	assert.Equal(t, runID, *entries[0].RunID)
+	assert.Contains(t, entries[0].InputSnippet, "DROP TABLE users")
+
+	requestIDs, params := elicitation.Requests()
+	require.Len(t, requestIDs, 1)
+	require.Len(t, params, 1)
+	assert.Contains(t, requestIDs[0], "consent-execute-sql-")
+	assert.Equal(t, agentic.ElicitationModeForm, params[0].Mode)
+	require.Len(t, params[0].Questions, 1)
+	assert.Equal(t, "confirm", params[0].Questions[0].Type)
+
+	types := make([]agentic.RunEventType, len(events))
+	for i, ev := range events {
+		types[i] = ev.Type
+	}
+	assert.Contains(t, types, agentic.EventRunComplete)
+}
+
+func TestRunner_ManagementToolCallOutsideAdvertisedScopeIsRejectedBeforeExecution(t *testing.T) {
+	cases := []struct {
+		name             string
+		isAdmin          bool
+		enableManagement bool
+		currentDepth     int
+	}{
+		{name: "non-admin caller", isAdmin: false, enableManagement: true},
+		{name: "agent opted out", isAdmin: true, enableManagement: false},
+		{name: "sub-agent", isAdmin: true, enableManagement: true, currentDepth: 1},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			agentSvc := &stubAgentService{}
+			management := agentic.NewManagementExecutor(agentSvc, nil, nil, nil, nil, nil)
+			model := &mockChatModel{
+				streamFn: func(idx int, _ []ai.Message, _ ai.ChatOptions) (<-chan ai.StreamChunk, error) {
+					if idx == 0 {
+						return makeToolCallStream("manage-blocked", "agenthub_manage", `{"operation":"create","resource":"agent","payload":{"name":"blocked"}}`), nil
+					}
+					return makeTextStream("management call rejected"), nil
+				},
+			}
+
+			runner := newTestRunner(model, &mockPersister{}, &mockHistoryLoader{}, agentic.DefaultRunConfig()).
+				WithManagementExecutor(management)
+			events := collectEvents(runner.Run(context.Background(), agentic.RunInput{
+				SessionID:        uuid.New(),
+				AgentID:          uuid.New(),
+				TenantID:         "test-tenant",
+				IsAdmin:          tt.isAdmin,
+				EnableManagement: tt.enableManagement,
+				CurrentDepth:     tt.currentDepth,
+			}))
+
+			assert.False(t, agentSvc.createCalled, "management executor must not run outside advertised scope")
+			toolResult := findEvent(t, events, agentic.EventToolResult)
+			var result agentic.ToolResultData
+			require.NoError(t, json.Unmarshal(toolResult.Data, &result))
+			require.NotNil(t, result.Error)
+			assert.Contains(t, *result.Error, "is not available for this agent")
+			assert.Equal(t, 2, model.CallCount())
+		})
+	}
 }
 
 func TestRunner_PermissionAllowList(t *testing.T) {

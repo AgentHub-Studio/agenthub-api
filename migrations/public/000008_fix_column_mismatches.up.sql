@@ -18,7 +18,18 @@ ALTER TABLE public.llm_config_preset
     ADD COLUMN IF NOT EXISTS temperature NUMERIC(4,2) NOT NULL DEFAULT 0.7,
     ADD COLUMN IF NOT EXISTS is_default  BOOLEAN      NOT NULL DEFAULT FALSE;
 
--- Backfill model from model_id for existing rows.
-UPDATE public.llm_config_preset SET model = COALESCE(model_id, '') WHERE model = '';
+-- Backfill model from model_id for Java-created schemas only.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'llm_config_preset'
+          AND column_name = 'model_id'
+    ) THEN
+        UPDATE public.llm_config_preset SET model = COALESCE(model_id, '') WHERE model = '';
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_llm_config_preset_is_default ON public.llm_config_preset (is_default);

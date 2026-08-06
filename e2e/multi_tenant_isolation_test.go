@@ -27,6 +27,7 @@ func TestE2E_MultiTenantIsolation(t *testing.T) {
 		cfg.keycloakAdmin, cfg.keycloakAdminPass,
 		cfg.e2eUserPassword,
 	)
+	t.Logf("e2e isolation tenants: A=%s B=%s", tenantA.Slug, tenantB.Slug)
 
 	clientA := tenantA.Client(t, cfg.backendURL)
 	clientB := tenantB.Client(t, cfg.backendURL)

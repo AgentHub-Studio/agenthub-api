@@ -2,6 +2,7 @@ package skill_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -54,14 +55,19 @@ func (m *mockSkillRepo) Update(_ context.Context, id uuid.UUID, req skill.Update
 	}
 	s.Name = req.Name
 	s.Description = req.Description
-	s.Instructions = req.Instructions
 	s.Category = req.Category
+	s.Instructions = req.Instructions
 	s.AllowedTools = req.AllowedTools
+	s.RequiredRoles = req.RequiredRoles
 	s.DisableModelInvocation = req.DisableModelInvocation
 	s.ContextMode = req.ContextMode
 	s.WhenToUse = req.WhenToUse
 	s.ArgumentHint = req.ArgumentHint
 	s.ShouldDefer = req.ShouldDefer
+	s.ModelOverrides = req.ModelOverrides
+	s.EffortLevel = req.EffortLevel
+	s.AssociatedAgents = req.AssociatedAgents
+	s.DynamicHooks = req.DynamicHooks
 	m.data[id] = s
 	return s, nil
 }
@@ -150,6 +156,34 @@ func TestSkillService_Create_CustomSlug(t *testing.T) {
 	assert.Equal(t, "doc-search", s.Slug)
 }
 
+func TestSkillService_Create_PreservesPortableMetadata(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:             "Incident Research",
+		Instructions:     "Investigate the incident and preserve evidence.",
+		ModelOverrides:   map[string]string{"default": "claude-sonnet-4-6"},
+		EffortLevel:      "high",
+		AssociatedAgents: []string{"incident-commander"},
+		DynamicHooks:     []string{"pre_tool_use", "run_end"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"default": "claude-sonnet-4-6"}, created.ModelOverrides)
+	assert.Equal(t, "high", created.EffortLevel)
+	assert.Equal(t, []string{"incident-commander"}, created.AssociatedAgents)
+	assert.Equal(t, []string{"pre_tool_use", "run_end"}, created.DynamicHooks)
+}
+
+func TestSkillService_Create_RejectsUnsupportedDynamicHook(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:         "Invalid Hook",
+		Instructions: "Do a safe thing.",
+		DynamicHooks: []string{"before_everything"},
+	})
+	require.ErrorIs(t, err, skill.ErrValidation)
+	assert.Contains(t, err.Error(), "dynamicHooks")
+}
+
 func TestSkillService_Create_RejectsHTMLName(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	_, err := svc.Create(context.Background(), skill.CreateRequest{
@@ -225,24 +259,6 @@ func TestSkillService_Update_InstructionsEmpty_Preserved(t *testing.T) {
 	assert.Equal(t, "Do something.", got.Instructions)
 }
 
-func TestSkillService_Update_InstructionsTrimmed(t *testing.T) {
-	repo := newMockRepo()
-	svc := skill.NewService(repo)
-	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Skill", Category: "misc", Instructions: "Old guidance."})
-	require.NoError(t, err)
-
-	updated, err := svc.Update(context.Background(), created.ID, skill.UpdateRequest{
-		Name:         "Skill",
-		Instructions: "  New guidance.  \n",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "New guidance.", updated.Instructions)
-
-	got, err := svc.GetByID(context.Background(), created.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "New guidance.", got.Instructions)
-}
-
 func TestSkillService_Update_AllowedToolsNoInstructions_Accepted(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Skill", Category: "misc", Instructions: "Guide."})
@@ -254,6 +270,40 @@ func TestSkillService_Update_AllowedToolsNoInstructions_Accepted(t *testing.T) {
 		AllowedTools: []string{"http_get"},
 	})
 	require.NoError(t, err)
+}
+
+func TestSkillService_Update_TrimsInstructionsBeforePersisting(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), skill.CreateRequest{Name: "Skill", Category: "misc", Instructions: "Guide."})
+	require.NoError(t, err)
+
+	updated, err := svc.Update(context.Background(), created.ID, skill.UpdateRequest{
+		Name:         "Skill",
+		Instructions: "  Use the crm_lookup tool before answering. \n\t",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "Use the crm_lookup tool before answering.", updated.Instructions)
+}
+
+func TestSkillService_Update_RejectsLegacyInertSkillAfterTrimmingInstructions(t *testing.T) {
+	repo := newMockRepo()
+	svc := skill.NewService(repo)
+	id := uuid.New()
+	repo.data[id] = skill.Skill{
+		ID:       id,
+		Name:     "Legacy Empty Skill",
+		Slug:     "legacy-empty-skill",
+		Category: "misc",
+	}
+	repo.slugs["legacy-empty-skill"] = true
+
+	_, err := svc.Update(context.Background(), id, skill.UpdateRequest{
+		Instructions: " \t\n ",
+	})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, skill.ErrSkillInert)
 }
 
 func TestSkillService_Update_InstructionsTooLong_Rejected(t *testing.T) {
@@ -322,6 +372,19 @@ func TestSkillService_Create_WithAllowedTools_NoInstructions_Accepted(t *testing
 	require.NoError(t, err)
 }
 
+func TestSkillService_Create_PreservesRequiredRoles(t *testing.T) {
+	svc := skill.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), skill.CreateRequest{
+		Name:          "Admin Skill",
+		Category:      "misc",
+		Instructions:  "Only admins should see this skill.",
+		RequiredRoles: []string{"admin"},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"admin"}, created.RequiredRoles)
+}
+
 func TestSkillService_Create_WhitespaceInstructions_TreatedAsEmpty(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	_, err := svc.Create(context.Background(), skill.CreateRequest{
@@ -350,15 +413,11 @@ func TestSkillService_Create_InstructionsTooLong(t *testing.T) {
 func TestSkillService_Create_InstructionsAtLimit_Accepted(t *testing.T) {
 	svc := skill.NewService(newMockRepo())
 	// Exactly 32000 non-whitespace chars should be accepted.
-	// Fill with printable chars
-	buf := make([]byte, 32000)
-	for i := range buf {
-		buf[i] = 'x'
-	}
+	instructions := strings.Repeat("x", 32000)
 	_, err := svc.Create(context.Background(), skill.CreateRequest{
 		Name:         "At Limit Skill",
 		Category:     "misc",
-		Instructions: string(buf),
+		Instructions: instructions,
 	})
 	require.NoError(t, err)
 }

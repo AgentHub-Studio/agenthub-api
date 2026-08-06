@@ -74,7 +74,19 @@ func TestBackgroundRunRegistry_Cancel(t *testing.T) {
 
 	run := reg.Get(runID)
 	require.NotNil(t, run)
-	assert.Equal(t, chat.RunStatusCompleted, run.Status)
+	assert.Equal(t, chat.RunStatusCancelled, run.Status)
+}
+
+func TestBackgroundRunRegistry_MarkCompletedDoesNotOverrideCancelled(t *testing.T) {
+	reg := chat.NewBackgroundRunRegistry(1 * time.Minute)
+	runID, _ := reg.Register(uuid.New())
+
+	reg.Cancel(runID)
+	reg.MarkCompleted(runID)
+
+	run := reg.Get(runID)
+	require.NotNil(t, run)
+	assert.Equal(t, chat.RunStatusCancelled, run.Status)
 }
 
 func TestBackgroundRunRegistry_CancelNonexistent(t *testing.T) {

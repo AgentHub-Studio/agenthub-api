@@ -11,6 +11,10 @@ import (
 // ErrNotFound is returned when an installation is not found.
 var ErrNotFound = errors.New("installation not found")
 
+// ErrPackageUnavailable is returned for missing and private registry packages
+// so the public marketplace endpoint does not expose package existence.
+var ErrPackageUnavailable = errors.New("installation: package not found")
+
 // InstallStatus represents the state of an installation.
 type InstallStatus string
 

@@ -3,6 +3,7 @@
 package ssrf
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -39,7 +40,7 @@ func init() {
 	}
 	allowedHosts = map[string]struct{}{}
 	for _, h := range strings.Split(os.Getenv("SSRF_ALLOWED_HOSTS"), ",") {
-		h = strings.TrimSpace(strings.ToLower(h))
+		h = canonicalHost(strings.TrimSpace(h))
 		if h != "" {
 			allowedHosts[h] = struct{}{}
 		}
@@ -54,7 +55,13 @@ func AllowHost(host string) {
 	if host == "" {
 		return
 	}
-	allowedHosts[strings.ToLower(host)] = struct{}{}
+	if normalized := canonicalHost(host); normalized != "" {
+		allowedHosts[normalized] = struct{}{}
+	}
+}
+
+func canonicalHost(host string) string {
+	return strings.TrimRight(strings.ToLower(strings.TrimSpace(host)), ".")
 }
 
 // ValidateHost performs narrower SSRF checks suitable for *database hosts*.
@@ -75,21 +82,24 @@ func ValidateHost(host string) error {
 	if host == "" {
 		return fmt.Errorf("host is empty")
 	}
+	normalizedHost := canonicalHost(host)
+	if normalizedHost == "" {
+		return fmt.Errorf("host is empty")
+	}
 
-	if _, ok := allowedHosts[strings.ToLower(host)]; ok {
+	if _, ok := allowedHosts[normalizedHost]; ok {
 		return nil
 	}
 
-	lowerHost := strings.ToLower(host)
-	if lowerHost == "localhost" || lowerHost == "ip6-localhost" || lowerHost == "ip6-loopback" {
+	if normalizedHost == "localhost" || normalizedHost == "ip6-localhost" || normalizedHost == "ip6-loopback" {
 		return fmt.Errorf("host targets loopback hostname: %s", host)
 	}
-	if strings.HasSuffix(lowerHost, ".svc.cluster.local") ||
-		strings.HasSuffix(lowerHost, ".cluster.local") {
+	if strings.HasSuffix(normalizedHost, ".svc.cluster.local") ||
+		strings.HasSuffix(normalizedHost, ".cluster.local") {
 		return fmt.Errorf("host targets internal cluster DNS: %s", host)
 	}
 
-	if ip := net.ParseIP(host); ip != nil {
+	if ip := net.ParseIP(normalizedHost); ip != nil {
 		// Loopback (127.0.0.0/8 + ::1)
 		if ip.IsLoopback() {
 			return fmt.Errorf("host targets loopback address: %s", host)
@@ -112,33 +122,40 @@ func ValidateHost(host string) error {
 func ValidateURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
+		return errors.New("invalid URL")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("unsupported URL scheme: %s", u.Scheme)
 	}
 	if u.Host == "" {
 		return fmt.Errorf("URL has no host")
 	}
 
 	host := u.Hostname()
+	normalizedHost := canonicalHost(host)
+	if normalizedHost == "" {
+		return fmt.Errorf("URL has no host")
+	}
 
 	// Explicit allowlist bypass (dev/test harness hosts).
-	if _, ok := allowedHosts[strings.ToLower(host)]; ok {
+	if _, ok := allowedHosts[normalizedHost]; ok {
 		return nil
 	}
 
 	// Block internal cluster DNS names.
-	if strings.HasSuffix(host, ".svc.cluster.local") ||
-		strings.HasSuffix(host, ".cluster.local") {
+	if strings.HasSuffix(normalizedHost, ".svc.cluster.local") ||
+		strings.HasSuffix(normalizedHost, ".cluster.local") {
 		return fmt.Errorf("URL targets internal cluster DNS: %s", host)
 	}
 
 	// Block well-known loopback hostnames that don't parse as IPs.
-	lowerHost := strings.ToLower(host)
-	if lowerHost == "localhost" || lowerHost == "ip6-localhost" || lowerHost == "ip6-loopback" {
+	if normalizedHost == "localhost" || normalizedHost == "ip6-localhost" || normalizedHost == "ip6-loopback" {
 		return fmt.Errorf("URL targets loopback hostname: %s", host)
 	}
 
 	// If the URL host is a literal IP address, check it directly.
-	if ip := net.ParseIP(host); ip != nil {
+	if ip := net.ParseIP(normalizedHost); ip != nil {
 		for _, cidr := range privateCIDRs {
 			if cidr.Contains(ip) {
 				return fmt.Errorf("URL targets private/reserved network address: %s", host)

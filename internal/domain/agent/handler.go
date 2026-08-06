@@ -2,13 +2,14 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -29,14 +30,36 @@ type TemplateContent struct {
 
 // Handler exposes agent HTTP endpoints.
 type Handler struct {
-	svc              Service
-	templateSvc      TemplateGetter
-	portableBindings PortableBindingLookup
+	svc             Service
+	templateSvc     TemplateGetter
+	readAccess      ReadAccessChecker
+	extractIdentity RequestIdentityExtractor
 }
 
 // NewHandler creates a new Handler.
 func NewHandler(svc Service) *Handler {
 	return &Handler{svc: svc}
+}
+
+// RequestIdentity is the authenticated subject used for resource-level ACL.
+type RequestIdentity struct {
+	SubjectID string
+	Roles     []string
+}
+
+// RequestIdentityExtractor reads the authenticated subject from a request.
+type RequestIdentityExtractor func(*http.Request) RequestIdentity
+
+// ReadAccessChecker checks per-resource read grants.
+type ReadAccessChecker interface {
+	CanAccess(ctx context.Context, subjectID, resourceType, resourceID, action string) (bool, error)
+}
+
+// WithReadAccess enables resource-level ACL checks for GET /api/agents/{id}.
+func (h *Handler) WithReadAccess(checker ReadAccessChecker, extract RequestIdentityExtractor) *Handler {
+	h.readAccess = checker
+	h.extractIdentity = extract
+	return h
 }
 
 // WithTemplateGetter attaches a prompt-template resolver used by the
@@ -46,24 +69,27 @@ func (h *Handler) WithTemplateGetter(g TemplateGetter) *Handler {
 	return h
 }
 
-// RegisterRoutes mounts agent routes on the given router.
+// RegisterRoutes mounts agent routes on the given router. Read routes remain
+// available to the chat and are protected by the resource-level ACL on get.
+// Agent administration routes require the administrator role.
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/api/agents", h.list)
-	r.Post("/api/agents", h.create)
-	// ACT-F3-19: bulk delete via DELETE /api/agents with a JSON body {"ids":[...]}.
-	r.Delete("/api/agents", h.bulkDelete)
 	r.Get("/api/agents/{id}", h.get)
-	r.Put("/api/agents/{id}", h.update)
-	r.Patch("/api/agents/{id}", h.update) // PATCH delegates to the same handler — all fields are optional
-	r.Delete("/api/agents/{id}", h.delete)
-	r.Post("/api/agents/{id}/publish", h.publish)
-	r.Post("/api/agents/{id}/archive", h.archive)
-	r.Post("/api/agents/{id}/restore", h.restore)
-	r.Post("/api/agents/{id}/clone", h.clone)
-	r.Post("/api/agents/{id}/apply-template", h.applyTemplate)
-	// MA-02: Agent-as-Code — YAML export/import.
-	r.Get("/api/agents/{id}/export", h.exportPortable)
-	r.Post("/api/agents/import", h.importPortable)
+
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Post("/api/agents", h.create)
+		// ACT-F3-19: bulk delete via DELETE /api/agents with a JSON body {"ids":[...]}.
+		r.Delete("/api/agents", h.bulkDelete)
+		r.Put("/api/agents/{id}", h.update)
+		r.Patch("/api/agents/{id}", h.update) // PATCH delegates to the same handler — all fields are optional
+		r.Delete("/api/agents/{id}", h.delete)
+		r.Post("/api/agents/{id}/publish", h.publish)
+		r.Post("/api/agents/{id}/archive", h.archive)
+		r.Post("/api/agents/{id}/restore", h.restore)
+		r.Post("/api/agents/{id}/clone", h.clone)
+		r.Post("/api/agents/{id}/apply-template", h.applyTemplate)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +106,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateAgentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -108,6 +134,15 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		respond.Error(w, http.StatusBadRequest, "invalid id")
 		return
 	}
+	allowed, err := h.canReadAgent(r, id)
+	if err != nil {
+		respond.Error(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !allowed {
+		respond.Error(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	resp, err := h.svc.GetWithReadiness(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -120,6 +155,25 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	respond.JSON(w, http.StatusOK, resp)
 }
 
+func (h *Handler) canReadAgent(r *http.Request, id uuid.UUID) (bool, error) {
+	if h.readAccess == nil {
+		return true, nil
+	}
+	if h.extractIdentity == nil {
+		return false, nil
+	}
+	identity := h.extractIdentity(r)
+	for _, role := range identity.Roles {
+		if role == "admin" {
+			return true, nil
+		}
+	}
+	if identity.SubjectID == "" {
+		return false, nil
+	}
+	return h.readAccess.CanAccess(r.Context(), identity.SubjectID, "agents", id.String(), "read")
+}
+
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -127,7 +181,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateAgentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -179,7 +233,7 @@ func (h *Handler) bulkDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IDs []uuid.UUID `json:"ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -264,7 +318,7 @@ func (h *Handler) clone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CloneAgentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -311,7 +365,7 @@ func (h *Handler) applyTemplate(w http.ResponseWriter, r *http.Request) {
 		TemplateID string `json:"template_id"`
 		Merge      bool   `json:"merge"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &body); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -380,17 +434,21 @@ func (h *VersionHandler) WithAgentService(s Service) *VersionHandler {
 	return h
 }
 
-// RegisterVersionRoutes mounts version routes under /api/agents/{agentId}/versions.
+// RegisterVersionRoutes mounts administrator-only version routes under
+// /api/agents/{agentId}/versions.
 func (h *VersionHandler) RegisterVersionRoutes(r chi.Router) {
-	r.Get("/api/agents/{agentId}/versions", h.listVersions)
-	r.Post("/api/agents/{agentId}/versions", h.createDraft)
-	r.Get("/api/agents/{agentId}/versions/draft", h.getDraft)
-	r.Get("/api/agents/{agentId}/versions/latest-published", h.getLatestPublished)
-	r.Get("/api/agents/{agentId}/versions/by-id/{versionId}", h.getVersionByID)
-	r.Put("/api/agents/{agentId}/versions/by-id/{versionId}", h.updateDraft)
-	r.Patch("/api/agents/{agentId}/versions/by-id/{versionId}", h.updateDraft)
-	r.Post("/api/agents/{agentId}/versions/{versionId}/publish", h.publishVersion)
-	r.Post("/api/agents/{agentId}/versions/{versionId}/rollback", h.rollbackVersion)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/agents/{agentId}/versions", h.listVersions)
+		r.Post("/api/agents/{agentId}/versions", h.createDraft)
+		r.Get("/api/agents/{agentId}/versions/draft", h.getDraft)
+		r.Get("/api/agents/{agentId}/versions/latest-published", h.getLatestPublished)
+		r.Get("/api/agents/{agentId}/versions/by-id/{versionId}", h.getVersionByID)
+		r.Put("/api/agents/{agentId}/versions/by-id/{versionId}", h.updateDraft)
+		r.Patch("/api/agents/{agentId}/versions/by-id/{versionId}", h.updateDraft)
+		r.Post("/api/agents/{agentId}/versions/{versionId}/publish", h.publishVersion)
+		r.Post("/api/agents/{agentId}/versions/{versionId}/rollback", h.rollbackVersion)
+	})
 }
 
 func parseAgentID(r *http.Request) (uuid.UUID, error) {
@@ -399,6 +457,17 @@ func parseAgentID(r *http.Request) (uuid.UUID, error) {
 
 func parseVersionID(r *http.Request) (uuid.UUID, error) {
 	return uuid.Parse(chi.URLParam(r, "versionId"))
+}
+
+func (h *VersionHandler) requireVersionForAgent(ctx context.Context, agentID, versionID uuid.UUID) (AgentVersionResponse, error) {
+	resp, err := h.svc.GetVersionByID(ctx, versionID)
+	if err != nil {
+		return AgentVersionResponse{}, err
+	}
+	if resp.AgentID != agentID {
+		return AgentVersionResponse{}, ErrVersionNotFound
+	}
+	return resp, nil
 }
 
 func (h *VersionHandler) listVersions(w http.ResponseWriter, r *http.Request) {
@@ -435,7 +504,7 @@ func (h *VersionHandler) createDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CreateAgentVersionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -491,12 +560,17 @@ func (h *VersionHandler) getLatestPublished(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *VersionHandler) getVersionByID(w http.ResponseWriter, r *http.Request) {
+	agentID, err := parseAgentID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agentId")
+		return
+	}
 	versionID, err := parseVersionID(r)
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid versionId")
 		return
 	}
-	resp, err := h.svc.GetVersionByID(r.Context(), versionID)
+	resp, err := h.requireVersionForAgent(r.Context(), agentID, versionID)
 	if err != nil {
 		if errors.Is(err, ErrVersionNotFound) {
 			respond.Error(w, http.StatusNotFound, "version not found")
@@ -509,14 +583,27 @@ func (h *VersionHandler) getVersionByID(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *VersionHandler) updateDraft(w http.ResponseWriter, r *http.Request) {
+	agentID, err := parseAgentID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agentId")
+		return
+	}
 	versionID, err := parseVersionID(r)
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid versionId")
 		return
 	}
 	var req UpdateAgentVersionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if _, err := h.requireVersionForAgent(r.Context(), agentID, versionID); err != nil {
+		if errors.Is(err, ErrVersionNotFound) {
+			respond.Error(w, http.StatusNotFound, "version not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	resp, err := h.svc.UpdateDraft(r.Context(), versionID, req)
@@ -535,9 +622,22 @@ func (h *VersionHandler) updateDraft(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *VersionHandler) publishVersion(w http.ResponseWriter, r *http.Request) {
+	agentID, err := parseAgentID(r)
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agentId")
+		return
+	}
 	versionID, err := parseVersionID(r)
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid versionId")
+		return
+	}
+	if _, err := h.requireVersionForAgent(r.Context(), agentID, versionID); err != nil {
+		if errors.Is(err, ErrVersionNotFound) {
+			respond.Error(w, http.StatusNotFound, "version not found")
+			return
+		}
+		respond.Error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	resp, err := h.svc.Publish(r.Context(), versionID)

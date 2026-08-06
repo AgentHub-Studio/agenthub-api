@@ -14,8 +14,8 @@ type e2eConfigValues struct {
 
 func e2eConfig() e2eConfigValues {
 	return e2eConfigValues{
-		backendURL:        getEnvOrDefault("API_URL", "http://localhost:8081"),
-		keycloakURL:       getEnvOrDefault("KEYCLOAK_URL", "https://keycloak.cezar.dev"),
+		backendURL:        getEnvOrDefault("API_URL", "http://127.0.0.1:28081"),
+		keycloakURL:       getEnvOrDefault("KEYCLOAK_URL", "http://127.0.0.1:28080"),
 		keycloakAdmin:     getEnvOrDefault("KEYCLOAK_ADMIN_USER", "admin"),
 		keycloakAdminPass: getEnvOrDefault("KEYCLOAK_ADMIN_PASSWORD", "@admin#"),
 		e2eUserPassword:   getEnvOrDefault("E2E_USER_PASSWORD", "E2eTestPass#1"),

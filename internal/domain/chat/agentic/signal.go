@@ -142,7 +142,6 @@ func (w *BufferedWriter) Write(content string) {
 
 	// Check if buffer exceeds limits.
 	shouldFlush := w.config.MaxBufferSize > 0 && len(w.buffer) >= w.config.MaxBufferSize
-
 	if w.config.MaxBufferBytes > 0 && w.bufferBytes >= w.config.MaxBufferBytes {
 		shouldFlush = true
 	}

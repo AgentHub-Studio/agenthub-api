@@ -2,7 +2,6 @@ package skill
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -47,16 +48,23 @@ func (h *Handler) WithRepository(repo skillExporter) *Handler {
 	return h
 }
 
-// RegisterRoutes mounts skill routes on the given router.
+// RegisterRoutes mounts administrator-only skill routes on the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/skills", h.list)
-	r.Post("/api/skills", h.create)
-	r.Post("/api/skills/import-skillmd", h.importSkillMD)
-	r.Get("/api/skills/{id}", h.getByID)
-	r.Put("/api/skills/{id}", h.update)
-	r.Patch("/api/skills/{id}", h.update)
-	r.Delete("/api/skills/{id}", h.delete)
-	r.Get("/api/skills/{id}/skillmd", h.exportSkillMD)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/skills", h.list)
+		r.Post("/api/skills", h.create)
+		// Portable SKILL.md contract from docs/PLAN.md. Keep the explicit
+		// import-skillmd route below as a backward-compatible alias.
+		r.Post("/api/skills/import", h.importSkillMD)
+		r.Post("/api/skills/import-skillmd", h.importSkillMD)
+		r.Get("/api/skills/{id}/export", h.exportSkillMD)
+		r.Get("/api/skills/{id}", h.getByID)
+		r.Put("/api/skills/{id}", h.update)
+		r.Patch("/api/skills/{id}", h.update)
+		r.Delete("/api/skills/{id}", h.delete)
+		r.Get("/api/skills/{id}/skillmd", h.exportSkillMD)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +83,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -125,7 +133,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

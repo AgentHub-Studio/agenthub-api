@@ -44,7 +44,7 @@ func TestE2E_VPNResourceLifecycle(t *testing.T) {
 	var page testutil.Page[map[string]any]
 	status = c.Get("/api/vpn-resources?page=0&size=20", &page)
 	assert.Equal(t, http.StatusOK, status)
-	assert.GreaterOrEqual(t, page.TotalElements, int64(1))
+	assert.GreaterOrEqual(t, page.TotalElements, 1)
 
 	// --- Update ---
 	var updated map[string]any
@@ -128,7 +128,7 @@ func TestE2E_DatasourceLifecycle(t *testing.T) {
 	var page testutil.Page[map[string]any]
 	status = c.Get("/api/datasources?page=0&size=20", &page)
 	assert.Equal(t, http.StatusOK, status)
-	assert.GreaterOrEqual(t, page.TotalElements, int64(1))
+	assert.GreaterOrEqual(t, page.TotalElements, 1)
 
 	// --- Update ---
 	var updated map[string]any

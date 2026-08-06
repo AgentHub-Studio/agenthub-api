@@ -8,6 +8,7 @@ package processors
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -72,7 +73,7 @@ func (p Pipeline) RunOutput(ctx context.Context, content string) (string, error)
 }
 
 // PIIRedactor masks Brazilian CPF/CNPJ/email patterns in user input so the LLM
-// never sees the raw values. Masked with ***.
+// never sees the raw values.
 type PIIRedactor struct{}
 
 var (
@@ -83,16 +84,41 @@ var (
 
 func (PIIRedactor) Name() string { return "pii_redactor" }
 
+func redactPII(content string) string {
+	content = cnpjPattern.ReplaceAllString(content, "[REDACTED:CNPJ]")
+	content = cpfPattern.ReplaceAllString(content, "[REDACTED:CPF]")
+	content = emailPattern.ReplaceAllString(content, "[REDACTED:EMAIL]")
+	return content
+}
+
 func (p PIIRedactor) ProcessInput(_ context.Context, in []Message) ([]Message, string, error) {
 	out := make([]Message, len(in))
 	for i, m := range in {
-		c := m.Content
-		c = cnpjPattern.ReplaceAllString(c, "[REDACTED_CNPJ]")
-		c = cpfPattern.ReplaceAllString(c, "[REDACTED_CPF]")
-		c = emailPattern.ReplaceAllString(c, "[REDACTED_EMAIL]")
-		out[i] = Message{Role: m.Role, Content: c}
+		out[i] = Message{Role: m.Role, Content: redactPII(m.Content)}
 	}
 	return out, "", nil
+}
+
+func (p PIIRedactor) ProcessOutput(_ context.Context, content string) (string, error) {
+	return redactPII(content), nil
+}
+
+// UpperCaser is a deterministic test processor used by adoption contracts to
+// verify that configured processor order is preserved end-to-end.
+type UpperCaser struct{}
+
+func (UpperCaser) Name() string { return "upper_caser" }
+
+func (UpperCaser) ProcessInput(_ context.Context, in []Message) ([]Message, string, error) {
+	out := make([]Message, len(in))
+	for i, m := range in {
+		out[i] = Message{Role: m.Role, Content: strings.ToUpper(m.Content)}
+	}
+	return out, "", nil
+}
+
+func (UpperCaser) ProcessOutput(_ context.Context, content string) (string, error) {
+	return strings.ToUpper(content), nil
 }
 
 // ProfanityFilter rejects messages containing any banned term (case-insensitive).
@@ -172,4 +198,58 @@ func (c *ResponseCache) ProcessOutput(_ context.Context, content string) (string
 		c.order = c.order[1:]
 	}
 	return content, nil
+}
+
+// BuildPipeline resolves configured processor names into executable processors.
+func BuildPipeline(inputNames, outputNames []string) (Pipeline, error) {
+	p := Pipeline{}
+	for _, name := range inputNames {
+		ip, err := InputByName(name)
+		if err != nil {
+			return Pipeline{}, err
+		}
+		p.Inputs = append(p.Inputs, ip)
+	}
+	for _, name := range outputNames {
+		op, err := OutputByName(name)
+		if err != nil {
+			return Pipeline{}, err
+		}
+		p.Outputs = append(p.Outputs, op)
+	}
+	return p, nil
+}
+
+// InputByName returns a built-in input processor by stable config name.
+func InputByName(name string) (InputProcessor, error) {
+	switch strings.TrimSpace(strings.ToLower(name)) {
+	case "", "none":
+		return nil, fmt.Errorf("unknown input processor %q", name)
+	case "pii_redactor":
+		return PIIRedactor{}, nil
+	case "upper_caser":
+		return UpperCaser{}, nil
+	case "profanity_filter":
+		return ProfanityFilter{}, nil
+	case "prompt_injection_detector":
+		return PromptInjectionDetector{}, nil
+	default:
+		return nil, fmt.Errorf("unknown input processor %q", name)
+	}
+}
+
+// OutputByName returns a built-in output processor by stable config name.
+func OutputByName(name string) (OutputProcessor, error) {
+	switch strings.TrimSpace(strings.ToLower(name)) {
+	case "", "none":
+		return nil, fmt.Errorf("unknown output processor %q", name)
+	case "pii_redactor":
+		return PIIRedactor{}, nil
+	case "upper_caser":
+		return UpperCaser{}, nil
+	case "response_cache":
+		return NewResponseCache(64), nil
+	default:
+		return nil, fmt.Errorf("unknown output processor %q", name)
+	}
 }

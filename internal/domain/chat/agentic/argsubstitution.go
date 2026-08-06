@@ -82,6 +82,9 @@ func ParseArgumentNames(names string) []string {
 // unfilled arguments (e.g., "[arg2] [arg3]"). Returns empty string
 // if all arguments are filled.
 func GenerateArgumentHint(argNames []string, typedArgs []string) string {
+	if len(typedArgs) >= len(argNames) {
+		return ""
+	}
 	remaining := argNames[len(typedArgs):]
 	if len(remaining) == 0 {
 		return ""

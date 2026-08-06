@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -22,7 +24,8 @@ var ErrSlugConflict = errors.New("package: slug already in use")
 
 // Repository provides data access for package_registry.
 type Repository struct {
-	pool *pgxpool.Pool
+	pool          *pgxpool.Pool
+	queryEmbedder QueryEmbedder
 }
 
 // NewRepository creates a new package Repository.
@@ -30,11 +33,18 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
+// WithQueryEmbedder configures semantic query generation. Without it, Search
+// deliberately falls back to lexical matching instead of mixing vector spaces.
+func (r *Repository) WithQueryEmbedder(embedder QueryEmbedder) *Repository {
+	r.queryEmbedder = embedder
+	return r
+}
+
 // ListPublic returns a paginated list of PUBLIC packages.
 func (r *Repository) ListPublic(ctx context.Context, req pagination.PageRequest) ([]Package, int64, error) {
 	const countQuery = `SELECT COUNT(*) FROM public.package_registry WHERE visibility = 'PUBLIC'`
 	const query = `
-		SELECT id, name, slug, COALESCE(description,''), type, visibility,
+		SELECT id, name, slug, COALESCE(description,''), COALESCE(tags, '{}'), type, visibility,
 		       author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at
 		  FROM public.package_registry
 		 WHERE visibility = 'PUBLIC'
@@ -62,7 +72,7 @@ func (r *Repository) ListPublic(ctx context.Context, req pagination.PageRequest)
 // GetByID returns a package by its UUID.
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (Package, error) {
 	const query = `
-		SELECT id, name, slug, COALESCE(description,''), type, visibility,
+		SELECT id, name, slug, COALESCE(description,''), COALESCE(tags, '{}'), type, visibility,
 		       author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at
 		  FROM public.package_registry
 		 WHERE id = $1`
@@ -74,7 +84,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (Package, error)
 // GetBySlug returns a package by its slug.
 func (r *Repository) GetBySlug(ctx context.Context, slug string) (Package, error) {
 	const query = `
-		SELECT id, name, slug, COALESCE(description,''), type, visibility,
+		SELECT id, name, slug, COALESCE(description,''), COALESCE(tags, '{}'), type, visibility,
 		       author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at
 		  FROM public.package_registry
 		 WHERE slug = $1`
@@ -87,7 +97,7 @@ func (r *Repository) GetBySlug(ctx context.Context, slug string) (Package, error
 func (r *Repository) ListByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) ([]Package, int64, error) {
 	const countQuery = `SELECT COUNT(*) FROM public.package_registry WHERE author_tenant_id = $1`
 	const query = `
-		SELECT id, name, slug, COALESCE(description,''), type, visibility,
+		SELECT id, name, slug, COALESCE(description,''), COALESCE(tags, '{}'), type, visibility,
 		       author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at
 		  FROM public.package_registry
 		 WHERE author_tenant_id = $1
@@ -115,13 +125,13 @@ func (r *Repository) ListByTenant(ctx context.Context, tenantID string, req pagi
 // Create inserts a new package and returns the created entity.
 func (r *Repository) Create(ctx context.Context, p Package) (Package, error) {
 	const query = `
-		INSERT INTO public.package_registry (name, slug, description, type, visibility, author_tenant_id)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, name, slug, COALESCE(description,''), type, visibility,
+		INSERT INTO public.package_registry (name, slug, description, tags, type, visibility, author_tenant_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, name, slug, COALESCE(description,''), COALESCE(tags, '{}'), type, visibility,
 		          author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at`
 
 	row := r.pool.QueryRow(ctx, query,
-		p.Name, p.Slug, p.Description, string(p.Type), string(p.Visibility), p.AuthorTenantID,
+		p.Name, p.Slug, p.Description, p.Tags, string(p.Type), string(p.Visibility), p.AuthorTenantID,
 	)
 	created, err := scanRow(row)
 	if err != nil {
@@ -135,15 +145,15 @@ func (r *Repository) Create(ctx context.Context, p Package) (Package, error) {
 }
 
 // Update patches a package's mutable fields.
-func (r *Repository) Update(ctx context.Context, id uuid.UUID, name, description, visibility string) (Package, error) {
+func (r *Repository) Update(ctx context.Context, id uuid.UUID, name, description, visibility string, tags []string) (Package, error) {
 	const query = `
 		UPDATE public.package_registry
-		   SET name = $2, description = $3, visibility = $4, updated_at = NOW()
+		   SET name = $2, description = $3, visibility = $4, tags = $5, updated_at = NOW()
 		 WHERE id = $1
-		RETURNING id, name, slug, COALESCE(description,''), type, visibility,
+		RETURNING id, name, slug, COALESCE(description,''), COALESCE(tags, '{}'), type, visibility,
 		          author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at`
 
-	row := r.pool.QueryRow(ctx, query, id, name, description, visibility)
+	row := r.pool.QueryRow(ctx, query, id, name, description, visibility, tags)
 	updated, err := scanRow(row)
 	if err != nil {
 		return Package{}, fmt.Errorf("package: update: %w", err)
@@ -164,67 +174,70 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// Search performs a full-text ILIKE search on name, slug, and description
-// across PUBLIC packages. An optional pkgType filter restricts the results.
+// Search ranks PUBLIC packages using lexical matches plus pgvector cosine
+// similarity. Packages not indexed yet remain searchable by lexical matching.
 // This is the backend for GET /api/registry/search?q=...&type=...
 func (r *Repository) Search(ctx context.Context, query string, pkgType *string, req pagination.PageRequest) ([]Package, int64, error) {
 	pattern := "%" + query + "%"
+	vectorString, embeddingModel := r.semanticQuery(ctx, query)
 	var total int64
-	var err error
-
-	if pkgType != nil && *pkgType != "" {
-		err = r.pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM public.package_registry
-			  WHERE visibility = 'PUBLIC' AND type = $1
-			    AND (name ILIKE $2 OR slug ILIKE $2 OR description ILIKE $2)`,
-			*pkgType, pattern,
-		).Scan(&total)
-	} else {
-		err = r.pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM public.package_registry
-			  WHERE visibility = 'PUBLIC'
-			    AND (name ILIKE $1 OR slug ILIKE $1 OR description ILIKE $1)`,
-			pattern,
-		).Scan(&total)
-	}
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		  FROM public.package_registry
+		 WHERE visibility = 'PUBLIC'
+		   AND ($4::text IS NULL OR type = $4)
+		   AND ((embedding IS NOT NULL AND $1::vector IS NOT NULL AND embedding_model = $2)
+		        OR name ILIKE $3 OR slug ILIKE $3 OR description ILIKE $3
+		        OR array_to_string(COALESCE(tags, '{}'), ' ') ILIKE $3)`,
+		vectorString, embeddingModel, pattern, pkgType,
+	).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("package: search count: %w", err)
 	}
 
-	var rows pgx.Rows
-	if pkgType != nil && *pkgType != "" {
-		rows, err = r.pool.Query(ctx,
-			`SELECT id, name, slug, COALESCE(description,''), type, visibility,
-			        author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at
-			   FROM public.package_registry
-			  WHERE visibility = 'PUBLIC' AND type = $1
-			    AND (name ILIKE $2 OR slug ILIKE $2 OR description ILIKE $2)
-			  ORDER BY download_count DESC, created_at DESC
-			  LIMIT $3 OFFSET $4`,
-			*pkgType, pattern, req.Size, req.Offset(),
-		)
-	} else {
-		rows, err = r.pool.Query(ctx,
-			`SELECT id, name, slug, COALESCE(description,''), type, visibility,
-			        author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at
-			   FROM public.package_registry
-			  WHERE visibility = 'PUBLIC'
-			    AND (name ILIKE $1 OR slug ILIKE $1 OR description ILIKE $1)
-			  ORDER BY download_count DESC, created_at DESC
-			  LIMIT $2 OFFSET $3`,
-			pattern, req.Size, req.Offset(),
-		)
-	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, name, slug, COALESCE(description,''), COALESCE(tags, '{}'), type, visibility,
+		       author_tenant_id, download_count, COALESCE(latest_version,''), created_at, updated_at,
+		       CASE WHEN embedding IS NULL OR $1::vector IS NULL OR embedding_model IS DISTINCT FROM $2 THEN 0.0
+		            ELSE 0.65 * (1 - (embedding <=> $1::vector)) END
+		       + CASE
+		           WHEN name ILIKE $3 THEN 0.35
+		           WHEN slug ILIKE $3 THEN 0.315
+		           WHEN description ILIKE $3 THEN 0.245
+		           WHEN array_to_string(COALESCE(tags, '{}'), ' ') ILIKE $3 THEN 0.21
+		           ELSE 0.0
+		         END AS relevance
+		  FROM public.package_registry
+		 WHERE visibility = 'PUBLIC'
+		   AND ($4::text IS NULL OR type = $4)
+		   AND ((embedding IS NOT NULL AND $1::vector IS NOT NULL AND embedding_model = $2)
+		        OR name ILIKE $3 OR slug ILIKE $3 OR description ILIKE $3
+		        OR array_to_string(COALESCE(tags, '{}'), ' ') ILIKE $3)
+		 ORDER BY relevance DESC, download_count DESC, created_at DESC
+		 LIMIT $5 OFFSET $6`,
+		vectorString, embeddingModel, pattern, pkgType, req.Size, req.Offset(),
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("package: search: %w", err)
 	}
 	defer rows.Close()
 
-	pkgs, err := scanRows(rows)
+	pkgs, err := scanSearchRows(rows)
 	if err != nil {
 		return nil, 0, err
 	}
 	return pkgs, total, nil
+}
+
+func (r *Repository) semanticQuery(ctx context.Context, query string) (any, string) {
+	if r.queryEmbedder == nil {
+		return nil, ""
+	}
+	embedding, err := r.queryEmbedder.Embed(ctx, query)
+	if err != nil || len(embedding.Vector) == 0 || embedding.Model == "" {
+		return nil, ""
+	}
+	return float32SliceToVector(embedding.Vector), embedding.Model
 }
 
 // UpdateLatestVersion updates the latest_version field after a new version is published.
@@ -241,7 +254,7 @@ func (r *Repository) UpdateLatestVersion(ctx context.Context, id uuid.UUID, vers
 func scanRow(row pgx.Row) (Package, error) {
 	var p Package
 	err := row.Scan(
-		&p.ID, &p.Name, &p.Slug, &p.Description,
+		&p.ID, &p.Name, &p.Slug, &p.Description, &p.Tags,
 		&p.Type, &p.Visibility, &p.AuthorTenantID,
 		&p.DownloadCount, &p.LatestVersion, &p.CreatedAt, &p.UpdatedAt,
 	)
@@ -260,7 +273,7 @@ func scanRows(rows pgx.Rows) ([]Package, error) {
 	for rows.Next() {
 		var p Package
 		if err := rows.Scan(
-			&p.ID, &p.Name, &p.Slug, &p.Description,
+			&p.ID, &p.Name, &p.Slug, &p.Description, &p.Tags,
 			&p.Type, &p.Visibility, &p.AuthorTenantID,
 			&p.DownloadCount, &p.LatestVersion, &p.CreatedAt, &p.UpdatedAt,
 		); err != nil {
@@ -269,4 +282,35 @@ func scanRows(rows pgx.Rows) ([]Package, error) {
 		pkgs = append(pkgs, p)
 	}
 	return pkgs, rows.Err()
+}
+
+func scanSearchRows(rows pgx.Rows) ([]Package, error) {
+	pkgs := make([]Package, 0)
+	for rows.Next() {
+		var p Package
+		if err := rows.Scan(
+			&p.ID, &p.Name, &p.Slug, &p.Description, &p.Tags,
+			&p.Type, &p.Visibility, &p.AuthorTenantID,
+			&p.DownloadCount, &p.LatestVersion, &p.CreatedAt, &p.UpdatedAt,
+			&p.Relevance,
+		); err != nil {
+			return nil, fmt.Errorf("package: scan search row: %w", err)
+		}
+		pkgs = append(pkgs, p)
+	}
+	return pkgs, rows.Err()
+}
+
+func float32SliceToVector(vector []float32) string {
+	var builder strings.Builder
+	builder.Grow(len(vector) * 10)
+	builder.WriteByte('[')
+	for i, value := range vector {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(strconv.FormatFloat(float64(value), 'f', -1, 32))
+	}
+	builder.WriteByte(']')
+	return builder.String()
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/trigger"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -109,14 +110,56 @@ func (m *mockSvc) ListRuns(_ context.Context, triggerID uuid.UUID, page paginati
 }
 
 func setupTrigger() (*chi.Mux, *mockSvc) {
+	return setupTriggerWithRoles("admin")
+}
+
+func setupTriggerWithRoles(roles ...string) (*chi.Mux, *mockSvc) {
 	svc := newMockSvc()
 	h := trigger.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterRoutes(r)
 	return r, svc
 }
 
 // --- handler tests ---
+
+func TestTriggerHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupTriggerWithRoles("user")
+	agentID := uuid.NewString()
+	triggerID := uuid.NewString()
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "create", method: http.MethodPost, path: "/api/agents/" + agentID + "/triggers", body: `{}`},
+		{name: "list", method: http.MethodGet, path: "/api/agents/" + agentID + "/triggers"},
+		{name: "get", method: http.MethodGet, path: "/api/agents/" + agentID + "/triggers/" + triggerID},
+		{name: "put", method: http.MethodPut, path: "/api/agents/" + agentID + "/triggers/" + triggerID, body: `{}`},
+		{name: "patch", method: http.MethodPatch, path: "/api/agents/" + agentID + "/triggers/" + triggerID, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/agents/" + agentID + "/triggers/" + triggerID},
+		{name: "list runs", method: http.MethodGet, path: "/api/agents/" + agentID + "/triggers/" + triggerID + "/runs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
+}
 
 func TestTriggerHandler_Create_Success(t *testing.T) {
 	r, _ := setupTrigger()
@@ -145,6 +188,32 @@ func TestTriggerHandler_Create_InvalidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestTriggerHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, svc := setupTrigger()
+		agentID := uuid.New()
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/"+agentID.String()+"/triggers", bytes.NewBufferString(`{"name":"first","cronExpression":"0 9 * * *"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.triggers)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		r, svc := setupTrigger()
+		agentID := uuid.New()
+		triggerID := uuid.New()
+		svc.triggers[triggerID] = trigger.AgentTrigger{ID: triggerID, AgentID: agentID, Name: "original"}
+		req := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agentID.String()+"/triggers/"+triggerID.String(), bytes.NewBufferString(`{"name":"changed"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, "original", svc.triggers[triggerID].Name)
+	})
 }
 
 func TestTriggerHandler_Create_InvalidAgentID(t *testing.T) {
@@ -289,4 +358,77 @@ func TestTriggerHandler_ListRuns_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestTriggerHandler_ListRuns_RedactsSensitiveError(t *testing.T) {
+	const authorizationSecret = "trigger-run-authorization-secret"
+	const passwordSecret = "trigger-run-password-secret"
+	r, svc := setupTrigger()
+	agentID := uuid.New()
+	triggerID := uuid.New()
+	errorMessage := "Authorization: Bearer " + authorizationSecret + "\npassword=" + passwordSecret
+	svc.triggers[triggerID] = trigger.AgentTrigger{ID: triggerID, AgentID: agentID}
+	svc.runs[uuid.New()] = trigger.AgentTriggerRun{
+		ID: uuid.New(), TriggerID: triggerID, SessionID: uuid.New(), Status: trigger.RunStatusFailed, Error: &errorMessage,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+agentID.String()+"/triggers/"+triggerID.String()+"/runs", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.NotContains(t, body, authorizationSecret)
+	assert.NotContains(t, body, passwordSecret)
+	assert.NotContains(t, body, "Authorization:")
+	assert.NotContains(t, body, "password")
+	assert.Contains(t, body, "[REDACTED]")
+}
+
+func TestTriggerHandler_NestedRoutesRejectTriggerOutsideRouteAgent(t *testing.T) {
+	r, svc := setupTrigger()
+	ownerID := uuid.New()
+	otherAgentID := uuid.New()
+	triggerID := uuid.New()
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   []byte
+	}{
+		{
+			name:   "get",
+			method: http.MethodGet,
+			path:   "/api/agents/" + otherAgentID.String() + "/triggers/" + triggerID.String(),
+		},
+		{
+			name:   "update",
+			method: http.MethodPatch,
+			path:   "/api/agents/" + otherAgentID.String() + "/triggers/" + triggerID.String(),
+			body:   []byte(`{"name":"must-not-update"}`),
+		},
+		{
+			name:   "delete",
+			method: http.MethodDelete,
+			path:   "/api/agents/" + otherAgentID.String() + "/triggers/" + triggerID.String(),
+		},
+		{
+			name:   "list runs",
+			method: http.MethodGet,
+			path:   "/api/agents/" + otherAgentID.String() + "/triggers/" + triggerID.String() + "/runs",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc.triggers[triggerID] = trigger.AgentTrigger{ID: triggerID, AgentID: ownerID, Name: "owner trigger"}
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewReader(tt.body))
+			w := httptest.NewRecorder()
+
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusNotFound, w.Code)
+		})
+	}
 }

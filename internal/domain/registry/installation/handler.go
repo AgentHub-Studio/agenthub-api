@@ -10,26 +10,33 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/apierror"
+	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
-const maxUploadSize = 100 << 20 // 100 MB
+const (
+	maxUploadSize      = 100 << 20 // 100 MB
+	maxUploadBodyBytes = maxUploadSize + (1 << 20)
+	maxUploadFieldSize = 16 << 10
+)
 
 // installationService defines the methods used by Handler.
 type installationService interface {
 	ListAssets(ctx context.Context, packageID uuid.UUID, versionID *uuid.UUID) ([]AssetResponse, error)
 	UploadAsset(ctx context.Context, packageID uuid.UUID, versionID *uuid.UUID, filename string, contentType string, reader io.Reader, size int64) (AssetResponse, error)
-	DownloadURL(ctx context.Context, assetID uuid.UUID) (AssetDownloadResponse, error)
+	DownloadURL(ctx context.Context, packageID, assetID uuid.UUID) (AssetDownloadResponse, error)
 }
 
-// packageExister verifies parent package existence (bug 210 batch).
-type packageExister interface {
-	GetByID(ctx context.Context, id uuid.UUID) error
+// packageReader verifies parent visibility before serving package assets.
+type packageReader interface {
+	GetAccessibleByID(ctx context.Context, id uuid.UUID, tenantID string) (pkg.PackageResponse, error)
 }
 
 // Handler exposes the HTTP interface for package assets.
 type Handler struct {
 	svc installationService
-	pkg packageExister
+	pkg packageReader
 }
 
 // NewHandler creates a new installation Handler.
@@ -37,14 +44,15 @@ func NewHandler(svc installationService) *Handler {
 	return &Handler{svc: svc}
 }
 
-// WithPackageExister wires the parent-package existence checker.
-func (h *Handler) WithPackageExister(p packageExister) *Handler {
+// WithPackageReader wires the parent-package visibility checker.
+func (h *Handler) WithPackageReader(p packageReader) *Handler {
 	h.pkg = p
 	return h
 }
 
-// RegisterPublicRoutes mounts read-only asset routes.
-func (h *Handler) RegisterPublicRoutes(r chi.Router) {
+// RegisterReadRoutes mounts asset routes behind optional authentication. Public
+// packages remain readable anonymously while PRIVATE packages require owner access.
+func (h *Handler) RegisterReadRoutes(r chi.Router) {
 	r.Get("/api/packages/{packageId}/assets", h.listAssets)
 	r.Get("/api/packages/{packageId}/assets/{assetId}/download", h.download)
 }
@@ -62,11 +70,8 @@ func (h *Handler) listAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.pkg != nil {
-		if err := h.pkg.GetByID(r.Context(), packageID); err != nil {
-			apierror.Write(w, http.StatusNotFound, "package not found")
-			return
-		}
+	if _, ok := h.readablePackage(w, r, packageID); !ok {
+		return
 	}
 
 	var versionID *uuid.UUID
@@ -94,26 +99,38 @@ func (h *Handler) uploadAsset(w http.ResponseWriter, r *http.Request) {
 		apierror.Write(w, http.StatusBadRequest, "invalid package id")
 		return
 	}
+	tenantID := tenant.FromContext(r.Context())
+	if tenantID == "" {
+		apierror.Write(w, http.StatusUnauthorized, "missing tenant context")
+		return
+	}
+	p, ok := h.readablePackage(w, r, packageID)
+	if !ok {
+		return
+	}
+	if p.AuthorTenantID != tenantID {
+		apierror.Write(w, http.StatusForbidden, "not the package owner")
+		return
+	}
 
-	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+	file, fields, err := httputil.ReadLimitedMultipartFile(w, r, httputil.LimitedMultipartOptions{
+		FileFields:    []string{"file"},
+		MaxFileBytes:  maxUploadSize,
+		MaxBodyBytes:  maxUploadBodyBytes,
+		MaxFieldBytes: maxUploadFieldSize,
+	})
+	if err != nil {
 		apierror.Write(w, http.StatusBadRequest, "failed to parse multipart form")
 		return
 	}
 
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		apierror.Write(w, http.StatusBadRequest, "file field is required")
-		return
-	}
-	defer func() { _ = file.Close() }()
-
-	contentType := header.Header.Get("Content-Type")
+	contentType := file.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
 	var versionID *uuid.UUID
-	if raw := r.FormValue("versionId"); raw != "" {
+	if raw := fields["versionId"]; raw != "" {
 		vid, err := uuid.Parse(raw)
 		if err != nil {
 			apierror.Write(w, http.StatusBadRequest, "invalid versionId")
@@ -122,7 +139,7 @@ func (h *Handler) uploadAsset(w http.ResponseWriter, r *http.Request) {
 		versionID = &vid
 	}
 
-	asset, err := h.svc.UploadAsset(r.Context(), packageID, versionID, header.Filename, contentType, file, header.Size)
+	asset, err := h.svc.UploadAsset(r.Context(), packageID, versionID, file.Filename, contentType, file.Reader(), file.Size)
 	if err != nil {
 		var ve *ValidationError
 		if errors.As(err, &ve) {
@@ -137,12 +154,20 @@ func (h *Handler) uploadAsset(w http.ResponseWriter, r *http.Request) {
 
 // download godoc — GET /api/packages/{packageId}/assets/{assetId}/download
 func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
+	packageID, err := uuid.Parse(chi.URLParam(r, "packageId"))
+	if err != nil {
+		apierror.Write(w, http.StatusBadRequest, "invalid package id")
+		return
+	}
+	if _, ok := h.readablePackage(w, r, packageID); !ok {
+		return
+	}
 	assetID, err := uuid.Parse(chi.URLParam(r, "assetId"))
 	if err != nil {
 		apierror.Write(w, http.StatusBadRequest, "invalid asset id")
 		return
 	}
-	resp, err := h.svc.DownloadURL(r.Context(), assetID)
+	resp, err := h.svc.DownloadURL(r.Context(), packageID, assetID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			apierror.Write(w, http.StatusNotFound, "asset not found")
@@ -152,4 +177,16 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apierror.WriteJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) readablePackage(w http.ResponseWriter, r *http.Request, packageID uuid.UUID) (pkg.PackageResponse, bool) {
+	if h.pkg == nil {
+		return pkg.PackageResponse{AuthorTenantID: tenant.FromContext(r.Context())}, true
+	}
+	p, err := h.pkg.GetAccessibleByID(r.Context(), packageID, tenant.FromContext(r.Context()))
+	if err != nil {
+		apierror.Write(w, http.StatusNotFound, "package not found")
+		return pkg.PackageResponse{}, false
+	}
+	return p, true
 }

@@ -2,10 +2,12 @@ package installation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
 
+	pkg "github.com/AgentHub-Studio/agenthub-api/internal/domain/registry/package"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -18,15 +20,15 @@ type InstallRepository interface {
 	SetHydrated(ctx context.Context, id uuid.UUID) error
 }
 
-// PackageExister verifies a package exists in the registry (bug 238).
-type PackageExister interface {
-	GetByID(ctx context.Context, id uuid.UUID) error
+// PackageReader loads a registry package before marketplace installation.
+type PackageReader interface {
+	GetByID(ctx context.Context, id uuid.UUID) (pkg.Package, error)
 }
 
 // Service implements business logic for marketplace installations.
 type Service struct {
-	repo    InstallRepository
-	pkgRdr  PackageExister
+	repo   InstallRepository
+	pkgRdr PackageReader
 }
 
 // NewService creates a new Service.
@@ -34,8 +36,8 @@ func NewService(repo InstallRepository) *Service {
 	return &Service{repo: repo}
 }
 
-// WithPackageExister wires a package existence checker (bug 238).
-func (s *Service) WithPackageExister(r PackageExister) *Service {
+// WithPackageReader wires a registry package reader.
+func (s *Service) WithPackageReader(r PackageReader) *Service {
 	s.pkgRdr = r
 	return s
 }
@@ -48,13 +50,18 @@ func (s *Service) Install(ctx context.Context, tenantID string, req InstallReque
 	if req.PackageVersion == "" {
 		return InstallResponse{}, fmt.Errorf("installation: packageVersion is required")
 	}
-	// Bug 238: validar existência do package no registry. Antes, qualquer
-	// UUID era aceito e persistido com status=INSTALLED, criando rows
-	// órfãs apontando pra packages inexistentes.
-	if s.pkgRdr != nil {
-		if err := s.pkgRdr.GetByID(ctx, req.PackageID); err != nil {
-			return InstallResponse{}, fmt.Errorf("installation: packageId not found")
+	if s.pkgRdr == nil {
+		return InstallResponse{}, fmt.Errorf("installation: package reader is not configured")
+	}
+	p, err := s.pkgRdr.GetByID(ctx, req.PackageID)
+	if err != nil {
+		if errors.Is(err, pkg.ErrNotFound) {
+			return InstallResponse{}, ErrPackageUnavailable
 		}
+		return InstallResponse{}, fmt.Errorf("installation: packageId not found")
+	}
+	if p.Visibility != pkg.PackageVisibilityPublic {
+		return InstallResponse{}, ErrPackageUnavailable
 	}
 	i := Installation{
 		ID:             uuid.New(),

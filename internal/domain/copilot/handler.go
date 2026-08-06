@@ -1,12 +1,12 @@
 package copilot
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
 
@@ -27,7 +27,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 func (h *Handler) completions(w http.ResponseWriter, r *http.Request) {
 	var req CompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

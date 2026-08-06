@@ -10,12 +10,12 @@ import (
 )
 
 func TestValidSlug_CanonicalPattern(t *testing.T) {
-	valid := []string{"a", "ab", "agent-1", strings.Repeat("a", sanitize.SlugMaxLength)}
+	valid := []string{"ab", "agent-1", strings.Repeat("a", sanitize.SlugMaxLength)}
 	for _, slug := range valid {
 		assert.True(t, sanitize.ValidSlug(slug), slug)
 	}
 
-	invalid := []string{"-agent", "agent-", "Agent", "agent_1", "agent.1", strings.Repeat("a", sanitize.SlugMaxLength+1)}
+	invalid := []string{"a", "-agent", "agent-", "Agent", "agent_1", "agent.1", strings.Repeat("a", sanitize.SlugMaxLength+1)}
 	for _, slug := range invalid {
 		assert.False(t, sanitize.ValidSlug(slug), slug)
 	}
@@ -27,9 +27,15 @@ func TestToSlug_UsesCanonicalFormat(t *testing.T) {
 	assert.True(t, sanitize.ValidSlug(slug))
 }
 
-func TestToSlug_DropsNonCanonicalLetters(t *testing.T) {
-	slug := sanitize.ToSlug("Café API", "tool")
-	assert.Equal(t, "caf-api", slug)
+func TestToSlug_TransliteratesUnicode(t *testing.T) {
+	slug := sanitize.ToSlug("Café São Niño", "tool")
+	assert.Equal(t, "cafe-sao-nino", slug)
+	assert.True(t, sanitize.ValidSlug(slug))
+}
+
+func TestToSlug_ExtendsSingleCharacterNamesToCanonicalSlug(t *testing.T) {
+	slug := sanitize.ToSlug("A", "agent")
+	assert.Equal(t, "a-agent", slug)
 	assert.True(t, sanitize.ValidSlug(slug))
 }
 

@@ -20,9 +20,11 @@ import (
 type mockEmbedder struct {
 	result []float32
 	err    error
+	calls  int
 }
 
 func (m *mockEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+	m.calls++
 	return m.result, m.err
 }
 
@@ -175,18 +177,17 @@ func TestMemoryBridge_MaybeStore_PassesMemoryType(t *testing.T) {
 	assert.Equal(t, "general", upserter.calls[2].Req.MemoryType)
 }
 
-func TestMemoryBridge_MaybeStore_NewTypeFieldTakesPrecedence(t *testing.T) {
-	// Verifies that the new "type" field (matching memory_eval_prompt template output)
-	// takes precedence over the legacy "memoryType" field.
-	// Inspired by CC's four-type taxonomy in memoryTypes.ts.
+func TestMemoryBridge_MaybeStore_AllowsEquivalentTypeAliases(t *testing.T) {
+	// The current "type" field and legacy "memoryType" stay compatible when
+	// they describe the same memory classification.
 	agentID := uuid.New()
 	embedder := &mockEmbedder{result: []float32{0.5}}
 	upserter := &mockUpserter{}
 	evaluator := &mockEvaluator{results: []agentic.ExtractedMemory{
-		{Key: "role", Value: "Senior Go dev", Type: "user", MemoryType: "general"}, // Type wins
-		{Key: "project_ctx", Value: "Release freeze May 2026", Type: "project"},    // new format
-		{Key: "legacy", Value: "Old format", MemoryType: "feedback"},               // legacy format
-		{Key: "untyped", Value: "No type"},                                         // defaults to general
+		{Key: "role", Value: "Senior Go dev", Type: "user", MemoryType: "user"}, // equivalent aliases
+		{Key: "project_ctx", Value: "Release freeze May 2026", Type: "project"}, // new format
+		{Key: "legacy", Value: "Old format", MemoryType: "feedback"},            // legacy format
+		{Key: "untyped", Value: "No type"},                                      // defaults to general
 	}}
 
 	bridge := defaultBridge(embedder, nil, upserter, evaluator)
@@ -196,19 +197,19 @@ func TestMemoryBridge_MaybeStore_NewTypeFieldTakesPrecedence(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 4, stored)
-	assert.Equal(t, "user", upserter.calls[0].Req.MemoryType)     // Type field wins over MemoryType
+	assert.Equal(t, "user", upserter.calls[0].Req.MemoryType)     // equivalent Type and MemoryType
 	assert.Equal(t, "project", upserter.calls[1].Req.MemoryType)  // new format
 	assert.Equal(t, "feedback", upserter.calls[2].Req.MemoryType) // legacy format still works
 	assert.Equal(t, "general", upserter.calls[3].Req.MemoryType)  // default
 }
 
-func TestMemoryBridge_MaybeStore_NormalizesUnknownMemoryType(t *testing.T) {
+func TestMemoryBridge_MaybeStore_RejectsConflictingTypeAliasesBeforeEmbedding(t *testing.T) {
 	agentID := uuid.New()
 	embedder := &mockEmbedder{result: []float32{0.5}}
 	upserter := &mockUpserter{}
 	evaluator := &mockEvaluator{results: []agentic.ExtractedMemory{
-		{Key: "project", Value: "Release freeze May 2026", Type: " Project "},
-		{Key: "custom", Value: "Dark mode preference", Type: "preference"},
+		{Key: "ambiguous", Value: "Do not classify by precedence", Type: "user", MemoryType: "feedback"},
+		{Key: "compatible", Value: "Keep this memory", Type: "project", MemoryType: "project"},
 	}}
 
 	bridge := defaultBridge(embedder, nil, upserter, evaluator)
@@ -217,9 +218,44 @@ func TestMemoryBridge_MaybeStore_NormalizesUnknownMemoryType(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, 2, stored)
+	assert.Equal(t, 1, stored)
+	require.Len(t, upserter.calls, 1)
+	assert.Equal(t, "compatible", upserter.calls[0].Key)
 	assert.Equal(t, "project", upserter.calls[0].Req.MemoryType)
-	assert.Equal(t, "general", upserter.calls[1].Req.MemoryType)
+	assert.Equal(t, 1, embedder.calls, "ambiguous aliases must be rejected before embedding")
+}
+
+func FuzzMemoryBridge_MaybeStore_TypeAliases(f *testing.F) {
+	f.Add("", "")
+	f.Add("user", "user")
+	f.Add("user", "feedback")
+
+	f.Fuzz(func(t *testing.T, typ, legacyType string) {
+		embedder := &mockEmbedder{result: []float32{0.5}}
+		upserter := &mockUpserter{}
+		evaluator := &mockEvaluator{results: []agentic.ExtractedMemory{{
+			Key:        "fuzz-memory",
+			Value:      "value",
+			Type:       typ,
+			MemoryType: legacyType,
+		}}}
+
+		bridge := defaultBridge(embedder, nil, upserter, evaluator)
+		stored, err := bridge.MaybeStore(context.Background(), uuid.New(), 0, []agentic.TurnMessage{{Role: "user", Content: "test"}})
+		require.NoError(t, err)
+
+		conflicting := typ != "" && legacyType != "" && typ != legacyType
+		if conflicting {
+			assert.Zero(t, stored)
+			assert.Zero(t, embedder.calls)
+			assert.Empty(t, upserter.calls)
+			return
+		}
+
+		assert.Equal(t, 1, stored)
+		assert.Equal(t, 1, embedder.calls)
+		require.Len(t, upserter.calls, 1)
+	})
 }
 
 func TestMemoryBridge_Recall_FiltersByRelevance(t *testing.T) {

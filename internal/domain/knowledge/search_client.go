@@ -16,8 +16,8 @@ type SearchResult struct {
 	KnowledgeBaseID uuid.UUID `json:"knowledgeBaseId"`
 }
 
-// SearchOptions controls the searchable knowledge bases, result limit, and an
-// optional document metadata expression for a single search request.
+// SearchOptions controls the searchable knowledge bases, result limit, and
+// optional document metadata expression for one search request.
 type SearchOptions struct {
 	KBIDs          []uuid.UUID
 	TopK           int

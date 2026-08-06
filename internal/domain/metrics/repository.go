@@ -53,12 +53,16 @@ func (r *Repository) ListByAgent(ctx context.Context, tenantID string, agentID u
 	var items []AgentMetrics
 	for rows.Next() {
 		var m AgentMetrics
+		var sessionID *string
 		if err := rows.Scan(
-			&m.ID, &m.AgentID, &m.AgentExecutionID, &m.SessionID, &m.ModelName, &m.Provider,
+			&m.ID, &m.AgentID, &m.AgentExecutionID, &sessionID, &m.ModelName, &m.Provider,
 			&m.PromptTokens, &m.CompletionTokens, &m.TotalTokens, &m.EstimatedCostUSD,
 			&m.LatencyMs, &m.CreatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("metrics: scan: %w", err)
+		}
+		if sessionID != nil {
+			m.SessionID = *sessionID
 		}
 		items = append(items, m)
 	}
@@ -80,9 +84,14 @@ func (r *Repository) Record(ctx context.Context, tenantID string, m AgentMetrics
 	if m.AgentExecutionID != uuid.Nil {
 		executionID = m.AgentExecutionID
 	}
+	var sessionID any
+	if m.SessionID != "" {
+		sessionID = m.SessionID
+	}
 
 	var created AgentMetrics
 	var scannedExecutionID *uuid.UUID
+	var scannedSessionID *string
 	err = conn.QueryRow(ctx,
 		`INSERT INTO agent_metrics
 		 (agent_id, agent_execution_id, session_id, model_name, provider,
@@ -90,15 +99,18 @@ func (r *Repository) Record(ctx context.Context, tenantID string, m AgentMetrics
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		 RETURNING id, agent_id, agent_execution_id, session_id, model_name, provider,
 		           prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd, latency_ms, created_at`,
-		m.AgentID, executionID, m.SessionID, m.ModelName, m.Provider,
+		m.AgentID, executionID, sessionID, m.ModelName, m.Provider,
 		m.PromptTokens, m.CompletionTokens, m.TotalTokens, m.EstimatedCostUSD, m.LatencyMs,
 	).Scan(
-		&created.ID, &created.AgentID, &scannedExecutionID, &created.SessionID,
+		&created.ID, &created.AgentID, &scannedExecutionID, &scannedSessionID,
 		&created.ModelName, &created.Provider, &created.PromptTokens, &created.CompletionTokens,
 		&created.TotalTokens, &created.EstimatedCostUSD, &created.LatencyMs, &created.CreatedAt,
 	)
 	if scannedExecutionID != nil {
 		created.AgentExecutionID = *scannedExecutionID
+	}
+	if scannedSessionID != nil {
+		created.SessionID = *scannedSessionID
 	}
 	return created, err
 }
@@ -150,12 +162,16 @@ func (r *Repository) ListAll(ctx context.Context, tenantID string, pr pagination
 	var items []AgentMetrics
 	for rows.Next() {
 		var m AgentMetrics
+		var sessionID *string
 		if err := rows.Scan(
-			&m.ID, &m.AgentID, &m.AgentExecutionID, &m.SessionID, &m.ModelName, &m.Provider,
+			&m.ID, &m.AgentID, &m.AgentExecutionID, &sessionID, &m.ModelName, &m.Provider,
 			&m.PromptTokens, &m.CompletionTokens, &m.TotalTokens, &m.EstimatedCostUSD,
 			&m.LatencyMs, &m.CreatedAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("metrics: scan all: %w", err)
+		}
+		if sessionID != nil {
+			m.SessionID = *sessionID
 		}
 		items = append(items, m)
 	}

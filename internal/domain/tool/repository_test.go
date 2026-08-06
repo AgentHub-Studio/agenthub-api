@@ -5,9 +5,13 @@ import (
 	"testing"
 )
 
-func TestRepositoryUpdateSQLPreservesTypeWhenPatchTypeEmpty(t *testing.T) {
+func TestUpdateToolSQLPreservesExistingTypeWhenPatchOmitsType(t *testing.T) {
 	normalized := strings.Join(strings.Fields(updateToolSQL), " ")
+
 	if !strings.Contains(normalized, "type=COALESCE(NULLIF($3, ''), type)") {
-		t.Fatalf("update SQL must preserve existing tool type when the patch type is empty: %s", normalized)
+		t.Fatalf("update query must preserve existing type when the repository receives an empty type: %s", normalized)
+	}
+	if strings.Contains(normalized, " type=$3,") {
+		t.Fatalf("update query must not write an empty type directly: %s", normalized)
 	}
 }

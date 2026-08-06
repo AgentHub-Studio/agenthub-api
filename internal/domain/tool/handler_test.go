@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tool"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -25,6 +27,8 @@ type mockToolSvc struct {
 	updateForceDuplicate uuid.UUID // if non-zero, Update returns ErrDuplicateName for this ID
 	createErr            error
 	updateErr            error
+	testErr              error
+	testCalls            int
 }
 
 func newMockToolSvc() *mockToolSvc {
@@ -119,6 +123,10 @@ func (m *mockToolSvc) ListLabels(_ context.Context) ([]string, error) {
 }
 
 func (m *mockToolSvc) TestTool(_ context.Context, _ uuid.UUID, _ map[string]any) (string, error) {
+	m.testCalls++
+	if m.testErr != nil {
+		return "", m.testErr
+	}
 	return "test result", nil
 }
 
@@ -135,9 +143,19 @@ func (m *mockToolSvc) GetDatabaseSchema(_ context.Context, _ string) (tool.Datab
 }
 
 func setupTool() (*chi.Mux, *mockToolSvc) {
+	return setupToolWithRoles("admin")
+}
+
+func setupToolWithRoles(roles ...string) (*chi.Mux, *mockToolSvc) {
 	svc := newMockToolSvc()
 	h := tool.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterRoutes(r)
 	return r, svc
 }
@@ -162,6 +180,47 @@ func TestToolHandler_List_Success(t *testing.T) {
 	var page pagination.Page[tool.Response]
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 	assert.Equal(t, int64(1), page.TotalElements)
+}
+
+func TestToolHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupToolWithRoles("user")
+	id := uuid.NewString()
+	skillID := uuid.NewString()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "list labels", method: http.MethodGet, path: "/api/tools/labels"},
+		{name: "database schema", method: http.MethodGet, path: "/api/tools/database-schema?dataSourceId=" + id},
+		{name: "generate code", method: http.MethodPost, path: "/api/tools/generate/code", body: `{"prompt":"generate"}`},
+		{name: "generate blockly", method: http.MethodPost, path: "/api/tools/generate/blockly", body: `{"prompt":"generate"}`},
+		{name: "list", method: http.MethodGet, path: "/api/tools"},
+		{name: "create", method: http.MethodPost, path: "/api/tools", body: `{"name":"tool","type":"HTTP"}`},
+		{name: "get", method: http.MethodGet, path: "/api/tools/" + id},
+		{name: "put", method: http.MethodPut, path: "/api/tools/" + id, body: `{}`},
+		{name: "patch", method: http.MethodPatch, path: "/api/tools/" + id, body: `{}`},
+		{name: "delete", method: http.MethodDelete, path: "/api/tools/" + id},
+		{name: "test", method: http.MethodPost, path: "/api/tools/" + id + "/test", body: `{}`},
+		{name: "bind to skill", method: http.MethodPost, path: "/api/skills/" + skillID + "/tools", body: `{"toolId":"` + id + `"}`},
+		{name: "unbind from skill", method: http.MethodDelete, path: "/api/skills/" + skillID + "/tools/" + id},
+		{name: "list by skill", method: http.MethodGet, path: "/api/skills/" + skillID + "/tools"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 func TestToolHandler_Create_Success(t *testing.T) {
@@ -231,6 +290,54 @@ func TestToolHandler_Create_InvalidBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestToolHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		r, svc := setupTool()
+		req := httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewBufferString(`{"name":"first","type":"HTTP"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.tools)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		r, svc := setupTool()
+		id := uuid.New()
+		svc.tools[id] = tool.Response{ID: id, Name: "original", Type: "HTTP"}
+		req := httptest.NewRequest(http.MethodPut, "/api/tools/"+id.String(), bytes.NewBufferString(`{"name":"changed"}{"name":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Equal(t, "original", svc.tools[id].Name)
+	})
+
+	t.Run("test", func(t *testing.T) {
+		r, svc := setupTool()
+		id := uuid.New()
+		req := httptest.NewRequest(http.MethodPost, "/api/tools/"+id.String()+"/test", bytes.NewBufferString(`{"query":"first"}{"query":"ignored"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Zero(t, svc.testCalls)
+	})
+
+	t.Run("bind", func(t *testing.T) {
+		r, svc := setupTool()
+		skillID := uuid.New()
+		toolID := uuid.New()
+		svc.tools[toolID] = tool.Response{ID: toolID, Name: "bound", Type: "HTTP"}
+		req := httptest.NewRequest(http.MethodPost, "/api/skills/"+skillID.String()+"/tools", bytes.NewBufferString(`{"toolId":"`+toolID.String()+`"}{"toolId":"`+uuid.NewString()+`"}`))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		assert.Empty(t, svc.bindings)
+	})
+}
+
 func TestToolHandler_Create_MissingFields(t *testing.T) {
 	r, _ := setupTool()
 	body, _ := json.Marshal(tool.CreateRequest{Name: ""})
@@ -253,6 +360,103 @@ func TestToolHandler_Create_ValidationError(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func TestToolHandler_CreateRejectsConflictingHTTPRuntimeAliases(t *testing.T) {
+	repo := newMockRepo()
+	h := tool.NewHandler(tool.NewService(repo))
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), "admin")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	h.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewBufferString(`{
+		"name":"Conflicting HTTP aliases",
+		"type":"HTTP",
+		"config":{"url":"https://api.example.com/endpoint","authToken":"configured-token-a","auth_token":"configured-token-b"}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
+	assert.Empty(t, repo.data, "invalid configuration must not be persisted")
+	assert.Contains(t, w.Body.String(), "authToken")
+	assert.NotContains(t, w.Body.String(), "configured-token-a")
+	assert.NotContains(t, w.Body.String(), "configured-token-b")
+}
+
+func TestToolHandler_CreateRejectsConflictingHTTPURLAliases(t *testing.T) {
+	repo := newMockRepo()
+	h := tool.NewHandler(tool.NewService(repo))
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), "admin")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	h.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewBufferString(`{
+		"name":"Conflicting HTTP URL aliases",
+		"type":"HTTP",
+		"config":{"url":"https://api.example.com/primary","urlTemplate":"https://api.example.com/legacy"}
+	}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
+	assert.Empty(t, repo.data)
+	assert.Contains(t, w.Body.String(), "url")
+	assert.Contains(t, w.Body.String(), "urlTemplate")
+}
+
+func TestToolHandler_SQLRejectsConflictingDatasourceAliases(t *testing.T) {
+	const snakeID = "00000000-0000-0000-0000-000000000001"
+	const camelID = "00000000-0000-0000-0000-000000000002"
+	repo := newMockRepo()
+	svc := tool.NewService(repo)
+	h := tool.NewHandler(svc)
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), "admin")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
+	h.RegisterRoutes(r)
+
+	conflictingConfig := `{"datasource_id":"` + snakeID + `","dataSourceId":"` + camelID + `","query":"SELECT 1"}`
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewBufferString(`{
+		"name":"Conflicting SQL aliases",
+		"type":"SQL",
+		"config":`+conflictingConfig+`
+	}`))
+	createRec := httptest.NewRecorder()
+	r.ServeHTTP(createRec, createReq)
+	assert.Equal(t, http.StatusUnprocessableEntity, createRec.Code, createRec.Body.String())
+	assert.Empty(t, repo.data)
+	assert.Contains(t, createRec.Body.String(), "datasource_id")
+	assert.Contains(t, createRec.Body.String(), "dataSourceId")
+
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "Existing SQL alias target",
+		Type:   tool.ToolTypeSQL,
+		Config: json.RawMessage(`{"datasource_id":"` + snakeID + `","query":"SELECT 1"}`),
+	})
+	require.NoError(t, err)
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tools/"+created.ID.String(), bytes.NewBufferString(`{"config":`+conflictingConfig+`}`))
+	updateRec := httptest.NewRecorder()
+	r.ServeHTTP(updateRec, updateReq)
+	assert.Equal(t, http.StatusUnprocessableEntity, updateRec.Code, updateRec.Body.String())
+	var persisted map[string]any
+	require.NoError(t, json.Unmarshal(repo.data[created.ID].Config, &persisted))
+	assert.Equal(t, snakeID, persisted["datasource_id"])
 }
 
 func TestToolHandler_GetByID_NotFound(t *testing.T) {
@@ -319,6 +523,21 @@ func TestToolHandler_TestTool_Success(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/plain")
+	assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
+}
+
+func TestToolHandler_TestTool_UpstreamFailureReturnsSanitizedBadGateway(t *testing.T) {
+	r, svc := setupTool()
+	id := uuid.New()
+	svc.testErr = fmt.Errorf("%w: credentials=not-for-public", tool.ErrUpstream)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/"+id.String()+"/test", bytes.NewBufferString("{}"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Contains(t, w.Body.String(), "tool upstream unavailable")
+	assert.NotContains(t, w.Body.String(), "not-for-public")
 }
 
 func TestToolHandler_GenerateCode_MissingPrompt(t *testing.T) {

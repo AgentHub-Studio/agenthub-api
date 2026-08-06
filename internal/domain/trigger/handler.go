@@ -2,13 +2,14 @@ package trigger
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -47,13 +48,16 @@ func (h *Handler) WithAgentExister(a agentExister) *Handler {
 
 // RegisterRoutes mounts trigger endpoints on the router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Post("/api/agents/{agentId}/triggers", h.create)
-	r.Get("/api/agents/{agentId}/triggers", h.list)
-	r.Get("/api/agents/{agentId}/triggers/{triggerId}", h.getByID)
-	r.Put("/api/agents/{agentId}/triggers/{triggerId}", h.update)
-	r.Patch("/api/agents/{agentId}/triggers/{triggerId}", h.update)
-	r.Delete("/api/agents/{agentId}/triggers/{triggerId}", h.delete)
-	r.Get("/api/agents/{agentId}/triggers/{triggerId}/runs", h.listRuns)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Post("/api/agents/{agentId}/triggers", h.create)
+		r.Get("/api/agents/{agentId}/triggers", h.list)
+		r.Get("/api/agents/{agentId}/triggers/{triggerId}", h.getByID)
+		r.Put("/api/agents/{agentId}/triggers/{triggerId}", h.update)
+		r.Patch("/api/agents/{agentId}/triggers/{triggerId}", h.update)
+		r.Delete("/api/agents/{agentId}/triggers/{triggerId}", h.delete)
+		r.Get("/api/agents/{agentId}/triggers/{triggerId}/runs", h.listRuns)
+	})
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +67,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CreateTriggerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -105,35 +109,24 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "triggerId"))
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid trigger id")
-		return
-	}
-	t, err := h.svc.GetByID(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			respond.Error(w, http.StatusNotFound, "trigger not found")
-			return
-		}
-		respond.Error(w, http.StatusInternalServerError, "failed to get trigger")
+	t, ok := h.triggerForRoute(w, r)
+	if !ok {
 		return
 	}
 	respond.JSON(w, http.StatusOK, t)
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "triggerId"))
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid trigger id")
+	t, ok := h.triggerForRoute(w, r)
+	if !ok {
 		return
 	}
 	var req UpdateTriggerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	t, err := h.svc.Update(r.Context(), id, req)
+	t, err := h.svc.Update(r.Context(), t.ID, req)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "trigger not found")
@@ -149,12 +142,11 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "triggerId"))
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid trigger id")
+	t, ok := h.triggerForRoute(w, r)
+	if !ok {
 		return
 	}
-	if err := h.svc.Delete(r.Context(), id); err != nil {
+	if err := h.svc.Delete(r.Context(), t.ID); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "trigger not found")
 			return
@@ -166,16 +158,56 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
-	triggerID, err := uuid.Parse(chi.URLParam(r, "triggerId"))
-	if err != nil {
-		respond.Error(w, http.StatusBadRequest, "invalid trigger id")
+	trigger, ok := h.triggerForRoute(w, r)
+	if !ok {
 		return
 	}
 	page := pagination.ParsePageRequest(r)
-	result, err := h.svc.ListRuns(r.Context(), triggerID, page)
+	result, err := h.svc.ListRuns(r.Context(), trigger.ID, page)
 	if err != nil {
 		respond.Error(w, http.StatusInternalServerError, "failed to list runs")
 		return
 	}
+	for index := range result.Content {
+		result.Content[index] = PublicRunResponseFrom(result.Content[index])
+	}
 	respond.JSON(w, http.StatusOK, result)
+}
+
+// triggerForRoute loads a trigger only after validating its parent agent from
+// the nested route. This prevents a trigger identifier from being reused under
+// a different agent path in the same tenant.
+func (h *Handler) triggerForRoute(w http.ResponseWriter, r *http.Request) (AgentTrigger, bool) {
+	agentID, err := uuid.Parse(chi.URLParam(r, "agentId"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid agent id")
+		return AgentTrigger{}, false
+	}
+	if h.agent != nil {
+		if err := h.agent.GetByID(r.Context(), agentID); err != nil {
+			respond.Error(w, http.StatusNotFound, "agent not found")
+			return AgentTrigger{}, false
+		}
+	}
+
+	triggerID, err := uuid.Parse(chi.URLParam(r, "triggerId"))
+	if err != nil {
+		respond.Error(w, http.StatusBadRequest, "invalid trigger id")
+		return AgentTrigger{}, false
+	}
+	trigger, err := h.svc.GetByID(r.Context(), triggerID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			respond.Error(w, http.StatusNotFound, "trigger not found")
+			return AgentTrigger{}, false
+		}
+		respond.Error(w, http.StatusInternalServerError, "failed to get trigger")
+		return AgentTrigger{}, false
+	}
+	if trigger.AgentID != agentID {
+		respond.Error(w, http.StatusNotFound, "trigger not found")
+		return AgentTrigger{}, false
+	}
+
+	return trigger, true
 }

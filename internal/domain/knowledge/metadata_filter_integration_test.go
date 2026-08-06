@@ -41,9 +41,9 @@ func TestIntegration_DocumentSearchMetadataFilter_VectorLexicalAndTenantIsolatio
 		vector:   true,
 	}})
 	seedMetadataSearchKB(t, pool, metadataSearchTenantA, lexicalKB, []metadataSearchDocument{
-		{name: "manual-lexical.txt", content: "release policy manual", metadata: `{"source":"manual","tags":["release","api"],"year":2026,"customer":{"region":"BR","tier":2,"labels":["priority","release"]}}`, vector: true},
-		{name: "generated-lexical.txt", content: "release policy generated", metadata: `{"source":"generated","tags":["internal"],"year":2025,"customer":{"region":"US","tier":1,"labels":["internal"]}}`, vector: true},
-		{name: "retired-lexical.txt", content: "release policy retired", metadata: `{"source":"manual","tags":["release"],"retired":true,"customer":{"region":"BR","tier":3,"labels":["priority"]}}`, vector: true},
+		{name: "manual-lexical.txt", content: "release policy manual", metadata: `{"source":"manual","tags":["release","api"],"year":2026,"customer":{"region":"BR","tier":2,"labels":["priority","release"]}}`},
+		{name: "generated-lexical.txt", content: "release policy generated", metadata: `{"source":"generated","tags":["internal"],"year":2025,"customer":{"region":"US","tier":1,"labels":["internal"]}}`},
+		{name: "retired-lexical.txt", content: "release policy retired", metadata: `{"source":"manual","tags":["release"],"retired":true,"customer":{"region":"BR","tier":3,"labels":["priority"]}}`},
 	})
 	foreignKB := uuid.New()
 	seedMetadataSearchKB(t, pool, metadataSearchTenantB, foreignKB, []metadataSearchDocument{{
@@ -159,7 +159,7 @@ func TestIntegration_DocumentSearchMetadataFilter_VectorLexicalAndTenantIsolatio
 
 	tenantResults, err := client.Search(ctx, "release policy", SearchOptions{TopK: 10})
 	require.NoError(t, err)
-	assert.Len(t, tenantResults, 4)
+	assert.Len(t, tenantResults, 1)
 	for _, result := range tenantResults {
 		assert.NotEqual(t, "foreign.txt", result.DocumentName)
 	}
@@ -171,19 +171,12 @@ func TestIntegration_DocumentSearchMetadataFilter_PreservesJSONScalarTypes(t *te
 
 	kbID := uuid.New()
 	seedMetadataSearchKB(t, pool, metadataSearchTenantA, kbID, []metadataSearchDocument{
-		{name: "year-number.txt", content: "typed metadata policy", metadata: `{"year":2026,"enabled":true}`, vector: true},
-		{name: "year-string.txt", content: "typed metadata policy", metadata: `{"year":"2026","enabled":false}`, vector: true},
-		{name: "year-previous.txt", content: "typed metadata policy", metadata: `{"year":2025}`, vector: true},
+		{name: "year-number.txt", content: "typed metadata policy", metadata: `{"year":2026,"enabled":true}`},
+		{name: "year-string.txt", content: "typed metadata policy", metadata: `{"year":"2026","enabled":false}`},
+		{name: "year-previous.txt", content: "typed metadata policy", metadata: `{"year":2025}`},
 	})
 
-	embedding := make([]float32, 1024)
-	embedding[0] = 1
-	embeddingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		require.NoError(t, json.NewEncoder(w).Encode(embedResponse{Embedding: embedding}))
-	}))
-	defer embeddingServer.Close()
-	client := NewPgDocumentSearchClient(pool, embeddingServer.URL)
+	client := NewPgDocumentSearchClient(pool, "")
 	ctx := tenant.NewContext(context.Background(), metadataSearchTenantA)
 
 	filter, err := ParseMetadataFilter(json.RawMessage(`{"field":"year","op":"eq","value":2026}`))

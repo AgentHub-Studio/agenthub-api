@@ -1,7 +1,10 @@
 package agentic_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/stretchr/testify/assert"
 
@@ -62,6 +65,11 @@ func TestGenerateArgumentHint_Remaining(t *testing.T) {
 
 func TestGenerateArgumentHint_AllFilled(t *testing.T) {
 	result := agentic.GenerateArgumentHint([]string{"foo", "bar"}, []string{"a", "b"})
+	assert.Equal(t, "", result)
+}
+
+func TestGenerateArgumentHint_ExtraTypedArgs(t *testing.T) {
+	result := agentic.GenerateArgumentHint([]string{"foo", "bar"}, []string{"a", "b", "c"})
 	assert.Equal(t, "", result)
 }
 
@@ -131,4 +139,110 @@ func TestSubstituteArguments_MixedPlaceholders(t *testing.T) {
 func TestParseArgumentNames_AllNumeric(t *testing.T) {
 	result := agentic.ParseArgumentNames("123 456")
 	assert.Nil(t, result)
+}
+
+func FuzzGenerateArgumentHintBounds(f *testing.F) {
+	f.Add("alpha beta gamma", "one two")
+	f.Add("alpha beta", "one two three")
+	f.Add("", "one two")
+
+	f.Fuzz(func(t *testing.T, rawNames string, rawTyped string) {
+		names := agentic.ParseArgumentNames(limitArgumentFuzzString(rawNames))
+		typed := agentic.ParseArguments(limitArgumentFuzzString(rawTyped))
+		got := agentic.GenerateArgumentHint(names, typed)
+
+		if len(typed) >= len(names) {
+			if got != "" {
+				t.Fatalf("hint for filled arguments = %q, want empty; names=%v typed=%v", got, names, typed)
+			}
+			return
+		}
+
+		for _, name := range names[len(typed):] {
+			if !strings.Contains(got, "["+name+"]") {
+				t.Fatalf("hint %q does not contain remaining argument %q; names=%v typed=%v", got, name, names, typed)
+			}
+		}
+	})
+}
+
+func FuzzSubstituteArgumentsGeneratedPlaceholders(f *testing.F) {
+	f.Add("alpha", "beta", "target")
+	f.Add("file-name", "tenant_42", "subject")
+	f.Add("one.two", "three_four", "arg_name")
+
+	f.Fuzz(func(t *testing.T, rawFirst string, rawSecond string, rawName string) {
+		first := safeArgumentToken(rawFirst, "alpha")
+		second := safeArgumentToken(rawSecond, "beta")
+		name := safeArgumentName(rawName, "target")
+		args := first + " " + second
+
+		content := fmt.Sprintf("all=$ARGUMENTS idx0=$ARGUMENTS[0] idx1=$1 named=$%s suffix", name)
+		got := agentic.SubstituteArguments(content, args, false, []string{name})
+		want := fmt.Sprintf("all=%s idx0=%s idx1=%s named=%s suffix", args, first, second, first)
+		if got != want {
+			t.Fatalf("substitution = %q, want %q", got, want)
+		}
+
+		for _, forbidden := range []string{"$ARGUMENTS", "$1", "$" + name} {
+			if strings.Contains(got, forbidden) {
+				t.Fatalf("substitution leaked placeholder %q in %q", forbidden, got)
+			}
+		}
+	})
+}
+
+func limitArgumentFuzzString(raw string) string {
+	if len(raw) > 160 {
+		return raw[:160]
+	}
+	return raw
+}
+
+func safeArgumentToken(raw string, fallback string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if b.Len() >= 32 {
+			break
+		}
+		if r > unicode.MaxASCII {
+			continue
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.' {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return fallback
+	}
+	return b.String()
+}
+
+func safeArgumentName(raw string, fallback string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if b.Len() >= 24 {
+			break
+		}
+		if r > unicode.MaxASCII {
+			continue
+		}
+		if b.Len() == 0 {
+			if unicode.IsLetter(r) || r == '_' {
+				b.WriteRune(unicode.ToLower(r))
+			}
+			continue
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+			b.WriteRune(unicode.ToLower(r))
+		}
+	}
+	if b.Len() == 0 {
+		return fallback
+	}
+	name := b.String()
+	if name == "arguments" {
+		return fallback
+	}
+	return name
 }

@@ -21,7 +21,7 @@ type packageRepo interface {
 	GetBySlug(ctx context.Context, slug string) (Package, error)
 	ListByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) ([]Package, int64, error)
 	Create(ctx context.Context, p Package) (Package, error)
-	Update(ctx context.Context, id uuid.UUID, name, description, visibility string) (Package, error)
+	Update(ctx context.Context, id uuid.UUID, name, description, visibility string, tags []string) (Package, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	Search(ctx context.Context, query string, pkgType *string, req pagination.PageRequest) ([]Package, int64, error)
 }
@@ -67,6 +67,38 @@ func (s *Service) GetBySlug(ctx context.Context, slug string) (PackageResponse, 
 	return ResponseFrom(p), nil
 }
 
+// GetAccessibleByID returns a PUBLIC package to any caller and a PRIVATE
+// package only to its author. Hidden packages deliberately use ErrNotFound so
+// callers cannot distinguish them from unknown package IDs.
+func (s *Service) GetAccessibleByID(ctx context.Context, id uuid.UUID, tenantID string) (PackageResponse, error) {
+	p, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return PackageResponse{}, err
+	}
+	if !isAccessibleTo(p, tenantID) {
+		return PackageResponse{}, ErrNotFound
+	}
+	return ResponseFrom(p), nil
+}
+
+// GetAccessibleBySlug returns a package only when it is public or belongs to
+// the authenticated tenant. It shares the non-enumerating not-found behavior
+// of GetAccessibleByID.
+func (s *Service) GetAccessibleBySlug(ctx context.Context, slug, tenantID string) (PackageResponse, error) {
+	p, err := s.repo.GetBySlug(ctx, slug)
+	if err != nil {
+		return PackageResponse{}, err
+	}
+	if !isAccessibleTo(p, tenantID) {
+		return PackageResponse{}, ErrNotFound
+	}
+	return ResponseFrom(p), nil
+}
+
+func isAccessibleTo(p Package, tenantID string) bool {
+	return p.Visibility == PackageVisibilityPublic || (tenantID != "" && p.AuthorTenantID == tenantID)
+}
+
 // ListByTenant returns packages owned by the given tenant.
 func (s *Service) ListByTenant(ctx context.Context, tenantID string, req pagination.PageRequest) (pagination.Page[PackageResponse], error) {
 	pkgs, total, err := s.repo.ListByTenant(ctx, tenantID, req)
@@ -97,6 +129,7 @@ func (s *Service) Create(ctx context.Context, req CreatePackageRequest, tenantID
 		Name:           req.Name,
 		Slug:           req.Slug,
 		Description:    req.Description,
+		Tags:           normalizeTags(req.Tags),
 		Type:           PackageType(strings.ToUpper(req.Type)),
 		Visibility:     visibility,
 		AuthorTenantID: tenantID,
@@ -122,6 +155,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdatePackageReq
 	name := existing.Name
 	description := existing.Description
 	visibility := string(existing.Visibility)
+	tags := existing.Tags
 
 	if req.Name != nil {
 		// Bug 183: strip HTML (XSS prevention).
@@ -133,12 +167,36 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdatePackageReq
 	if req.Visibility != nil {
 		visibility = strings.ToUpper(*req.Visibility)
 	}
+	if req.Tags != nil {
+		tags = normalizeTags(*req.Tags)
+	}
 
-	updated, err := s.repo.Update(ctx, id, name, description, visibility)
+	updated, err := s.repo.Update(ctx, id, name, description, visibility, tags)
 	if err != nil {
 		return PackageResponse{}, fmt.Errorf("service: update package: %w", err)
 	}
 	return ResponseFrom(updated), nil
+}
+
+func normalizeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return []string{}
+	}
+
+	seen := make(map[string]struct{}, len(tags))
+	normalized := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag == "" {
+			continue
+		}
+		if _, exists := seen[tag]; exists {
+			continue
+		}
+		seen[tag] = struct{}{}
+		normalized = append(normalized, tag)
+	}
+	return normalized
 }
 
 // Delete removes a package. Caller must own the package.

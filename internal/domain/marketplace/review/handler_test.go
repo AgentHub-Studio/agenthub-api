@@ -21,7 +21,8 @@ import (
 
 // mockReviewSvc is an in-memory implementation of the reviewService interface.
 type mockReviewSvc struct {
-	reviews map[uuid.UUID]review.Review
+	reviews   map[uuid.UUID]review.Review
+	deleteErr error
 }
 
 func newMockReviewSvc() *mockReviewSvc {
@@ -55,6 +56,9 @@ func (m *mockReviewSvc) Create(_ context.Context, listingID uuid.UUID, tenantID 
 }
 
 func (m *mockReviewSvc) Delete(_ context.Context, listingID uuid.UUID, reviewID uuid.UUID, tenantID string) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
 	r, ok := m.reviews[reviewID]
 	if !ok {
 		return review.ErrNotFound
@@ -133,6 +137,19 @@ func TestReviewHandler_Create_BadBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestReviewHandler_CreateRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	r, svc := setupReviewHandler()
+	listingID := uuid.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/marketplace/listings/"+listingID.String()+"/reviews", bytes.NewBufferString(`{"rating":5,"comment":"great"} {"rating":1}`))
+	req = withTenant(req, "tenant-1")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, svc.reviews)
+}
+
 func TestReviewHandler_Delete_NoContent(t *testing.T) {
 	r, svc := setupReviewHandler()
 	listingID := uuid.New()
@@ -156,6 +173,35 @@ func TestReviewHandler_Delete_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestReviewHandler_Delete_RejectsMismatchedListing(t *testing.T) {
+	r, svc := setupReviewHandler()
+	listingID := uuid.New()
+	reviewID := uuid.New()
+	svc.reviews[reviewID] = review.Review{ID: reviewID, ListingID: uuid.New(), TenantID: "t1", Rating: 3}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/marketplace/listings/"+listingID.String()+"/reviews/"+reviewID.String(), nil)
+	req = withTenant(req, "t1")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, svc.reviews, reviewID)
+}
+
+func TestReviewHandler_Delete_Forbidden(t *testing.T) {
+	r, svc := setupReviewHandler()
+	svc.deleteErr = review.ErrForbidden
+	listingID := uuid.New()
+	reviewID := uuid.New()
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/marketplace/listings/"+listingID.String()+"/reviews/"+reviewID.String(), nil)
+	req = withTenant(req, "other-tenant")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
 func TestReviewHandler_Delete_InvalidID(t *testing.T) {

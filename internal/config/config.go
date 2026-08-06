@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/mcpruntime"
 )
 
 // KeycloakAdminConfig holds Keycloak Admin API credentials.
@@ -30,37 +32,34 @@ type MinIOConfig struct {
 // IsConfigured returns true when the MinIO endpoint is set.
 func (m MinIOConfig) IsConfigured() bool { return m.Endpoint != "" }
 
-// ClickHouseConfig holds analytics ClickHouse connection settings.
-type ClickHouseConfig struct {
-	URL      string
-	Database string
-	Username string
-	Password string
-}
-
-// IsConfigured returns true when ClickHouse analytics should be enabled.
-func (c ClickHouseConfig) IsConfigured() bool { return c.URL != "" }
-
 // Config holds all configuration for agenthub-api.
 type Config struct {
-	Port               string
-	DatabaseURL        string
-	KeycloakBaseURL    string
-	KeycloakIssuerURL  string // KEYCLOAK_ISSUER_URL — bug 281: validar `iss` claim contra esta URL pública. Vazio = sem validação (legacy)
-	KeycloakAdmin      KeycloakAdminConfig
-	MinIO              MinIOConfig
-	CORSOrigins        []string
-	LogLevel           string
-	OAuthEncryptionKey string // 32-byte AES-256 key; empty disables encryption (dev mode)
-	RabbitMQURL        string // RABBITMQ_URL — optional; enables document pipeline events when set
-	SkillRuntimeURL    string // SKILL_RUNTIME_URL — optional; base URL for skill-runtime service
-	MCPRuntimeURL      string // MCP_RUNTIME_URL — optional; base URL for mcp-client-runtime service
-	EmbeddingURL       string // EMBEDDING_URL — optional; base URL for embedding service (enables document_search)
-	ClickHouse         ClickHouseConfig
+	Port                              string
+	DatabaseURL                       string
+	KeycloakBaseURL                   string
+	KeycloakIssuerURL                 string // KEYCLOAK_ISSUER_URL — bug 281: validar `iss` claim contra esta URL pública. Vazio = sem validação (legacy)
+	KeycloakAdmin                     KeycloakAdminConfig
+	MinIO                             MinIOConfig
+	CORSOrigins                       []string
+	LogLevel                          string
+	OAuthEncryptionKey                string   // 32-byte AES-256 key; empty disables encryption (dev mode)
+	RabbitMQURL                       string   // RABBITMQ_URL — optional; enables document pipeline events when set
+	SkillRuntimeURL                   string   // SKILL_RUNTIME_URL — optional; base URL for skill-runtime service
+	BackendBaseURL                    string   // BACKEND_BASE_URL — base URL used to resolve relative internal HTTP tools
+	MCPRuntimeURL                     string   // MCP_RUNTIME_URL — optional; base URL for mcp-client-runtime service
+	MCPRuntimeClientID                string   // MCP_RUNTIME_CLIENT_ID — tenant-local Keycloak service client for runtime calls
+	MCPRuntimeAudience                string   // MCP_RUNTIME_AUDIENCE — audience required by mcp-client-runtime
+	MCPRuntimeCredentialEncryptionKey string   // MCP_RUNTIME_CREDENTIAL_ENCRYPTION_KEY — base64-encoded 32-byte AES-256 key for tenant workload credentials
+	MCPRuntimeScopes                  []string // MCP_RUNTIME_SCOPES — optional client-credentials scopes
+	EmbeddingURL                      string   // EMBEDDING_URL — optional; base URL for embedding service (enables document_search)
+	EmbeddingProvider                 string   // EMBEDDING_PROVIDER — "python" keeps the external service, "fastembed" uses the in-process provider
 	// LLMCallTimeoutSecs is the per-LLM-call timeout in seconds.
 	// P-C102-1: prevents stalled providers from blocking goroutines indefinitely.
-	// Default: 300 (5 minutes). Set to 0 to disable.
+	// RT-01 default: 120 seconds. Set to 0 to disable.
 	LLMCallTimeoutSecs int // LLM_CALL_TIMEOUT_SECS
+	// AuditRetentionIntervalSecs controls the audit retention scheduler period.
+	// Default: 86400 (24 hours).
+	AuditRetentionIntervalSecs int // AUDIT_RETENTION_INTERVAL_SECS
 }
 
 // Load reads configuration from environment variables.
@@ -94,20 +93,26 @@ func Load() (*Config, error) {
 
 	cfg.RabbitMQURL = os.Getenv("RABBITMQ_URL")
 	cfg.SkillRuntimeURL = getEnv("SKILL_RUNTIME_URL", "http://agenthub-skill-runtime:8083")
-	cfg.MCPRuntimeURL = getEnv("MCP_RUNTIME_URL", "http://agenthub-mcp-client-runtime:8080")
+	cfg.BackendBaseURL = getEnv("BACKEND_BASE_URL", "http://localhost:"+cfg.Port)
+	cfg.MCPRuntimeURL = getEnv("MCP_RUNTIME_URL", mcpruntime.DefaultHTTPURL)
+	cfg.MCPRuntimeClientID = getEnv("MCP_RUNTIME_CLIENT_ID", "agenthub-api")
+	cfg.MCPRuntimeAudience = getEnv("MCP_RUNTIME_AUDIENCE", "agenthub-mcp-client-runtime")
+	cfg.MCPRuntimeCredentialEncryptionKey = os.Getenv("MCP_RUNTIME_CREDENTIAL_ENCRYPTION_KEY")
+	cfg.MCPRuntimeScopes = splitNonEmpty(os.Getenv("MCP_RUNTIME_SCOPES"))
 	cfg.EmbeddingURL = getEnv("EMBEDDING_URL", "http://agenthub-embedding:8092")
-	cfg.ClickHouse = ClickHouseConfig{
-		URL:      os.Getenv("CLICKHOUSE_URL"),
-		Database: getEnv("CLICKHOUSE_DATABASE", "agenthub"),
-		Username: os.Getenv("CLICKHOUSE_USERNAME"),
-		Password: os.Getenv("CLICKHOUSE_PASSWORD"),
-	}
+	cfg.EmbeddingProvider = strings.ToLower(strings.TrimSpace(getEnv("EMBEDDING_PROVIDER", "python")))
 
-	// P-C102-1: per-LLM-call timeout. Default 300s (5 minutes).
-	cfg.LLMCallTimeoutSecs = 300
+	// P-C102-1 / RT-01: per-LLM-call timeout. Default 120s.
+	cfg.LLMCallTimeoutSecs = 120
 	if v := os.Getenv("LLM_CALL_TIMEOUT_SECS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			cfg.LLMCallTimeoutSecs = n
+		}
+	}
+	cfg.AuditRetentionIntervalSecs = 86400
+	if v := os.Getenv("AUDIT_RETENTION_INTERVAL_SECS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.AuditRetentionIntervalSecs = n
 		}
 	}
 
@@ -122,6 +127,16 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func splitNonEmpty(csv string) []string {
+	var values []string
+	for _, value := range strings.Split(csv, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }
 
 func getEnv(key, defaultValue string) string {

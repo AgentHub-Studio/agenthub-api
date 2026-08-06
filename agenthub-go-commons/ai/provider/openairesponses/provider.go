@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/AgentHub-Studio/agenthub-go-commons/ai"
+	"github.com/AgentHub-Studio/agenthub-go-commons/ai/internal/redirectguard"
 )
 
 const defaultBaseURL = "https://api.openai.com/v1"
@@ -35,7 +36,7 @@ func New(apiKey, baseURL string) *Provider {
 	return &Provider{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: 180 * time.Second},
+		client:  redirectguard.NewHTTPClient(180 * time.Second),
 	}
 }
 
@@ -78,12 +79,13 @@ type rTool struct {
 // ---- Responses API response types (non-streaming) ----
 
 type responsesResponse struct {
-	ID     string       `json:"id"`
-	Model  string       `json:"model"`
-	Output []outputItem `json:"output"`
-	Usage  rUsage       `json:"usage"`
-	Status string       `json:"status"` // "completed", "failed", etc.
-	Error  *rError      `json:"error,omitempty"`
+	ID                string             `json:"id"`
+	Model             string             `json:"model"`
+	Output            []outputItem       `json:"output"`
+	Usage             rUsage             `json:"usage"`
+	Status            string             `json:"status"` // "completed", "failed", etc.
+	Error             *rError            `json:"error,omitempty"`
+	IncompleteDetails *incompleteDetails `json:"incomplete_details,omitempty"`
 }
 
 type outputItem struct {
@@ -111,6 +113,10 @@ type rUsage struct {
 type rError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type incompleteDetails struct {
+	Reason string `json:"reason"`
 }
 
 // ---- Streaming event types ----
@@ -169,6 +175,21 @@ func (p *Provider) Chat(ctx context.Context, messages []ai.Message, opts ai.Chat
 	var rResp responsesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&rResp); err != nil {
 		return nil, fmt.Errorf("openai-responses: decode response: %w", err)
+	}
+
+	if rResp.Status == "incomplete" {
+		if isMaxOutputTruncation(&rResp) {
+			response := p.convertResponse(&rResp)
+			response.FinishReason = "length"
+			return response, nil
+		}
+		return nil, incompleteResponseError(&rResp)
+	}
+	if rResp.Status == "failed" {
+		if rResp.Error != nil {
+			return nil, fmt.Errorf("openai-responses: %s: %s", rResp.Error.Code, rResp.Error.Message)
+		}
+		return nil, fmt.Errorf("openai-responses: response failed")
 	}
 
 	return p.convertResponse(&rResp), nil
@@ -241,10 +262,16 @@ func (p *Provider) consumeStream(resp *http.Response, ch chan<- ai.StreamChunk) 
 		}
 
 		switch eventType {
-		case "response.output_text.delta":
+		case "response.output_text.delta", "response.refusal.delta":
 			var delta outputTextDelta
 			if err := json.Unmarshal([]byte(data), &delta); err == nil {
 				ch <- ai.StreamChunk{Delta: delta.Delta}
+			}
+
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			var delta outputTextDelta
+			if err := json.Unmarshal([]byte(data), &delta); err == nil {
+				ch <- ai.StreamChunk{ThinkingDelta: delta.Delta}
 			}
 
 		case "response.output_item.added":
@@ -317,6 +344,30 @@ func (p *Provider) consumeStream(resp *http.Response, ch chan<- ai.StreamChunk) 
 			}
 			return
 
+		case "response.incomplete":
+			var incomplete responseCompleted
+			if err := json.Unmarshal([]byte(data), &incomplete); err != nil {
+				ch <- ai.StreamChunk{Error: fmt.Errorf("openai-responses: decode incomplete response: %w", err)}
+				return
+			}
+
+			r := &incomplete.Response
+			if isMaxOutputTruncation(r) {
+				ch <- ai.StreamChunk{
+					FinishReason: "length",
+					ResponseID:   r.ID,
+					Usage: &ai.Usage{
+						PromptTokens:     r.Usage.InputTokens,
+						CompletionTokens: r.Usage.OutputTokens,
+						TotalTokens:      r.Usage.TotalTokens,
+					},
+				}
+				return
+			}
+
+			ch <- ai.StreamChunk{Error: incompleteResponseError(r)}
+			return
+
 		case "response.failed":
 			var completed responseCompleted
 			if err := json.Unmarshal([]byte(data), &completed); err == nil && completed.Response.Error != nil {
@@ -355,7 +406,7 @@ func (p *Provider) consumeStream(resp *http.Response, ch chan<- ai.StreamChunk) 
 
 		// Events we don't need to handle:
 		// response.created, response.in_progress, response.content_part.added,
-		// response.content_part.done, response.output_text.done, response.refusal.delta
+		// response.content_part.done, response.output_text.done, response.refusal.done
 		default:
 			// Ignore unknown events.
 		}
@@ -437,11 +488,14 @@ func (p *Provider) buildRequest(messages []ai.Message, opts ai.ChatOptions, stre
 					})
 				}
 				for _, tc := range m.ToolCalls {
+					args := strings.TrimSpace(tc.Function.Arguments)
+					if args == "" {
+						args = "{}"
+					}
 					items = append(items, inputItem{
 						Type:   "function_call",
-						ID:     tc.ID,
 						Name:   tc.Function.Name,
-						Args:   tc.Function.Arguments,
+						Args:   args,
 						CallID: tc.ID,
 					})
 				}
@@ -508,6 +562,21 @@ func (p *Provider) convertResponse(r *responsesResponse) *ai.ChatResponse {
 
 	resp.Content = strings.Join(textParts, "")
 	return resp
+}
+
+func isMaxOutputTruncation(r *responsesResponse) bool {
+	if r.IncompleteDetails == nil {
+		return false
+	}
+	return r.IncompleteDetails.Reason == "max_tokens" || r.IncompleteDetails.Reason == "max_output_tokens"
+}
+
+func incompleteResponseError(r *responsesResponse) error {
+	reason := "unknown"
+	if r.IncompleteDetails != nil && r.IncompleteDetails.Reason != "" {
+		reason = r.IncompleteDetails.Reason
+	}
+	return fmt.Errorf("openai-responses: response incomplete: %s", reason)
 }
 
 func (p *Provider) parseHTTPError(resp *http.Response) error {

@@ -1,6 +1,9 @@
 package agentic
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // RunEventType identifies the kind of event emitted by the Runner.
 type RunEventType string
@@ -26,9 +29,7 @@ const (
 	EventStopHookSummary  RunEventType = "stop_hook_summary"
 	EventTranscription    RunEventType = "transcription"
 	EventAudioDelta       RunEventType = "audio_delta"
-	// EventConfigChanged is emitted when the live agent configuration differs
-	// from the session snapshot currently pinned for the conversation.
-	EventConfigChanged RunEventType = "config_changed"
+	EventConfigChanged    RunEventType = "config_changed"
 	// EventInputRequest is emitted when the agentic loop needs structured user input
 	// via an elicitation request (form, URL confirmation, etc.).
 	EventInputRequest RunEventType = "input_request"
@@ -49,12 +50,6 @@ const (
 	// client posts it back through the same `client-state` endpoint with
 	// `actionResults: [{id, status, result?, error?}]`.
 	EventFrontendActionCall RunEventType = "frontend_action_call"
-	// EventSkillSetInitial reports the skill set selected for the first dynamic
-	// turn of a session.
-	EventSkillSetInitial RunEventType = "skill_set_initial"
-	// EventSkillSetChanged reports a dynamic re-retrieval caused by drift or an
-	// invalidated source embedding.
-	EventSkillSetChanged RunEventType = "skill_set_changed"
 )
 
 // ToolUseSummaryData carries a human-readable summary of a completed tool batch.
@@ -72,33 +67,93 @@ type RunEvent struct {
 
 // NewRunEvent serialises the typed payload into a RunEvent.
 func NewRunEvent(typ RunEventType, data any) RunEvent {
-	raw, _ := json.Marshal(data)
+	raw, err := json.Marshal(normalizeRunEventPayload(data))
+	if err != nil {
+		raw = json.RawMessage(`{"error":"event payload serialization failed"}`)
+	}
 	return RunEvent{Type: typ, Data: raw}
 }
 
+func normalizeRunEventPayload(data any) any {
+	switch payload := data.(type) {
+	case json.RawMessage:
+		return serializableJSONRawMessage(payload)
+	case ToolCallStartData:
+		payload.Input = serializableJSONRawMessage(redactSensitiveToolResultOutput(payload.Input))
+		return payload
+	case ToolResultData:
+		payload.Output = serializableJSONRawMessage(redactSensitiveToolResultOutput(payload.Output))
+		payload.Error = sanitizeSSEMessagePtr(payload.Error)
+		payload.IsError = payload.Error != nil
+		return payload
+	case ToolUseSummaryData:
+		payload.Summary = sanitizeSSEMessage(payload.Summary)
+		return payload
+	case ErrorData:
+		payload.Message = sanitizeSSEMessage(payload.Message)
+		return payload
+	case WarningData:
+		payload.Message = sanitizeSSEMessage(payload.Message)
+		return payload
+	case ModelFallbackData:
+		payload.Reason = sanitizeSSEMessage(payload.Reason)
+		return payload
+	case ToolDeniedData:
+		payload.Reason = sanitizeSSEMessage(payload.Reason)
+		return payload
+	case StopHookSummaryData:
+		payload.Summary = sanitizeSSEMessage(payload.Summary)
+		return payload
+	case SubtaskCompleteData:
+		payload.Summary = sanitizeSSEMessage(payload.Summary)
+		payload.Error = sanitizeSSEMessagePtr(payload.Error)
+		return payload
+	case SubtaskStartData:
+		payload.Description = sanitizeSSEMessage(payload.Description)
+		return payload
+	case SubtaskProgressData:
+		payload.Summary = sanitizeSSEMessage(payload.Summary)
+		return payload
+	case AgentMessageData:
+		payload.Content = sanitizeSSEMessage(payload.Content)
+		return payload
+	case RunProgressData:
+		if len(payload.RecentActivity) == 0 {
+			return payload
+		}
+		activities := make([]ActivityItem, len(payload.RecentActivity))
+		copy(activities, payload.RecentActivity)
+		for i := range activities {
+			activities[i].Summary = sanitizeSSEMessage(activities[i].Summary)
+		}
+		payload.RecentActivity = activities
+		return payload
+	case InputRequestData:
+		payload.Payload = serializableJSONRawMessage(payload.Payload)
+		return payload
+	case FrontendActionCallData:
+		payload.Arguments = serializableJSONRawMessage(payload.Arguments)
+		return payload
+	default:
+		return data
+	}
+}
+
+func serializableJSONRawMessage(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	if json.Valid(raw) {
+		return raw
+	}
+	encoded, err := json.Marshal(string(bytes.ToValidUTF8(raw, []byte("�"))))
+	if err != nil {
+		return json.RawMessage(`""`)
+	}
+	return encoded
+}
+
 // --- typed payloads ---
-
-// ConfigChangedData tells the UI that future sessions can use newer agent config,
-// while this session remains pinned to its snapshot.
-type ConfigChangedData struct {
-	SessionID string `json:"sessionId"`
-	AgentID   string `json:"agentId"`
-	Message   string `json:"message"`
-}
-
-// SkillSetData makes dynamic retrieval observable to SSE clients without
-// exposing embeddings or other internal vector details.
-type SkillSetData struct {
-	Skills     []SkillSetEntry `json:"skills"`
-	Reason     string          `json:"reason"`
-	DriftScore float64         `json:"driftScore,omitempty"`
-}
-
-type SkillSetEntry struct {
-	ID    string  `json:"id"`
-	Slug  string  `json:"slug,omitempty"`
-	Score float64 `json:"score,omitempty"`
-}
 
 // TextDeltaData carries a chunk of streamed assistant text.
 type TextDeltaData struct {
@@ -123,18 +178,21 @@ type AudioDeltaData struct {
 
 // ToolCallStartData is emitted when the LLM requests a tool execution.
 type ToolCallStartData struct {
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	Input        json.RawMessage `json:"input"`
+	AutoCollapse bool            `json:"autoCollapse,omitempty"`
 }
 
 // ToolResultData is emitted after a tool execution completes.
 type ToolResultData struct {
-	ID         string          `json:"id"`
-	Name       string          `json:"name"`
-	Output     json.RawMessage `json:"output,omitempty"`
-	DurationMs int64           `json:"durationMs"`
-	Error      *string         `json:"error,omitempty"`
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	Output       json.RawMessage `json:"output,omitempty"`
+	DurationMs   int64           `json:"durationMs"`
+	Error        *string         `json:"error,omitempty"`
+	IsError      bool            `json:"isError"`
+	AutoCollapse bool            `json:"autoCollapse,omitempty"`
 }
 
 // TokenUsage tracks prompt and completion token counts for a single LLM call.
@@ -176,19 +234,39 @@ type TurnCompleteData struct {
 // - CumulativeOutputTokens: sum of all output tokens across all turns
 // - CumulativeCacheReadTokens/CacheCreationTokens: sum across all turns
 type RunCompleteData struct {
-	TotalTurns                    int     `json:"totalTurns"`
-	TotalTokens                   int     `json:"totalTokens"`
-	TotalCost                     float64 `json:"totalCostUsd,omitempty"`
-	LatestInputTokens             int     `json:"latestInputTokens,omitempty"`
-	CumulativeOutputTokens        int     `json:"cumulativeOutputTokens,omitempty"`
-	CumulativeCacheReadTokens     int     `json:"cumulativeCacheReadTokens,omitempty"`
-	CumulativeCacheCreationTokens int     `json:"cumulativeCacheCreationTokens,omitempty"`
+	TotalTurns                    int            `json:"totalTurns"`
+	TotalTokens                   int            `json:"totalTokens"`
+	TotalCost                     float64        `json:"totalCostUsd,omitempty"`
+	LatestInputTokens             int            `json:"latestInputTokens,omitempty"`
+	CumulativeOutputTokens        int            `json:"cumulativeOutputTokens,omitempty"`
+	CumulativeCacheReadTokens     int            `json:"cumulativeCacheReadTokens,omitempty"`
+	CumulativeCacheCreationTokens int            `json:"cumulativeCacheCreationTokens,omitempty"`
+	Timing                        *RunTimingData `json:"timing,omitempty"`
+}
+
+// RunTimingData describes non-sensitive timings collected by the runner. The
+// values are elapsed milliseconds and contain no prompt, tenant, agent, tool,
+// model response, or credential data.
+type RunTimingData struct {
+	FirstOutputMS       int64 `json:"firstOutputMs"`
+	StreamCompleteMS    int64 `json:"streamCompleteMs"`
+	AssistantPersistMS  int64 `json:"assistantPersistMs"`
+	PostTurnLifecycleMS int64 `json:"postTurnLifecycleMs"`
+	TotalMS             int64 `json:"totalMs"`
 }
 
 // ErrorData carries error information.
 type ErrorData struct {
 	Message string `json:"message"`
 	Code    string `json:"code,omitempty"`
+}
+
+// ConfigChangedData is emitted when the current agent config no longer matches
+// the session's stored config hash. The old persona is intentionally redacted:
+// callers need a stable notification shape, not the full system prompt.
+type ConfigChangedData struct {
+	OldPersona      string `json:"oldPersona"`
+	NewSnapshotHash string `json:"newSnapshotHash"`
 }
 
 // CompactData is emitted when the context window is compressed.

@@ -3,6 +3,7 @@ package tenantsignup_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -17,10 +18,14 @@ import (
 type fakeTenantCreator struct {
 	called  []tenant.CreateTenantRequest
 	errWith string
+	err     error
 }
 
 func (f *fakeTenantCreator) Create(_ context.Context, req tenant.CreateTenantRequest) (tenant.TenantResponse, error) {
 	f.called = append(f.called, req)
+	if f.err != nil {
+		return tenant.TenantResponse{}, f.err
+	}
 	if f.errWith != "" {
 		return tenant.TenantResponse{}, errors.New(f.errWith)
 	}
@@ -73,7 +78,7 @@ func TestSignup_HappyPath(t *testing.T) {
 func TestSignup_RejectsInvalidSlug(t *testing.T) {
 	svc := newSvc(&fakeTenantCreator{}, &fakeUserCreator{})
 
-	for _, bad := range []string{"", "A", "My Company", "-leading", "trailing-", "under_score", "slash/in/name"} {
+	for _, bad := range []string{"", "A", "ab", "My Company", "-leading", "trailing-", "under_score", "slash/in/name"} {
 		_, err := svc.Signup(context.Background(), tenantsignup.SignupRequest{
 			TenantID:       bad,
 			TenantName:     "x",
@@ -88,7 +93,7 @@ func TestSignup_RejectsInvalidEmail(t *testing.T) {
 	svc := newSvc(&fakeTenantCreator{}, &fakeUserCreator{})
 
 	_, err := svc.Signup(context.Background(), tenantsignup.SignupRequest{
-		TenantID:       "ok",
+		TenantID:       "okay",
 		TenantName:     "OK",
 		AdminEmail:     "not-an-email",
 		AdminFirstName: "Alice",
@@ -101,7 +106,7 @@ func TestSignup_RequiresFirstName(t *testing.T) {
 	svc := newSvc(&fakeTenantCreator{}, &fakeUserCreator{})
 
 	_, err := svc.Signup(context.Background(), tenantsignup.SignupRequest{
-		TenantID:       "ok",
+		TenantID:       "okay",
 		TenantName:     "OK",
 		AdminEmail:     "a@b.com",
 		AdminFirstName: "",
@@ -127,6 +132,24 @@ func TestSignup_TenantCreateError_PropagatesAndSkipsUserCreate(t *testing.T) {
 	assert.Empty(t, uc.called, "should not attempt user creation when tenant creation fails")
 }
 
+func TestSignup_TenantValidationErrorMapsToClientValidation(t *testing.T) {
+	tc := &fakeTenantCreator{err: fmt.Errorf("%w: tenant id %q is reserved", tenant.ErrValidation, "core")}
+	uc := &fakeUserCreator{}
+	svc := newSvc(tc, uc)
+
+	_, err := svc.Signup(context.Background(), tenantsignup.SignupRequest{
+		TenantID:       "core",
+		TenantName:     "Core Tenant",
+		AdminEmail:     "admin@example.invalid",
+		AdminFirstName: "Admin",
+	})
+
+	require.ErrorIs(t, err, tenantsignup.ErrValidation)
+	assert.Contains(t, err.Error(), "reserved")
+	assert.NotContains(t, err.Error(), "validation failed: validation failed")
+	assert.Empty(t, uc.called, "should not attempt user creation when tenant validation fails")
+}
+
 func TestSignup_UserCreateError_DoesNotRollbackTenant(t *testing.T) {
 	// P-tenantsignup: leaving a half-provisioned tenant when user creation fails
 	// is acceptable — admin can retry user creation via /api/tenants/{id}/users.
@@ -135,7 +158,7 @@ func TestSignup_UserCreateError_DoesNotRollbackTenant(t *testing.T) {
 	svc := newSvc(tc, uc)
 
 	_, err := svc.Signup(context.Background(), tenantsignup.SignupRequest{
-		TenantID:       "ok",
+		TenantID:       "okay",
 		TenantName:     "OK",
 		AdminEmail:     "a@b.com",
 		AdminFirstName: "A",
@@ -165,7 +188,7 @@ func TestSignup_LoginURL_EmptyWhenKeycloakBaseMissing(t *testing.T) {
 	svc := tenantsignup.NewService(&fakeTenantCreator{}, &fakeUserCreator{}, "", "")
 
 	got, err := svc.Signup(context.Background(), tenantsignup.SignupRequest{
-		TenantID:       "ok",
+		TenantID:       "okay",
 		TenantName:     "OK",
 		AdminEmail:     "a@b.com",
 		AdminFirstName: "A",

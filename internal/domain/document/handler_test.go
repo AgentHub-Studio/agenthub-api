@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/domain/document"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
 
@@ -44,6 +46,7 @@ func (m *mockDocumentSvc) Upload(_ context.Context, req document.UploadRequest) 
 		KnowledgeBaseID: req.KnowledgeBaseID,
 		FileName:        req.FileName,
 		Status:          document.StatusPending,
+		Metadata:        req.Metadata,
 	}
 	m.docs[id] = resp
 	return resp, nil
@@ -76,9 +79,19 @@ func (m *mockDocumentSvc) Reprocess(_ context.Context, id uuid.UUID) (document.D
 }
 
 func setupDocument() (*chi.Mux, *mockDocumentSvc) {
+	return setupDocumentWithRoles("admin")
+}
+
+func setupDocumentWithRoles(roles ...string) (*chi.Mux, *mockDocumentSvc) {
 	svc := newMockDocumentSvc()
 	h := document.NewHandler(svc)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := middleware.ContextWithRoles(r.Context(), roles...)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	})
 	h.RegisterRoutes(r)
 	return r, svc
 }
@@ -97,6 +110,34 @@ func TestDocumentHandler_List_Success(t *testing.T) {
 	var page pagination.Page[document.DocumentResponse]
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 	assert.Equal(t, int64(1), page.TotalElements)
+}
+
+func TestDocumentHandler_AdministrativeRoutesRequireAdminRole(t *testing.T) {
+	r, _ := setupDocumentWithRoles("user")
+	kbID := uuid.NewString()
+	documentID := uuid.NewString()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "list", method: http.MethodGet, path: "/api/knowledge-bases/" + kbID + "/documents"},
+		{name: "upload", method: http.MethodPost, path: "/api/knowledge-bases/" + kbID + "/documents"},
+		{name: "get", method: http.MethodGet, path: "/api/knowledge-bases/" + kbID + "/documents/" + documentID},
+		{name: "delete", method: http.MethodDelete, path: "/api/knowledge-bases/" + kbID + "/documents/" + documentID},
+		{name: "reprocess", method: http.MethodPost, path: "/api/knowledge-bases/" + kbID + "/documents/" + documentID + "/reprocess"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+			assert.Contains(t, w.Body.String(), "missing required role")
+		})
+	}
 }
 
 func TestDocumentHandler_Upload_Success(t *testing.T) {
@@ -120,6 +161,142 @@ func TestDocumentHandler_Upload_Success(t *testing.T) {
 	var resp document.DocumentResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "report.pdf", resp.FileName)
+}
+
+func TestDocumentHandler_Upload_AcceptsDocumentMetadata(t *testing.T) {
+	r, _ := setupDocument()
+	kbID := uuid.New()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("metadata", `{"source":"manual","tags":["release","api"],"year":2026}`))
+	part, err := writer.CreateFormFile("file", "report.txt")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("metadata contract"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var resp document.DocumentResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.JSONEq(t, `{"source":"manual","tags":["release","api"],"year":2026}`, string(resp.Metadata))
+}
+
+func TestDocumentHandler_Upload_AcceptsSecondLevelDocumentMetadata(t *testing.T) {
+	r, _ := setupDocument()
+	kbID := uuid.New()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("metadata", `{"customer":{"region":"br","tier":2,"labels":["priority"]}}`))
+	part, err := writer.CreateFormFile("file", "report.txt")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("metadata contract"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var resp document.DocumentResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.JSONEq(t, `{"customer":{"region":"br","tier":2,"labels":["priority"]}}`, string(resp.Metadata))
+}
+
+func TestDocumentHandler_Upload_RejectsThirdLevelDocumentMetadata(t *testing.T) {
+	r, svc := setupDocument()
+	kbID := uuid.New()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("metadata", `{"source":{"name":{"value":"manual"}}}`))
+	part, err := writer.CreateFormFile("file", "report.txt")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("metadata contract"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, svc.docs)
+}
+
+func TestDocumentHandler_Upload_RejectsDuplicateDocumentMetadataWithoutCreating(t *testing.T) {
+	r, svc := setupDocument()
+	kbID := uuid.New()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("metadata", `{"source":"first","source":"second"}`))
+	part, err := writer.CreateFormFile("file", "report.txt")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("metadata contract"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Empty(t, svc.docs)
+}
+
+func TestDocumentHandler_Upload_RejectsMetadataOutsidePostgresJSONBNumericRange(t *testing.T) {
+	r, svc := setupDocument()
+	kbID := uuid.New()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("metadata", `{"year":1e131072}`))
+	part, err := writer.CreateFormFile("file", "report.txt")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("metadata numeric boundary"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, svc.docs)
+}
+
+func TestDocumentHandler_Upload_RejectsOversizeDocumentMetadata(t *testing.T) {
+	r, _ := setupDocument()
+	kbID := uuid.New()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	oversizeMetadata := `{"source":"` + strings.Repeat("x", 16<<10) + `"}`
+	require.NoError(t, writer.WriteField("metadata", oversizeMetadata))
+	part, err := writer.CreateFormFile("file", "report.txt")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("metadata contract"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/"+kbID.String()+"/documents", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestDocumentHandler_Upload_InvalidBody(t *testing.T) {

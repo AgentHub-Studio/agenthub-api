@@ -1,17 +1,21 @@
 package middleware
 
 import (
+	"context"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
 
 const jwksCacheTTL = 5 * time.Minute
+const jwksFetchTimeout = 10 * time.Second
 
 // jwksCache holds per-realm RSA public keys fetched from Keycloak.
 // On cache miss or TTL expiry, keys are refetched from the JWKS endpoint.
@@ -64,20 +68,32 @@ type jwkKey struct {
 // fetchRealmJWKS fetches and parses RSA signing keys from a Keycloak realm's certs endpoint.
 // The keycloakBaseURL parameter allows injection of a test server URL in unit tests.
 func fetchRealmJWKS(keycloakBaseURL, realm string) (map[string]*rsa.PublicKey, error) {
-	url := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/certs", keycloakBaseURL, realm)
-	resp, err := http.Get(url) //nolint:noctx // JWKS fetch uses a short-lived background request
+	jwksURL, err := buildRealmJWKSURL(keycloakBaseURL, realm)
 	if err != nil {
-		return nil, fmt.Errorf("jwks: fetch %s: %w", url, err)
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), jwksFetchTimeout)
+	defer cancel()
+	// #nosec G704 -- jwksURL is built from a trusted Keycloak base URL and an escaped realm segment.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("jwks: build request for %s: %w", jwksURL, err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("jwks: fetch %s: %w", jwksURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jwks: fetch %s returned HTTP %d", url, resp.StatusCode)
+		return nil, fmt.Errorf("jwks: fetch %s returned HTTP %d", jwksURL, resp.StatusCode)
 	}
 
 	var doc jwksDoc
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return nil, fmt.Errorf("jwks: decode response from %s: %w", url, err)
+		return nil, fmt.Errorf("jwks: decode response from %s: %w", jwksURL, err)
 	}
 
 	keys := make(map[string]*rsa.PublicKey, len(doc.Keys))
@@ -96,6 +112,68 @@ func fetchRealmJWKS(keycloakBaseURL, realm string) (map[string]*rsa.PublicKey, e
 		return nil, fmt.Errorf("jwks: no usable RSA signing keys found for realm %q", realm)
 	}
 	return keys, nil
+}
+
+func buildRealmJWKSURL(keycloakBaseURL, realm string) (string, error) {
+	parsed, err := parseTrustedHTTPBaseURL(keycloakBaseURL, "jwks: invalid Keycloak base URL")
+	if err != nil {
+		return "", err
+	}
+	if realm == "" || strings.Contains(realm, "/") || containsControlChar(realm) {
+		return "", fmt.Errorf("jwks: invalid realm %q", realm)
+	}
+	return appendEscapedPathSegments(parsed, "realms", realm, "protocol", "openid-connect", "certs")
+}
+
+func parseTrustedHTTPBaseURL(rawBase, message string) (*url.URL, error) {
+	if rawBase == "" || containsControlChar(rawBase) {
+		return nil, fmt.Errorf("%s: empty or unsafe base URL", message)
+	}
+	parsed, err := url.Parse(strings.TrimRight(rawBase, "/"))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", message, err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("%s: unsupported scheme %q", message, parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("%s: missing host", message)
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("%s: userinfo, query and fragment are not allowed", message)
+	}
+	return parsed, nil
+}
+
+func appendEscapedPathSegments(base *url.URL, segments ...string) (string, error) {
+	escapedPath := strings.TrimSuffix(base.EscapedPath(), "/")
+	for _, segment := range segments {
+		if segment == "" || containsControlChar(segment) {
+			return "", fmt.Errorf("invalid URL path segment")
+		}
+		escapedPath += "/" + url.PathEscape(segment)
+	}
+	if escapedPath == "" {
+		escapedPath = "/"
+	}
+	unescapedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return "", err
+	}
+	next := *base
+	next.Path = unescapedPath
+	next.RawPath = escapedPath
+	return next.String(), nil
+}
+
+func containsControlChar(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // jwkToRSA converts a JWK entry into an *rsa.PublicKey.

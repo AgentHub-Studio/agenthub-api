@@ -31,15 +31,15 @@ import (
 //      - per-fork PermissionRules (not inherited)
 //      - shared CacheSafeParams (same prompt cache prefix)
 //
-//   2. SESSION-LEVEL FORK (PENDING — gap identified)
-//      The PDF /branch command equivalent that creates a new ChatSession
-//      from an existing session, copying transcript up to a chosen point,
-//      is NOT implemented in AgentHub. Users wanting to explore a different
-//      branch must currently start a fresh session and lose context.
+//   2. SESSION-LEVEL FORK (DONE — PERSIST-005a)
+//      CloneSession creates a new ChatSession from an existing one, copies the
+//      transcript up to an optional message boundary, retains the stable agent
+//      snapshot, and records the source lineage. Session-scoped permissions
+//      are intentionally not copied.
 //
-// This BDD ratifies what EXISTS (sub-agent fork) and explicitly documents
-// the SESSION-LEVEL gap so a future PERSIST-005a can close it. Status of
-// the parent feature: PARTIAL.
+// This BDD ratifies both scopes of fork. The PostgreSQL integration regression
+// verifies the public clone route, transcript independence, and rollback when
+// a transcript insert fails. Status of the parent feature: DONE.
 
 func TestBDD_ForkBranch(t *testing.T) {
 	t.Run("Scenario_SubAgentForkUsesNewSessionID", func(t *testing.T) {
@@ -108,17 +108,15 @@ func TestBDD_ForkBranch(t *testing.T) {
 			"unset fork rules must be nil — no silent inheritance of parent's session permissions")
 	})
 
-	t.Run("Scenario_SessionLevelForkOperationDoesNotExistYet", func(t *testing.T) {
+	t.Run("Scenario_SessionLevelForkOperationIsAvailable", func(t *testing.T) {
 		// Given the PDF Section 9.2 describes a session-level fork (the
 		//       /branch command in Claude Code that creates a new session
 		//       from an existing one with shared history up to a point),
 		// When we inspect the chat repository for a fork/branch verb,
 		repoType := reflect.TypeOf((*chat.Repository)(nil)).Elem()
 
-		// Then NO ForkSession / BranchSession / CloneSession method exists
-		//      yet. This scenario is a documentation guard: it FAILS the day
-		//      such a method is added, prompting the implementer to update
-		//      this BDD and the PERSIST-005 ledger entry to DONE.
+		// Then CloneSession exists as the production persistence verb. This
+		// scenario must fail if a future refactor removes the branch contract.
 		hasFork := false
 		for i := 0; i < repoType.NumMethod(); i++ {
 			name := repoType.Method(i).Name
@@ -126,16 +124,14 @@ func TestBDD_ForkBranch(t *testing.T) {
 				hasFork = true
 			}
 		}
-		assert.False(t, hasFork,
-			"NO session-level fork verb yet — when added, update PERSIST-005 to DONE and revise this BDD")
+		assert.True(t, hasFork,
+			"CloneSession must preserve the session-level branch contract")
 	})
 
-	t.Run("Scenario_FreshSessionCanBeCreatedAsForkAlternative", func(t *testing.T) {
-		// Given the absence of session-level fork (above scenario),
-		// When users want to start exploring a branch,
-		// Then they currently MUST create a brand-new session via
-		//      CreateSession and re-enter context manually — this is the
-		//      documented workaround until PERSIST-005 lands fully.
+	t.Run("Scenario_FreshSessionCreationRemainsAvailable", func(t *testing.T) {
+		// Given users may also choose a blank conversation instead of a branch,
+		// When the repository exposes session lifecycle operations,
+		// Then CreateSession remains available alongside CloneSession.
 		repoType := reflect.TypeOf((*chat.Repository)(nil)).Elem()
 		hasCreateSession := false
 		for i := 0; i < repoType.NumMethod(); i++ {

@@ -1,6 +1,7 @@
 package agentic_test
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -227,7 +228,8 @@ func TestInterpolateHeaders_NoVars(t *testing.T) {
 }
 
 func TestInterpolateHeaders_WithAllowedVar(t *testing.T) {
-	t.Setenv("TEST_TOKEN_HOOKTYPE", "secret123")
+	require.NoError(t, os.Setenv("TEST_TOKEN_HOOKTYPE", "secret123"))
+	defer func() { require.NoError(t, os.Unsetenv("TEST_TOKEN_HOOKTYPE")) }()
 
 	headers := map[string]string{"Authorization": "Bearer $TEST_TOKEN_HOOKTYPE"}
 	result := agentic.InterpolateHeaders(headers, []string{"TEST_TOKEN_HOOKTYPE"})
@@ -235,7 +237,8 @@ func TestInterpolateHeaders_WithAllowedVar(t *testing.T) {
 }
 
 func TestInterpolateHeaders_DisallowedVar(t *testing.T) {
-	t.Setenv("SECRET_KEY", "should_not_appear")
+	require.NoError(t, os.Setenv("SECRET_KEY", "should_not_appear"))
+	defer func() { require.NoError(t, os.Unsetenv("SECRET_KEY")) }()
 
 	headers := map[string]string{"X-Key": "$SECRET_KEY"}
 	result := agentic.InterpolateHeaders(headers, []string{"OTHER_VAR"})
@@ -243,8 +246,10 @@ func TestInterpolateHeaders_DisallowedVar(t *testing.T) {
 }
 
 func TestInterpolateHeaders_MultipleVars(t *testing.T) {
-	t.Setenv("HOOK_HOST", "example.com")
-	t.Setenv("HOOK_PORT", "8080")
+	require.NoError(t, os.Setenv("HOOK_HOST", "example.com"))
+	require.NoError(t, os.Setenv("HOOK_PORT", "8080"))
+	defer func() { require.NoError(t, os.Unsetenv("HOOK_HOST")) }()
+	defer func() { require.NoError(t, os.Unsetenv("HOOK_PORT")) }()
 
 	headers := map[string]string{"X-Target": "$HOOK_HOST:$HOOK_PORT"}
 	result := agentic.InterpolateHeaders(headers, []string{"HOOK_HOST", "HOOK_PORT"})
@@ -252,7 +257,8 @@ func TestInterpolateHeaders_MultipleVars(t *testing.T) {
 }
 
 func TestInterpolateHeaders_MixedAllowed(t *testing.T) {
-	t.Setenv("ALLOWED_VAR", "yes")
+	require.NoError(t, os.Setenv("ALLOWED_VAR", "yes"))
+	defer func() { require.NoError(t, os.Unsetenv("ALLOWED_VAR")) }()
 
 	headers := map[string]string{"X-Mix": "$ALLOWED_VAR and $DENIED_VAR"}
 	result := agentic.InterpolateHeaders(headers, []string{"ALLOWED_VAR"})

@@ -149,6 +149,8 @@ func TestBDD_StructuredEventLogs(t *testing.T) {
 			"duration must surface for per-tool latency analysis")
 		assert.Nil(t, decodedOK.Error,
 			"successful result must omit the error field")
+		assert.False(t, decodedOK.IsError,
+			"successful result must expose isError=false for SSE consumers")
 
 		// And given a tool execution that failed,
 		errMsg := "deny: external network blocked"
@@ -165,6 +167,8 @@ func TestBDD_StructuredEventLogs(t *testing.T) {
 			"failed result must surface the error field")
 		assert.Equal(t, errMsg, *decodedFail.Error,
 			"error message must round-trip exactly")
+		assert.True(t, decodedFail.IsError,
+			"failed result must expose isError=true for SSE consumers")
 	})
 
 	t.Run("Scenario_TokenUsageIsObservablePerEvent", func(t *testing.T) {

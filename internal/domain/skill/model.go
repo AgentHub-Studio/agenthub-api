@@ -17,7 +17,10 @@ type Skill struct {
 	// AllowedTools restricts which tools this skill can use when invoked.
 	// Empty means all tools are allowed. Inspired by Claude Code's
 	// BundledSkillDefinition.allowedTools for fine-grained security.
-	AllowedTools []string  `db:"allowed_tools"`
+	AllowedTools []string `db:"allowed_tools"`
+	// RequiredRoles restricts this skill to callers that have at least one of
+	// the listed roles. Empty means the skill is visible to any authenticated user.
+	RequiredRoles []string `db:"required_roles"`
 	// DisableModelInvocation marks skills that should only be invoked by the user
 	// (via slash commands or UI), not by the LLM. Their descriptions are excluded
 	// from the system prompt to save context tokens.
@@ -44,7 +47,11 @@ type Skill struct {
 	// requires a tool_search round-trip to load. This is the 3rd layer of
 	// disclosure (after tool-level deferral and the DeferredToolThreshold).
 	// Inspired by Claude Code's ShouldDefer flag applied at the skill level.
-	ShouldDefer bool      `db:"should_defer"`
-	CreatedAt   time.Time `db:"created_at"`
-	UpdatedAt   time.Time `db:"updated_at"`
+	ShouldDefer      bool              `db:"should_defer"`
+	ModelOverrides   map[string]string `db:"model_overrides"`
+	EffortLevel      string            `db:"effort_level"`
+	AssociatedAgents []string          `db:"associated_agents"`
+	DynamicHooks     []string          `db:"dynamic_hooks"`
+	CreatedAt        time.Time         `db:"created_at"`
+	UpdatedAt        time.Time         `db:"updated_at"`
 }

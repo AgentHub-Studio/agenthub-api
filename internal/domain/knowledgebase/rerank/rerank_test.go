@@ -52,3 +52,17 @@ func TestLLMReranker(t *testing.T) {
 		t.Fatalf("expected 2 on top, got %+v", out)
 	}
 }
+
+func TestCrossEncoderReranker(t *testing.T) {
+	scorer := func(_ context.Context, _, content string) (float64, error) {
+		if content == "exact match" {
+			return 100, nil
+		}
+		return 1, nil
+	}
+	cs := []rerank.Candidate{{ID: "1", Content: "loose match"}, {ID: "2", Content: "exact match"}}
+	out, _ := rerank.CrossEncoderReranker{Scorer: scorer}.Rerank(context.Background(), "q", cs, 1)
+	if len(out) != 1 || out[0].ID != "2" {
+		t.Fatalf("expected exact match as top-1, got %+v", out)
+	}
+}

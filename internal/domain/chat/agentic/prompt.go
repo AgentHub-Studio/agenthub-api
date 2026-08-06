@@ -5,6 +5,7 @@ package agentic
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -112,17 +113,6 @@ func (b *PromptBuilder) ClearCacheForAgent(agentID uuid.UUID) {
 	}
 }
 
-// ClearCacheForDynamicSession invalidates the per-session cache used by an
-// explicit dynamic skill set. It never touches other agents or sessions.
-func (b *PromptBuilder) ClearCacheForDynamicSession(sessionID uuid.UUID) {
-	suffix := "dynamic:" + sessionID.String()
-	for k := range b.sectionCache {
-		if strings.Contains(k, suffix) {
-			delete(b.sectionCache, k)
-		}
-	}
-}
-
 // getCachedOrCompute returns a cached section or computes and caches it.
 func (b *PromptBuilder) getCachedOrCompute(name string, compute func() (string, error)) (string, error) {
 	if cached, ok := b.sectionCache[name]; ok {
@@ -142,11 +132,6 @@ func (b *PromptBuilder) getCachedOrCompute(name string, compute func() (string, 
 type PromptInput struct {
 	// AgentID is used to look up skills and knowledge bases.
 	AgentID uuid.UUID
-	// SkillIDs is an explicit set selected for this run. Together with
-	// UseSkillIDs it supports DYNAMIC_SKILL sessions without falling back to
-	// agent bindings when retrieval returns an empty result.
-	SkillIDs    []uuid.UUID
-	UseSkillIDs bool
 	// SessionID is used to find the latest compact summary.
 	SessionID uuid.UUID
 	// SystemPrompt is the agent's custom identity/instructions (editable by user).
@@ -169,8 +154,6 @@ type PromptInput struct {
 	// skills present in this set are listed in "## Available Tools". Skills absent
 	// from the set are excluded so the LLM cannot hallucinate calls to a slug that
 	// has no callable implementation (BUG-SKILL-EMPTY).
-	// For "## Skill Instructions", a non-nil set is authoritative: instructions
-	// from skills absent from the set are omitted, including when the set is empty.
 	ActiveSkillSlugs map[string]bool
 	// RequestContext supplies per-request identity (user, tenant) used to resolve
 	// {{user.email}}, {{tenant.id}}, etc. placeholders in SystemPrompt. MA-09.
@@ -185,12 +168,6 @@ type PromptInput struct {
 // DANGEROUS_uncachedSystemPromptSection (volatile) pattern.
 func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, error) {
 	var sections []string
-	promptCacheScope := in.AgentID.String()
-	if in.UseSkillIDs {
-		// Dynamic selections vary per session, not per virtual agent ID.
-		promptCacheScope = "dynamic:" + in.SessionID.String()
-	}
-	skillCacheScope := promptCacheScope
 
 	// 1. Agent Identity & Instructions (cached — stable across turns)
 	if in.SystemPrompt != "" {
@@ -208,7 +185,7 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	userInteractionSection, err := b.resolvePromptSection(
 		ctx,
 		in.AgentID,
-		"prompt-section:user_interaction_policy:"+promptCacheScope,
+		"prompt-section:user_interaction_policy:"+in.AgentID.String(),
 		promptTemplateSlugUserInteractionPolicy,
 		userInteractionPolicy,
 	)
@@ -220,11 +197,12 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	// 2. Available Tools (cached — only changes on skill config changes)
 	if b.skills != nil {
 		// BUG-SKILL-EMPTY: snapshot active slugs so the closure uses the value
-		// from this Build() call. The cache is cleared per-agent at run start so
-		// a stale snapshot cannot persist across runs.
+		// from this Build() call. The active slug fingerprint is part of the cache
+		// key because Available Tools and tool-referencing instructions depend on it.
 		activeSlugSnapshot := in.ActiveSkillSlugs
-		toolsSection, err := b.getCachedOrCompute("tools:"+skillCacheScope, func() (string, error) {
-			skills, err := b.skillsForInput(ctx, in)
+		activeSlugCacheKey := activeSkillSlugsCacheKey(activeSlugSnapshot)
+		toolsSection, err := b.getCachedOrCompute("tools:"+activeSlugCacheKey+":"+in.AgentID.String(), func() (string, error) {
+			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
 			if err != nil {
 				return "", fmt.Errorf("prompt: list skills: %w", err)
 			}
@@ -241,17 +219,30 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 		}
 
 		// 2b. Skill Instructions (cached — stable across turns).
-		// P-C152-2: include only behavioral instructions (no tool references), and
-		// when active skill bindings are known, only from skills with active tools.
-		instrSection, instrErr := b.getCachedOrCompute("skill-instructions:"+skillCacheScope, func() (string, error) {
-			skills, err := b.skillsForInput(ctx, in)
+		// P-C152-2: behavioral instructions (no tool references) are always included.
+		// Tool-referencing instructions require active tool bindings to avoid hallucination;
+		// they are handled by FormatSkillInstructionsSection when tool info is available.
+		// Without tool info here, we safely include only behavioral (non-tool-referencing)
+		// instructions so that formatting, tone, and workflow rules always reach the LLM.
+		instrSection, instrErr := b.getCachedOrCompute("skill-instructions:"+activeSlugCacheKey+":"+in.AgentID.String(), func() (string, error) {
+			skills, err := b.skills.ListByAgentID(ctx, in.AgentID)
 			if err != nil {
 				return "", fmt.Errorf("prompt: list skills for instructions: %w", err)
 			}
 			var sb strings.Builder
 			for _, s := range skills {
-				if !shouldIncludeSkillInstructions(s, activeSlugSnapshot) {
+				if s.Instructions == "" || s.DisableModelInvocation {
 					continue
+				}
+				referencesTool := referencesToolByName(s.Instructions)
+				if referencesTool {
+					// RT-02: tool-referencing instructions are safe only when the caller
+					// proved this skill has at least one active callable tool. When the
+					// caller has no active-tool snapshot, keep the conservative legacy
+					// behavior and omit them.
+					if len(activeSlugSnapshot) == 0 || !activeSlugSnapshot[s.Slug] {
+						continue
+					}
 				}
 				sb.WriteString(s.Instructions)
 				sb.WriteString("\n")
@@ -270,7 +261,7 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	toolUsageSection, err := b.resolvePromptSection(
 		ctx,
 		in.AgentID,
-		"prompt-section:tool_usage_instructions:"+promptCacheScope,
+		"prompt-section:tool_usage_instructions:"+in.AgentID.String(),
 		promptTemplateSlugToolUsageInstructions,
 		toolUsageInstructions,
 	)
@@ -298,7 +289,7 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 
 	// 4. Knowledge Base Context (cached — only changes on KB config changes)
 	if b.kbs != nil {
-		kbSection, err := b.getCachedOrCompute("kbs:"+promptCacheScope, func() (string, error) {
+		kbSection, err := b.getCachedOrCompute("kbs:"+in.AgentID.String(), func() (string, error) {
 			kbs, err := b.kbs.ListByAgentID(ctx, in.AgentID)
 			if err != nil {
 				return "", fmt.Errorf("prompt: list knowledge bases: %w", err)
@@ -343,23 +334,6 @@ func (b *PromptBuilder) Build(ctx context.Context, in PromptInput) (string, erro
 	return prompt, nil
 }
 
-func (b *PromptBuilder) skillsForInput(ctx context.Context, in PromptInput) ([]skill.Skill, error) {
-	if in.UseSkillIDs {
-		return b.skills.ListByIDs(ctx, in.SkillIDs)
-	}
-	return b.skills.ListByAgentID(ctx, in.AgentID)
-}
-
-func shouldIncludeSkillInstructions(s skill.Skill, activeSkillSlugs map[string]bool) bool {
-	if s.Instructions == "" || s.DisableModelInvocation {
-		return false
-	}
-	if activeSkillSlugs != nil && !activeSkillSlugs[s.Slug] {
-		return false
-	}
-	return !referencesToolByName(s.Instructions)
-}
-
 func (b *PromptBuilder) resolvePromptSection(
 	ctx context.Context,
 	agentID uuid.UUID,
@@ -378,6 +352,23 @@ func (b *PromptBuilder) resolvePromptSection(
 		}
 		return fallback, nil
 	})
+}
+
+func activeSkillSlugsCacheKey(activeSkillSlugs map[string]bool) string {
+	if len(activeSkillSlugs) == 0 {
+		return "active-slugs=all"
+	}
+	slugs := make([]string, 0, len(activeSkillSlugs))
+	for slug, enabled := range activeSkillSlugs {
+		if enabled {
+			slugs = append(slugs, slug)
+		}
+	}
+	if len(slugs) == 0 {
+		return "active-slugs=none"
+	}
+	sort.Strings(slugs)
+	return "active-slugs=" + strings.Join(slugs, ",")
 }
 
 // formatToolsSection produces a markdown block listing the available skills.

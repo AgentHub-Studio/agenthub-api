@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +23,9 @@ type Repository interface {
 	GetSessionListStamp(ctx context.Context) (ChatSessionListStamp, error)
 	GetSessionByID(ctx context.Context, id uuid.UUID) (ChatSession, error)
 	CreateSession(ctx context.Context, s ChatSession) (ChatSession, error)
+	// CloneSession atomically persists a child session and its transcript copy.
+	// No child state is committed when any message insert fails.
+	CloneSession(ctx context.Context, s ChatSession, messages []ChatMessage) (ChatSession, error)
 	UpdateSessionStatus(ctx context.Context, id uuid.UUID, status ChatStatus) (ChatSession, error)
 	UpdateSessionTitle(ctx context.Context, id uuid.UUID, title string) (ChatSession, error)
 	// UpdateSessionAgent binds an agent to a session that has none.
@@ -32,7 +36,7 @@ type Repository interface {
 	// UpdateSessionSnapshots persists the agent persona/model/skill snapshot onto
 	// a session. Used when an agent is routed and bound to a previously agentless
 	// session so the P-C115-1 consistency guarantee also covers routed sessions.
-	UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage, configHash string) error
+	UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings, agentSnapshot json.RawMessage, agentSnapshotHash *string) error
 	// FindAgentsForRouting returns all PUBLISHED agents with lightweight routing
 	// metadata (id, name, slug, description). Used by the smart agent router to
 	// pick the best agent for a given user message without loading full configs.
@@ -87,7 +91,9 @@ func (r *postgresRepository) FindSessions(ctx context.Context, req pagination.Pa
 	}
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, agent_id, mode, persona_id, sticky_skill_set, title, status, created_at, updated_at
+		`SELECT id, agent_id, title, status,
+		        cloned_from_session_id, cloned_from_session_title,
+		        created_at, updated_at
 		 FROM chat_session
 		 ORDER BY created_at DESC
 		 LIMIT $1 OFFSET $2`,
@@ -101,7 +107,11 @@ func (r *postgresRepository) FindSessions(ctx context.Context, req pagination.Pa
 	var items []ChatSession
 	for rows.Next() {
 		var s ChatSession
-		if err := rows.Scan(&s.ID, &s.AgentID, &s.Mode, &s.PersonaID, &s.StickySkillSet, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(
+			&s.ID, &s.AgentID, &s.Title, &s.Status,
+			&s.ClonedFromSessionID, &s.ClonedFromSessionTitle,
+			&s.CreatedAt, &s.UpdatedAt,
+		); err != nil {
 			return nil, 0, fmt.Errorf("chat: scan session: %w", err)
 		}
 		items = append(items, s)
@@ -141,14 +151,18 @@ func (r *postgresRepository) GetSessionByID(ctx context.Context, id uuid.UUID) (
 
 	var s ChatSession
 	err = conn.QueryRow(ctx,
-		`SELECT id, agent_id, mode, persona_id, sticky_skill_set, title, status,
+		`SELECT id, agent_id, title, status,
+		        cloned_from_session_id, cloned_from_session_title,
 		        system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot,
-		        config_hash, created_at, updated_at
+		        agent_snapshot, agent_snapshot_hash, config_hash,
+		        created_at, updated_at
 		 FROM chat_session WHERE id = $1`,
 		id,
-	).Scan(&s.ID, &s.AgentID, &s.Mode, &s.PersonaID, &s.StickySkillSet, &s.Title, &s.Status,
+	).Scan(&s.ID, &s.AgentID, &s.Title, &s.Status,
+		&s.ClonedFromSessionID, &s.ClonedFromSessionTitle,
 		&s.SystemPromptSnapshot, &s.ModelConfigSnapshot, &s.SkillBindingsSnapshot,
-		&s.ConfigHash, &s.CreatedAt, &s.UpdatedAt)
+		&s.AgentSnapshot, &s.AgentSnapshotHash, &s.ConfigHash,
+		&s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatSession{}, ErrNotFound
@@ -170,25 +184,25 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s ChatSession) (
 	s.ID = uuid.New()
 	s.CreatedAt = now
 	s.UpdatedAt = now
-	if s.Mode == "" {
-		if s.AgentID == nil {
-			s.Mode = ModeDynamicSkill
-		} else {
-			s.Mode = ModeAgentFixed
-		}
-	}
-	if len(s.StickySkillSet) == 0 {
-		s.StickySkillSet = json.RawMessage(`{}`)
-	}
 
+	// The pool default uses DescribeExec so arbitrary repository operations stay
+	// safe across tenant schemas. These append-only writes have only built-in
+	// types (JSON values are sent as text), so execute them in one round trip.
+	// This keeps the same durable INSERT semantics while shortening the
+	// latency-sensitive streaming path.
 	_, err = conn.Exec(ctx,
 		`INSERT INTO chat_session
-		 (id, agent_id, mode, persona_id, sticky_skill_set, title, status,
-		  system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot, config_hash,
+		 (id, agent_id, title, status,
+		  cloned_from_session_id, cloned_from_session_title,
+		  system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot,
+		  agent_snapshot, agent_snapshot_hash, config_hash,
 		  created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		s.ID, s.AgentID, s.Mode, s.PersonaID, s.StickySkillSet, s.Title, s.Status,
-		s.SystemPromptSnapshot, s.ModelConfigSnapshot, s.SkillBindingsSnapshot, s.ConfigHash,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		pgx.QueryExecModeExec,
+		s.ID, s.AgentID, s.Title, s.Status,
+		s.ClonedFromSessionID, s.ClonedFromSessionTitle,
+		s.SystemPromptSnapshot, jsonTextArgument(s.ModelConfigSnapshot), jsonTextArgument(s.SkillBindingsSnapshot),
+		jsonTextArgument(s.AgentSnapshot), s.AgentSnapshotHash, s.ConfigHash,
 		s.CreatedAt, s.UpdatedAt,
 	)
 	if err != nil {
@@ -199,6 +213,83 @@ func (r *postgresRepository) CreateSession(ctx context.Context, s ChatSession) (
 			}
 		}
 		return ChatSession{}, fmt.Errorf("chat: create session: %w", err)
+	}
+
+	return s, nil
+}
+
+// CloneSession writes the cloned session and every copied message in one
+// PostgreSQL transaction. A failed transcript insert must not leave a visible
+// branch with an incomplete history.
+func (r *postgresRepository) CloneSession(ctx context.Context, s ChatSession, messages []ChatMessage) (ChatSession, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return ChatSession{}, err
+	}
+	defer release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return ChatSession{}, fmt.Errorf("chat: begin clone session transaction: %w", err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
+			slog.Error("chat: rollback clone session transaction", "err", rollbackErr)
+		}
+	}()
+
+	now := time.Now().UTC()
+	s.ID = uuid.New()
+	s.CreatedAt = now
+	s.UpdatedAt = now
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO chat_session
+		 (id, agent_id, title, status,
+		  cloned_from_session_id, cloned_from_session_title,
+		  system_prompt_snapshot, model_config_snapshot, skill_bindings_snapshot,
+		  agent_snapshot, agent_snapshot_hash, config_hash,
+		  created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		s.ID, s.AgentID, s.Title, s.Status,
+		s.ClonedFromSessionID, s.ClonedFromSessionTitle,
+		s.SystemPromptSnapshot, s.ModelConfigSnapshot, s.SkillBindingsSnapshot,
+		s.AgentSnapshot, s.AgentSnapshotHash, s.ConfigHash,
+		s.CreatedAt, s.UpdatedAt,
+	)
+	if err != nil {
+		return ChatSession{}, fmt.Errorf("chat: clone session: %w", err)
+	}
+
+	for _, sourceMessage := range messages {
+		message := sourceMessage
+		message.ID = uuid.New()
+		message.SessionID = s.ID
+		message.RunID = nil
+		message.CreatedAt = time.Now().UTC()
+		if message.MessageType == "" {
+			message.MessageType = MessageTypeText
+		}
+
+		_, err = tx.Exec(ctx,
+			`INSERT INTO chat_message
+			 (id, session_id, role, content,
+			  message_type, tool_calls, tool_call_id,
+			  metadata, token_usage, finish_reason, turn_index, run_id,
+			  created_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+			message.ID, message.SessionID, message.Role, message.Content,
+			message.MessageType, message.ToolCalls, message.ToolCallID,
+			message.Metadata, message.TokenUsage, message.FinishReason, message.TurnIndex, message.RunID,
+			message.CreatedAt,
+		)
+		if err != nil {
+			return ChatSession{}, fmt.Errorf("chat: clone message: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return ChatSession{}, fmt.Errorf("chat: commit clone session transaction: %w", err)
 	}
 
 	return s, nil
@@ -217,9 +308,15 @@ func (r *postgresRepository) UpdateSessionStatus(ctx context.Context, id uuid.UU
 		`UPDATE chat_session
 		 SET status = $1, updated_at = $2
 		 WHERE id = $3
-		 RETURNING id, agent_id, mode, persona_id, sticky_skill_set, title, status, created_at, updated_at`,
+		 RETURNING id, agent_id, title, status,
+		           cloned_from_session_id, cloned_from_session_title,
+		           created_at, updated_at`,
 		status, now, id,
-	).Scan(&s.ID, &s.AgentID, &s.Mode, &s.PersonaID, &s.StickySkillSet, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(
+		&s.ID, &s.AgentID, &s.Title, &s.Status,
+		&s.ClonedFromSessionID, &s.ClonedFromSessionTitle,
+		&s.CreatedAt, &s.UpdatedAt,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatSession{}, ErrNotFound
@@ -243,9 +340,15 @@ func (r *postgresRepository) UpdateSessionTitle(ctx context.Context, id uuid.UUI
 		`UPDATE chat_session
 		 SET title = $1, updated_at = $2
 		 WHERE id = $3
-		 RETURNING id, agent_id, mode, persona_id, sticky_skill_set, title, status, created_at, updated_at`,
+		 RETURNING id, agent_id, title, status,
+		           cloned_from_session_id, cloned_from_session_title,
+		           created_at, updated_at`,
 		title, now, id,
-	).Scan(&s.ID, &s.AgentID, &s.Mode, &s.PersonaID, &s.StickySkillSet, &s.Title, &s.Status, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(
+		&s.ID, &s.AgentID, &s.Title, &s.Status,
+		&s.ClonedFromSessionID, &s.ClonedFromSessionTitle,
+		&s.CreatedAt, &s.UpdatedAt,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ChatSession{}, ErrNotFound
@@ -282,10 +385,8 @@ func (r *postgresRepository) UpdateSessionAgent(ctx context.Context, sessionID u
 	defer release()
 
 	tag, err := conn.Exec(ctx,
-		`UPDATE chat_session
-		 SET agent_id = $1, mode = $2, persona_id = NULL, updated_at = $3
-		 WHERE id = $4`,
-		agentID, ModeAgentFixed, time.Now().UTC(), sessionID,
+		`UPDATE chat_session SET agent_id = $1, updated_at = $2 WHERE id = $3`,
+		agentID, time.Now().UTC(), sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("chat: update session agent: %w", err)
@@ -296,69 +397,7 @@ func (r *postgresRepository) UpdateSessionAgent(ctx context.Context, sessionID u
 	return nil
 }
 
-// GetTenantChatDefault loads the only dynamic persona owned by a tenant from
-// the public schema. It intentionally uses a parameterized tenant ID rather
-// than the tenant schema search path.
-func (r *postgresRepository) GetTenantChatDefault(ctx context.Context, tenantID string) (DynamicPersona, error) {
-	var persona DynamicPersona
-	var retrievalConfig json.RawMessage
-	err := r.pool.QueryRow(ctx,
-		`SELECT id, tenant_id, name, system_prompt, model_config, retrieval_config, enable_management
-		 FROM public.tenant_chat_default
-		 WHERE tenant_id = $1`,
-		tenantID,
-	).Scan(
-		&persona.ID,
-		&persona.TenantID,
-		&persona.Name,
-		&persona.SystemPrompt,
-		&persona.ModelConfig,
-		&retrievalConfig,
-		&persona.EnableManagement,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return DynamicPersona{}, fmt.Errorf("chat: tenant default persona not found")
-		}
-		return DynamicPersona{}, fmt.Errorf("chat: load tenant default persona: %w", err)
-	}
-	if len(retrievalConfig) > 0 && string(retrievalConfig) != "null" {
-		if err := json.Unmarshal(retrievalConfig, &persona.RetrievalConfig); err != nil {
-			return DynamicPersona{}, fmt.Errorf("chat: decode tenant retrieval config: %w", err)
-		}
-	}
-	persona.RetrievalConfig = persona.RetrievalConfig.Normalize()
-	return persona, nil
-}
-
-// UpdateSessionDynamicSkillSet persists the complete retrieval state before the
-// LLM starts. A later skill mutation is therefore detectable by source hash.
-func (r *postgresRepository) UpdateSessionDynamicSkillSet(ctx context.Context, sessionID uuid.UUID, snapshot DynamicSkillSetSnapshot) error {
-	raw, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("chat: encode sticky skill set: %w", err)
-	}
-	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
-	if err != nil {
-		return err
-	}
-	defer release()
-	tag, err := conn.Exec(ctx,
-		`UPDATE chat_session
-		 SET sticky_skill_set = $1, updated_at = NOW()
-		 WHERE id = $2 AND mode = $3`,
-		raw, sessionID, ModeDynamicSkill,
-	)
-	if err != nil {
-		return fmt.Errorf("chat: update sticky skill set: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-func (r *postgresRepository) UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings json.RawMessage, configHash string) error {
+func (r *postgresRepository) UpdateSessionSnapshots(ctx context.Context, sessionID uuid.UUID, systemPrompt *string, modelConfig, skillBindings, agentSnapshot json.RawMessage, agentSnapshotHash *string) error {
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
 	if err != nil {
 		return err
@@ -367,9 +406,14 @@ func (r *postgresRepository) UpdateSessionSnapshots(ctx context.Context, session
 
 	tag, err := conn.Exec(ctx,
 		`UPDATE chat_session
-		 SET system_prompt_snapshot = $1, model_config_snapshot = $2, skill_bindings_snapshot = $3, config_hash = $4, updated_at = $5
-		 WHERE id = $6`,
-		systemPrompt, modelConfig, skillBindings, nullableConfigHash(configHash), time.Now().UTC(), sessionID,
+		 SET system_prompt_snapshot = $1,
+		     model_config_snapshot = $2,
+		     skill_bindings_snapshot = $3,
+		     agent_snapshot = $4,
+		     agent_snapshot_hash = $5,
+		     updated_at = $6
+		 WHERE id = $7`,
+		systemPrompt, modelConfig, skillBindings, agentSnapshot, agentSnapshotHash, time.Now().UTC(), sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("chat: update session snapshots: %w", err)
@@ -378,13 +422,6 @@ func (r *postgresRepository) UpdateSessionSnapshots(ctx context.Context, session
 		return ErrNotFound
 	}
 	return nil
-}
-
-func nullableConfigHash(hash string) *string {
-	if hash == "" {
-		return nil
-	}
-	return &hash
 }
 
 func (r *postgresRepository) FindAgentsForRouting(ctx context.Context) ([]AgentRoutingInfo, error) {
@@ -429,7 +466,7 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 	}
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
+		`SELECT id, session_id, role, content,
 		        message_type, tool_calls, tool_call_id,
 		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
@@ -448,7 +485,7 @@ func (r *postgresRepository) FindMessages(ctx context.Context, sessionID uuid.UU
 	for rows.Next() {
 		var m ChatMessage
 		if err := rows.Scan(
-			&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
+			&m.ID, &m.SessionID, &m.Role, &m.Content,
 			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 			&m.CreatedAt,
@@ -476,20 +513,18 @@ func (r *postgresRepository) CreateMessage(ctx context.Context, m ChatMessage) (
 	if m.MessageType == "" {
 		m.MessageType = MessageTypeText
 	}
-	if len(m.Attachments) == 0 {
-		m.Attachments = json.RawMessage("[]")
-	}
 
 	_, err = conn.Exec(ctx,
 		`INSERT INTO chat_message
-		 (id, session_id, role, content, attachments,
+		 (id, session_id, role, content,
 		  message_type, tool_calls, tool_call_id,
 		  metadata, token_usage, finish_reason, turn_index, run_id,
 		  created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-		m.ID, m.SessionID, m.Role, m.Content, m.Attachments,
-		m.MessageType, m.ToolCalls, m.ToolCallID,
-		m.Metadata, m.TokenUsage, m.FinishReason, m.TurnIndex, m.RunID,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		pgx.QueryExecModeExec,
+		m.ID, m.SessionID, m.Role, m.Content,
+		m.MessageType, jsonTextArgument(m.ToolCalls), m.ToolCallID,
+		jsonTextArgument(m.Metadata), jsonTextArgument(m.TokenUsage), m.FinishReason, m.TurnIndex, m.RunID,
 		m.CreatedAt,
 	)
 	if err != nil {
@@ -497,6 +532,125 @@ func (r *postgresRepository) CreateMessage(ctx context.Context, m ChatMessage) (
 	}
 
 	return m, nil
+}
+
+// jsonTextArgument keeps JSON/JSONB parameters compatible with pgx's direct
+// execution mode, which intentionally does not describe each statement.
+func jsonTextArgument(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return string(raw)
+}
+
+// CreateToolSuspendState persists a pending user-input request emitted by a
+// suspend-capable tool. It intentionally lives outside the chat.Repository
+// interface because only the agentic adapter needs this optional capability.
+func (r *postgresRepository) CreateToolSuspendState(ctx context.Context, sessionID uuid.UUID, requestID, toolName string, payload json.RawMessage) error {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	var payloadObject map[string]any
+	if err := json.Unmarshal(payload, &payloadObject); err != nil {
+		payloadObject = map[string]any{"raw": string(payload)}
+	}
+	state := map[string]any{
+		"type":      "input_request",
+		"state":     "RUNNING_SUSPENDED",
+		"sessionId": sessionID.String(),
+		"requestId": requestID,
+		"toolName":  toolName,
+		"payload":   payloadObject,
+		"createdAt": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("chat: marshal tool suspend state: %w", err)
+	}
+
+	_, err = conn.Exec(ctx,
+		`INSERT INTO tool_execution (status, input, state)
+		 VALUES ($1, $2, $3)`,
+		"RUNNING_SUSPENDED", payload, json.RawMessage(stateJSON),
+	)
+	if err != nil {
+		return fmt.Errorf("chat: create tool suspend state: %w", err)
+	}
+	return nil
+}
+
+// ResolveToolSuspendState marks a previously suspended tool state as resumed.
+// It returns false when the persisted request was not found or was already
+// resolved, allowing callers to distinguish stale requests from live ones.
+func (r *postgresRepository) ResolveToolSuspendState(ctx context.Context, sessionID uuid.UUID, requestID string, result ElicitationResult) (bool, error) {
+	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenant.FromContext(ctx))
+	if err != nil {
+		return false, err
+	}
+	defer release()
+
+	var id uuid.UUID
+	var stateJSON json.RawMessage
+	err = conn.QueryRow(ctx,
+		`SELECT id, state
+		 FROM tool_execution
+		 WHERE state->>'sessionId' = $1
+		   AND state->>'requestId' = $2
+		   AND state->>'state' = 'RUNNING_SUSPENDED'
+		 ORDER BY started_at DESC
+		 LIMIT 1`,
+		sessionID.String(), requestID,
+	).Scan(&id, &stateJSON)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("chat: find tool suspend state: %w", err)
+	}
+
+	state := map[string]any{}
+	if len(stateJSON) > 0 {
+		_ = json.Unmarshal(stateJSON, &state)
+	}
+	state["state"] = "RESUMED"
+	state["action"] = result.Action
+	state["resumeData"] = result.Content
+	state["resumedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+	updatedState, err := json.Marshal(state)
+	if err != nil {
+		return false, fmt.Errorf("chat: marshal resolved tool suspend state: %w", err)
+	}
+	output := result.Content
+	if output == nil {
+		output = map[string]interface{}{}
+	}
+	outputJSON, err := json.Marshal(output)
+	if err != nil {
+		return false, fmt.Errorf("chat: marshal tool suspend output: %w", err)
+	}
+
+	tag, err := conn.Exec(ctx,
+		`UPDATE tool_execution
+		 SET status = $1,
+		     output = $2,
+		     finished_at = NOW(),
+		     duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000)::BIGINT),
+		     state = $3
+		 WHERE id = $4
+		   AND state->>'state' = 'RUNNING_SUSPENDED'`,
+		"RESUMED", json.RawMessage(outputJSON), json.RawMessage(updatedState), id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("chat: resolve tool suspend state: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sessionID uuid.UUID, after time.Time) (ChatMessage, bool, error) {
@@ -508,9 +662,9 @@ func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sess
 
 	var m ChatMessage
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
+		`SELECT id, session_id, role, content,
 		        message_type, tool_calls, tool_call_id,
-		        metadata, token_usage, finish_reason, turn_index, run_id,
+		        metadata, token_usage, finish_reason, turn_index,
 		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1 AND role = 'assistant' AND created_at > $2
@@ -518,7 +672,7 @@ func (r *postgresRepository) GetLatestAssistantMessage(ctx context.Context, sess
 		 LIMIT 1`,
 		sessionID, after,
 	).Scan(
-		&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
+		&m.ID, &m.SessionID, &m.Role, &m.Content,
 		&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 		&m.CreatedAt,
@@ -541,7 +695,7 @@ func (r *postgresRepository) FindAllMessages(ctx context.Context, sessionID uuid
 	defer release()
 
 	rows, err := conn.Query(ctx,
-		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
+		`SELECT id, session_id, role, content,
 		        message_type, tool_calls, tool_call_id,
 		        metadata, token_usage, finish_reason, turn_index, run_id,
 		        created_at
@@ -559,7 +713,7 @@ func (r *postgresRepository) FindAllMessages(ctx context.Context, sessionID uuid
 	for rows.Next() {
 		var m ChatMessage
 		if err := rows.Scan(
-			&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
+			&m.ID, &m.SessionID, &m.Role, &m.Content,
 			&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 			&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 			&m.CreatedAt,
@@ -584,9 +738,9 @@ func (r *postgresRepository) GetLatestCompactSummary(ctx context.Context, sessio
 
 	var m ChatMessage
 	err = conn.QueryRow(ctx,
-		`SELECT id, session_id, role, content, COALESCE(attachments, '[]'::jsonb),
+		`SELECT id, session_id, role, content,
 		        message_type, tool_calls, tool_call_id,
-		        metadata, token_usage, finish_reason, turn_index, run_id,
+		        metadata, token_usage, finish_reason, turn_index,
 		        created_at
 		 FROM chat_message
 		 WHERE session_id = $1 AND message_type = 'compact_summary'
@@ -594,7 +748,7 @@ func (r *postgresRepository) GetLatestCompactSummary(ctx context.Context, sessio
 		 LIMIT 1`,
 		sessionID,
 	).Scan(
-		&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Attachments,
+		&m.ID, &m.SessionID, &m.Role, &m.Content,
 		&m.MessageType, &m.ToolCalls, &m.ToolCallID,
 		&m.Metadata, &m.TokenUsage, &m.FinishReason, &m.TurnIndex, &m.RunID,
 		&m.CreatedAt,

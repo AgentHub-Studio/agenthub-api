@@ -21,9 +21,47 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
+func createRerankStrategy(req CreateRequest) string {
+	if req.RerankStrategy != "" {
+		return req.RerankStrategy
+	}
+	return req.RerankStrategySnake
+}
+
+func updateRerankStrategy(req UpdateRequest) *string {
+	if req.RerankStrategy != nil {
+		return req.RerankStrategy
+	}
+	return req.RerankStrategySnake
+}
+
+func createGraphEnabled(req CreateRequest) bool {
+	return req.GraphEnabled || req.GraphEnabledSnake
+}
+
+func updateGraphEnabled(req UpdateRequest) *bool {
+	if req.GraphEnabled != nil {
+		return req.GraphEnabled
+	}
+	return req.GraphEnabledSnake
+}
+
+func normalizeRerankStrategy(raw string) (RerankStrategy, error) {
+	strategy := RerankStrategy(strings.TrimSpace(raw))
+	if strategy == "" {
+		return RerankStrategyNone, nil
+	}
+	switch strategy {
+	case RerankStrategyNone, RerankStrategyLLM, RerankStrategyCrossEncoder, RerankStrategyRRF, RerankStrategyBrokenReranker:
+		return strategy, nil
+	default:
+		return "", fmt.Errorf("%w: rerankStrategy must be one of none, llm, cross_encoder, rrf, broken_reranker (got %q)", ErrValidation, raw)
+	}
+}
+
 // List returns a paginated list of knowledge bases.
-func (s *Service) List(ctx context.Context, req pagination.PageRequest) (pagination.Page[KnowledgeBaseResponse], error) {
-	items, total, err := s.repo.List(ctx, req)
+func (s *Service) List(ctx context.Context, req pagination.PageRequest, filters ListFilters) (pagination.Page[KnowledgeBaseResponse], error) {
+	items, total, err := s.repo.ListFiltered(ctx, req, filters)
 	if err != nil {
 		return pagination.Page[KnowledgeBaseResponse]{}, fmt.Errorf("knowledgebase service: list: %w", err)
 	}
@@ -75,6 +113,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 	if req.ContextWindow < 0 {
 		return KnowledgeBaseResponse{}, fmt.Errorf("knowledgebase service: contextWindow must be >= 0 (got %d)", req.ContextWindow)
 	}
+	rerankStrategy, err := normalizeRerankStrategy(createRerankStrategy(req))
+	if err != nil {
+		return KnowledgeBaseResponse{}, err
+	}
 
 	// Bug 159: cap description em 32KB.
 	if len(req.Description) > 32000 {
@@ -97,6 +139,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (KnowledgeBaseR
 		EmbeddingModel: req.EmbeddingModel,
 		SearchMode:     req.SearchMode,
 		ContextWindow:  req.ContextWindow,
+		RerankStrategy: rerankStrategy,
+		GraphEnabled:   createGraphEnabled(req),
 	}
 
 	created, err := s.repo.Create(ctx, kb)
@@ -168,6 +212,16 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req UpdateRequest) (
 			return KnowledgeBaseResponse{}, fmt.Errorf("%w: contextWindow must be >= 0 (got %d)", ErrValidation, *req.ContextWindow)
 		}
 		existing.ContextWindow = *req.ContextWindow
+	}
+	if rawStrategy := updateRerankStrategy(req); rawStrategy != nil {
+		strategy, err := normalizeRerankStrategy(*rawStrategy)
+		if err != nil {
+			return KnowledgeBaseResponse{}, err
+		}
+		existing.RerankStrategy = strategy
+	}
+	if graphEnabled := updateGraphEnabled(req); graphEnabled != nil {
+		existing.GraphEnabled = *graphEnabled
 	}
 
 	updated, err := s.repo.Update(ctx, existing)

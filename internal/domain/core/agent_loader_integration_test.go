@@ -18,12 +18,13 @@ import (
 // Integration tests for CoreAgentLoader against real Postgres
 // (testcontainers pgvector:pg16). Build tag `integration`.
 //
-// BACKFILL — migrations 000004 + 000006_reset_and_seed_specialists
-// predate the testcontainers pattern. This file closes the audit gap.
+// BACKFILL — specialist seed migrations predate the testcontainers pattern.
+// This file closes the audit gap and validates the additive binding repair.
 //
 // Migration chain applied per test:
 //   000001 schema → 000002 tools → 000003 skills → 000004 initial agents
 //   → 000005 schema upgrade → 000006 reset+seed specialists (12 agents)
+//   → 000126 specialist skill-binding repair
 
 func applyAgentSeedChain(t *testing.T, pool any, migDir string) {
 	// Helper centralises the full seed chain — agents depend on tools+skills.
@@ -47,6 +48,7 @@ func TestIntegration_CoreAgent_LoadAll_AfterSeed(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -85,6 +87,7 @@ func TestIntegration_CoreAgent_FindBySlug_ReturnsKnownAgent(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -109,6 +112,7 @@ func TestIntegration_CoreAgent_FindBySlug_UnknownReturnsNotFound(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -128,6 +132,7 @@ func TestIntegration_CoreAgent_AllAgentTypesAreInExpectedSet(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -156,6 +161,7 @@ func TestIntegration_CoreAgent_ExactlyOneAssistantAgentExists(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -184,6 +190,7 @@ func TestIntegration_CoreAgent_AllAgentsUseCorePrefix(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -207,6 +214,7 @@ func TestIntegration_CoreAgent_AllSlugsAreUniqueInDB(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -232,6 +240,7 @@ func TestIntegration_CoreAgent_AllSystemPromptsArePresent(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -249,7 +258,7 @@ func TestIntegration_CoreAgent_AllSystemPromptsArePresent(t *testing.T) {
 	}
 }
 
-func TestIntegration_CoreAgent_LoadSkillBindings_MatchesObservedCount(t *testing.T) {
+func TestIntegration_CoreAgent_LoadSkillBindings_MatchesCanonicalCount(t *testing.T) {
 	pool := testutil.NewPostgresContainer(t)
 	migDir := ah_coreMigrationsDir(t)
 	for _, m := range []string{
@@ -259,6 +268,7 @@ func TestIntegration_CoreAgent_LoadSkillBindings_MatchesObservedCount(t *testing
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -268,7 +278,7 @@ func TestIntegration_CoreAgent_LoadSkillBindings_MatchesObservedCount(t *testing
 	require.NoError(t, err)
 
 	assert.Equal(t, core.SeedExpectedAgentSkillBindingsCount, len(bindings),
-		"binding count must match SeedExpectedAgentSkillBindingsCount (known: 7 — only core-assistant cross-joins)")
+		"binding count must match SeedExpectedAgentSkillBindingsCount (canonical catalog after migration 000126)")
 }
 
 func TestIntegration_CoreAgent_AssistantHasAllSkillBindings(t *testing.T) {
@@ -281,6 +291,7 @@ func TestIntegration_CoreAgent_AssistantHasAllSkillBindings(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -319,6 +330,7 @@ func TestIntegration_CoreAgent_BindingsReferenceExistingAgentsAndSkills(t *testi
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
@@ -356,11 +368,13 @@ func TestIntegration_CoreAgent_ResetMigrationIsIdempotent(t *testing.T) {
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}
-	// Re-apply migration 000006 — DELETE+INSERT pattern, idempotent.
+	// Re-apply the reset and its additive repair — the final catalog is stable.
 	applyMigration(t, pool, migDir, "000006_reset_and_seed_specialists.up.sql")
+	applyMigration(t, pool, migDir, "000126_fix_specialist_skill_bindings.up.sql")
 
 	loader := core.NewCoreAgentLoader(pool)
 	got, err := loader.LoadAll(context.Background())
@@ -384,6 +398,7 @@ func TestIntegration_CoreAgent_SeedSlugsMatchCanonicalListExactly(t *testing.T) 
 		"000004_seed_agents.up.sql",
 		"000005_upgrade_existing_schema.up.sql",
 		"000006_reset_and_seed_specialists.up.sql",
+		"000126_fix_specialist_skill_bindings.up.sql",
 	} {
 		applyMigration(t, pool, migDir, m)
 	}

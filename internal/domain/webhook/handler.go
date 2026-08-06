@@ -2,7 +2,6 @@ package webhook
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -11,6 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -32,21 +33,26 @@ type Handler struct {
 	svc webhookService
 }
 
+const maxInboundWebhookBodyBytes = 1 << 20
+
 // NewHandler creates a new Handler.
 func NewHandler(svc webhookService) *Handler {
 	return &Handler{svc: svc}
 }
 
-// RegisterRoutes mounts webhook routes on the given router.
+// RegisterRoutes mounts administrator-only webhook routes on the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/api/webhooks", h.list)
-	r.Post("/api/webhooks", h.create)
-	r.Get("/api/webhooks/{id}", h.getByID)
-	r.Put("/api/webhooks/{id}", h.update)
-	r.Patch("/api/webhooks/{id}", h.update)
-	r.Delete("/api/webhooks/{id}", h.delete)
-	r.Get("/api/webhooks/{id}/deliveries", h.listDeliveries)
-	r.Post("/api/webhooks/{id}/test", h.sendTest)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
+		r.Get("/api/webhooks", h.list)
+		r.Post("/api/webhooks", h.create)
+		r.Get("/api/webhooks/{id}", h.getByID)
+		r.Put("/api/webhooks/{id}", h.update)
+		r.Patch("/api/webhooks/{id}", h.update)
+		r.Delete("/api/webhooks/{id}", h.delete)
+		r.Get("/api/webhooks/{id}/deliveries", h.listDeliveries)
+		r.Post("/api/webhooks/{id}/test", h.sendTest)
+	})
 }
 
 // RegisterPublicRoutes mounts public webhook routes (no auth required).
@@ -67,7 +73,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateWebhookRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -109,7 +115,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateWebhookRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -184,9 +190,13 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MiB limit
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxInboundWebhookBodyBytes+1))
 	if err != nil {
 		respond.Error(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	if len(body) > maxInboundWebhookBodyBytes {
+		respond.Error(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 

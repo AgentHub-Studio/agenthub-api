@@ -1,7 +1,7 @@
 package agentic
 
 import (
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"sync"
 	"time"
@@ -18,7 +18,7 @@ import (
 type FileSnapshot struct {
 	// Path is the file path.
 	Path string `json:"path"`
-	// ContentHash is the MD5 hash of the content.
+	// ContentHash is the SHA-256 hash of the content.
 	ContentHash string `json:"contentHash"`
 	// Content is the full file content (may be empty if evicted).
 	Content string `json:"content,omitempty"`
@@ -77,7 +77,7 @@ func NewFileHistory(config FileHistoryConfig) *FileHistory {
 // Record stores a snapshot of a file's content at the given turn.
 // Returns true if a new snapshot was created, false if content was unchanged.
 func (fh *FileHistory) Record(path, content string, turnIndex int) bool {
-	hash := hashMD5(content)
+	hash := hashContent(content)
 
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
@@ -195,7 +195,7 @@ func (fh *FileHistory) MonotonicCounter() int {
 
 // HasChanged returns true if the file's current content differs from the latest snapshot.
 func (fh *FileHistory) HasChanged(path, currentContent string) bool {
-	hash := hashMD5(currentContent)
+	hash := hashContent(currentContent)
 
 	fh.mu.RLock()
 	defer fh.mu.RUnlock()
@@ -241,8 +241,8 @@ func (fh *FileHistory) evictOldest() {
 	}
 }
 
-// hashMD5 computes the MD5 hex digest of content.
-func hashMD5(content string) string {
-	h := md5.Sum([]byte(content))
+// hashContent computes the SHA-256 hex digest of content.
+func hashContent(content string) string {
+	h := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(h[:])
 }

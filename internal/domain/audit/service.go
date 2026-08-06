@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -23,6 +24,7 @@ type LogRepository interface {
 	ListAll(ctx context.Context, tenantID string, f ListFilter, pr pagination.PageRequest) ([]AuditLog, int, error)
 	GetByID(ctx context.Context, tenantID string, id uuid.UUID) (AuditLog, error)
 	Record(ctx context.Context, tenantID string, l AuditLog) (AuditLog, error)
+	ApplyRetention(ctx context.Context, tenantID string, cutoff time.Time, dryRun bool) (int, error)
 }
 
 // Service implements business logic for audit logs.
@@ -43,6 +45,31 @@ func (s *Service) ListAll(ctx context.Context, tenantID string, f ListFilter, pr
 // GetByID retrieves an audit log entry by ID.
 func (s *Service) GetByID(ctx context.Context, tenantID string, id uuid.UUID) (AuditLog, error) {
 	return s.repo.GetByID(ctx, tenantID, id)
+}
+
+// ApplyRetention removes audit entries older than the configured retention window.
+func (s *Service) ApplyRetention(ctx context.Context, tenantID string, req AuditRetentionRequest, now time.Time) (AuditRetentionResponse, error) {
+	retentionDays := req.RetentionDays
+	if retentionDays == 0 {
+		retentionDays = DefaultAuditRetentionDays
+	}
+	if retentionDays < MinAuditRetentionDays {
+		return AuditRetentionResponse{}, fmt.Errorf("%w: retentionDays cannot be lower than %d", ErrValidation, MinAuditRetentionDays)
+	}
+
+	now = now.UTC()
+	cutoff := now.AddDate(0, 0, -retentionDays)
+	deleted, err := s.repo.ApplyRetention(ctx, tenantID, cutoff, req.DryRun)
+	if err != nil {
+		return AuditRetentionResponse{}, err
+	}
+	return AuditRetentionResponse{
+		TenantID:      tenantID,
+		RetentionDays: retentionDays,
+		Cutoff:        cutoff,
+		DryRun:        req.DryRun,
+		Deleted:       deleted,
+	}, nil
 }
 
 // Record appends a new audit log entry.

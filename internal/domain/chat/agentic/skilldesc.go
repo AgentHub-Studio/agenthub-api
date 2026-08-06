@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 )
 
 // SkillDescription holds a rich, LLM-oriented description for a known skill.
@@ -429,7 +431,7 @@ func (h *SkillDescHandler) ValidateHandler(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		// Bug 282: http.Error usa text/plain mesmo com body JSON
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

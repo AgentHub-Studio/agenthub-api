@@ -14,6 +14,9 @@ var ErrNotFound = errors.New("review not found")
 // ErrDuplicate is returned when a tenant already reviewed a listing.
 var ErrDuplicate = errors.New("review already exists")
 
+// ErrForbidden is returned when a tenant attempts to mutate another tenant's review.
+var ErrForbidden = errors.New("review forbidden")
+
 // Review is the domain entity for a marketplace rating & review.
 type Review struct {
 	ID        uuid.UUID

@@ -2,13 +2,13 @@ package review
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
@@ -45,7 +45,17 @@ func (h *Handler) WithListingExister(l listingExister) *Handler {
 
 // RegisterRoutes mounts review routes on the given router.
 func (h *Handler) RegisterRoutes(r chi.Router) {
+	h.RegisterReadRoutes(r)
+	h.RegisterWriteRoutes(r)
+}
+
+// RegisterReadRoutes mounts public review reads for public listings.
+func (h *Handler) RegisterReadRoutes(r chi.Router) {
 	r.Get("/api/marketplace/listings/{listingId}/reviews", h.list)
+}
+
+// RegisterWriteRoutes mounts review mutations, which require a tenant.
+func (h *Handler) RegisterWriteRoutes(r chi.Router) {
 	r.Post("/api/marketplace/listings/{listingId}/reviews", h.create)
 	r.Delete("/api/marketplace/listings/{listingId}/reviews/{id}", h.delete)
 }
@@ -87,7 +97,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -118,6 +128,10 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Delete(r.Context(), listingID, id, tenantID); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "review not found")
+			return
+		}
+		if errors.Is(err, ErrForbidden) {
+			respond.Error(w, http.StatusForbidden, "review forbidden")
 			return
 		}
 		respond.Error(w, http.StatusInternalServerError, "internal error")

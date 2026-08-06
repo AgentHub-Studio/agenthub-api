@@ -2,8 +2,8 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -11,6 +11,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/AgentHub-Studio/agenthub-api/internal/httputil"
+	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
 	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 	"github.com/AgentHub-Studio/agenthub-api/internal/respond"
 )
@@ -60,29 +62,33 @@ func (h *Handler) WithSkillExister(s skillExisterAdapter) *Handler {
 	return h
 }
 
-// RegisterRoutes mounts tool routes on the given router.
+// RegisterRoutes mounts administrator-only tool routes on the given router.
 // NOTE: fixed-path routes must be registered before parameterized ones so chi
 // does not match "labels", "generate", etc. as {id}.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	// Fixed-path tool routes — must come before /{id}.
-	r.Get("/api/tools/labels", h.listLabels)
-	r.Get("/api/tools/database-schema", h.getDatabaseSchema)
-	r.Post("/api/tools/generate/code", h.generateCode)
-	r.Post("/api/tools/generate/blockly", h.generateBlockly)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireRole("admin"))
 
-	// CRUD routes.
-	r.Get("/api/tools", h.list)
-	r.Post("/api/tools", h.create)
-	r.Get("/api/tools/{id}", h.getByID)
-	r.Put("/api/tools/{id}", h.update)
-	r.Patch("/api/tools/{id}", h.update) // PATCH delegates to the same handler — all fields are optional
-	r.Delete("/api/tools/{id}", h.delete)
-	r.Post("/api/tools/{id}/test", h.testTool)
+		// Fixed-path tool routes — must come before /{id}.
+		r.Get("/api/tools/labels", h.listLabels)
+		r.Get("/api/tools/database-schema", h.getDatabaseSchema)
+		r.Post("/api/tools/generate/code", h.generateCode)
+		r.Post("/api/tools/generate/blockly", h.generateBlockly)
 
-	// Skill-tool binding routes.
-	r.Post("/api/skills/{skillId}/tools", h.bindToSkill)
-	r.Delete("/api/skills/{skillId}/tools/{toolId}", h.unbindFromSkill)
-	r.Get("/api/skills/{skillId}/tools", h.listBySkill)
+		// CRUD routes.
+		r.Get("/api/tools", h.list)
+		r.Post("/api/tools", h.create)
+		r.Get("/api/tools/{id}", h.getByID)
+		r.Put("/api/tools/{id}", h.update)
+		r.Patch("/api/tools/{id}", h.update) // PATCH delegates to the same handler — all fields are optional
+		r.Delete("/api/tools/{id}", h.delete)
+		r.Post("/api/tools/{id}/test", h.testTool)
+
+		// Skill-tool binding routes.
+		r.Post("/api/skills/{skillId}/tools", h.bindToSkill)
+		r.Delete("/api/skills/{skillId}/tools/{toolId}", h.unbindFromSkill)
+		r.Get("/api/skills/{skillId}/tools", h.listBySkill)
+	})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +113,7 @@ func (h *Handler) listLabels(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -157,7 +163,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -205,13 +211,21 @@ func (h *Handler) testTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var inputs map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&inputs); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &inputs); err != nil && !errors.Is(err, io.EOF) {
+		respond.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if inputs == nil {
 		inputs = map[string]any{}
 	}
 	result, err := h.svc.TestTool(r.Context(), id, inputs)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			respond.Error(w, http.StatusNotFound, "tool not found")
+			return
+		}
+		if errors.Is(err, ErrUpstream) {
+			respond.Error(w, http.StatusBadGateway, "tool upstream unavailable")
 			return
 		}
 		// Bug 242: TestTool emite erros prefixados com "tool: ..." para
@@ -227,7 +241,9 @@ func (h *Handler) testTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
+	// #nosec G705 -- TestTool results are returned as text/plain with nosniff, not HTML.
 	_, _ = w.Write([]byte(result))
 }
 
@@ -236,7 +252,7 @@ func (h *Handler) generateCode(w http.ResponseWriter, r *http.Request) {
 		Prompt   string `json:"prompt"`
 		Language string `json:"language"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -263,7 +279,7 @@ func (h *Handler) generateBlockly(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Prompt string `json:"prompt"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -310,7 +326,7 @@ func (h *Handler) bindToSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req BindRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := httputil.DecodeSingleJSON(r.Body, &req); err != nil {
 		respond.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

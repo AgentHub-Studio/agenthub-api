@@ -96,6 +96,55 @@ func TestOpenAIProvider_Chat_WithSystemMessage(t *testing.T) {
 	assert.Equal(t, "system", first["role"])
 }
 
+func TestOpenAIProvider_ChatStream_SerializesToolChoice(t *testing.T) {
+	tests := []struct {
+		name     string
+		choice   *ai.ToolChoice
+		expected string
+	}{
+		{name: "auto", choice: &ai.ToolChoice{Type: ai.ToolChoiceAuto}, expected: `"auto"`},
+		{name: "none", choice: &ai.ToolChoice{Type: ai.ToolChoiceNone}, expected: `"none"`},
+		{name: "required", choice: &ai.ToolChoice{Type: ai.ToolChoiceAny}, expected: `"required"`},
+		{
+			name:     "named function",
+			choice:   ai.ForcedToolChoice("health_probe"),
+			expected: `{"type":"function","function":{"name":"health_probe"}}`,
+		},
+		{name: "missing named function", choice: &ai.ToolChoice{Type: ai.ToolChoiceTool}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var request map[string]json.RawMessage
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			}))
+			defer srv.Close()
+
+			p := openai.New("key", srv.URL)
+			stream, err := p.ChatStream(context.Background(), []ai.Message{{Role: ai.RoleUser, Content: "probe"}}, ai.ChatOptions{
+				Model:      "gpt-4o",
+				Tools:      []ai.Tool{{Type: "function", Function: ai.ToolSchema{Name: "health_probe"}}},
+				ToolChoice: tt.choice,
+			})
+			require.NoError(t, err)
+			for chunk := range stream {
+				require.NoError(t, chunk.Error)
+			}
+
+			raw, exists := request["tool_choice"]
+			if tt.expected == "" {
+				assert.False(t, exists)
+				return
+			}
+			require.True(t, exists)
+			assert.JSONEq(t, tt.expected, string(raw))
+		})
+	}
+}
+
 func TestOpenAIProvider_ChatStream_Tokens(t *testing.T) {
 	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n" +
@@ -118,6 +167,35 @@ func TestOpenAIProvider_ChatStream_Tokens(t *testing.T) {
 		got += chunk.Delta
 	}
 	assert.Equal(t, "Hello world", got)
+}
+
+func TestOpenAIProvider_ChatStream_ThinkingDeltas(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"step one \"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"reasoning\":\"step two \"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"thinking\":{\"content\":\"step three \"}},\"finish_reason\":null}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"final answer\"},\"finish_reason\":null}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer srv.Close()
+
+	p := openai.New("key", srv.URL)
+	ch, err := p.ChatStream(context.Background(), []ai.Message{{Role: ai.RoleUser, Content: "Hi"}},
+		ai.ChatOptions{Model: "gpt-4o"})
+	require.NoError(t, err)
+
+	var gotThinking string
+	var gotText string
+	for chunk := range ch {
+		require.NoError(t, chunk.Error)
+		gotThinking += chunk.ThinkingDelta
+		gotText += chunk.Delta
+	}
+	assert.Equal(t, "step one step two step three ", gotThinking)
+	assert.Equal(t, "final answer", gotText)
 }
 
 func TestOpenAIProvider_ChatStream_APIError(t *testing.T) {

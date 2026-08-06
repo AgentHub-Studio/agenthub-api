@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/middleware"
+	"github.com/AgentHub-Studio/agenthub-api/internal/tenant"
 )
 
 func TestChain_Public_NoAuthRequired(t *testing.T) {
@@ -98,6 +99,93 @@ func TestChain_Protected_AcceptsValidJWT(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code, "valid JWT signed with realm key should be accepted")
+}
+
+func TestChain_ExpiredToken_IsRejectedBeforeHandler(t *testing.T) {
+	realm := "test-realm-expired-jwt"
+	key, keycloakURL := mustSetupFakeKeycloak(t, realm)
+	tokenStr := mustSignJWTWithExpiry(t, key, realm, keycloakURL, "test-kid", time.Now().Add(-time.Minute))
+
+	t.Run("protected", func(t *testing.T) {
+		calls := 0
+		chain := middleware.New(keycloakURL, []string{"*"})
+		handler := applyMiddlewares(chain.Protected(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+		assert.JSONEq(t, `{"error":"invalid or expired token"}`, rec.Body.String())
+		assert.Zero(t, calls, "expired tokens must not reach protected handlers")
+	})
+
+	t.Run("optional authentication", func(t *testing.T) {
+		calls := 0
+		chain := middleware.New(keycloakURL, []string{"*"})
+		handler := applyMiddlewares(chain.OptionalAuth(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/api/packages/id", nil)
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+		assert.JSONEq(t, `{"error":"invalid or expired token"}`, rec.Body.String())
+		assert.Zero(t, calls, "expired optional credentials must not downgrade to anonymous access")
+	})
+}
+
+func TestChain_OptionalAuth_UsesTenantOnlyForValidToken(t *testing.T) {
+	realm := "test-realm-optional-auth"
+	key, keycloakURL := mustSetupFakeKeycloak(t, realm)
+	tokenStr := mustSignJWT(t, key, realm, keycloakURL, "test-kid")
+
+	chain := middleware.New(keycloakURL, []string{"*"})
+	handler := applyMiddlewares(chain.OptionalAuth(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(tenant.FromContext(r.Context())))
+	}))
+
+	t.Run("anonymous remains anonymous", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/packages/id", nil)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Empty(t, rec.Body.String())
+		assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+	})
+
+	t.Run("valid token attaches tenant", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/packages/id", nil)
+		req.Header.Set("Authorization", "Bearer "+tokenStr)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, realm, rec.Body.String())
+	})
+
+	t.Run("invalid token is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/packages/id", nil)
+		req.Header.Set("Authorization", "Bearer invalid")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
 }
 
 func TestRequireRole_RejectsMissingRole(t *testing.T) {
@@ -260,6 +348,12 @@ func mustSignJWT(t *testing.T, key *rsa.PrivateKey, realm, keycloakBaseURL, kid 
 	return mustSignJWTWithRoles(t, key, realm, keycloakBaseURL, kid, nil, nil)
 }
 
+func mustSignJWTWithExpiry(t *testing.T, key *rsa.PrivateKey, realm, keycloakBaseURL, kid string, expiresAt time.Time) string {
+	t.Helper()
+
+	return mustSignJWTWithRolesAndExpiry(t, key, realm, keycloakBaseURL, kid, nil, nil, expiresAt)
+}
+
 type testAccessRoles struct {
 	Roles []string `json:"roles"`
 }
@@ -279,6 +373,19 @@ func mustSignJWTWithRoles(
 ) string {
 	t.Helper()
 
+	return mustSignJWTWithRolesAndExpiry(t, key, realm, keycloakBaseURL, kid, realmRoles, resourceRoles, time.Now().Add(time.Hour))
+}
+
+func mustSignJWTWithRolesAndExpiry(
+	t *testing.T,
+	key *rsa.PrivateKey,
+	realm, keycloakBaseURL, kid string,
+	realmRoles []string,
+	resourceRoles map[string][]string,
+	expiresAt time.Time,
+) string {
+	t.Helper()
+
 	// Encode the public key as PEM for display only; not needed for signing.
 	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
 	require.NoError(t, err)
@@ -288,7 +395,7 @@ func mustSignJWTWithRoles(
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    fmt.Sprintf("%s/realms/%s", keycloakBaseURL, realm),
 			Subject:   "test-user",
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 		RealmAccess:    testAccessRoles{Roles: realmRoles},

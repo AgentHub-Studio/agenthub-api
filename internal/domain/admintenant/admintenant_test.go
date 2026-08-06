@@ -1,11 +1,66 @@
 package admintenant
 
 import (
+	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/tenant"
+	"github.com/AgentHub-Studio/agenthub-api/internal/domain/user"
+	"github.com/AgentHub-Studio/agenthub-api/internal/pagination"
 )
+
+type recordingTenantAPI struct {
+	createCalls int
+}
+
+func (r *recordingTenantAPI) Create(context.Context, tenant.CreateTenantRequest) (tenant.TenantResponse, error) {
+	r.createCalls++
+	return tenant.TenantResponse{}, nil
+}
+
+func (r *recordingTenantAPI) List(context.Context, pagination.PageRequest) (pagination.Page[tenant.TenantResponse], error) {
+	return pagination.Page[tenant.TenantResponse]{}, nil
+}
+
+type recordingTenantRepo struct {
+	updateCalls int
+}
+
+func (r *recordingTenantRepo) UpdateName(context.Context, string, string) error {
+	r.updateCalls++
+	return nil
+}
+
+func (*recordingTenantRepo) Delete(context.Context, string) error { return nil }
+
+type recordingAdminUserAPI struct {
+	createCalls int
+}
+
+func (r *recordingAdminUserAPI) CreateUser(context.Context, string, user.CreateUserRequest) (user.User, error) {
+	r.createCalls++
+	return user.User{}, nil
+}
+
+type noopRealmDeleter struct{}
+
+func (noopRealmDeleter) DeleteRealm(context.Context, string) error { return nil }
+
+func setupAdminTenantRouter() (*chi.Mux, *recordingTenantAPI, *recordingTenantRepo, *recordingAdminUserAPI) {
+	tenants := &recordingTenantAPI{}
+	repo := &recordingTenantRepo{}
+	users := &recordingAdminUserAPI{}
+	handler := NewHandler(NewService(tenants, repo, users, noopRealmDeleter{}))
+	router := chi.NewRouter()
+	handler.RegisterRoutes(router)
+	return router, tenants, repo, users
+}
 
 func TestWriteAdminTenantErr_UpstreamLeakSanitized(t *testing.T) {
 	cases := []struct {
@@ -55,4 +110,42 @@ func TestWriteAdminTenantErr_ValidationStaysAs400(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAdminTenantHandlerRejectsTrailingJSONWithoutServiceEffects(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		router, tenants, _, users := setupAdminTenantRouter()
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/api/admin/tenants/",
+			strings.NewReader(`{"tenantId":"test","tenantName":"Test","adminUsername":"admin","adminPassword":"password-123"}{"tenantName":"Ignored"}`),
+		)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+		}
+		if tenants.createCalls != 0 || users.createCalls != 0 {
+			t.Fatalf("unexpected create calls: tenants=%d users=%d", tenants.createCalls, users.createCalls)
+		}
+	})
+
+	t.Run("update", func(t *testing.T) {
+		router, _, repo, _ := setupAdminTenantRouter()
+		req := httptest.NewRequest(
+			http.MethodPut,
+			"/api/admin/tenants/test",
+			strings.NewReader(`{"tenantName":"Changed"}{"tenantName":"Ignored"}`),
+		)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+		}
+		if repo.updateCalls != 0 {
+			t.Fatalf("unexpected update calls: %d", repo.updateCalls)
+		}
+	})
 }

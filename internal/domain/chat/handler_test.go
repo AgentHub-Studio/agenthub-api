@@ -1,14 +1,17 @@
 package chat_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"net/textproto"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,22 +30,17 @@ type mockChatSvc struct {
 	sessions               map[uuid.UUID]chat.ChatSession
 	messages               map[uuid.UUID][]chat.ChatMessage
 	runEvents              []chat.RunEvent
-	lastRunOverrides       chat.RunOverrides
+	runEventCh             <-chan chat.RunEvent
+	runSessionErr          error
+	runCalls               int
+	lastRunOptions         []chat.RunSessionOptions
+	cloneCalls             int
 	lastClientState        chat.ClientStatePatch
 	lastClientStateSession uuid.UUID
-}
-
-type recordingAttachmentStorage struct {
-	key         string
-	size        int64
-	contentType string
-}
-
-func (s *recordingAttachmentStorage) Upload(_ context.Context, key string, _ io.Reader, size int64, contentType string) (string, error) {
-	s.key = key
-	s.size = size
-	s.contentType = contentType
-	return key, nil
+	clientStateCalls       int
+	elicitationCalls       int
+	elicitationOK          bool
+	lastElicitationResult  chat.ElicitationResult
 }
 
 func newMockChatSvc() *mockChatSvc {
@@ -65,13 +63,8 @@ func (m *mockChatSvc) CreateSession(_ context.Context, req chat.CreateSessionReq
 	s := chat.ChatSession{
 		ID:      id,
 		AgentID: req.AgentID,
-		Mode:    req.Mode,
 		Title:   req.Title,
 		Status:  chat.StatusActive,
-	}
-	if req.Mode == chat.ModeDynamicSkill {
-		personaID := uuid.New()
-		s.PersonaID = &personaID
 	}
 	m.sessions[id] = s
 	return chat.SessionResponseFrom(s), nil
@@ -133,11 +126,59 @@ func (m *mockChatSvc) AddMessage(_ context.Context, sessionID uuid.UUID, req cha
 	return chat.MessageResponseFrom(msg), nil
 }
 
-func (m *mockChatSvc) RunSession(_ context.Context, sessionID uuid.UUID, userMessage, tenantID string, overrides chat.RunOverrides) (<-chan chat.RunEvent, error) {
+func (m *mockChatSvc) CloneSession(_ context.Context, sessionID uuid.UUID, req chat.CloneSessionRequest) (chat.ChatSessionResponse, error) {
+	m.cloneCalls++
+	source, ok := m.sessions[sessionID]
+	if !ok {
+		return chat.ChatSessionResponse{}, chat.ErrNotFound
+	}
+
+	title := req.Title
+	if title == "" {
+		title = "Copy of " + source.Title
+	}
+	cloneID := uuid.New()
+	sourceID := source.ID
+	sourceTitle := source.Title
+	clone := chat.ChatSession{
+		ID:                     cloneID,
+		AgentID:                source.AgentID,
+		Title:                  title,
+		Status:                 chat.StatusActive,
+		ClonedFromSessionID:    &sourceID,
+		ClonedFromSessionTitle: &sourceTitle,
+	}
+	m.sessions[cloneID] = clone
+
+	for _, msg := range m.messages[sessionID] {
+		copied := msg
+		copied.ID = uuid.New()
+		copied.SessionID = cloneID
+		copied.RunID = nil
+		m.messages[cloneID] = append(m.messages[cloneID], copied)
+		if req.UntilMessageID != nil && msg.ID == *req.UntilMessageID {
+			return chat.SessionResponseFrom(clone), nil
+		}
+	}
+	if req.UntilMessageID != nil {
+		return chat.ChatSessionResponse{}, chat.ErrMessageNotFound
+	}
+
+	return chat.SessionResponseFrom(clone), nil
+}
+
+func (m *mockChatSvc) RunSession(_ context.Context, sessionID uuid.UUID, userMessage, tenantID string, opts ...chat.RunSessionOptions) (<-chan chat.RunEvent, error) {
+	m.runCalls++
+	m.lastRunOptions = opts
 	if _, ok := m.sessions[sessionID]; !ok {
 		return nil, chat.ErrNotFound
 	}
-	m.lastRunOverrides = overrides
+	if m.runSessionErr != nil {
+		return nil, m.runSessionErr
+	}
+	if m.runEventCh != nil {
+		return m.runEventCh, nil
+	}
 	ch := make(chan chat.RunEvent, 10)
 	go func() {
 		defer close(ch)
@@ -153,46 +194,100 @@ func (m *mockChatSvc) RunSession(_ context.Context, sessionID uuid.UUID, userMes
 	return ch, nil
 }
 
+func readSSEBlock(t *testing.T, r *bufio.Reader) string {
+	t.Helper()
+
+	var b strings.Builder
+	for {
+		line, err := r.ReadString('\n')
+		require.NoError(t, err)
+		if strings.TrimSpace(line) == "" {
+			return b.String()
+		}
+		b.WriteString(line)
+	}
+}
+
+func sseIDFromBlock(t *testing.T, block string) string {
+	t.Helper()
+
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(line, "id: ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "id: "))
+		}
+	}
+	t.Fatalf("SSE block has no id: %q", block)
+	return ""
+}
+
 func (m *mockChatSvc) GetActiveRun(_ context.Context, _ uuid.UUID) (chat.ChatRunResponse, bool, error) {
 	return chat.ChatRunResponse{}, false, nil
 }
 
-func (m *mockChatSvc) RespondElicitation(sessionID, requestID string, result chat.ElicitationResult) bool {
-	return false // no active runs in tests
+func (m *mockChatSvc) RespondElicitation(_ context.Context, sessionID, requestID string, result chat.ElicitationResult) bool {
+	m.elicitationCalls++
+	m.lastElicitationResult = result
+	return m.elicitationOK
 }
 
 func (m *mockChatSvc) ApplyClientState(sessionID uuid.UUID, patch chat.ClientStatePatch) {
+	m.clientStateCalls++
 	m.lastClientState = patch
 	m.lastClientStateSession = sessionID
 }
 
 type mockVoiceSvc struct {
-	input chat.VoiceTranscriptionInput
+	input         chat.VoiceTranscriptionInput
+	synthesis     chat.VoiceSynthesisInput
+	transcribeErr error
+	synthesizeErr error
 }
 
 func (m *mockVoiceSvc) Transcribe(_ context.Context, in chat.VoiceTranscriptionInput) (chat.VoiceTranscription, error) {
 	m.input = in
+	if m.transcribeErr != nil {
+		return chat.VoiceTranscription{}, m.transcribeErr
+	}
 	return chat.VoiceTranscription{Text: "abrir dashboard", Language: "pt-BR", Confidence: 0.95}, nil
 }
 
-func (m *mockVoiceSvc) Synthesize(_ context.Context, _ chat.VoiceSynthesisInput) (chat.VoiceAudio, error) {
+func (m *mockVoiceSvc) Synthesize(_ context.Context, in chat.VoiceSynthesisInput) (chat.VoiceAudio, error) {
+	m.synthesis = in
+	if m.synthesizeErr != nil {
+		return chat.VoiceAudio{}, m.synthesizeErr
+	}
 	return chat.VoiceAudio{Format: "mp3", Base64: "YXVkaW8="}, nil
+}
+
+type mockEffectivePromptInspector struct {
+	identity chat.PromptIdentity
+	resp     chat.EffectivePromptResponse
+	err      error
+}
+
+func (m *mockEffectivePromptInspector) EffectivePrompt(_ context.Context, _ uuid.UUID, identity chat.PromptIdentity) (chat.EffectivePromptResponse, error) {
+	m.identity = identity
+	return m.resp, m.err
+}
+
+type mockPermissionAuditReader struct {
+	called    bool
+	sessionID uuid.UUID
+	limit     int
+	entries   []chat.PermissionAuditEntryResponse
+	err       error
+}
+
+func (m *mockPermissionAuditReader) ListBySession(_ context.Context, sessionID uuid.UUID, limit int) ([]chat.PermissionAuditEntryResponse, error) {
+	m.called = true
+	m.sessionID = sessionID
+	m.limit = limit
+	return m.entries, m.err
 }
 
 func setupChat() (*chi.Mux, *mockChatSvc) {
 	svc := newMockChatSvc()
 	h := chat.NewHandler(svc, nil)
-	r := chi.NewRouter()
-	h.RegisterRoutes(r)
-	return r, svc
-}
-
-func setupChatWithHandler(configure func(*chat.Handler)) (*chi.Mux, *mockChatSvc) {
-	svc := newMockChatSvc()
-	h := chat.NewHandler(svc, nil)
-	if configure != nil {
-		configure(h)
-	}
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
 	return r, svc
@@ -205,6 +300,29 @@ func setupChatWithVoice() (*chi.Mux, *mockChatSvc, *mockVoiceSvc) {
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
 	return r, svc, voice
+}
+
+func setupChatWithEffectivePrompt(inspector *mockEffectivePromptInspector) (*chi.Mux, *mockChatSvc) {
+	svc := newMockChatSvc()
+	h := chat.NewHandler(svc, nil).WithEffectivePromptInspector(inspector, func(*http.Request) chat.PromptIdentity {
+		return chat.PromptIdentity{
+			UserEmail:  "ana@example.test",
+			Roles:      []string{"admin"},
+			TenantID:   "test",
+			TenantName: "Test Tenant",
+		}
+	})
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r, svc
+}
+
+func setupChatWithPermissionAudit(reader chat.PermissionAuditReader) (*chi.Mux, *mockChatSvc) {
+	svc := newMockChatSvc()
+	h := chat.NewHandler(svc, nil).WithPermissionAuditReader(reader)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+	return r, svc
 }
 
 func TestChatHandler_ListSessions_Success(t *testing.T) {
@@ -281,46 +399,80 @@ func TestChatHandler_VoiceInputTranscribesMultipartAudio(t *testing.T) {
 	assert.Nil(t, resp.RunID)
 }
 
-func TestChatHandler_CreateSession_AgentFixedUnchanged(t *testing.T) {
-	r, _ := setupChat()
-	agentID := uuid.New()
-	body, _ := json.Marshal(chat.CreateSessionRequest{
-		AgentID: &agentID,
-		Mode:    chat.ModeAgentFixed,
-		Title:   "Fixed Agent Chat",
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+func TestChatHandler_VoiceInputTranscriptionFailureDoesNotLeakInfrastructureDetail(t *testing.T) {
+	r, svc, voice := setupChatWithVoice()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Voice", Status: chat.StatusActive}
+	voice.transcribeErr = errors.New("post https://voice.internal.example/v1/audio: dial tcp 10.42.0.19:443: connection refused")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/voice/input?run=false", bytes.NewReader([]byte("fake wav")))
+	req.Header.Set("Content-Type", "audio/wav")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusCreated, w.Code)
-	var resp chat.ChatSessionResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, "Fixed Agent Chat", resp.Title)
-	assert.Equal(t, "AGENT_FIXED", resp.Mode)
-	require.NotNil(t, resp.AgentID)
-	assert.Equal(t, agentID, *resp.AgentID)
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Contains(t, w.Body.String(), "voice transcription is temporarily unavailable")
+	assert.NotContains(t, w.Body.String(), "voice.internal.example")
+	assert.NotContains(t, w.Body.String(), "10.42.0.19")
+	assert.NotContains(t, w.Body.String(), "connection refused")
 }
 
-func TestChatHandler_CreateSession_DynamicSkillUsesServerPersona(t *testing.T) {
-	r, _ := setupChat()
-	body, _ := json.Marshal(chat.CreateSessionRequest{
-		Mode:  chat.ModeDynamicSkill,
-		Title: "Dynamic Chat",
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", bytes.NewReader(body))
+func TestChatHandler_VoiceInputRunsAndSynthesizesWithoutAsyncExecutor(t *testing.T) {
+	r, svc, voice := setupChatWithVoice()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Voice", Status: chat.StatusActive}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/voice/input", bytes.NewReader([]byte("fake wav")))
+	req.Header.Set("Content-Type", "audio/wav")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp chat.VoiceInputResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.NotNil(t, resp.RunID)
+	require.NotNil(t, resp.Audio)
+	assert.Equal(t, "completed", resp.Status)
+	assert.Equal(t, "mp3", resp.Audio.Format)
+	assert.Equal(t, "YXVkaW8=", resp.Audio.Base64)
+	assert.Equal(t, []byte("fake wav"), voice.input.Audio)
+	assert.Equal(t, "Hello from agent", voice.synthesis.Text)
+}
+
+func TestChatHandler_VoiceInputSynchronousRunFailureDoesNotLeakInfrastructureDetail(t *testing.T) {
+	r, svc, _ := setupChatWithVoice()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Voice", Status: chat.StatusActive}
+	svc.runSessionErr = errors.New("provider https://llm.internal.example: dial tcp 10.42.0.20:443: connection refused")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/voice/input", bytes.NewReader([]byte("fake wav")))
+	req.Header.Set("Content-Type", "audio/wav")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Contains(t, w.Body.String(), "failed to process voice run")
+	assert.NotContains(t, w.Body.String(), "llm.internal.example")
+	assert.NotContains(t, w.Body.String(), "10.42.0.20")
+	assert.NotContains(t, w.Body.String(), "connection refused")
+}
+
+func TestChatHandler_RunSessionSynchronousFailureDoesNotLeakInfrastructureDetail(t *testing.T) {
+	r, svc := setupChat()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Chat", Status: chat.StatusActive}
+	svc.runSessionErr = errors.New("provider https://llm.internal.example: dial tcp 10.42.0.21:443: connection refused")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", strings.NewReader(`{"message":"hello"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusCreated, w.Code)
-	var resp chat.ChatSessionResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, "Dynamic Chat", resp.Title)
-	assert.Equal(t, "DYNAMIC_SKILL", resp.Mode)
-	assert.Nil(t, resp.AgentID)
-	require.NotNil(t, resp.PersonaID)
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Contains(t, w.Body.String(), "failed to start chat run")
+	assert.NotContains(t, w.Body.String(), "llm.internal.example")
+	assert.NotContains(t, w.Body.String(), "10.42.0.21")
+	assert.NotContains(t, w.Body.String(), "connection refused")
 }
 
 func TestChatHandler_CreateSession_InvalidBody(t *testing.T) {
@@ -340,6 +492,160 @@ func TestChatHandler_GetSession_NotFound(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestChatHandler_GetSession_IncludesLegacyBackgroundActiveRun(t *testing.T) {
+	r, svc := setupChat()
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Reconnect", Status: chat.StatusActive}
+	runEvents := make(chan chat.RunEvent)
+	svc.runEventCh = runEvents
+
+	runReq, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/api/chat/sessions/"+sessionID.String()+"/run",
+		strings.NewReader(`{"message":"start a slow run"}`),
+	)
+	require.NoError(t, err)
+	runReq.Header.Set("Accept", "text/event-stream")
+	runReq.Header.Set("Content-Type", "application/json")
+
+	runRespCh := make(chan *http.Response, 1)
+	runErrCh := make(chan error, 1)
+	go func() {
+		resp, err := server.Client().Do(runReq)
+		if err != nil {
+			runErrCh <- err
+			return
+		}
+		runRespCh <- resp
+	}()
+
+	runEvents <- chat.RunEvent{Type: "text_delta", Data: json.RawMessage(`{"content":"partial"}`)}
+
+	var runResp *http.Response
+	select {
+	case err := <-runErrCh:
+		require.NoError(t, err)
+	case runResp = <-runRespCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("POST /run did not start streaming")
+	}
+	defer func() { _ = runResp.Body.Close() }()
+	defer close(runEvents)
+	require.Equal(t, http.StatusOK, runResp.StatusCode)
+	runID := runResp.Header.Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	getResp, err := server.Client().Get(server.URL + "/api/chat/sessions/" + sessionID.String())
+	require.NoError(t, err)
+	defer func() { _ = getResp.Body.Close() }()
+	require.Equal(t, http.StatusOK, getResp.StatusCode)
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(getResp.Body).Decode(&body))
+	activeRun, ok := body["activeRun"].(map[string]any)
+	require.True(t, ok, "GET session must expose the legacy in-memory active run")
+	assert.Equal(t, runID, activeRun["id"])
+	assert.Equal(t, sessionID.String(), activeRun["sessionId"])
+	assert.Equal(t, "active", activeRun["status"])
+}
+
+func TestChatHandler_EffectivePrompt_Success(t *testing.T) {
+	sessionID := uuid.New()
+	agentID := uuid.New()
+	inspector := &mockEffectivePromptInspector{resp: chat.EffectivePromptResponse{
+		SessionID:    sessionID,
+		AgentID:      &agentID,
+		SystemPrompt: "Olá ana@example.test",
+		Warnings:     []string{},
+	}}
+	r, _ := setupChatWithEffectivePrompt(inspector)
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/effective-prompt", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "ana@example.test", inspector.identity.UserEmail)
+	assert.Equal(t, []string{"admin"}, inspector.identity.Roles)
+	var resp chat.EffectivePromptResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, sessionID, resp.SessionID)
+	assert.Equal(t, "Olá ana@example.test", resp.SystemPrompt)
+	assert.Empty(t, resp.Warnings)
+}
+
+func TestChatHandler_PermissionAudit_Success(t *testing.T) {
+	sessionID := uuid.New()
+	runID := uuid.New()
+	runIDString := runID.String()
+	createdAt := time.Date(2026, 6, 22, 16, 30, 0, 0, time.UTC).Format(time.RFC3339)
+	reader := &mockPermissionAuditReader{entries: []chat.PermissionAuditEntryResponse{
+		{
+			SessionID:    sessionID.String(),
+			RunID:        &runIDString,
+			ToolName:     "execute-sql",
+			Decision:     "confirm_denied",
+			MatchedRule:  "execute-*",
+			InputSnippet: `{"query":"DROP TABLE users"}`,
+			CreatedAt:    createdAt,
+		},
+		{
+			SessionID: sessionID.String(),
+			ToolName:  "execute-sql",
+			Decision:  "confirm_approved",
+			CreatedAt: createdAt,
+		},
+	}}
+	r, svc := setupChatWithPermissionAudit(reader)
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Audit", Status: chat.StatusActive}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/permission-audit", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, reader.called)
+	assert.Equal(t, sessionID, reader.sessionID)
+	assert.Equal(t, 0, reader.limit)
+
+	var resp []chat.PermissionAuditEntryResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp, 2)
+	assert.Equal(t, "execute-sql", resp[0].ToolName)
+	assert.Equal(t, "confirm_denied", resp[0].Decision)
+	require.NotNil(t, resp[0].RunID)
+	assert.Equal(t, runID.String(), *resp[0].RunID)
+	assert.Equal(t, "execute-*", resp[0].MatchedRule)
+	assert.Contains(t, resp[0].InputSnippet, "DROP TABLE users")
+	assert.Equal(t, "confirm_approved", resp[1].Decision)
+}
+
+func TestChatHandler_PermissionAudit_NotConfigured(t *testing.T) {
+	r, svc := setupChat()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Audit", Status: chat.StatusActive}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/permission-audit", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotImplemented, w.Code)
+}
+
+func TestChatHandler_PermissionAudit_SessionNotFoundDoesNotReadAudit(t *testing.T) {
+	reader := &mockPermissionAuditReader{}
+	r, _ := setupChatWithPermissionAudit(reader)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+uuid.New().String()+"/permission-audit", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.False(t, reader.called, "audit reader must not be queried for a missing session")
 }
 
 func TestChatHandler_DeleteSession_Success(t *testing.T) {
@@ -378,39 +684,52 @@ func TestChatHandler_AddMessage_Success(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 }
 
-func TestChatHandler_UploadAttachment_Success(t *testing.T) {
-	storage := &recordingAttachmentStorage{}
-	r, svc := setupChatWithHandler(func(h *chat.Handler) {
-		h.WithAttachmentStorage(storage)
-	})
+func TestChatHandler_CloneSession_Success(t *testing.T) {
+	r, svc := setupChat()
 	sessionID := uuid.New()
 	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Chat", Status: chat.StatusActive}
+	firstID := uuid.New()
+	svc.messages[sessionID] = []chat.ChatMessage{
+		{ID: firstID, SessionID: sessionID, Role: "user", Content: "primeira", MessageType: chat.MessageTypeText},
+		{ID: uuid.New(), SessionID: sessionID, Role: "user", Content: "segunda", MessageType: chat.MessageTypeText},
+	}
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", `form-data; name="file"; filename="notes.md"`)
-	header.Set("Content-Type", "text/markdown")
-	part, err := writer.CreatePart(header)
-	require.NoError(t, err)
-	_, err = part.Write([]byte("# Notes\nhello"))
-	require.NoError(t, err)
-	require.NoError(t, writer.Close())
-
-	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/attachments", &body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	body, _ := json.Marshal(chat.CloneSessionRequest{UntilMessageID: &firstID, Title: "Clone A"})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/clone", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusCreated, w.Code)
-	var resp chat.ChatAttachment
+	assert.Equal(t, http.StatusCreated, w.Code)
+	var resp chat.ChatSessionResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	assert.Equal(t, "notes.md", resp.Name)
-	assert.Equal(t, chat.AttachmentKindText, resp.Kind)
-	assert.Contains(t, resp.URL, "chat-attachments/unknown/"+sessionID.String()+"/")
-	assert.Equal(t, storage.key, resp.URL)
-	assert.Equal(t, int64(len("# Notes\nhello")), storage.size)
-	assert.Equal(t, "text/markdown", storage.contentType)
+	assert.NotEqual(t, sessionID, resp.ID)
+	assert.Equal(t, "Clone A", resp.Title)
+	require.NotNil(t, resp.ClonedFromSessionID)
+	assert.Equal(t, sessionID, *resp.ClonedFromSessionID)
+	require.NotNil(t, resp.ClonedFromSessionTitle)
+	assert.Equal(t, "Chat", *resp.ClonedFromSessionTitle)
+
+	require.Len(t, svc.messages[resp.ID], 1)
+	assert.Equal(t, "primeira", svc.messages[resp.ID][0].Content)
+	assert.NotEqual(t, firstID, svc.messages[resp.ID][0].ID)
+	assert.Nil(t, svc.messages[resp.ID][0].RunID)
+}
+
+func TestChatHandler_CloneSession_400_ConcatenatedJSONDoesNotCallService(t *testing.T) {
+	r, svc := setupChat()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Chat", Status: chat.StatusActive}
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/chat/sessions/"+sessionID.String()+"/clone",
+		bytes.NewBufferString(`{"title":"Clone A"}{"title":"Clone B"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Zero(t, svc.cloneCalls)
 }
 
 func TestChatHandler_ListMessages_Success(t *testing.T) {
@@ -423,6 +742,47 @@ func TestChatHandler_ListMessages_Success(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestChatHandler_ListMessages_RedactsSensitiveToolCallArguments(t *testing.T) {
+	r, svc := setupChat()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Chat", Status: chat.StatusActive}
+
+	const bearerSecret = "Bearer history-tool-call-bearer-sentinel"
+	const apiKeySecret = "history-tool-call-api-key-sentinel"
+	const passwordSecret = "history-tool-call-password-sentinel"
+	toolCalls, err := json.Marshal([]map[string]any{{
+		"id":   "tool-call-history-1",
+		"type": "function",
+		"function": map[string]any{
+			"name":      "http_request",
+			"arguments": `{"safe":"keep-this","Authorization":"` + bearerSecret + `","password":"` + passwordSecret + `","nested":{"api_key":"` + apiKeySecret + `"}}`,
+		},
+	}})
+	require.NoError(t, err)
+	svc.messages[sessionID] = []chat.ChatMessage{{
+		ID:          uuid.New(),
+		SessionID:   sessionID,
+		Role:        "assistant",
+		MessageType: chat.MessageTypeToolUse,
+		ToolCalls:   toolCalls,
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/messages", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.NotContains(t, body, bearerSecret)
+	assert.NotContains(t, body, apiKeySecret)
+	assert.NotContains(t, body, passwordSecret)
+	assert.NotContains(t, body, "Authorization")
+	assert.NotContains(t, body, "api_key")
+	assert.NotContains(t, body, "password")
+	assert.Contains(t, body, "keep-this")
+	assert.Equal(t, json.RawMessage(toolCalls), svc.messages[sessionID][0].ToolCalls, "the public projection must not mutate persisted tool calls")
 }
 
 func TestChatHandler_ArchiveSession_Success(t *testing.T) {
@@ -492,22 +852,17 @@ func TestChatHandler_RunSession_Success(t *testing.T) {
 	assert.Contains(t, responseBody, "id: "+runID+":2\n")
 }
 
-func TestChatHandler_RunSession_ForwardsOverrides(t *testing.T) {
+func TestChatHandler_RunSession_ForwardsSystemPromptOverride(t *testing.T) {
 	r, svc := setupChat()
 
 	agentID := uuid.New()
 	sessionID := uuid.New()
-	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "studio", Status: chat.StatusActive}
 
 	body, _ := json.Marshal(map[string]any{
 		"message": "Hello",
 		"overrides": map[string]any{
-			"systemPrompt": "Respond only in French.",
-			"modelConfig": map[string]any{
-				"provider":    "openai",
-				"model":       "gpt-4o-mini",
-				"temperature": 0.2,
-			},
+			"systemPrompt": "Preview prompt from Studio.",
 		},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
@@ -516,25 +871,9 @@ func TestChatHandler_RunSession_ForwardsOverrides(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	require.NotNil(t, svc.lastRunOverrides.SystemPrompt)
-	assert.Equal(t, "Respond only in French.", *svc.lastRunOverrides.SystemPrompt)
-	assert.JSONEq(t, `{"provider":"openai","model":"gpt-4o-mini","temperature":0.2}`, string(svc.lastRunOverrides.ModelConfig))
-}
-
-func TestChatHandler_RunSession_RejectsInvalidModelConfigOverride(t *testing.T) {
-	r, svc := setupChat()
-
-	agentID := uuid.New()
-	sessionID := uuid.New()
-	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
-
-	body := []byte(`{"message":"Hello","overrides":{"modelConfig":"not-an-object"}}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	require.Len(t, svc.lastRunOptions, 1)
+	require.NotNil(t, svc.lastRunOptions[0].SystemPromptOverride)
+	assert.Equal(t, "Preview prompt from Studio.", *svc.lastRunOptions[0].SystemPromptOverride)
 }
 
 func TestChatHandler_RunSession_SessionNotFound(t *testing.T) {
@@ -567,6 +906,21 @@ func TestChatHandler_RunSession_InvalidBody(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestChatHandler_RunSession_RejectsTrailingJSONWithoutStartingRun(t *testing.T) {
+	r, svc := setupChat()
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewBufferString(`{"message":"first"}{"message":"ignored"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Zero(t, svc.runCalls)
 }
 
 func TestChatHandler_RunSession_InvalidSessionID(t *testing.T) {
@@ -617,6 +971,43 @@ func TestChatHandler_ResumeSession_ReplayAll(t *testing.T) {
 	assert.Contains(t, resumeBody, "id: "+runID+":2\n")
 }
 
+func TestChatHandler_ResumeSession_DoesNotAllowSSEFrameInjection(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+	svc.runEvents = []chat.RunEvent{
+		{
+			Type: "text_delta\nevent: injected",
+			Data: json.RawMessage("{\"content\":\"safe\"}\nevent: injected\ndata: bad"),
+		},
+		{
+			Type: "run_complete",
+			Data: json.RawMessage(`{"totalTurns":1,"totalTokens":50}`),
+		},
+	}
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	require.Equal(t, http.StatusOK, runW.Code)
+	runID := runW.Header().Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume", nil)
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	require.Equal(t, http.StatusOK, resumeW.Code)
+	resumeBody := resumeW.Body.String()
+	assert.NotContains(t, resumeBody, "event: injected\n")
+	assert.NotContains(t, resumeBody, "\ndata: bad\n")
+}
+
 func TestChatHandler_ResumeSession_ReplayPartial(t *testing.T) {
 	r, svc := setupChat()
 
@@ -645,6 +1036,34 @@ func TestChatHandler_ResumeSession_ReplayPartial(t *testing.T) {
 	assert.Contains(t, resumeBody, "id: "+runID+":2\n")
 }
 
+func TestChatHandler_ResumeSession_WrongSessionDoesNotReplayLegacyBuffer(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	wrongSessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+	svc.sessions[wrongSessionID] = chat.ChatSession{ID: wrongSessionID, AgentID: &agentID, Title: "wrong", Status: chat.StatusActive}
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	require.Equal(t, http.StatusOK, runW.Code)
+	runID := runW.Header().Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+wrongSessionID.String()+"/run/"+runID+"/resume", nil)
+	resumeReq.Header.Set("Last-Event-ID", runID+":1")
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	assert.Equal(t, http.StatusNotFound, resumeW.Code)
+	assert.NotContains(t, resumeW.Body.String(), "event: run_complete\n")
+}
+
 func TestChatHandler_ResumeSession_QueryParamLastEventID(t *testing.T) {
 	r, svc := setupChat()
 
@@ -669,6 +1088,232 @@ func TestChatHandler_ResumeSession_QueryParamLastEventID(t *testing.T) {
 	resumeBody := resumeW.Body.String()
 	assert.NotContains(t, resumeBody, "id: "+runID+":1\n")
 	assert.Contains(t, resumeBody, "id: "+runID+":2\n")
+}
+
+func TestChatHandler_ResumeSession_HeaderTakesPrecedenceOverQueryParamLastEventID(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	require.Equal(t, http.StatusOK, runW.Code)
+	runID := runW.Header().Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume?lastEventId="+runID+":0", nil)
+	resumeReq.Header.Set("Last-Event-ID", runID+":1")
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	require.Equal(t, http.StatusOK, resumeW.Code)
+	resumeBody := resumeW.Body.String()
+	assert.NotContains(t, resumeBody, "id: "+runID+":1\n")
+	assert.Contains(t, resumeBody, "id: "+runID+":2\n")
+}
+
+func TestChatHandler_ResumeSession_RejectsLastEventIDForDifferentRun(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	require.Equal(t, http.StatusOK, runW.Code)
+	runID := runW.Header().Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume", nil)
+	resumeReq.Header.Set("Last-Event-ID", uuid.New().String()+":1")
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	assert.Equal(t, http.StatusBadRequest, resumeW.Code)
+	assert.NotContains(t, resumeW.Body.String(), "event: run_complete\n")
+}
+
+func TestChatHandler_ResumeSession_RejectsMalformedLastEventID(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	require.Equal(t, http.StatusOK, runW.Code)
+	runID := runW.Header().Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume", nil)
+	resumeReq.Header.Set("Last-Event-ID", "not-an-sse-id")
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	assert.Equal(t, http.StatusBadRequest, resumeW.Code)
+	assert.NotContains(t, resumeW.Body.String(), "event: run_complete\n")
+}
+
+func TestChatHandler_ResumeSession_RejectsNonCanonicalLastEventID(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	require.Equal(t, http.StatusOK, runW.Code)
+	runID := runW.Header().Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	tests := []struct {
+		name        string
+		lastEventID string
+		useQuery    bool
+	}{
+		{name: "leading zero header", lastEventID: runID + ":01"},
+		{name: "leading plus header", lastEventID: runID + ":+1"},
+		{name: "leading zero query", lastEventID: runID + ":01", useQuery: true},
+		{name: "leading plus query", lastEventID: runID + ":+1", useQuery: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resumeURL := "/api/chat/sessions/" + sessionID.String() + "/run/" + runID + "/resume"
+			if tt.useQuery {
+				resumeURL += "?lastEventId=" + url.QueryEscape(tt.lastEventID)
+			}
+			resumeReq := httptest.NewRequest(http.MethodGet, resumeURL, nil)
+			if !tt.useQuery {
+				resumeReq.Header.Set("Last-Event-ID", tt.lastEventID)
+			}
+			resumeW := httptest.NewRecorder()
+			r.ServeHTTP(resumeW, resumeReq)
+
+			assert.Equal(t, http.StatusBadRequest, resumeW.Code)
+			assert.NotEqual(t, "text/event-stream", resumeW.Header().Get("Content-Type"))
+			assert.NotContains(t, resumeW.Body.String(), "event: run_complete\n")
+		})
+	}
+}
+
+func TestChatHandler_ResumeSession_ReconnectOverflow(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	svc.runEvents = make([]chat.RunEvent, 0, chat.DefaultEventBufferSize+2)
+	for i := 0; i < chat.DefaultEventBufferSize+1; i++ {
+		svc.runEvents = append(svc.runEvents, chat.RunEvent{
+			Type: "text_delta",
+			Data: json.RawMessage(`{"content":"chunk"}`),
+		})
+	}
+	svc.runEvents = append(svc.runEvents, chat.RunEvent{
+		Type: "run_complete",
+		Data: json.RawMessage(`{"totalTurns":1,"totalTokens":50}`),
+	})
+
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	runReq.Header.Set("Content-Type", "application/json")
+	runW := httptest.NewRecorder()
+	r.ServeHTTP(runW, runReq)
+
+	require.Equal(t, http.StatusOK, runW.Code)
+	runID := runW.Header().Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	resumeReq := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume", nil)
+	resumeReq.Header.Set("Last-Event-ID", runID+":1")
+	resumeW := httptest.NewRecorder()
+	r.ServeHTTP(resumeW, resumeReq)
+
+	require.Equal(t, http.StatusOK, resumeW.Code)
+	resumeBody := resumeW.Body.String()
+	assert.Contains(t, resumeBody, "event: reconnect_overflow\n")
+	assert.Contains(t, resumeBody, `"lastEventId":"`+runID+`:1"`)
+	assert.NotContains(t, resumeBody, "id: "+runID+":1\n")
+	assert.NotContains(t, resumeBody, "event: run_complete\n")
+}
+
+func TestChatHandler_ResumeSession_ContinuesAfterClientDisconnect(t *testing.T) {
+	r, svc := setupChat()
+
+	agentID := uuid.New()
+	sessionID := uuid.New()
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, AgentID: &agentID, Title: "test", Status: chat.StatusActive}
+
+	eventCh := make(chan chat.RunEvent, 4)
+	svc.runEventCh = eventCh
+
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	body, _ := json.Marshal(map[string]string{"message": "Hello"})
+	runReq, err := http.NewRequest(http.MethodPost, server.URL+"/api/chat/sessions/"+sessionID.String()+"/run", bytes.NewReader(body))
+	require.NoError(t, err)
+	runReq.Header.Set("Content-Type", "application/json")
+	runReq.Header.Set("Accept", "text/event-stream")
+
+	eventCh <- chat.RunEvent{Type: "text_delta", Data: json.RawMessage(`{"content":"first"}`)}
+	runResp, err := client.Do(runReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, runResp.StatusCode)
+	runID := runResp.Header.Get("X-Run-ID")
+	require.NotEmpty(t, runID)
+
+	initialReader := bufio.NewReader(runResp.Body)
+	firstBlock := readSSEBlock(t, initialReader)
+	require.Contains(t, firstBlock, "event: text_delta\n")
+	lastEventID := sseIDFromBlock(t, firstBlock)
+	require.NoError(t, runResp.Body.Close())
+
+	eventCh <- chat.RunEvent{Type: "text_delta", Data: json.RawMessage(`{"content":"second"}`)}
+	eventCh <- chat.RunEvent{Type: "run_complete", Data: json.RawMessage(`{"totalTurns":1,"totalTokens":50}`)}
+	close(eventCh)
+
+	resumeReq, err := http.NewRequest(http.MethodGet, server.URL+"/api/chat/sessions/"+sessionID.String()+"/run/"+runID+"/resume", nil)
+	require.NoError(t, err)
+	resumeReq.Header.Set("Accept", "text/event-stream")
+	resumeReq.Header.Set("Last-Event-ID", lastEventID)
+	resumeResp, err := client.Do(resumeReq)
+	require.NoError(t, err)
+	defer func() { _ = resumeResp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resumeResp.StatusCode)
+	resumeBody, err := io.ReadAll(resumeResp.Body)
+	require.NoError(t, err)
+	resumeText := string(resumeBody)
+	assert.NotContains(t, resumeText, "id: "+lastEventID+"\n")
+	assert.Contains(t, resumeText, "id: "+runID+":2\n")
+	assert.Contains(t, resumeText, `{"content":"second"}`)
+	assert.Contains(t, resumeText, "id: "+runID+":3\n")
+	assert.Contains(t, resumeText, "event: run_complete\n")
 }
 
 func TestChatHandler_ResumeSession_FiltersResolvedInputRequest(t *testing.T) {
@@ -743,6 +1388,69 @@ func TestGetRun_Success(t *testing.T) {
 	assert.Equal(t, chat.ChatRunStatusCompleted, resp.Status)
 }
 
+func TestGetRun_RedactsSensitiveFailureReason(t *testing.T) {
+	const authorizationSecret = "run-response-authorization-secret"
+	const passwordSecret = "run-response-password-secret"
+	runID := uuid.New()
+	sessionID := uuid.New()
+	failureReason := "Authorization: Bearer " + authorizationSecret + "\npassword=" + passwordSecret
+
+	rl := &mockRunLookup{runs: map[uuid.UUID]chat.ChatRun{
+		runID: {
+			ID:            runID,
+			SessionID:     sessionID,
+			Status:        chat.ChatRunStatusFailed,
+			FailureReason: &failureReason,
+		},
+	}}
+	r, _ := setupChatWithRuns(rl)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/runs/"+runID.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.NotContains(t, body, authorizationSecret)
+	assert.NotContains(t, body, passwordSecret)
+	assert.NotContains(t, body, "Authorization:")
+	assert.NotContains(t, body, "password")
+	assert.Contains(t, body, "[REDACTED]")
+}
+
+func TestGetRun_RedactsSensitiveMetadataErrorMessage(t *testing.T) {
+	const authorizationSecret = "run-metadata-authorization-secret"
+	const passwordSecret = "run-metadata-password-secret"
+	runID := uuid.New()
+	sessionID := uuid.New()
+	metadata := json.RawMessage(`{"finishReason":"error","errorMessage":"Authorization: Bearer ` + authorizationSecret + `\npassword=` + passwordSecret + `","nested":{"api_key":"nested-metadata-api-key"}}`)
+
+	rl := &mockRunLookup{runs: map[uuid.UUID]chat.ChatRun{
+		runID: {
+			ID:        runID,
+			SessionID: sessionID,
+			Status:    chat.ChatRunStatusFailed,
+			Metadata:  metadata,
+		},
+	}}
+	r, _ := setupChatWithRuns(rl)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/runs/"+runID.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.NotContains(t, body, authorizationSecret)
+	assert.NotContains(t, body, passwordSecret)
+	assert.NotContains(t, body, "nested-metadata-api-key")
+	assert.NotContains(t, body, "api_key")
+	assert.NotContains(t, body, "Authorization:")
+	assert.NotContains(t, body, "password")
+	assert.Contains(t, body, "[REDACTED]")
+	assert.JSONEq(t, string(metadata), string(rl.runs[runID].Metadata), "the persisted run must remain unchanged")
+}
+
 func TestGetRun_NotFound(t *testing.T) {
 	rl := &mockRunLookup{runs: map[uuid.UUID]chat.ChatRun{}}
 	r, _ := setupChatWithRuns(rl)
@@ -783,7 +1491,8 @@ func TestGetRun_NoLookupConfigured(t *testing.T) {
 
 // mockHandlerTaskRepo is a simple in-memory task.Repository for handler tests.
 type mockHandlerTaskRepo struct {
-	tasks []task.Task
+	tasks         []task.Task
+	notifications []task.Notification
 }
 
 func (m *mockHandlerTaskRepo) CreateTask(_ context.Context, t task.Task) error {
@@ -801,7 +1510,7 @@ func (m *mockHandlerTaskRepo) CreateNotification(_ context.Context, _ task.Notif
 	return nil
 }
 func (m *mockHandlerTaskRepo) ListNotificationsByTask(_ context.Context, _ string) ([]task.Notification, error) {
-	return nil, nil
+	return m.notifications, nil
 }
 
 var _ task.Repository = (*mockHandlerTaskRepo)(nil)
@@ -823,7 +1532,7 @@ func TestHandler_GetTasks_200(t *testing.T) {
 		},
 	}
 	r, svc := setupChatWithTasks(repo)
-	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Task Session", Status: chat.StatusActive}
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Status: chat.StatusActive}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/tasks", nil)
 	w := httptest.NewRecorder()
@@ -860,7 +1569,7 @@ func TestHandler_GetTaskNotifications_200(t *testing.T) {
 	sessionID := uuid.New()
 	repo := &mockHandlerTaskRepo{}
 	r, svc := setupChatWithTasks(repo)
-	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Title: "Task Session", Status: chat.StatusActive}
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Status: chat.StatusActive}
 
 	url := "/api/chat/sessions/" + sessionID.String() + "/tasks/task-1/notifications"
 	req := httptest.NewRequest(http.MethodGet, url, nil)
@@ -868,6 +1577,35 @@ func TestHandler_GetTaskNotifications_200(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandler_GetTaskNotifications_RedactsSensitiveDiagnostics(t *testing.T) {
+	sessionID := uuid.New()
+	errorMessage := "Authorization: Bearer task-notification-authorization-secret\npassword=task-notification-password-secret"
+	repo := &mockHandlerTaskRepo{
+		notifications: []task.Notification{{
+			ID:       "notification-1",
+			TaskID:   "task-1",
+			Status:   "failed",
+			Findings: json.RawMessage(`{"provider":{"api_key":"task-notification-findings-secret"},"message":"Authorization: Bearer task-notification-findings-bearer"}`),
+			Error:    &errorMessage,
+		}},
+	}
+	r, svc := setupChatWithTasks(repo)
+	svc.sessions[sessionID] = chat.ChatSession{ID: sessionID, Status: chat.StatusActive}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sessionID.String()+"/tasks/task-1/notifications", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "task-notification-authorization-secret")
+	assert.NotContains(t, w.Body.String(), "task-notification-password-secret")
+	assert.NotContains(t, w.Body.String(), "task-notification-findings-secret")
+	assert.NotContains(t, w.Body.String(), "task-notification-findings-bearer")
+	assert.Contains(t, w.Body.String(), "[REDACTED]")
+	assert.Contains(t, string(repo.notifications[0].Findings), "task-notification-findings-secret")
+	assert.Equal(t, errorMessage, *repo.notifications[0].Error)
 }
 
 // --- CopilotKit Phase 1: POST /client-state ----------------------------------
@@ -922,6 +1660,20 @@ func TestHandler_ClientState_400_InvalidJSON(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandler_ClientState_400_ConcatenatedJSONDoesNotCallService(t *testing.T) {
+	r, svc := setupChat()
+	sessionID := uuid.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/chat/sessions/"+sessionID.String()+"/client-state",
+		bytes.NewBufferString(`{"readables":[]}{"readables":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Zero(t, svc.clientStateCalls)
 }
 
 func TestHandler_ClientState_204_EmptyBodyIsOK(t *testing.T) {

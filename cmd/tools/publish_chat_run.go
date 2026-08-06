@@ -26,21 +26,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
 	}
-	defer func() {
-		if closeErr := conn.Close(); closeErr != nil {
-			log.Printf("Failed to close RabbitMQ connection: %v", closeErr)
-		}
-	}()
+	defer func() { _ = conn.Close() }()
 
 	ch, err := conn.Channel()
 	if err != nil {
 		log.Fatalf("Failed to open a channel: %v", err)
 	}
-	defer func() {
-		if closeErr := ch.Close(); closeErr != nil {
-			log.Printf("Failed to close RabbitMQ channel: %v", closeErr)
-		}
-	}()
+	defer func() { _ = ch.Close() }()
 
 	q, err := ch.QueueDeclare("chat.run.queue", true, false, false, false, nil)
 	if err != nil {
@@ -68,5 +60,9 @@ func main() {
 		log.Fatalf("Failed to publish a message: %v", err)
 	}
 
-	log.Printf(" [x] Sent message to chat.run.queue for session %s", task.SessionID)
+	log.Print(chatRunPublishedLogMessage())
+}
+
+func chatRunPublishedLogMessage() string {
+	return " [x] Sent message to chat.run.queue"
 }

@@ -165,7 +165,7 @@ func (r *Repository) Update(ctx context.Context, w WebhookConfig) (WebhookConfig
 		UPDATE webhook_config
 		   SET name = $2, url = $3, events = $4, secret = $5, enabled = $6, retry_count = $7, updated_at = NOW()
 		 WHERE id = $1
-		RETURNING id, name, url, events, secret, enabled, retry_count, created_at, updated_at`
+		RETURNING id, name, url, events, secret, token, enabled, retry_count, created_at, updated_at`
 	row := conn.QueryRow(ctx, query, w.ID, w.Name, w.URL, w.Events, w.Secret, w.Enabled, w.RetryCount)
 	return scanConfigRow(row)
 }
