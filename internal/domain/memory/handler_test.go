@@ -361,6 +361,22 @@ func TestMemoryHandler_Stats(t *testing.T) {
 	assert.Equal(t, 1, stats.ByType["feedback"])
 }
 
+func TestMemoryHandler_SummaryAlias(t *testing.T) {
+	r, svc := setupMemory()
+	agentID := uuid.New()
+	svc.entries[entryKey(agentID, "k1")] = memory.AgentMemory{ID: uuid.New(), AgentID: agentID, Key: "k1", MemoryType: memory.MemoryTypeProject, Value: []byte(`"a"`)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+agentID.String()+"/memories/summary", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var stats memory.MemoryStats
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &stats))
+	assert.Equal(t, 1, stats.Total)
+	assert.Equal(t, 1, stats.ByType["project"])
+}
+
 func TestMemoryHandler_BulkUpsert(t *testing.T) {
 	r, _ := setupMemory()
 	agentID := uuid.New()

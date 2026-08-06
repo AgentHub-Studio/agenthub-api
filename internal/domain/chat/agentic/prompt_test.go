@@ -446,6 +446,51 @@ func TestPromptBuild_BehavioralSkillInstructions_IncludedInPrompt(t *testing.T) 
 	assert.Contains(t, prompt, marker, "behavioral skill instruction must appear in the system prompt")
 }
 
+func TestPromptBuild_SkillInstructionsRequireActiveToolWhenActiveSlugsProvided(t *testing.T) {
+	activeMarker := "---ACTIVE_SKILL_INSTRUCTION---"
+	inactiveMarker := "---INACTIVE_SKILL_INSTRUCTION---"
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{skills: []skill.Skill{
+			{Name: "Active Skill", Slug: "active-skill", Instructions: "Always include " + activeMarker},
+			{Name: "Inactive Skill", Slug: "inactive-skill", Instructions: "Always include " + inactiveMarker},
+		}},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	)
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:          uuid.New(),
+		SessionID:        uuid.New(),
+		ActiveSkillSlugs: map[string]bool{"active-skill": true},
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, prompt, activeMarker, "active skill instruction must appear")
+	assert.NotContains(t, prompt, inactiveMarker, "skill instruction without an active tool must be omitted")
+}
+
+func TestPromptBuild_EmptyActiveSkillSlugsOmitsSkillInstructions(t *testing.T) {
+	marker := "---ORPHAN_SKILL_INSTRUCTION---"
+	builder := agentic.NewPromptBuilder(
+		&mockSkillLister{skills: []skill.Skill{
+			{Name: "Orphan Skill", Slug: "orphan-skill", Instructions: "Always include " + marker},
+		}},
+		&mockKBLister{},
+		&mockSummaryFinder{found: false},
+		agentic.DefaultPromptConfig(),
+	)
+
+	prompt, err := builder.Build(context.Background(), agentic.PromptInput{
+		AgentID:          uuid.New(),
+		SessionID:        uuid.New(),
+		ActiveSkillSlugs: map[string]bool{},
+	})
+
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, marker, "no active skill set must omit orphan instructions")
+}
+
 // TestPromptBuild_ToolRefSkillInstructions_OmittedFromPrompt verifies that instructions
 // containing a tool reference are omitted when we cannot verify active tool bindings.
 // This prevents LLM hallucination of non-existent tool calls. P-C152-2.

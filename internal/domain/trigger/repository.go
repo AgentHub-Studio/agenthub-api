@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AgentHub-Studio/agenthub-api/internal/database"
@@ -35,7 +36,7 @@ type TriggerRepository interface {
 	// CompleteRunBySession updates the running trigger_run linked to a chat session.
 	// Bug 291: chat run finishes asynchronously and only knows sessionID; this lets the
 	// run-end hook close the trigger_run without a separate sessionID→runID lookup.
-	CompleteRunBySession(ctx context.Context, sessionID uuid.UUID, status RunStatus, turns, tokens *int, errMsg *string) error
+	CompleteRunBySession(ctx context.Context, sessionID uuid.UUID, status RunStatus, turns, tokens *int, errMsg *string) (AgentTriggerRun, AgentTrigger, bool, error)
 	// ListRuns returns paginated runs for a trigger.
 	ListRuns(ctx context.Context, triggerID uuid.UUID, page pagination.PageRequest) (pagination.Page[AgentTriggerRun], error)
 }
@@ -50,7 +51,7 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-const triggerColumns = `id, agent_id, name, cron_expression, enabled, input_template,
+const triggerColumns = `id, agent_id, name, cron_expression, enabled, input_template, notification_webhook_id,
 	last_run_at, next_run_at, run_count, created_at, updated_at`
 
 const runColumns = `id, trigger_id, session_id, status, started_at, completed_at,
@@ -65,18 +66,15 @@ func (r *Repository) Create(ctx context.Context, t AgentTrigger) (AgentTrigger, 
 	defer release()
 
 	query := `
-		INSERT INTO agent_trigger (agent_id, name, cron_expression, enabled, input_template, next_run_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO agent_trigger (agent_id, name, cron_expression, enabled, input_template, notification_webhook_id, next_run_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING ` + triggerColumns
 
-	row := conn.QueryRow(ctx, query, t.AgentID, t.Name, t.CronExpression, t.Enabled, t.InputTemplate, t.NextRunAt)
+	row := conn.QueryRow(ctx, query, t.AgentID, t.Name, t.CronExpression, t.Enabled, t.InputTemplate, t.NotificationWebhookID, t.NextRunAt)
 	created, err := scanTrigger(row)
 	if err != nil {
-		msg := err.Error()
-		for i := 0; i+5 <= len(msg); i++ {
-			if msg[i:i+5] == "23503" {
-				return AgentTrigger{}, ErrAgentNotFound
-			}
+		if mapped := mapForeignKeyError(err); mapped != nil {
+			return AgentTrigger{}, mapped
 		}
 	}
 	return created, err
@@ -157,12 +155,19 @@ func (r *Repository) Update(ctx context.Context, t AgentTrigger) (AgentTrigger, 
 	query := `
 		UPDATE agent_trigger
 		   SET name = $2, cron_expression = $3, enabled = $4,
-		       input_template = $5, next_run_at = $6, updated_at = NOW()
+		       input_template = $5, notification_webhook_id = $6,
+		       next_run_at = $7, updated_at = NOW()
 		 WHERE id = $1
 		RETURNING ` + triggerColumns
 
-	row := conn.QueryRow(ctx, query, t.ID, t.Name, t.CronExpression, t.Enabled, t.InputTemplate, t.NextRunAt)
-	return scanTrigger(row)
+	row := conn.QueryRow(ctx, query, t.ID, t.Name, t.CronExpression, t.Enabled, t.InputTemplate, t.NotificationWebhookID, t.NextRunAt)
+	updated, err := scanTrigger(row)
+	if err != nil {
+		if mapped := mapForeignKeyError(err); mapped != nil {
+			return AgentTrigger{}, mapped
+		}
+	}
+	return updated, err
 }
 
 func (r *Repository) Delete(ctx context.Context, id uuid.UUID) error {
@@ -259,29 +264,44 @@ func (r *Repository) CompleteRun(ctx context.Context, runID uuid.UUID, status Ru
 	return nil
 }
 
-func (r *Repository) CompleteRunBySession(ctx context.Context, sessionID uuid.UUID, status RunStatus, turns, tokens *int, errMsg *string) error {
+func (r *Repository) CompleteRunBySession(ctx context.Context, sessionID uuid.UUID, status RunStatus, turns, tokens *int, errMsg *string) (AgentTriggerRun, AgentTrigger, bool, error) {
 	tenantID := tenant.FromContext(ctx)
 	conn, release, err := database.AcquireWithTenant(ctx, r.pool, tenantID)
 	if err != nil {
-		return err
+		return AgentTriggerRun{}, AgentTrigger{}, false, err
 	}
 	defer release()
 
 	// Only update the most recent running run for this session — protects against
 	// stale rows if the session is somehow reused.
-	_, err = conn.Exec(ctx, `
-		UPDATE agent_trigger_run
-		   SET status = $2, completed_at = NOW(), total_turns = $3, total_tokens = $4, error = $5
-		 WHERE id = (
-		     SELECT id FROM agent_trigger_run
-		      WHERE session_id = $1 AND status = 'running'
-		      ORDER BY started_at DESC
-		      LIMIT 1
-		 )`, sessionID, status, turns, tokens, errMsg)
-	if err != nil {
-		return fmt.Errorf("trigger: complete run by session: %w", err)
+	query := `
+		WITH target AS (
+			SELECT id FROM agent_trigger_run
+			 WHERE session_id = $1 AND status = 'running'
+			 ORDER BY started_at DESC
+			 LIMIT 1
+		), updated AS (
+			UPDATE agent_trigger_run r
+			   SET status = $2, completed_at = NOW(), total_turns = $3, total_tokens = $4, error = $5
+			  FROM target
+			 WHERE r.id = target.id
+			RETURNING r.id, r.trigger_id, r.session_id, r.status, r.started_at, r.completed_at,
+			          r.total_turns, r.total_tokens, r.error
+		)
+		SELECT updated.id, updated.trigger_id, updated.session_id, updated.status, updated.started_at,
+		       updated.completed_at, updated.total_turns, updated.total_tokens, updated.error,
+		       ` + prefixTriggerColumns("t") + `
+		  FROM updated
+		  JOIN agent_trigger t ON t.id = updated.trigger_id`
+	row := conn.QueryRow(ctx, query, sessionID, status, turns, tokens, errMsg)
+	run, trigger, err := scanRunAndTrigger(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AgentTriggerRun{}, AgentTrigger{}, false, nil
 	}
-	return nil
+	if err != nil {
+		return AgentTriggerRun{}, AgentTrigger{}, false, fmt.Errorf("trigger: complete run by session: %w", err)
+	}
+	return run, trigger, true, nil
 }
 
 func (r *Repository) ListRuns(ctx context.Context, triggerID uuid.UUID, page pagination.PageRequest) (pagination.Page[AgentTriggerRun], error) {
@@ -330,7 +350,7 @@ func (r *Repository) ListRuns(ctx context.Context, triggerID uuid.UUID, page pag
 func scanTrigger(row pgx.Row) (AgentTrigger, error) {
 	var t AgentTrigger
 	err := row.Scan(&t.ID, &t.AgentID, &t.Name, &t.CronExpression, &t.Enabled,
-		&t.InputTemplate, &t.LastRunAt, &t.NextRunAt, &t.RunCount, &t.CreatedAt, &t.UpdatedAt)
+		&t.InputTemplate, &t.NotificationWebhookID, &t.LastRunAt, &t.NextRunAt, &t.RunCount, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AgentTrigger{}, ErrNotFound
 	}
@@ -338,6 +358,47 @@ func scanTrigger(row pgx.Row) (AgentTrigger, error) {
 		return AgentTrigger{}, fmt.Errorf("trigger: scan: %w", err)
 	}
 	return t, nil
+}
+
+func scanRunAndTrigger(row pgx.Row) (AgentTriggerRun, AgentTrigger, error) {
+	var r AgentTriggerRun
+	var t AgentTrigger
+	err := row.Scan(
+		&r.ID, &r.TriggerID, &r.SessionID, &r.Status, &r.StartedAt, &r.CompletedAt,
+		&r.TotalTurns, &r.TotalTokens, &r.Error,
+		&t.ID, &t.AgentID, &t.Name, &t.CronExpression, &t.Enabled, &t.InputTemplate,
+		&t.NotificationWebhookID, &t.LastRunAt, &t.NextRunAt, &t.RunCount, &t.CreatedAt, &t.UpdatedAt,
+	)
+	return r, t, err
+}
+
+func prefixTriggerColumns(alias string) string {
+	cols := []string{
+		"id", "agent_id", "name", "cron_expression", "enabled", "input_template",
+		"notification_webhook_id", "last_run_at", "next_run_at", "run_count",
+		"created_at", "updated_at",
+	}
+	out := ""
+	for i, c := range cols {
+		if i > 0 {
+			out += ", "
+		}
+		out += alias + "." + c
+	}
+	return out
+}
+
+func mapForeignKeyError(err error) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+		return nil
+	}
+	switch pgErr.ConstraintName {
+	case "agent_trigger_notification_webhook_id_fkey":
+		return ErrNotificationWebhookNotFound
+	default:
+		return ErrAgentNotFound
+	}
 }
 
 func scanTriggers(rows pgx.Rows) ([]AgentTrigger, error) {

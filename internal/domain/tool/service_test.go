@@ -771,6 +771,105 @@ func TestToolService_Create_HTTPAcceptsBackendRelativeURLForRuntime(t *testing.T
 	assert.Equal(t, "/api/agents", configString(t, resp.Config, "url"))
 }
 
+func TestToolService_Create_RejectsHTMLName(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   `<svg onload="alert(1)">Tool`,
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"url":"https://api.example.com/endpoint"}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
+	assert.Contains(t, err.Error(), "HTML")
+}
+
+func TestToolService_Create_RejectsInvalidCanonicalSlug(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "HTTP Tool",
+		Slug:   "http_tool",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"url":"https://api.example.com/endpoint"}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
+	assert.Contains(t, err.Error(), "slug must match")
+}
+
+func TestToolService_Create_HTTPRejectsURLTemplateTraversal(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "Traversal Tool",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"urlTemplate":"https://api.example.com/files/../secret"}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
+	assert.Contains(t, err.Error(), "path traversal")
+}
+
+func TestToolService_Create_HTTPRejectsEncodedSlashURLTemplate(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "Encoded Slash Tool",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"urlTemplate":"https://api.example.com/files/..%2Fsecret"}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
+	assert.Contains(t, err.Error(), "encoded slashes")
+}
+
+func TestToolService_Create_HTTPAcceptsSafeURLTemplate(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	resp, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "Safe Template Tool",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"urlTemplate":"https://api.example.com/users/{id}"}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "safe-template-tool", resp.Slug)
+}
+
+func TestToolService_Create_HTTPRejectsSensitiveBodyTemplatePlaceholder(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	_, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name: "Webhook",
+		Type: tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{
+			"url":"https://api.example.com/endpoint",
+			"method":"POST",
+			"body_template":"{\"apiKey\":\"{{input.apiKey}}\"}"
+		}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
+	assert.Contains(t, err.Error(), "body_template")
+	assert.Contains(t, err.Error(), "credential-like")
+}
+
+func TestToolService_Update_HTTPRejectsEnvironmentBodyTemplatePlaceholder(t *testing.T) {
+	svc := tool.NewService(newMockRepo())
+	created, err := svc.Create(context.Background(), tool.CreateRequest{
+		Name:   "Webhook",
+		Type:   tool.ToolTypeHTTP,
+		Config: json.RawMessage(`{"url":"https://api.example.com/endpoint","method":"POST"}`),
+	})
+	require.NoError(t, err)
+
+	_, err = svc.Update(context.Background(), created.ID, tool.UpdateRequest{
+		Config: json.RawMessage(`{
+			"url":"https://api.example.com/endpoint",
+			"method":"POST",
+			"bodyTemplate":"{\"token\":\"${API_TOKEN}\"}"
+		}`),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tool.ErrValidation)
+	assert.Contains(t, err.Error(), "bodyTemplate")
+	assert.Contains(t, err.Error(), "environment variable")
+}
+
 func TestToolService_Create_WithLabels(t *testing.T) {
 	svc := tool.NewService(newMockRepo())
 	created, err := svc.Create(context.Background(), tool.CreateRequest{

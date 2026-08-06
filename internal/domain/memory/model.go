@@ -62,9 +62,26 @@ func (m AgentMemory) RelevanceScore() float64 {
 	return math.Exp(-relevanceDecayLambda * hoursSince)
 }
 
+func relevanceScoreAt(now, lastAccessedAt time.Time) float64 {
+	if lastAccessedAt.IsZero() {
+		return 0
+	}
+	hoursSince := now.Sub(lastAccessedAt).Hours()
+	if hoursSince <= 0 {
+		return 1
+	}
+	return math.Exp(-relevanceDecayLambda * hoursSince)
+}
+
+func shouldPruneStaleGeneral(now, lastAccessedAt, cutoff time.Time, minRelevance float64) bool {
+	if minRelevance <= 0 {
+		minRelevance = 0.05
+	}
+	return lastAccessedAt.Before(cutoff) && relevanceScoreAt(now, lastAccessedAt) < minRelevance
+}
+
 // MemoryRecallResult wraps a recalled memory entry with its relevance score.
 type MemoryRecallResult struct {
 	AgentMemory
 	Relevance float64 `json:"relevance"`
 }
-

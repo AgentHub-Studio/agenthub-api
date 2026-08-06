@@ -31,7 +31,10 @@ func TestSanitizeModelConfig_RemovesAllCredentialVariants(t *testing.T) {
 		"apiKey":"sk-a",
 		"api_key":"sk-b",
 		"apiSecret":"secret-c",
-		"api_secret":"secret-d"
+		"api_secret":"secret-d",
+		"clientSecret":"secret-e",
+		"accessToken":"token-f",
+		"password":"password-g"
 	}`)
 	result := agent.SanitizeModelConfig(raw)
 	var m map[string]interface{}
@@ -40,7 +43,26 @@ func TestSanitizeModelConfig_RemovesAllCredentialVariants(t *testing.T) {
 	assert.NotContains(t, m, "api_key")
 	assert.NotContains(t, m, "apiSecret")
 	assert.NotContains(t, m, "api_secret")
+	assert.NotContains(t, m, "clientSecret")
+	assert.NotContains(t, m, "accessToken")
+	assert.NotContains(t, m, "password")
 	assert.Equal(t, "openai", m["provider"])
+}
+
+func TestSanitizeModelConfig_RemovesNestedCredentialFields(t *testing.T) {
+	raw := json.RawMessage(`{
+		"provider":"openai",
+		"routing":{"fallback":{"apiKey":"sk-nested","model":"gpt-4o-mini"}},
+		"providers":[{"name":"anthropic","clientSecret":"secret-nested"}]
+	}`)
+	result := agent.SanitizeModelConfig(raw)
+	data, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "sk-nested")
+	assert.NotContains(t, string(data), "secret-nested")
+	assert.NotContains(t, string(data), "apiKey")
+	assert.NotContains(t, string(data), "clientSecret")
+	assert.Contains(t, string(data), "gpt-4o-mini")
 }
 
 // TestSanitizeModelConfig_PreservesNonSensitiveFields checks that safe fields survive.

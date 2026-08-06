@@ -48,13 +48,13 @@ func TestResolveSystemPrompt_NilSnapshot_FallsBackToCurrentPrompt(t *testing.T) 
 	assert.Equal(t, "Current prompt", result)
 }
 
-func TestResolveSystemPrompt_EmptySnapshot_FallsBackToCurrentPrompt(t *testing.T) {
+func TestResolveSystemPrompt_EmptySnapshotPinsEmptyPrompt(t *testing.T) {
 	in := chat.RunInput{SystemPromptSnapshot: strPtr("")}
 	agentCfg := &chat.AgentRunConfig{SystemPrompt: "Current prompt"}
 
 	result := resolveSystemPrompt(in, agentCfg)
 
-	assert.Equal(t, "Current prompt", result)
+	assert.Equal(t, "", result)
 }
 
 func TestResolveSystemPrompt_AfterAgentUpdate_SnapshotUnchanged(t *testing.T) {
@@ -84,4 +84,13 @@ func TestResolveModelConfig_NilSnapshot_FallsBackToAgentConfig(t *testing.T) {
 	result := resolveModelConfig(in, agentCfg)
 
 	assert.Contains(t, string(result), "anthropic")
+}
+
+func TestResolveModelConfig_EmptyObjectSnapshotPinsDefaults(t *testing.T) {
+	in := chat.RunInput{ModelConfigSnapshot: json.RawMessage(`{}`)}
+	agentCfg := &chat.AgentRunConfig{ModelConfig: json.RawMessage(`{"provider":"anthropic"}`)}
+
+	result := resolveModelConfig(in, agentCfg)
+
+	assert.Equal(t, `{}`, string(result))
 }

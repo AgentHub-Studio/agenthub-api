@@ -236,6 +236,8 @@ func (s *SubtaskExecutor) Execute(
 		ParentEventCh:      parentCh,
 		SubtaskID:          subtaskID,
 		ParentSessionID:    parentSessionID,
+		IsAdmin:            false,           // SEC-01: sub-agents never inherit admin scope
+		EnableManagement:   false,           // SEC-01: sub-agents never inherit management tools
 	}
 
 	// Run the sub-agent and collect results.

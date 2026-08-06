@@ -38,14 +38,15 @@ func (m *mockSvc) Create(_ context.Context, agentID uuid.UUID, req trigger.Creat
 		return trigger.AgentTrigger{}, trigger.ErrNotFound
 	}
 	t := trigger.AgentTrigger{
-		ID:             uuid.New(),
-		AgentID:        agentID,
-		Name:           req.Name,
-		CronExpression: req.CronExpression,
-		Enabled:        true,
-		InputTemplate:  req.InputTemplate,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		ID:                    uuid.New(),
+		AgentID:               agentID,
+		Name:                  req.Name,
+		CronExpression:        req.CronExpression,
+		Enabled:               true,
+		InputTemplate:         req.InputTemplate,
+		NotificationWebhookID: req.NotificationWebhookID,
+		CreatedAt:             time.Now(),
+		UpdatedAt:             time.Now(),
 	}
 	m.triggers[t.ID] = t
 	return t, nil
@@ -79,6 +80,9 @@ func (m *mockSvc) Update(_ context.Context, id uuid.UUID, req trigger.UpdateTrig
 	}
 	if req.Name != nil {
 		t.Name = *req.Name
+	}
+	if req.NotificationWebhookID.Set {
+		t.NotificationWebhookID = req.NotificationWebhookID.Value
 	}
 	m.triggers[id] = t
 	return t, nil
@@ -270,8 +274,7 @@ func TestTriggerHandler_Update_Success(t *testing.T) {
 		ID: triggerID, AgentID: agentID, Name: "original",
 	}
 
-	newName := "updated"
-	body, _ := json.Marshal(trigger.UpdateTriggerRequest{Name: &newName})
+	body := []byte(`{"name":"updated"}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+agentID.String()+"/triggers/"+triggerID.String(), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -283,10 +286,31 @@ func TestTriggerHandler_Update_Success(t *testing.T) {
 	assert.Equal(t, "updated", result.Name)
 }
 
+func TestTriggerHandler_Update_ClearNotificationWebhook(t *testing.T) {
+	r, svc := setupTrigger()
+	agentID := uuid.New()
+	triggerID := uuid.New()
+	webhookID := uuid.New()
+	svc.triggers[triggerID] = trigger.AgentTrigger{
+		ID: triggerID, AgentID: agentID, Name: "original", NotificationWebhookID: &webhookID,
+	}
+
+	body := []byte(`{"notificationWebhookId":null}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/agents/"+agentID.String()+"/triggers/"+triggerID.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var result trigger.AgentTrigger
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+	assert.Nil(t, result.NotificationWebhookID)
+}
+
 func TestTriggerHandler_Update_NotFound(t *testing.T) {
 	r, _ := setupTrigger()
 	agentID := uuid.New()
-	body, _ := json.Marshal(trigger.UpdateTriggerRequest{})
+	body := []byte(`{}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/agents/"+agentID.String()+"/triggers/"+uuid.New().String(), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
